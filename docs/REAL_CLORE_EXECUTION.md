@@ -76,3 +76,14 @@ npm run check:first-gpu-session
 ```
 
 The seed gate proves that the local controller can sign short-lived R2 upload permissions without exposing `.secrets/model-cache-admin.env`, and that the GPU-side readonly credential cannot put, overwrite, or delete. The test only uses tiny `_seed-test` objects and cleans them. It does not call `create_order`, `cancel_order`, SSH, or model download code.
+
+## 2026-07-12 Real Create Compatibility Notes
+
+The first real order attempt exposed Clore API requirements that are now encoded in code:
+
+- `currency` must be the wallet/marketplace key `USD-Blockchain`, not plain `USD`.
+- `required_price` must use Clore's raw on-demand USD/day value, while local budget gates continue to use normalized USD/hour.
+- `autossh_entrypoint` must be enabled so Clore prepares SSH access.
+- Failure cleanup can call real `cancel_order` before a final video exists when the issue is a pre-inference infrastructure failure such as `ssh_unavailable`.
+
+The first real order for server `107713` was created and then canceled because SSH never became available within the 30-minute window. No model was downloaded and no video was generated.
