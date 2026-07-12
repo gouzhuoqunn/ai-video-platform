@@ -131,40 +131,71 @@ async function listPrefix(creds: R2Creds) {
 async function main() {
   const admin = loadCreds("model-cache-admin.env");
   const readonly = loadCreds("model-cache-readonly.env");
+  if (admin.bucket !== readonly.bucket || admin.endpoint !== readonly.endpoint || admin.prefix !== readonly.prefix) {
+    throw new Error("Admin and readonly credentials must target the same bucket, endpoint, and prefix.");
+  }
   const key = `${admin.prefix}/permission-tests/${Date.now()}-probe.txt`;
   const body = "r2 permission probe\n";
+  const overwrittenBody = "r2 permission probe overwritten\n";
 
-  const adminPut = await signedFetch(admin, "PUT", key, body);
-  if (!adminPut.ok) throw new Error(`Admin PUT failed with status ${adminPut.status}`);
-  const readonlyGet = await signedFetch(readonly, "GET", key);
-  if (!readonlyGet.ok) throw new Error(`Readonly GET failed with status ${readonlyGet.status}`);
-  const readonlyList = await listPrefix(readonly);
-  if (!readonlyList.ok) throw new Error(`Readonly LIST failed with status ${readonlyList.status}`);
+  let created = false;
+  try {
+    const adminList = await listPrefix(admin);
+    if (!adminList.ok) throw new Error(`Admin LIST failed with status ${adminList.status}`);
 
-  const readonlyPut = await signedFetch(readonly, "PUT", key, "blocked\n");
-  if (readonlyPut.ok) throw new Error("Readonly PUT unexpectedly succeeded");
-  const readonlyDelete = await signedFetch(readonly, "DELETE", key);
-  if (readonlyDelete.ok) throw new Error("Readonly DELETE unexpectedly succeeded");
+    const adminPut = await signedFetch(admin, "PUT", key, body);
+    if (!adminPut.ok) throw new Error(`Admin PUT failed with status ${adminPut.status}`);
+    created = true;
 
-  const adminDelete = await signedFetch(admin, "DELETE", key);
-  if (!adminDelete.ok) throw new Error(`Admin DELETE cleanup failed with status ${adminDelete.status}`);
+    const adminGet = await signedFetch(admin, "GET", key);
+    if (!adminGet.ok) throw new Error(`Admin GET failed with status ${adminGet.status}`);
+    if ((await adminGet.text()) !== body) throw new Error("Admin GET returned unexpected object content.");
 
-  console.log(
-    JSON.stringify(
-      {
-        ok: true,
-        bucket: admin.bucket,
-        prefix: admin.prefix,
-        admin_can_put_get_delete: true,
-        readonly_can_get_list: true,
-        readonly_put_blocked: true,
-        readonly_delete_blocked: true,
-        test_object_cleaned: true,
-      },
-      null,
-      2,
-    ),
-  );
+    const adminOverwrite = await signedFetch(admin, "PUT", key, overwrittenBody);
+    if (!adminOverwrite.ok) throw new Error(`Admin OVERWRITE failed with status ${adminOverwrite.status}`);
+    const adminGetAfterOverwrite = await signedFetch(admin, "GET", key);
+    if (!adminGetAfterOverwrite.ok) throw new Error(`Admin GET after overwrite failed with status ${adminGetAfterOverwrite.status}`);
+    if ((await adminGetAfterOverwrite.text()) !== overwrittenBody) throw new Error("Admin overwrite did not persist expected content.");
+
+    const readonlyList = await listPrefix(readonly);
+    if (!readonlyList.ok) throw new Error(`Readonly LIST failed with status ${readonlyList.status}`);
+    const readonlyGet = await signedFetch(readonly, "GET", key);
+    if (!readonlyGet.ok) throw new Error(`Readonly GET failed with status ${readonlyGet.status}`);
+    if ((await readonlyGet.text()) !== overwrittenBody) throw new Error("Readonly GET returned unexpected object content.");
+
+    const readonlyPut = await signedFetch(readonly, "PUT", `${admin.prefix}/permission-tests/${Date.now()}-readonly-put-blocked.txt`, "blocked\n");
+    if (readonlyPut.ok) throw new Error("Readonly PUT unexpectedly succeeded");
+    const readonlyOverwrite = await signedFetch(readonly, "PUT", key, "blocked overwrite\n");
+    if (readonlyOverwrite.ok) throw new Error("Readonly OVERWRITE unexpectedly succeeded");
+    const readonlyDelete = await signedFetch(readonly, "DELETE", key);
+    if (readonlyDelete.ok) throw new Error("Readonly DELETE unexpectedly succeeded");
+
+    const adminDelete = await signedFetch(admin, "DELETE", key);
+    if (!adminDelete.ok) throw new Error(`Admin DELETE cleanup failed with status ${adminDelete.status}`);
+    created = false;
+
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          bucket: admin.bucket,
+          prefix: admin.prefix,
+          admin_can_list_put_get_overwrite_delete: true,
+          readonly_can_list_get: true,
+          readonly_put_blocked: true,
+          readonly_overwrite_blocked: true,
+          readonly_delete_blocked: true,
+          test_objects_cleaned: true,
+        },
+        null,
+        2,
+      ),
+    );
+  } finally {
+    if (created) {
+      await signedFetch(admin, "DELETE", key).catch(() => undefined);
+    }
+  }
 }
 
 void main().catch((error) => {
