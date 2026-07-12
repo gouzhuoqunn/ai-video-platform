@@ -24,6 +24,7 @@ export type CreateOrderRequest = {
   ssh_key: string;
   command: string;
   required_price: number;
+  autossh_entrypoint: boolean;
 };
 
 export type CreateOrderPreflightInput = {
@@ -43,6 +44,7 @@ export function buildCreateOrderBody(input: {
   currency: string;
   sshPublicKey: string;
   maxPriceUsdPerHour: number;
+  requiredPriceForApi?: number;
 }): CreateOrderRequest {
   return {
     currency: input.currency,
@@ -59,7 +61,8 @@ export function buildCreateOrderBody(input: {
     },
     ssh_key: input.sshPublicKey,
     command: "bash -lc 'mkdir -p /workspace/ai-video-platform /workspace/models /workspace/jobs /workspace/logs'",
-    required_price: input.maxPriceUsdPerHour,
+    required_price: input.requiredPriceForApi ?? input.maxPriceUsdPerHour,
+    autossh_entrypoint: true,
   };
 }
 
@@ -215,6 +218,10 @@ export async function prepareCreateOrderFromLive(input: {
     currency: input.config.rentalCurrency,
     sshPublicKey: publicKey,
     maxPriceUsdPerHour: input.maxPriceUsdPerHour,
+    requiredPriceForApi:
+      candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null
+        ? candidate.priceOriginalAmount
+        : input.maxPriceUsdPerHour,
   });
   assertCreateOrderBodySafe(requestBody);
   return { candidate, requestBody, wallet };

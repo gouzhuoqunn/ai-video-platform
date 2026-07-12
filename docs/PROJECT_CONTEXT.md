@@ -387,3 +387,18 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - `npm run model-cache:seed:test` now covers mock manifest validation, safe relative paths, skip/staging planning, presigned PUT, multipart planning, publish-last `current.json`, secret-free logs, and a real small R2 presigned PUT probe under `_seed-test`.
 - The real probe uploaded only a tiny random test object, verified read access through the GPU readonly credential, verified other-key and readonly-write attempts are blocked, and cleaned the object.
 - No Clore order was created, no balance was spent, no SSH/GPU connection was opened, no Wan2.2 model was downloaded, and no Wan2.2 model file was uploaded to R2.
+
+## 2026-07-12 First Real Clore Order Attempt
+
+- A real on-demand Clore order was created for live RTX 5090 server `107713`.
+- Live selection used the cheapest compliant candidate at `7 USD/day`, normalized to about `0.291667 USD/hour`; six-hour planning cost was `1.75 USD`.
+- The Clore create body required two real API compatibility fixes:
+  - `required_price` must use the Clore marketplace day price (`7`) while local budget checks still use normalized USD/hour.
+  - `currency` must match the wallet/marketplace key `USD-Blockchain`.
+  - `autossh_entrypoint: true` is required for the SSH entrypoint.
+- Real Clore order ID: `1947533`.
+- SSH endpoint appeared with mapped port `1202`, but SSH reset/timed out for the full 30-minute readiness window.
+- No GPU hardware check, model download, Worker start, video inference, Supabase video upload, local archive, or R2 model cache publish happened.
+- The order was canceled through real `cancel_order` with failure cleanup issue `ssh_unavailable`.
+- Final live `my_orders` showed no active order. Wallet moved from about `15.89 USD` to `15.55 USD`, so the failed attempt cost about `0.34 USD`, below the `4.50 USD` cap.
+- The queued local_lab standard-video task remains queued for the next attempt.

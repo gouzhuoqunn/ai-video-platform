@@ -16,11 +16,11 @@
     {
       "name": "USD-Blockchain",
       "currency": "USD-Blockchain",
-      "available": 10.99,
+      "available": 15.55,
       "usd_like": true
     }
   ],
-  "available_usd_balance": 10.99,
+  "available_usd_balance": 15.55,
   "balance_source": "direct USD-like wallet/API field",
   "planned_order_currency": "USD",
   "cheapest_compliant_5090": {
@@ -28,7 +28,7 @@
     "usd_per_hour": 0.2916666666666667,
     "six_hour_cost_usd": 1.75,
     "balance_sufficient_for_6h": true,
-    "balance_margin_usd": 9.24
+    "balance_margin_usd": 13.8
   },
   "balance_changes_made": false,
   "hidden_sensitive_fields": [

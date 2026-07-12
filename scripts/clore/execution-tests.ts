@@ -105,8 +105,11 @@ async function main() {
       currency: "USD",
       sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockPublicKeyForTestsOnly000000000000 test",
       maxPriceUsdPerHour: 0.7,
+      requiredPriceForApi: 14.99,
     });
     assert(body.type === "on-demand", "create body must be on-demand.");
+    assert(body.required_price === 14.99, "create body should preserve Clore USD/day required_price when provided.");
+    assert(body.autossh_entrypoint === true, "create body must request Clore autossh entrypoint.");
     assert(body.ports["22"] === "tcp" && Object.keys(body.ports).length === 1, "create body must expose SSH only.");
     assert(!JSON.stringify(body).includes("CLORE_API_KEY"), "Clore API key must not enter create body.");
 
