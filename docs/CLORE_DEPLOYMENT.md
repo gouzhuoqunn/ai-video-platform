@@ -304,9 +304,10 @@ GitHub Actions has successfully built and pushed the runtime image to GHCR.
 
 Important remaining blocker:
 
-- The GHCR package is currently not anonymously pullable. Anonymous manifest check returns `401`.
-- Change only the runtime image package visibility to Public before any Clore rental. Keep the source repository private.
-- The Clore preflight now supports anonymous GHCR manifest checks and should reject real create while this package is private.
-- Cloudflare R2 must still be enabled in the Cloudflare Dashboard before a private bucket or limited R2 credentials can be created. No R2 bucket, R2 key, or model upload exists yet.
+- The GHCR package is now Public. Anonymous manifest check succeeds and the digest matches the pinned runtime image.
+- Cloudflare R2 is enabled and bucket `ai-video-platform-wan22-model-cache` exists.
+- `r2.dev` public access is disabled and no custom domains are connected.
+- Remaining blocker: create limited R2 S3 credentials in the Cloudflare Dashboard and verify them with `npm run model-cache:r2:test`.
+- No model upload exists yet.
 
 No Clore order was created during this image work.
