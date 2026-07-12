@@ -22,7 +22,8 @@
 
 - The current architecture is optimized for one user, low frequency generation, and GPU sessions up to about 6 hours.
 - Prepared cache order: current Clore local model dir, optional Clore persistent volume, private R2 model cache, then official Hugging Face fallback for `Wan-AI/Wan2.2-TI2V-5B`.
-- Wan2.2 model weights are not baked into the Docker image. The runtime image plan is `ghcr.io/<user>/wan22-runtime:<immutable-version>`, but no image was pushed.
+- Wan2.2 model weights are not baked into the Docker image. The runtime image now exists at `ghcr.io/gouzhuoqunn/wan22-runtime:v0.1.0-pre-gpu`, with digest `sha256:fd03ef72d7369f59b3af9e535d9f6a75add9430a5c1ef4e7fd5853be0e4c060a`.
+- The GHCR package is still private; it must be made Public before Clore can pull it. Keep the GitHub source repository private.
 - GPU disk reservation remains at least 200GB even though the official model budget is 34.2GB.
 - `gpu_worker` private upload, task completion, signed URL playback/download, and permission isolation remain verified after user-executed migrations 0005, 0006, and 0007.
 - GPU servers still do not need `SUPABASE_SECRET_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, or `CLORE_API_KEY`; they should receive only limited Worker credentials and optional read-only model cache credentials.
@@ -40,6 +41,16 @@
 - Closest rejected candidate: server `95538`, RTX 5090, 31GB API-reported GPU memory, 14.99 USD/hour, 89.94 USD for 6 hours.
 - No `create_order` call was made, no order was created, no balance was consumed, no SSH connection was opened, and no Wan2.2 model was downloaded.
 - `clore:create:dry` is permanently dry-run. Future real create is separated as `npm run clore:create -- --execute --server-id=<id> --max-price=<price> --confirm-project=ai-video-platform-wan22`, but it is still blocked in this checkpoint.
+
+## 2026-07-12 GitHub / GHCR / R2 current gate
+
+- GitHub CLI is logged in and the private repository `gouzhuoqunn/ai-video-platform` exists.
+- Native `git push` was unreliable from this network, so repository files were uploaded through the GitHub Contents API.
+- GitHub Actions built and pushed `ghcr.io/gouzhuoqunn/wan22-runtime:v0.1.0-pre-gpu`.
+- Runtime image digest: `sha256:fd03ef72d7369f59b3af9e535d9f6a75add9430a5c1ef4e7fd5853be0e4c060a`.
+- The GHCR package is still private. Make only the package Public before a Clore order; keep the source repository private.
+- Wrangler is logged in, but Cloudflare R2 is not enabled for the account yet. `npx wrangler r2 bucket list` returns Cloudflare code `10042`.
+- No R2 bucket, R2 S3 credential, model upload, Clore order, GPU/SSH connection, or Wan2.2 download exists yet.
 
 ## 2026-07-11 Clore parser correction
 

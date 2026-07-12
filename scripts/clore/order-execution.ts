@@ -34,6 +34,7 @@ export type CreateOrderPreflightInput = {
   availableUsdBalance: number | null;
   config: LoadedCloreConfig;
   execution: CloreExecutionConfig;
+  verifyImage?: typeof verifyDockerImage;
 };
 
 export function buildCreateOrderBody(input: {
@@ -121,7 +122,7 @@ export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) 
   if (!ssh.exists || !ssh.formatValid) {
     throw new Error("SSH public key is missing or invalid.");
   }
-  const image = await verifyDockerImage(input.config.dockerImage);
+  const image = await (input.verifyImage ?? verifyDockerImage)(input.config.dockerImage);
   if (!image.exists || !image.linuxAmd64) {
     throw new Error("Docker image was not verified for linux/amd64.");
   }
