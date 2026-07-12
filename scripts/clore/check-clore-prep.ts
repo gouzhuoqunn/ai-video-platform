@@ -34,6 +34,9 @@ function main() {
   assert(existsSync(path.join(root, "scripts", "clore", "mock-marketplace.json")), "mock marketplace is required.");
   assert(existsSync(path.join(root, "scripts", "clore", "session-orchestrator.ts")), "Clore session orchestrator is required.");
   assert(existsSync(path.join(root, "scripts", "model-cache", "plan-sync.ts")), "model cache plan script is required.");
+  assert(existsSync(path.join(root, "scripts", "model-cache", "seed-cache.ts")), "secure model cache seed script is required.");
+  assert(packageJson.includes("model-cache:seed:test"), "package.json must expose model-cache:seed:test.");
+  assert(packageJson.includes("model-cache:seed:test") && packageJson.includes("check:first-gpu-session"), "first GPU session check must include model cache seed gate.");
   assert(existsSync(path.join(root, "docs", "CLORE_DEPLOYMENT.md")), "Clore deployment doc is required.");
   assert(existsSync(cloreEnvPath), ".secrets/clore.env must exist for live read-only Clore checks.");
   assert(Boolean(config.apiKey), "CLORE_API_KEY must be readable from .secrets/clore.env.");
@@ -46,7 +49,9 @@ function main() {
   const uploadScript = readFileSync(path.join(root, "scripts", "clore", "upload-worker.ps1"), "utf8");
   assert(!uploadScript.includes(".env.local"), "upload script must not upload .env.local.");
   assert(!/id_rsa|\.pem/i.test(uploadScript), "upload script must not reference SSH private keys.");
-  assert(uploadScript.includes(".secrets/gpu-worker.env"), "upload script should upload only limited Worker credentials.");
+  assert(uploadScript.includes(".secrets/gpu-worker.env"), "upload script should upload limited Worker credentials.");
+  assert(uploadScript.includes(".secrets/model-cache-readonly.env"), "upload script should upload readonly model cache credentials.");
+  assert(!uploadScript.includes(".secrets/model-cache-admin.env"), "upload script must not upload R2 admin credentials.");
   console.log("Clore准备检查通过。");
 }
 

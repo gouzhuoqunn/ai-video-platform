@@ -48,3 +48,10 @@ http://127.0.0.1:3000
 - Host sorting defaults to normalized USD/hour low-to-high and supports price desc, reliability desc, and rating desc. Raw `USD/day` labels are display/audit data only.
 - A selected host is kept only while it remains rentable; otherwise the selection is cleared and the user must choose again.
 - Real Clore execution remains blocked until R2 model cache and a public custom runtime image are configured and verified.
+
+## 2026-07-12 Model Cache Seed Status
+
+- The local_lab session panel now exposes safe model-cache seed status only.
+- It may show the cache prefix, `wan22-ti2v-5b/current.json`, whether presigned PUT and multipart planning are implemented, and that the GPU credential file is `.secrets/model-cache-readonly.env`.
+- It must not show R2 access keys, R2 secret keys, presigned URLs, full endpoint query strings, `.secrets/model-cache-admin.env`, SSH details, prompts, videos, or absolute remote paths.
+- The page remains a local control surface; it still does not create a Clore order while `CLORE_ORDER_EXECUTION_ENABLED=false`.

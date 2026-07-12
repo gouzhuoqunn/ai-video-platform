@@ -373,3 +373,17 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - GPU deployment planning now allows `.secrets/model-cache-readonly.env` and explicitly forbids `.secrets/model-cache-admin.env`.
 - The first real GPU session preconditions are now satisfied from the local prep side: public GHCR runtime image, private R2 bucket, verified read-only R2 credential boundary, limited GPU Worker credentials, SSH public key, Clore dry-run, no active Clore order, and passing local checks.
 - Real Clore create still requires an explicit future user command and final live confirmation; no order was created in this checkpoint.
+
+## 2026-07-12 Model Cache Seed Flow Gate
+
+- Added and verified a local-controller model cache seed flow for the first future Wan2.2 GPU session.
+- The future GPU downloads `Wan-AI/Wan2.2-TI2V-5B` from official Hugging Face on the rented Clore GPU, generates a manifest, and asks the local controller for short-lived, object-specific R2 upload permission.
+- The GPU receives only `.secrets/model-cache-readonly.env`; `.secrets/model-cache-admin.env` stays local and is never sent to Clore, Docker, SSH commands, manifests, logs, or browser responses.
+- R2 object layout is fixed:
+  - files: `wan22-ti2v-5b/files/<relative_path>`
+  - revision manifest: `wan22-ti2v-5b/manifests/<model_revision>.json`
+  - current pointer: `wan22-ti2v-5b/current.json`
+  - staging: `wan22-ti2v-5b/staging/<session-id>/`
+- `npm run model-cache:seed:test` now covers mock manifest validation, safe relative paths, skip/staging planning, presigned PUT, multipart planning, publish-last `current.json`, secret-free logs, and a real small R2 presigned PUT probe under `_seed-test`.
+- The real probe uploaded only a tiny random test object, verified read access through the GPU readonly credential, verified other-key and readonly-write attempts are blocked, and cleaned the object.
+- No Clore order was created, no balance was spent, no SSH/GPU connection was opened, no Wan2.2 model was downloaded, and no Wan2.2 model file was uploaded to R2.

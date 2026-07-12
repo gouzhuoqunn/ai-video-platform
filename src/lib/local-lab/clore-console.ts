@@ -13,6 +13,7 @@ import { buildLocalResultsPlan } from "../../../scripts/local-results/plan";
 import { loadCloreExecutionConfig } from "../../../scripts/clore/execution-config";
 import { DEFAULT_DOCKER_IMAGE } from "../../../scripts/clore/config";
 import { loadModelCacheConfig } from "../../../scripts/model-cache/config";
+import { MODEL_CACHE_CURRENT_KEY } from "../../../scripts/model-cache/manifest";
 
 const MOCK_MARKETPLACE_PATH = path.join(process.cwd(), "scripts", "clore", "mock-marketplace.json");
 const LATEST_MARKETPLACE_PATH = path.join(process.cwd(), "scripts", "clore", "fixtures", "latest-marketplace.sanitized.json");
@@ -214,6 +215,14 @@ export function getLocalLabSessionSummary() {
       bucketConfigured: Boolean(modelCache.bucket),
       endpointConfigured: Boolean(modelCache.endpoint),
       prefix: modelCache.prefix,
+      seedFlowImplemented: true,
+      seedStatus: "cache_seed_ready_for_first_session",
+      presignedUploadSupported: true,
+      multipartUploadSupported: true,
+      currentManifestKey: MODEL_CACHE_CURRENT_KEY,
+      readonlyCredentialFile: ".secrets/model-cache-readonly.env",
+      adminCredentialsOnGpu: false,
+      signedUrlsReturnedToBrowser: false,
       readOnlyMode: modelCache.readOnly,
       r2Enabled: modelCache.r2Enabled,
       hfFallbackEnabled: modelCache.hfFallbackEnabled,

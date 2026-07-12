@@ -50,6 +50,8 @@ tsconfig.tsbuildinfo
 .secrets/model-cache.env
 .secrets/model-cache-admin.env
 .secrets/model-cache-readonly.env
+.secrets/model-cache-upload-plan.json
+.secrets/model-cache-seed-state.json
 .secrets/model-cache-state.json
 .secrets/runtime-image-state.json
 /scripts/clore/*.local.json

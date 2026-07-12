@@ -65,3 +65,14 @@ Current tests cover:
 - mock cancel clears active project order state;
 - SSH args keep host key checking and disable password auth;
 - deployment upload whitelist excludes `.env.local`, `.secrets/clore.env`, private keys, videos, and Supabase Secret keys.
+
+## 2026-07-12 Additional First-Session Gate
+
+Real create remains blocked unless the model cache seed gate is healthy:
+
+```powershell
+npm run model-cache:seed:test
+npm run check:first-gpu-session
+```
+
+The seed gate proves that the local controller can sign short-lived R2 upload permissions without exposing `.secrets/model-cache-admin.env`, and that the GPU-side readonly credential cannot put, overwrite, or delete. The test only uses tiny `_seed-test` objects and cleans them. It does not call `create_order`, `cancel_order`, SSH, or model download code.

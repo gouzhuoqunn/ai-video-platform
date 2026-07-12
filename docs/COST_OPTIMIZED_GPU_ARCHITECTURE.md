@@ -180,3 +180,13 @@ R2/private model cache and a publicly pullable runtime image remain required bef
 Next successful checkpoint should record:
 
 - Next real checkpoint should be the explicit first Clore order command after final live confirmation; queued jobs must not auto-rent.
+
+## 2026-07-12 Model Cache Seed Readiness
+
+- The cost-optimized path now includes a secure first-session cache seed gate.
+- The future GPU still downloads Wan2.2 only on the rented Clore host. Local tests do not download or upload model weights.
+- R2 write credentials remain local-only in `.secrets/model-cache-admin.env`.
+- The GPU receives only the limited Worker credential and `.secrets/model-cache-readonly.env`.
+- A local controller signs short-lived R2 upload permissions for specific object keys or multipart parts, verifies the uploaded objects, and publishes `current.json` only after all files are complete.
+- `npm run check:first-gpu-session` and `npm run check:gpu-prep` now include `npm run model-cache:seed:test` as a precondition.
+- This keeps first-session cost bounded: no automatic Clore order is created, no balance is spent, and no model cache seed is attempted until a future explicit real GPU session.

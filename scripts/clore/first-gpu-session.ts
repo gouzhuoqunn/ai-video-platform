@@ -1,4 +1,4 @@
-import { buildMockManifest, validateManifest } from "../model-cache/manifest";
+import { MODEL_CACHE_CURRENT_KEY, MODEL_CACHE_PREFIX, buildMockManifest, validateManifest } from "../model-cache/manifest";
 import { buildWorkerDeploymentPlan } from "./deploy-worker";
 import type { SshTarget } from "./ssh-client";
 
@@ -20,11 +20,24 @@ export function buildFirstGpuSessionPlan(target: SshTarget) {
       "install runtime dependencies",
       "download Wan-AI/Wan2.2-TI2V-5B from official Hugging Face only",
       "generate model manifest and SHA-256 summary",
+      "seed private R2 cache through controller-signed short-lived upload URLs",
       "start limited gpu_worker",
       "process first synthetic text job",
       "pause for user video inspection",
     ],
     deployment,
+    model_cache_seed: {
+      required_before_real_create: true,
+      status_gate_script: "npm run model-cache:seed:test",
+      cache_prefix: MODEL_CACHE_PREFIX,
+      current_manifest_key: MODEL_CACHE_CURRENT_KEY,
+      presigned_put_supported: true,
+      multipart_upload_supported: true,
+      admin_credentials_uploaded: false,
+      gpu_credentials_file: ".secrets/model-cache-readonly.env",
+      signed_urls_logged_or_returned_to_browser: false,
+      real_model_uploaded_in_tests: false,
+    },
     mock_model_manifest_valid: manifestErrors.length === 0,
     records_without_sensitive_prompt: [
       "model download duration",
