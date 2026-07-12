@@ -55,6 +55,14 @@
 - `npm run model-cache:r2:test` verified admin list/put/get/overwrite/delete and GPU read-only list/get with put/overwrite/delete blocked.
 - No model upload, Clore order, GPU/SSH connection, or Wan2.2 download exists yet.
 
+## 2026-07-12 Model cache seed gate
+
+- The first future Wan2.2 GPU session now has a local-controller seed flow for the private R2 cache.
+- R2 admin credentials remain local in `.secrets/model-cache-admin.env`; GPU hosts receive only `.secrets/model-cache-readonly.env`.
+- The controller validates the model manifest, signs short-lived object-specific upload permissions, supports mock multipart planning, verifies uploaded objects, and publishes `wan22-ti2v-5b/current.json` only after all files complete.
+- `npm run model-cache:seed:test` covers the mock flow plus a tiny real `_seed-test` R2 presigned PUT probe and cleans test objects.
+- The seed test does not create a Clore order, connect SSH, download Wan2.2, or upload Wan2.2 model files.
+
 ## 2026-07-11 Clore parser correction
 
 - Clore on-demand USD marketplace price is now parsed as USD per 24 hours.
@@ -283,6 +291,7 @@ npm run clore:execution:test
 npm run clore:ssh:test
 npm run first-gpu-session:plan
 npm run first-gpu-session:test
+npm run model-cache:seed:test
 npm run check:clore-prep
 npm run check:first-gpu-session
 npm run secret:scan

@@ -101,6 +101,14 @@ type SessionResponse = {
     bucketConfigured: boolean;
     endpointConfigured: boolean;
     prefix: string;
+    seedFlowImplemented?: boolean;
+    seedStatus?: string;
+    presignedUploadSupported?: boolean;
+    multipartUploadSupported?: boolean;
+    currentManifestKey?: string;
+    readonlyCredentialFile?: string;
+    adminCredentialsOnGpu?: boolean;
+    signedUrlsReturnedToBrowser?: boolean;
     readOnlyMode: boolean;
     r2Enabled: boolean;
     hfFallbackEnabled: boolean;
@@ -791,6 +799,12 @@ export function LocalCreationStudio() {
                 <p>模型前缀：{session?.modelCache?.prefix ?? "wan22-ti2v-5b"}</p>
                 <p>模型：{session?.modelCache?.officialRepo ?? "Wan-AI/Wan2.2-TI2V-5B"}</p>
                 <p>官方大小预算：{session?.modelCache?.expectedSizeGb ?? 34.2}GB</p>
+                <p>Seed flow：{session?.modelCache?.seedFlowImplemented ? "presigned upload ready" : "not ready"}</p>
+                <p>Seed status：{session?.modelCache?.seedStatus ?? "cache_seed_manifest_pending"}</p>
+                <p>Upload mode：{session?.modelCache?.presignedUploadSupported ? "short-lived PUT" : "disabled"} / {session?.modelCache?.multipartUploadSupported ? "multipart" : "single"}</p>
+                <p>GPU cache creds：{session?.modelCache?.readonlyCredentialFile ?? ".secrets/model-cache-readonly.env"}</p>
+                <p>Admin creds on GPU：{session?.modelCache?.adminCredentialsOnGpu ? "blocked" : "no"}</p>
+                <p>Current manifest：{session?.modelCache?.currentManifestKey ?? "wan22-ti2v-5b/current.json"}</p>
                 <p className="mt-2 text-xs text-stone-500">R2 仅作为模型缓存；不会在网页返回 endpoint、Access Key、Secret 或预签名 URL。</p>
               </section>
 

@@ -24,6 +24,7 @@ The dry-run deployment plan uploads only:
 - `scripts/clore/start-worker.sh`
 - `scripts/clore/cleanup-worker.sh`
 - `.secrets/gpu-worker.env`
+- `.secrets/model-cache-readonly.env`
 
 Forbidden uploads include `.env.local`, `.secrets/clore.env`, Supabase Secret keys, Clore API keys, R2 write credentials, SSH private keys, videos, sessions, and signed URLs.
 
@@ -34,11 +35,13 @@ Forbidden uploads include `.env.local`, `.secrets/clore.env`, Supabase Secret ke
 3. Install runtime dependencies.
 4. Download `Wan-AI/Wan2.2-TI2V-5B` on the rented GPU only.
 5. Generate and validate a model manifest.
-6. Start the limited `gpu_worker`.
-7. Process one synthetic text job.
-8. Upload final video to private Supabase Storage through the limited Worker account.
-9. Sync or view the result in local_lab.
-10. Pause for inspection before any further jobs.
+6. Seed the private R2 cache through local-controller signed upload URLs.
+7. Publish `wan22-ti2v-5b/current.json` only after all files verify.
+8. Start the limited `gpu_worker`.
+9. Process one synthetic text job.
+10. Upload final video to private Supabase Storage through the limited Worker account.
+11. Sync or view the result in local_lab.
+12. Pause for inspection before any further jobs.
 
 ## Commands
 
@@ -49,3 +52,13 @@ npm run check:first-gpu-session
 ```
 
 The plan command prints a dry-run structure. It does not connect SSH, start a worker, or download the model.
+
+## Cache Seed Safety Gate
+
+Before any future real create command is allowed, run:
+
+```powershell
+npm run model-cache:seed:test
+```
+
+This validates manifest rules, object key layout, short-lived presigned PUT, multipart planning, publish-last `current.json`, readonly restore credentials, and cleanup of tiny `_seed-test` objects. It still does not download Wan2.2, upload model weights, create a Clore order, or connect SSH.

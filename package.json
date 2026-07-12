@@ -56,6 +56,7 @@
     "model-cache:test": "tsx scripts/model-cache/model-cache-tests.ts",
     "model-cache:manifest:test": "tsx scripts/model-cache/verify.ts --mock",
     "model-cache:r2:test": "tsx scripts/model-cache/r2-credentials-check.ts",
+    "model-cache:seed:test": "tsx scripts/model-cache/seed-cache.ts",
     "cost:session": "tsx scripts/cost/session-cost.ts",
     "cost:plan": "tsx scripts/cost/session-plan.ts",
     "cost:test": "tsx scripts/cost/cost-tests.ts",
@@ -70,8 +71,8 @@
     "check:local-lab": "npm run local-lab:test && npm run local-lab:delete:test && npm run test:unit && npm run lint && npm run typecheck && npm run build && npm run secret:scan",
     "check:full": "npm run mock-video:generate && npm run lint && npm run typecheck && npm run test:unit && npm run build && npm run verify:remote && npm run test:integration",
     "check:cost-optimized-gpu": "npm run model-cache:test && npm run runtime-image:test && npm run cost:test && npm run clore:session:test && npm run results:test",
-    "check:first-gpu-session": "npm run clore:execution:test && npm run clore:ssh:test && npm run first-gpu-session:test && npm run lint && npm run typecheck && npm run build && npm run secret:scan",
-    "check:gpu-prep": "npm run lint && npm run typecheck && npm run test:unit && npm run build && npm run gpu-worker:test && npm run clore:test && npm run clore:session:test && npm run runtime-image:test && npm run model-cache:test && npm run cost:test && npm run results:test && npm run docker:check && npm run secret:scan"
+    "check:first-gpu-session": "npm run model-cache:seed:test && npm run clore:execution:test && npm run clore:ssh:test && npm run first-gpu-session:test && npm run lint && npm run typecheck && npm run build && npm run secret:scan",
+    "check:gpu-prep": "npm run lint && npm run typecheck && npm run test:unit && npm run build && npm run gpu-worker:test && npm run clore:test && npm run clore:session:test && npm run runtime-image:test && npm run model-cache:test && npm run model-cache:seed:test && npm run cost:test && npm run results:test && npm run docker:check && npm run secret:scan"
   },
   "keywords": [],
   "author": "",

@@ -103,3 +103,34 @@ Latest permission test result:
 - Admin boundary: list, put, get, overwrite, delete passed.
 - GPU read-only boundary: list/get passed; put/overwrite/delete blocked.
 - Cleanup: test objects removed; bucket object count returned to 0.
+
+## 2026-07-12 Secure Seed Upload Flow
+
+The first real Wan2.2 session must seed the private R2 cache without copying R2 write credentials to the GPU.
+
+Flow:
+
+1. GPU downloads `Wan-AI/Wan2.2-TI2V-5B` from official Hugging Face on the future rented Clore host.
+2. GPU generates a manifest with model id, revision, relative paths, size, sha256, file count, total size, runtime image digest, Wan code revision, and generated time.
+3. Local controller retrieves and validates the manifest. Absolute paths, drive letters, `..`, empty path segments, unknown model id, bad hashes, and sensitive fields are rejected.
+4. Local controller signs short-lived object-specific R2 upload permissions. Small files use presigned PUT; large files use controller-owned multipart create/sign/complete/abort planning.
+5. GPU uploads directly to R2 using only temporary signed URLs and returns size/hash or part ETags. ETag is never treated as sha256.
+6. Local controller verifies uploaded objects and publishes `wan22-ti2v-5b/manifests/<model_revision>.json`, then publishes `wan22-ti2v-5b/current.json` last.
+7. Future GPUs restore from R2 with `.secrets/model-cache-readonly.env`.
+
+Fixed keys:
+
+```text
+wan22-ti2v-5b/files/<relative_path>
+wan22-ti2v-5b/manifests/<model_revision>.json
+wan22-ti2v-5b/current.json
+wan22-ti2v-5b/staging/<session-id>/
+```
+
+Validation command:
+
+```powershell
+npm run model-cache:seed:test
+```
+
+The current seed test uses mock model files plus a tiny `_seed-test` R2 object only. It does not download Wan2.2 and does not upload model weights.
