@@ -161,7 +161,7 @@ The latest live read-only Clore query found cheaper qualified RTX 5090 capacity 
 
 The architecture rule is unchanged: all host ordering and budget math must use normalized USD/hour, while preserving raw price amount and unit for audit.
 
-R2/private model cache and a publicly pullable runtime image remain required before the guarded real create path should proceed. The runtime image exists in GHCR and is publicly pullable. The private R2 bucket exists, but the two limited S3 credentials still need manual Dashboard creation and permission verification.
+R2/private model cache and a publicly pullable runtime image remain required before the guarded real create path should proceed. The runtime image exists in GHCR and is publicly pullable. The private R2 bucket exists, and the separate admin/read-only S3 credentials have passed permission-boundary verification.
 
 ## 2026-07-12 Infrastructure Prep Update
 
@@ -174,9 +174,9 @@ R2/private model cache and a publicly pullable runtime image remain required bef
 - R2 bucket `ai-video-platform-wan22-model-cache` exists, `r2.dev` public access is disabled, and no custom domains are connected.
 - Local Docker Desktop remains unnecessary; runtime image builds are intended to run in GitHub Actions.
 - The runtime image workflow pushes immutable tags with SBOM and provenance.
-- R2 remains empty after cleanup of a tiny permission probe object. No Wan2.2 model files were uploaded.
-- Model cache S3 credentials are still absent and must remain ignored under `.secrets/`.
+- R2 remains empty after cleanup of permission probe objects. No Wan2.2 model files were uploaded.
+- Model cache S3 credentials exist only under ignored `.secrets/`.
 
 Next successful checkpoint should record:
 
-- Admin and GPU read-only R2 credential files created locally without printing their values, then verified by `npm run model-cache:r2:test`.
+- Next real checkpoint should be the explicit first Clore order command after final live confirmation; queued jobs must not auto-rent.
