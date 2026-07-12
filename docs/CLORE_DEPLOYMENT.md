@@ -257,12 +257,11 @@ The latest live read-only Clore query did not create or cancel any order.
 
 Current real-execution blockers:
 
-- `wrangler` was not found, so this machine cannot create or manage the Cloudflare R2 model cache yet.
-- `docker` was not found, so this machine cannot build or verify-push the runtime image yet.
-- `gh` was not found, so GHCR login/push cannot be completed yet.
+- The custom runtime image has been built and pushed to GHCR, but the package is still private. Clore must be able to pull the image anonymously before any real order.
+- Cloudflare R2 is not enabled for the account yet. `npx wrangler r2 bucket list` returns Cloudflare code `10042`, so no private model-cache bucket or R2 S3 credentials exist yet.
 - `.secrets/model-cache.env`, `.secrets/model-cache-admin.env`, and `.secrets/model-cache-readonly.env` are absent.
 
-Because the custom public runtime image and private R2 model cache are not configured, do not run real `create_order` yet. The only real-create entry after those blockers are resolved remains:
+Because the public runtime image pull check and private R2 model cache are not ready, do not run real `create_order` yet. The only real-create entry after those blockers are resolved remains:
 
 ```powershell
 npm run clore:create -- --execute --server-id=<server_id> --max-price=<price> --confirm-project=ai-video-platform-wan22 --queued-jobs=<count>
@@ -283,6 +282,31 @@ The runtime image build path has been moved away from local Docker Desktop and i
 - It enables SBOM and provenance.
 - It must not publish `:latest` as the only reference and must not include Wan2.2 weights or secrets.
 
-Current blocker: GitHub CLI OAuth did not complete in this environment, so the repository has not yet been created/pushed and the GitHub Actions build has not yet run. There is no GHCR image address or digest yet.
+Earlier blocker resolved: GitHub OAuth completed, the private repository was created, repository contents were uploaded, and the GitHub Actions runtime image build ran successfully.
 
 The Clore real create path must continue to refuse execution until a real GHCR image tag/digest is recorded and publicly pullable by Clore.
+
+## 2026-07-12 Runtime Image Build Result
+
+GitHub Actions has successfully built and pushed the runtime image to GHCR.
+
+- Repository: `gouzhuoqunn/ai-video-platform` (private).
+- Workflow: `Runtime Image`.
+- Successful run ID: `29177649384`.
+- Image: `ghcr.io/gouzhuoqunn/wan22-runtime`.
+- Immutable tag: `v0.1.0-pre-gpu`.
+- Commit tag: `sha-b7076f466d5c8d5de6f5c5d8e9b18c326f8666e4`.
+- Digest: `sha256:fd03ef72d7369f59b3af9e535d9f6a75add9430a5c1ef4e7fd5853be0e4c060a`.
+- Pinned image reference: `ghcr.io/gouzhuoqunn/wan22-runtime@sha256:fd03ef72d7369f59b3af9e535d9f6a75add9430a5c1ef4e7fd5853be0e4c060a`.
+- Build platform: `linux/amd64`.
+- SBOM/provenance: enabled.
+- Model weights in image: no.
+
+Important remaining blocker:
+
+- The GHCR package is currently not anonymously pullable. Anonymous manifest check returns `401`.
+- Change only the runtime image package visibility to Public before any Clore rental. Keep the source repository private.
+- The Clore preflight now supports anonymous GHCR manifest checks and should reject real create while this package is private.
+- Cloudflare R2 must still be enabled in the Cloudflare Dashboard before a private bucket or limited R2 credentials can be created. No R2 bucket, R2 key, or model upload exists yet.
+
+No Clore order was created during this image work.
