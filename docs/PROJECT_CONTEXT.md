@@ -330,3 +330,40 @@ Blocked by required browser OAuth / account setup:
 - `npx wrangler login` opened Cloudflare OAuth but timed out before the callback completed, so R2 account availability, bucket creation, S3 credentials, and R2 permission tests could not be completed.
 
 No Clore order was created, no `create_order` call was made, no Clore balance was consumed, no SSH/GPU connection was opened, no Wan2.2 model was downloaded, and no model files were uploaded to R2.
+
+## 2026-07-12 GitHub Actions Runtime Image Success
+
+Completed after GitHub OAuth:
+
+- Created private GitHub repository: `gouzhuoqunn/ai-video-platform`.
+- Configured current-repo-only Git identity from the real GitHub account.
+- Created local commit `checkpoint: local creation studio and gpu deployment pipeline`.
+- Native `git push` to `github.com:443` was unreliable in this network, so repository files were uploaded through GitHub Contents API instead.
+- Triggered GitHub Actions workflow `Runtime Image`.
+- First run failed because the GitHub-hosted runner ran out of disk space while building the CUDA/PyTorch image.
+- Added a workflow step to free runner disk space and reran the workflow.
+- Successful run: `29177649384`.
+- Runtime image: `ghcr.io/gouzhuoqunn/wan22-runtime`.
+- Immutable tag: `v0.1.0-pre-gpu`.
+- Commit tag: `sha-b7076f466d5c8d5de6f5c5d8e9b18c326f8666e4`.
+- Digest: `sha256:fd03ef72d7369f59b3af9e535d9f6a75add9430a5c1ef4e7fd5853be0e4c060a`.
+- The runtime image was built from `gpu-worker/Dockerfile`, for `linux/amd64`, with SBOM/provenance enabled, and without Wan2.2 weights.
+- Local ignored state `.secrets/runtime-image-state.json` records the non-secret image metadata.
+- `.secrets/clore.env` now contains non-secret `CLORE_DOCKER_IMAGE` pointing at the pinned digest.
+
+Still blocked:
+
+- GHCR package is still private. Anonymous manifest check returns `401`, so Clore cannot pull it yet. The package visibility must be changed to Public in GitHub Package settings or through a refreshed GitHub token with package scopes.
+- Cloudflare R2 is still not enabled for the account. `npx wrangler r2 bucket list` returns Cloudflare code `10042`, so no bucket or R2 S3 credentials were created.
+- No model files were uploaded to R2.
+
+Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/SSH connection, and no Wan2.2 download.
+
+## 2026-07-12 Current Infrastructure Gate
+
+- GitHub CLI auth is valid and Wrangler auth is valid.
+- The runtime image exists in GHCR with immutable tag `v0.1.0-pre-gpu` and digest `sha256:fd03ef72d7369f59b3af9e535d9f6a75add9430a5c1ef4e7fd5853be0e4c060a`.
+- The source GitHub repository remains private, as intended.
+- The GHCR runtime package is still private and must be made Public before Clore can pull it.
+- Cloudflare R2 must be enabled in the Cloudflare Dashboard before bucket creation and limited S3 credentials can proceed.
+- Until those two gates are resolved, the real Clore create path must remain blocked.
