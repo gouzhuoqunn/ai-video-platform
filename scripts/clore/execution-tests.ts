@@ -63,6 +63,7 @@ async function main() {
       availableUsdBalance: 10.99,
       config,
       execution,
+      verifyImage: async (image) => ({ image, exists: true, linuxAmd64: true, method: "mock" }),
     });
     assert(candidate.serverId === "95538", "preflight should return the selected candidate.");
 
@@ -74,6 +75,7 @@ async function main() {
       availableUsdBalance: 10.99,
       config,
       execution,
+      verifyImage: async (image) => ({ image, exists: true, linuxAmd64: true, method: "mock" }),
     }).then(
       () => {
         throw new Error("spot candidate should fail.");
@@ -89,6 +91,7 @@ async function main() {
       availableUsdBalance: 10.99,
       config,
       execution,
+      verifyImage: async (image) => ({ image, exists: true, linuxAmd64: true, method: "mock" }),
     }).then(
       () => {
         throw new Error("no queued job should fail.");
