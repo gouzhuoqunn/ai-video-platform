@@ -51,7 +51,8 @@
 - The GHCR package is Public while the source repository remains Private.
 - Wrangler is logged in and R2 is enabled.
 - Private R2 bucket `ai-video-platform-wan22-model-cache` exists. `r2.dev` access is disabled and no custom domain is connected.
-- Remaining blocker: create the two R2 S3 credentials in the Cloudflare Dashboard and verify them with `npm run model-cache:r2:test`.
+- R2 S3 credentials are stored only in ignored `.secrets/model-cache-admin.env` and `.secrets/model-cache-readonly.env`.
+- `npm run model-cache:r2:test` verified admin list/put/get/overwrite/delete and GPU read-only list/get with put/overwrite/delete blocked.
 - No model upload, Clore order, GPU/SSH connection, or Wan2.2 download exists yet.
 
 ## 2026-07-11 Clore parser correction
