@@ -56,13 +56,14 @@ The runtime image is a general Wan2.2 worker environment:
 - ffmpeg, git, rclone, `huggingface_hub`, Supabase client, and worker healthcheck dependencies.
 - No model weights, prompts, videos, `.env.local`, `.secrets`, passwords, tokens, or API keys.
 
-Planned future public image name:
+Runtime image built by GitHub Actions:
 
 ```text
-ghcr.io/<user>/wan22-runtime:<immutable-version>
+ghcr.io/gouzhuoqunn/wan22-runtime:v0.1.0-pre-gpu
+ghcr.io/gouzhuoqunn/wan22-runtime@sha256:fd03ef72d7369f59b3af9e535d9f6a75add9430a5c1ef4e7fd5853be0e4c060a
 ```
 
-The GitHub Actions skeleton only dry-builds by default. It does not push an image.
+The package is still private at this checkpoint. Clore cannot pull it until the GHCR package visibility is changed to Public. The source repository can remain private.
 
 ## Session Cost Model
 
@@ -160,21 +161,23 @@ The latest live read-only Clore query found cheaper qualified RTX 5090 capacity 
 
 The architecture rule is unchanged: all host ordering and budget math must use normalized USD/hour, while preserving raw price amount and unit for audit.
 
-R2/private model cache and the public runtime image remain required before the guarded real create path should proceed. On this machine they are not ready yet because `wrangler`, `docker`, `gh`, and model-cache env files are absent.
+R2/private model cache and a publicly pullable runtime image remain required before the guarded real create path should proceed. The runtime image exists in GHCR, but the package is still private. Cloudflare R2 is still not enabled for the account, so model-cache buckets and credentials are absent.
 
 ## 2026-07-12 Infrastructure Prep Update
 
-- GitHub CLI is now installed locally, but GitHub OAuth did not complete yet.
-- Project-local Wrangler is installed as a dev dependency, but Cloudflare OAuth did not complete yet.
+- GitHub CLI is installed and authenticated.
+- The private GitHub repository `gouzhuoqunn/ai-video-platform` exists. Native `git push` was unreliable on this network, so repository files were uploaded through GitHub Contents API.
+- GitHub Actions built and pushed `ghcr.io/gouzhuoqunn/wan22-runtime:v0.1.0-pre-gpu`.
+- Runtime image digest: `sha256:fd03ef72d7369f59b3af9e535d9f6a75add9430a5c1ef4e7fd5853be0e4c060a`.
+- The GHCR package is not public yet; anonymous manifest checks return `401`.
+- Project-local Wrangler is installed and authenticated, but Cloudflare R2 itself is not enabled for the account. R2 bucket listing returns Cloudflare code `10042`.
 - Local Docker Desktop remains unnecessary; runtime image builds are intended to run in GitHub Actions.
-- The runtime image workflow is prepared to push GHCR images with immutable tags, SBOM, and provenance after the repository is pushed.
+- The runtime image workflow pushes immutable tags with SBOM and provenance.
 - R2 remains empty/not created in this checkpoint. No Wan2.2 model files were uploaded.
 - Model cache credentials are still absent and must remain ignored under `.secrets/`.
 
 Next successful checkpoint should record:
 
-- GitHub repository URL.
-- GHCR image repository, immutable tag, and digest.
-- Whether the GHCR package is public.
+- GHCR package visibility changed to Public while keeping the source repository private.
 - R2 bucket name, private status, endpoint, and prefix.
 - Admin and GPU read-only R2 credential files created locally without printing their values.
