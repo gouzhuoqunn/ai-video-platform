@@ -28,14 +28,44 @@ async function verifyWithPowerShell(repo: string, tag: string, image: string): P
 }
 
 function parseDockerImage(image: string) {
-  const [namePart, tag = "latest"] = image.split(":");
+  const [imageWithoutDigest] = image.split("@");
+  const [namePart, tag = "latest"] = imageWithoutDigest.split(":");
   const parts = namePart.split("/");
   const registry = parts.length > 2 && parts[0].includes(".") ? parts.shift() : "registry-1.docker.io";
   const repo = registry === "registry-1.docker.io" && parts.length === 1 ? `library/${parts[0]}` : parts.join("/");
   return { registry, repo, tag };
 }
 
+async function verifyWithAnonymousRegistry(image: string): Promise<DockerImageVerification> {
+  const [imageWithoutDigest, digest] = image.split("@");
+  const { registry, repo, tag } = parseDockerImage(imageWithoutDigest);
+  const reference = digest || tag;
+  const response = await fetch(`https://${registry}/v2/${repo}/manifests/${reference}`, {
+    headers: {
+      Accept:
+        "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json",
+    },
+  });
+  if (!response.ok) {
+    return {
+      image,
+      exists: false,
+      linuxAmd64: false,
+      method: `${registry}-anonymous-registry-api`,
+      note: `manifest request status ${response.status}`,
+    };
+  }
+
+  const manifest = (await response.json()) as { manifests?: Array<{ platform?: { os?: string; architecture?: string } }> };
+  const linuxAmd64 = manifest.manifests?.some((entry) => entry.platform?.os === "linux" && entry.platform.architecture === "amd64") ?? true;
+  return { image, exists: true, linuxAmd64, method: `${registry}-anonymous-registry-api` };
+}
+
 export async function verifyDockerImage(image: string): Promise<DockerImageVerification> {
+  if (image.startsWith("ghcr.io/")) {
+    return verifyWithAnonymousRegistry(image);
+  }
+
   if (!image.startsWith("nvidia/cuda:")) {
     return {
       image,
