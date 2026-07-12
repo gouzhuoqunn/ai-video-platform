@@ -1,0 +1,17 @@
+.env
+.env.*
+.env.local
+.secrets/
+__pycache__/
+.pytest_cache/
+*.pyc
+workspace/
+jobs/
+models/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.gguf
+*.log

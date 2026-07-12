@@ -1,0 +1,2 @@
+export const VIDEO_JOB_SELECT_FIELDS =
+  "id,user_id,prompt,model_key,status,duration_seconds,resolution,cost_credits,reference_image_path,output_video_url,thumbnail_url,error_message,progress,worker_id,lease_expires_at,attempt_count,max_attempts,output_video_path,output_size_bytes,output_mime_type,charged_at,refunded_at,created_at,updated_at,started_at,completed_at";

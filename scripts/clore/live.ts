@@ -1,0 +1,93 @@
+import { cloreRequest } from "./client";
+import type { CloreConfig, RawCloreServer, WalletSummary } from "./types";
+
+export type MarketplacePayload = RawCloreServer[] | { servers?: RawCloreServer[]; marketplace?: RawCloreServer[]; data?: RawCloreServer[] };
+
+export async function readLiveMarketplace(config: CloreConfig) {
+  const data = await cloreRequest<MarketplacePayload>(config, "/marketplace");
+  if (Array.isArray(data)) {
+    return data;
+  }
+  return data.servers ?? data.marketplace ?? data.data ?? [];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function firstNumber(record: Record<string, unknown>, names: string[]) {
+  for (const name of names) {
+    const value = record[name];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && Number.isFinite(Number(value))) return Number(value);
+  }
+  return null;
+}
+
+function firstString(record: Record<string, unknown>, names: string[]) {
+  for (const name of names) {
+    const value = record[name];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+export function summarizeWalletPayload(data: unknown): WalletSummary {
+  const record = asRecord(data) ?? {};
+  const rawWallets = Array.isArray(record.wallets) ? record.wallets : Array.isArray(data) ? data : [];
+  const balances = rawWallets
+    .map((wallet) => {
+      const walletRecord = asRecord(wallet) ?? {};
+      const name = firstString(walletRecord, ["name", "currency", "wallet", "type"]) ?? "unknown";
+      const currency = firstString(walletRecord, ["currency", "ticker", "symbol"]) ?? name;
+      const balance = firstNumber(walletRecord, ["balance", "available", "amount", "value"]);
+      const isUsdLike = /usd/i.test(name) || /usd/i.test(currency ?? "");
+      return { name, balance, currency, isUsdLike };
+    })
+    .filter((wallet) => wallet.balance !== null || wallet.name !== "unknown");
+
+  const availableUsdBalance =
+    firstNumber(record, ["usd", "usd_balance", "balance_usd", "available_usd"]) ??
+    balances.find((wallet) => wallet.isUsdLike && wallet.balance !== null)?.balance ??
+    null;
+
+  return {
+    balances,
+    availableUsdBalance,
+    source: availableUsdBalance === null ? "no direct USD balance field; no currency conversion performed" : "direct USD-like wallet/API field",
+  };
+}
+
+export async function readWalletSummary(config: CloreConfig) {
+  const data = await cloreRequest<unknown>(config, "/wallets");
+  return summarizeWalletPayload(data);
+}
+
+export type CloreOrderSummary = {
+  orderId: string | null;
+  serverId: string | null;
+  status: string | null;
+  active: boolean;
+};
+
+export function summarizeOrdersPayload(data: unknown): CloreOrderSummary[] {
+  const record = asRecord(data) ?? {};
+  const orders = Array.isArray(record.orders) ? record.orders : Array.isArray(data) ? data : [];
+  return orders.map((order) => {
+    const value = asRecord(order) ?? {};
+    const status = firstString(value, ["status", "state"]) ?? null;
+    const statusText = (status ?? "").toLowerCase();
+    const active = statusText ? !/(cancel|complete|stop|stopped|expire|expired|finish|finished|end|ended)/i.test(statusText) : true;
+    return {
+      orderId: firstString(value, ["id", "order_id"]) ?? null,
+      serverId: firstString(value, ["server_id", "renting_server"]) ?? null,
+      status,
+      active,
+    };
+  });
+}
+
+export async function readLiveOrdersSummary(config: CloreConfig) {
+  const data = await cloreRequest<unknown>(config, "/my_orders");
+  return summarizeOrdersPayload(data);
+}

@@ -1,0 +1,39 @@
+{
+  "mode": "live-wallet-read-only",
+  "balances": [
+    {
+      "name": "bitcoin",
+      "currency": "bitcoin",
+      "available": 0,
+      "usd_like": false
+    },
+    {
+      "name": "CLORE-Blockchain",
+      "currency": "CLORE-Blockchain",
+      "available": 0,
+      "usd_like": false
+    },
+    {
+      "name": "USD-Blockchain",
+      "currency": "USD-Blockchain",
+      "available": 10.99,
+      "usd_like": true
+    }
+  ],
+  "available_usd_balance": 10.99,
+  "balance_source": "direct USD-like wallet/API field",
+  "planned_order_currency": "USD",
+  "cheapest_compliant_5090": {
+    "server_id": "107713",
+    "usd_per_hour": 0.2916666666666667,
+    "six_hour_cost_usd": 1.75,
+    "balance_sufficient_for_6h": true,
+    "balance_margin_usd": 9.24
+  },
+  "balance_changes_made": false,
+  "hidden_sensitive_fields": [
+    "deposit addresses",
+    "full wallet object",
+    "api key"
+  ]
+}
