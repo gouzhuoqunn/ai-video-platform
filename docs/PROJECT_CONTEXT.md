@@ -351,9 +351,10 @@ Completed after GitHub OAuth:
 - Local ignored state `.secrets/runtime-image-state.json` records the non-secret image metadata.
 - `.secrets/clore.env` now contains non-secret `CLORE_DOCKER_IMAGE` pointing at the pinned digest.
 
-Remaining blocker:
+R2 credentials completed:
 
-- R2 S3 credentials still need to be created in the Cloudflare Dashboard. No model files were uploaded to R2.
+- R2 S3 credentials were created in Cloudflare Dashboard and stored only in ignored `.secrets/model-cache-admin.env` and `.secrets/model-cache-readonly.env`.
+- No model files were uploaded to R2.
 
 Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/SSH connection, and no Wan2.2 download.
 
@@ -366,6 +367,9 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - Cloudflare R2 is enabled.
 - Private R2 bucket `ai-video-platform-wan22-model-cache` exists. `r2.dev` public access is disabled, no custom domains are connected, and a Wrangler OAuth put/get/delete probe passed and cleaned its test object.
 - `.secrets/model-cache.env` now stores non-secret bucket, endpoint, and prefix configuration for dry-run and future deployment planning.
-- Remaining single blocker: create two R2 S3 API credentials in the Cloudflare Dashboard, one Object Read & Write token for local admin use and one Object Read only token scoped to the bucket for GPU read-only restore.
-- `npm run model-cache:r2:test` is prepared to verify admin read/write/delete and GPU read/list-only permissions after those two ignored env files exist.
-- Until R2 S3 credentials pass that permission test, real Clore create remains blocked.
+- `npm run model-cache:r2:test` verified that the admin credential can list, put, get, overwrite, and delete test objects.
+- The same test verified that the GPU read-only credential can list and get, but cannot put, overwrite, or delete.
+- All R2 permission test objects were cleaned; bucket info showed `object_count: 0`.
+- GPU deployment planning now allows `.secrets/model-cache-readonly.env` and explicitly forbids `.secrets/model-cache-admin.env`.
+- The first real GPU session preconditions are now satisfied from the local prep side: public GHCR runtime image, private R2 bucket, verified read-only R2 credential boundary, limited GPU Worker credentials, SSH public key, Clore dry-run, no active Clore order, and passing local checks.
+- Real Clore create still requires an explicit future user command and final live confirmation; no order was created in this checkpoint.
