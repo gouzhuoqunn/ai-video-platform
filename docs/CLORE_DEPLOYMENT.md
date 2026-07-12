@@ -302,12 +302,14 @@ GitHub Actions has successfully built and pushed the runtime image to GHCR.
 - SBOM/provenance: enabled.
 - Model weights in image: no.
 
-Important remaining blocker:
+R2 and runtime readiness:
 
 - The GHCR package is now Public. Anonymous manifest check succeeds and the digest matches the pinned runtime image.
 - Cloudflare R2 is enabled and bucket `ai-video-platform-wan22-model-cache` exists.
 - `r2.dev` public access is disabled and no custom domains are connected.
-- Remaining blocker: create limited R2 S3 credentials in the Cloudflare Dashboard and verify them with `npm run model-cache:r2:test`.
+- Admin R2 credential can list, put, get, overwrite, and delete test objects.
+- GPU read-only R2 credential can list and get, but cannot put, overwrite, or delete.
+- GPU deployment allows `.secrets/model-cache-readonly.env` only; `.secrets/model-cache-admin.env` remains forbidden.
 - No model upload exists yet.
 
 No Clore order was created during this image work.

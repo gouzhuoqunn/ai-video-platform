@@ -1,6 +1,6 @@
 # First GPU Session
 
-Status: this is a future runbook. This task did not rent a GPU, call real Clore `create_order`, SSH into a host, download Wan2.2, push a Docker image, create R2 resources, or deploy publicly.
+Status: this is a future runbook. The prep path now has a public GHCR runtime image and a private R2 bucket with verified admin/read-only credential boundaries. This task still did not rent a GPU, call real Clore `create_order`, SSH into a host, download Wan2.2, upload model weights, or deploy publicly.
 
 ## 2026-07-11 default-off execution chain update
 

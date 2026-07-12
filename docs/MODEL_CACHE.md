@@ -1,6 +1,6 @@
 # Model Cache
 
-Status: private Cloudflare R2 bucket created and connected to dry-run planning. R2 S3 credentials still require manual Dashboard creation. No Wan2.2 weights were uploaded or downloaded.
+Status: private Cloudflare R2 bucket created, connected to dry-run planning, and permission-tested with separate admin and GPU read-only S3 credentials. No Wan2.2 weights were uploaded or downloaded.
 
 ## Fixed Model
 
@@ -73,10 +73,10 @@ ai-video-platform-wan22-model-cache
 
 The bucket is private. `r2.dev` public access is disabled and no custom domains are connected.
 
-`npm run model-cache:r2:test` requires:
+`npm run model-cache:r2:test` verifies:
 
-- `.secrets/model-cache-admin.env`: Object Read & Write credentials scoped to the model cache bucket.
-- `.secrets/model-cache-readonly.env`: Object Read only credentials scoped to the model cache bucket.
+- `.secrets/model-cache-admin.env`: Object Read & Write credentials scoped to the model cache bucket can list, put, get, overwrite, and delete.
+- `.secrets/model-cache-readonly.env`: Object Read only credentials scoped to the model cache bucket can list and get, but cannot put, overwrite, or delete.
 
 Both files must use:
 
@@ -97,3 +97,9 @@ scripts/model-cache/r2-upload.sh
 ```
 
 This round connected to R2 only for bucket setup and a tiny permission probe object. It did not upload Wan2.2 weights.
+
+Latest permission test result:
+
+- Admin boundary: list, put, get, overwrite, delete passed.
+- GPU read-only boundary: list/get passed; put/overwrite/delete blocked.
+- Cleanup: test objects removed; bucket object count returned to 0.
