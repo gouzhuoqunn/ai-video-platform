@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  background: #070708;
+  color: #f8fafc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #070708;
+  color: #f8fafc;
+  font-family: Arial, "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+@keyframes demo-pan {
+  0% {
+    transform: translate3d(-2%, 0, 0) scale(1.04);
+  }
+  50% {
+    transform: translate3d(2%, -1%, 0) scale(1.08);
+  }
+  100% {
+    transform: translate3d(-2%, 0, 0) scale(1.04);
+  }
+}
+
+@keyframes demo-scan {
+  0% {
+    transform: translateY(110%);
+    opacity: 0;
+  }
+  25%,
+  70% {
+    opacity: 0.55;
+  }
+  100% {
+    transform: translateY(-120%);
+    opacity: 0;
+  }
+}
+
+@keyframes demo-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
