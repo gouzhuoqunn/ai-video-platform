@@ -1,0 +1,11 @@
+{
+  "mode": "live-my-orders-read-only",
+  "active_order_state_exists": false,
+  "active_order_summary": null,
+  "orders_summary": [],
+  "hidden_sensitive_fields": [
+    "passwords",
+    "full connection credentials",
+    "api key"
+  ]
+}
