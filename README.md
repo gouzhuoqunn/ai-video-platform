@@ -48,9 +48,11 @@
 - Native `git push` was unreliable from this network, so repository files were uploaded through the GitHub Contents API.
 - GitHub Actions built and pushed `ghcr.io/gouzhuoqunn/wan22-runtime:v0.1.0-pre-gpu`.
 - Runtime image digest: `sha256:fd03ef72d7369f59b3af9e535d9f6a75add9430a5c1ef4e7fd5853be0e4c060a`.
-- The GHCR package is still private. Make only the package Public before a Clore order; keep the source repository private.
-- Wrangler is logged in, but Cloudflare R2 is not enabled for the account yet. `npx wrangler r2 bucket list` returns Cloudflare code `10042`.
-- No R2 bucket, R2 S3 credential, model upload, Clore order, GPU/SSH connection, or Wan2.2 download exists yet.
+- The GHCR package is Public while the source repository remains Private.
+- Wrangler is logged in and R2 is enabled.
+- Private R2 bucket `ai-video-platform-wan22-model-cache` exists. `r2.dev` access is disabled and no custom domain is connected.
+- Remaining blocker: create the two R2 S3 credentials in the Cloudflare Dashboard and verify them with `npm run model-cache:r2:test`.
+- No model upload, Clore order, GPU/SSH connection, or Wan2.2 download exists yet.
 
 ## 2026-07-11 Clore parser correction
 
