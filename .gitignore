@@ -1,0 +1,68 @@
+# dependencies
+/node_modules
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# local env files
+.env
+.env*.local
+!.env.example
+.secrets/
+.secrets/local-lab.env
+*.secret
+*.secrets
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.next-dev*.log
+*.log
+
+# local generated media and worker files
+/public/mock-videos/*.mp4
+/public/mock-videos/*.webm
+__pycache__/
+*.pyc
+/tmp/
+/temp/
+/.worker-cache/
+/worker-cache/
+/test-results/
+/playwright-report/
+/coverage/
+tsconfig.tsbuildinfo
+
+# cloud / worker local state
+.secrets/clore.env
+.secrets/clore-active-order.json
+.secrets/clore-order-create.lock
+.secrets/clore-known-hosts
+.secrets/clore-order-plan.json
+.secrets/clore-session-state.json
+.secrets/model-cache.env
+.secrets/model-cache-admin.env
+.secrets/model-cache-readonly.env
+.secrets/model-cache-state.json
+.secrets/runtime-image-state.json
+/scripts/clore/*.local.json
+/workspace/jobs/
+/workspace/models/
+/models/
+/model-cache/
+/order-logs/
+/gpu-worker/.env
+/gpu-worker/.env.*
+D:/AI-Video-Library/
+AI-Video-Library/
+*.pem
+
+# system files
+.DS_Store
+Thumbs.db
