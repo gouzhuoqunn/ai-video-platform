@@ -55,6 +55,7 @@
     "model-cache:plan": "tsx scripts/model-cache/plan-sync.ts",
     "model-cache:test": "tsx scripts/model-cache/model-cache-tests.ts",
     "model-cache:manifest:test": "tsx scripts/model-cache/verify.ts --mock",
+    "model-cache:r2:test": "tsx scripts/model-cache/r2-credentials-check.ts",
     "cost:session": "tsx scripts/cost/session-cost.ts",
     "cost:plan": "tsx scripts/cost/session-plan.ts",
     "cost:test": "tsx scripts/cost/cost-tests.ts",

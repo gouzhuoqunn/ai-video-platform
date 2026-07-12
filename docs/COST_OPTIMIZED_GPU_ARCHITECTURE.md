@@ -161,7 +161,7 @@ The latest live read-only Clore query found cheaper qualified RTX 5090 capacity 
 
 The architecture rule is unchanged: all host ordering and budget math must use normalized USD/hour, while preserving raw price amount and unit for audit.
 
-R2/private model cache and a publicly pullable runtime image remain required before the guarded real create path should proceed. The runtime image exists in GHCR, but the package is still private. Cloudflare R2 is still not enabled for the account, so model-cache buckets and credentials are absent.
+R2/private model cache and a publicly pullable runtime image remain required before the guarded real create path should proceed. The runtime image exists in GHCR and is publicly pullable. The private R2 bucket exists, but the two limited S3 credentials still need manual Dashboard creation and permission verification.
 
 ## 2026-07-12 Infrastructure Prep Update
 
@@ -169,15 +169,14 @@ R2/private model cache and a publicly pullable runtime image remain required bef
 - The private GitHub repository `gouzhuoqunn/ai-video-platform` exists. Native `git push` was unreliable on this network, so repository files were uploaded through GitHub Contents API.
 - GitHub Actions built and pushed `ghcr.io/gouzhuoqunn/wan22-runtime:v0.1.0-pre-gpu`.
 - Runtime image digest: `sha256:fd03ef72d7369f59b3af9e535d9f6a75add9430a5c1ef4e7fd5853be0e4c060a`.
-- The GHCR package is not public yet; anonymous manifest checks return `401`.
-- Project-local Wrangler is installed and authenticated, but Cloudflare R2 itself is not enabled for the account. R2 bucket listing returns Cloudflare code `10042`.
+- The GHCR package is public; anonymous manifest checks return 200 and the digest matches the pinned image.
+- Project-local Wrangler is installed and authenticated.
+- R2 bucket `ai-video-platform-wan22-model-cache` exists, `r2.dev` public access is disabled, and no custom domains are connected.
 - Local Docker Desktop remains unnecessary; runtime image builds are intended to run in GitHub Actions.
 - The runtime image workflow pushes immutable tags with SBOM and provenance.
-- R2 remains empty/not created in this checkpoint. No Wan2.2 model files were uploaded.
-- Model cache credentials are still absent and must remain ignored under `.secrets/`.
+- R2 remains empty after cleanup of a tiny permission probe object. No Wan2.2 model files were uploaded.
+- Model cache S3 credentials are still absent and must remain ignored under `.secrets/`.
 
 Next successful checkpoint should record:
 
-- GHCR package visibility changed to Public while keeping the source repository private.
-- R2 bucket name, private status, endpoint, and prefix.
-- Admin and GPU read-only R2 credential files created locally without printing their values.
+- Admin and GPU read-only R2 credential files created locally without printing their values, then verified by `npm run model-cache:r2:test`.

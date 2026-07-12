@@ -40,12 +40,25 @@ async function verifyWithAnonymousRegistry(image: string): Promise<DockerImageVe
   const [imageWithoutDigest, digest] = image.split("@");
   const { registry, repo, tag } = parseDockerImage(imageWithoutDigest);
   const reference = digest || tag;
-  const response = await fetch(`https://${registry}/v2/${repo}/manifests/${reference}`, {
-    headers: {
-      Accept:
-        "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json",
-    },
+  const headers = {
+    Accept:
+      "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json",
+  };
+  let response = await fetch(`https://${registry}/v2/${repo}/manifests/${reference}`, {
+    headers,
   });
+  if (response.status === 401) {
+    const tokenResponse = await fetch(`https://${registry}/token?scope=repository:${repo}:pull`);
+    if (tokenResponse.ok) {
+      const tokenPayload = (await tokenResponse.json()) as { token?: string };
+      response = await fetch(`https://${registry}/v2/${repo}/manifests/${reference}`, {
+        headers: {
+          ...headers,
+          Authorization: `Bearer ${tokenPayload.token ?? ""}`,
+        },
+      });
+    }
+  }
   if (!response.ok) {
     return {
       image,
@@ -59,6 +72,35 @@ async function verifyWithAnonymousRegistry(image: string): Promise<DockerImageVe
   const manifest = (await response.json()) as { manifests?: Array<{ platform?: { os?: string; architecture?: string } }> };
   const linuxAmd64 = manifest.manifests?.some((entry) => entry.platform?.os === "linux" && entry.platform.architecture === "amd64") ?? true;
   return { image, exists: true, linuxAmd64, method: `${registry}-anonymous-registry-api` };
+}
+
+async function verifyWithDockerHubRegistry(image: string): Promise<DockerImageVerification> {
+  const { repo, tag } = parseDockerImage(image);
+  try {
+    const tokenResponse = await fetch(`https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull`);
+    if (!tokenResponse.ok) {
+      return { image, exists: false, linuxAmd64: false, method: "docker-registry-api", note: "token request failed" };
+    }
+
+    const tokenPayload = (await tokenResponse.json()) as { token?: string };
+    const manifestResponse = await fetch(`https://registry-1.docker.io/v2/${repo}/manifests/${tag}`, {
+    headers: {
+      Authorization: `Bearer ${tokenPayload.token ?? ""}`,
+      Accept:
+        "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json",
+    },
+  });
+    if (!manifestResponse.ok) {
+      return { image, exists: false, linuxAmd64: false, method: "docker-registry-api", note: `manifest request status ${manifestResponse.status}` };
+    }
+
+    const manifest = (await manifestResponse.json()) as { manifests?: Array<{ platform?: { os?: string; architecture?: string } }> };
+    const linuxAmd64 = manifest.manifests?.some((entry) => entry.platform?.os === "linux" && entry.platform.architecture === "amd64") ?? true;
+    return { image, exists: true, linuxAmd64, method: "docker-registry-api" };
+  } catch {
+    const { repo, tag } = parseDockerImage(image);
+    return verifyWithPowerShell(repo, tag, image);
+  }
 }
 
 export async function verifyDockerImage(image: string): Promise<DockerImageVerification> {
@@ -76,29 +118,5 @@ export async function verifyDockerImage(image: string): Promise<DockerImageVerif
     };
   }
 
-  const { repo, tag } = parseDockerImage(image);
-  try {
-    const tokenResponse = await fetch(`https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull`);
-    if (!tokenResponse.ok) {
-      return { image, exists: false, linuxAmd64: false, method: "docker-registry-api", note: "token request failed" };
-    }
-
-    const tokenPayload = (await tokenResponse.json()) as { token?: string };
-    const manifestResponse = await fetch(`https://registry-1.docker.io/v2/${repo}/manifests/${tag}`, {
-      headers: {
-        Authorization: `Bearer ${tokenPayload.token ?? ""}`,
-        Accept:
-          "application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json",
-      },
-    });
-    if (!manifestResponse.ok) {
-      return { image, exists: false, linuxAmd64: false, method: "docker-registry-api", note: `manifest request status ${manifestResponse.status}` };
-    }
-
-    const manifest = (await manifestResponse.json()) as { manifests?: Array<{ platform?: { os?: string; architecture?: string } }> };
-    const linuxAmd64 = manifest.manifests?.some((entry) => entry.platform?.os === "linux" && entry.platform.architecture === "amd64") ?? true;
-    return { image, exists: true, linuxAmd64, method: "docker-registry-api" };
-  } catch {
-    return verifyWithPowerShell(repo, tag, image);
-  }
+  return verifyWithDockerHubRegistry(image);
 }

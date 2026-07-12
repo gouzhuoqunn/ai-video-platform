@@ -351,11 +351,9 @@ Completed after GitHub OAuth:
 - Local ignored state `.secrets/runtime-image-state.json` records the non-secret image metadata.
 - `.secrets/clore.env` now contains non-secret `CLORE_DOCKER_IMAGE` pointing at the pinned digest.
 
-Still blocked:
+Remaining blocker:
 
-- GHCR package is still private. Anonymous manifest check returns `401`, so Clore cannot pull it yet. The package visibility must be changed to Public in GitHub Package settings or through a refreshed GitHub token with package scopes.
-- Cloudflare R2 is still not enabled for the account. `npx wrangler r2 bucket list` returns Cloudflare code `10042`, so no bucket or R2 S3 credentials were created.
-- No model files were uploaded to R2.
+- R2 S3 credentials still need to be created in the Cloudflare Dashboard. No model files were uploaded to R2.
 
 Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/SSH connection, and no Wan2.2 download.
 
@@ -364,6 +362,10 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - GitHub CLI auth is valid and Wrangler auth is valid.
 - The runtime image exists in GHCR with immutable tag `v0.1.0-pre-gpu` and digest `sha256:fd03ef72d7369f59b3af9e535d9f6a75add9430a5c1ef4e7fd5853be0e4c060a`.
 - The source GitHub repository remains private, as intended.
-- The GHCR runtime package is still private and must be made Public before Clore can pull it.
-- Cloudflare R2 must be enabled in the Cloudflare Dashboard before bucket creation and limited S3 credentials can proceed.
-- Until those two gates are resolved, the real Clore create path must remain blocked.
+- The GHCR runtime package is now Public. Anonymous manifest access returns 200 and the digest matches the pinned image.
+- Cloudflare R2 is enabled.
+- Private R2 bucket `ai-video-platform-wan22-model-cache` exists. `r2.dev` public access is disabled, no custom domains are connected, and a Wrangler OAuth put/get/delete probe passed and cleaned its test object.
+- `.secrets/model-cache.env` now stores non-secret bucket, endpoint, and prefix configuration for dry-run and future deployment planning.
+- Remaining single blocker: create two R2 S3 API credentials in the Cloudflare Dashboard, one Object Read & Write token for local admin use and one Object Read only token scoped to the bucket for GPU read-only restore.
+- `npm run model-cache:r2:test` is prepared to verify admin read/write/delete and GPU read/list-only permissions after those two ignored env files exist.
+- Until R2 S3 credentials pass that permission test, real Clore create remains blocked.

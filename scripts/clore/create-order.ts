@@ -9,6 +9,7 @@ import { loadCloreExecutionConfig } from "./execution-config";
 import { buildCreateOrderBody, createCloreOrder, prepareCreateOrderFromLive } from "./order-execution";
 import { inspectSshPublicKey } from "./ssh";
 import type { OrderPlan } from "./types";
+import { loadModelCacheConfig } from "../model-cache/config";
 
 const PLAN_PATH = path.join(process.cwd(), ".secrets", "clore-order-plan.json");
 
@@ -166,6 +167,7 @@ async function main() {
     return;
   }
   const plan = await buildPlan();
+  const modelCache = loadModelCacheConfig();
   const minimumBillingConfirmed = plan.selected?.minRentalHours !== null && plan.selected?.minRentalHours !== undefined;
   writePlan(plan);
   const payload = {
@@ -214,7 +216,9 @@ async function main() {
       worker_code_dir: "/workspace/app/gpu-worker",
       temp_job_dir: "/workspace/jobs",
       first_model_source: "official Hugging Face fallback",
-      r2_configured_now: false,
+      r2_configured_now: modelCache.provider === "r2" && modelCache.r2Enabled && Boolean(modelCache.bucket) && Boolean(modelCache.endpoint),
+      r2_bucket_configured: Boolean(modelCache.bucket),
+      r2_prefix: modelCache.prefix,
       estimated_model_disk_gb: "80-120",
       estimated_first_bootstrap_time: "30-90 minutes depending on network and Hugging Face download speed",
       create_order_body_shape: buildCreateOrderBody({
