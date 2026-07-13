@@ -62,3 +62,13 @@ npm run model-cache:seed:test
 ```
 
 This validates manifest rules, object key layout, short-lived presigned PUT, multipart planning, publish-last `current.json`, readonly restore credentials, and cleanup of tiny `_seed-test` objects. It still does not download Wan2.2, upload model weights, create a Clore order, or connect SSH.
+
+## 2026-07-13 First Test Lockdown
+
+- First-session Worker mode uses `FIRST_SESSION_MAX_CLAIMS=1`; the count increments immediately after a successful claim, so a failed first job still stops further claims.
+- The safe first prompt is a synthetic text-only red paper boat scene with no people and no text.
+- Wan code is pinned to commit `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`.
+- Hugging Face model revision is pinned to `921dbaf3f1674a56f47e83fb80a34bac8a8f203e`.
+- Anonymous Hugging Face metadata/HEAD checks must not download weights and must not require an HF token when the public model endpoint is reachable.
+- Current local network cannot reach Hugging Face reliably; this must be checked again before the first real session.
+- Real create remains blocked until the remote Cloudflare Cron watchdog is active and healthy.

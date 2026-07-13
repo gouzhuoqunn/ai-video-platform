@@ -1,0 +1,11 @@
+name = "ai-video-platform-clore-watchdog"
+main = "src/index.ts"
+compatibility_date = "2026-07-13"
+workers_dev = false
+
+[[r2_buckets]]
+binding = "WATCHDOG_STATE"
+bucket_name = "ai-video-platform-clore-watchdog-state"
+
+[triggers]
+crons = ["* * * * *"]

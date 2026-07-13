@@ -47,6 +47,9 @@ tsconfig.tsbuildinfo
 .secrets/clore-known-hosts
 .secrets/clore-order-plan.json
 .secrets/clore-session-state.json
+.secrets/clore-watchdog-arm.json
+.secrets/clore-local-watchdog-heartbeat.json
+.secrets/clore-watchdog-disarmed-at.txt
 .secrets/model-cache.env
 .secrets/model-cache-admin.env
 .secrets/model-cache-readonly.env

@@ -33,6 +33,8 @@ class WorkerConfig:
     worker_password: str
     worker_id: str
     wan_runner: str
+    wan_model_revision: str
+    wan_code_revision: str
     wan_model_dir: str
     wan_model_manifest: str
     wan_output_dir: str
@@ -45,6 +47,7 @@ class WorkerConfig:
     wan_cpu_offload: bool
     worker_poll_interval_seconds: int
     worker_lease_seconds: int
+    first_session_max_claims: int
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -56,6 +59,8 @@ class WorkerConfig:
             worker_password=os.getenv("GPU_WORKER_PASSWORD", "").strip(),
             worker_id=os.getenv("GPU_WORKER_USER_ID", "").strip() or email,
             wan_runner=os.getenv("WAN_RUNNER", "mock").strip().lower(),
+            wan_model_revision=os.getenv("WAN_MODEL_REVISION", "921dbaf3f1674a56f47e83fb80a34bac8a8f203e").strip(),
+            wan_code_revision=os.getenv("WAN_CODE_REVISION", "42bf4cfaa384bc21833865abc2f9e6c0e67233dc").strip(),
             wan_model_dir=os.getenv("WAN_MODEL_DIR", "/workspace/models/Wan2.2-TI2V-5B"),
             wan_model_manifest=os.getenv("WAN_MODEL_MANIFEST", "model-cache-manifest.json"),
             wan_output_dir=os.getenv("WAN_OUTPUT_DIR", "/workspace/jobs"),
@@ -68,6 +73,7 @@ class WorkerConfig:
             wan_cpu_offload=_bool("WAN_CPU_OFFLOAD", True),
             worker_poll_interval_seconds=_int("WORKER_POLL_INTERVAL_SECONDS", 8),
             worker_lease_seconds=_int("WORKER_LEASE_SECONDS", 300),
+            first_session_max_claims=_int("FIRST_SESSION_MAX_CLAIMS", 0),
         )
 
     def validate(self) -> None:
@@ -86,3 +92,10 @@ class WorkerConfig:
 
         if self.wan_runner not in {"mock", "real"}:
             raise ValueError("WAN_RUNNER must be mock or real")
+        if self.first_session_max_claims < 0:
+            raise ValueError("FIRST_SESSION_MAX_CLAIMS must be 0 or greater")
+        if self.wan_runner == "real":
+            if not self.wan_model_revision or self.wan_model_revision == "main":
+                raise ValueError("WAN_MODEL_REVISION must be pinned for real runner")
+            if not self.wan_code_revision or self.wan_code_revision == "main":
+                raise ValueError("WAN_CODE_REVISION must be pinned for real runner")

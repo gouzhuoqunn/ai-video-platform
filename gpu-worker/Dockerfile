@@ -24,7 +24,7 @@ RUN python3.11 -m pip install --upgrade pip setuptools wheel \
     && python3.11 -m pip install -r /app/requirements.txt \
     && python3.11 -m pip install --index-url https://download.pytorch.org/whl/cu128 \
       torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 \
-    && python3.11 -m pip install "git+https://github.com/Wan-Video/Wan2.2.git" || true
+    && python3.11 -m pip install "git+https://github.com/Wan-Video/Wan2.2.git@42bf4cfaa384bc21833865abc2f9e6c0e67233dc" || true
 
 COPY . /app
 RUN chmod +x /app/entrypoint.sh

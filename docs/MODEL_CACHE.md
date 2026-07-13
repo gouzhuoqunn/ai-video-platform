@@ -134,3 +134,16 @@ npm run model-cache:seed:test
 ```
 
 The current seed test uses mock model files plus a tiny `_seed-test` R2 object only. It does not download Wan2.2 and does not upload model weights.
+
+## 2026-07-13 Pinned Revisions
+
+Fixed non-secret version constants now live in `scripts/model-cache/model-version.ts`:
+
+```text
+WAN_MODEL_REPO=Wan-AI/Wan2.2-TI2V-5B
+WAN_MODEL_REVISION=921dbaf3f1674a56f47e83fb80a34bac8a8f203e
+WAN_CODE_REVISION=42bf4cfaa384bc21833865abc2f9e6c0e67233dc
+WAN_MODEL_EXPECTED_SIZE_GB=34.2
+```
+
+The runtime Dockerfile installs Wan code from the pinned commit instead of drifting `main`. The Python real runner refuses to start if the generated model manifest does not match the pinned model and code revisions.

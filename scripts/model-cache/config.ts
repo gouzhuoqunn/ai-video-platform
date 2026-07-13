@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { WAN_MODEL_EXPECTED_SIZE_GB, WAN_MODEL_REPO } from "./model-version";
 
 const MODEL_CACHE_ENV_PATH = path.join(process.cwd(), ".secrets", "model-cache.env");
 
@@ -62,8 +63,8 @@ export function loadModelCacheConfig(): ModelCacheConfig {
     volumeDir: readString(fileValues, "MODEL_CACHE_VOLUME_DIR", "/workspace/model-cache/Wan2.2-TI2V-5B"),
     r2Enabled: readBool(fileValues, "MODEL_CACHE_R2_ENABLED", true),
     hfFallbackEnabled: readBool(fileValues, "MODEL_CACHE_HF_FALLBACK_ENABLED", true),
-    officialRepo: readString(fileValues, "WAN_MODEL_REPO", "Wan-AI/Wan2.2-TI2V-5B"),
-    expectedSizeGb: 34.2,
+    officialRepo: readString(fileValues, "WAN_MODEL_REPO", WAN_MODEL_REPO),
+    expectedSizeGb: WAN_MODEL_EXPECTED_SIZE_GB,
   };
 }
 

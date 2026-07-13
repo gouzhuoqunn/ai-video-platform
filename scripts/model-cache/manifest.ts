@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { WAN_CODE_REVISION, WAN_MODEL_REVISION } from "./model-version";
 
 export type ModelCacheManifestFile = {
   path: string;
@@ -91,9 +92,9 @@ export async function generateManifest(modelDir: string, expectedSizeGb = 34.2):
     model: "Wan-AI/Wan2.2-TI2V-5B",
     modelId: "Wan-AI/Wan2.2-TI2V-5B",
     modelRepo: "Wan-AI/Wan2.2-TI2V-5B",
-    modelRevision: process.env.WAN_MODEL_REVISION || "unknown",
+    modelRevision: process.env.WAN_MODEL_REVISION || WAN_MODEL_REVISION,
     runtimeImageDigest: process.env.CLORE_DOCKER_IMAGE?.split("@")[1] || "unknown",
-    wanCodeRevision: process.env.WAN_CODE_REVISION || "unknown",
+    wanCodeRevision: process.env.WAN_CODE_REVISION || WAN_CODE_REVISION,
     expectedSizeGb,
     generatedAt: new Date().toISOString(),
     fileCount: files.length,

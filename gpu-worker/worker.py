@@ -23,6 +23,7 @@ class GpuWorker:
         self.supabase = supabase_client
         self.runner = runner or build_runner(config)
         self.logger = logger or logging.getLogger("gpu-worker")
+        self.claim_count = 0
 
     def login(self) -> None:
         self.supabase.auth.sign_in_with_password(
@@ -88,9 +89,14 @@ class GpuWorker:
         ).execute()
 
     def process_one(self) -> bool:
+        if self.config.first_session_max_claims and self.claim_count >= self.config.first_session_max_claims:
+            safe_log(self.logger, "claim_limit_reached", worker_id=self.config.worker_id, claim_count=self.claim_count)
+            return False
+
         job = self.claim()
         if not job:
             return False
+        self.claim_count += 1
 
         job_id = str(job["id"])
         started = time.monotonic()

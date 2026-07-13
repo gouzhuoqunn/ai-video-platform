@@ -44,6 +44,12 @@ class RealWanRunner:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("model") != "Wan-AI/Wan2.2-TI2V-5B":
             raise ValueError("Wan2.2 model manifest model id does not match expected TI2V-5B.")
+        model_revision = manifest.get("model_revision") or manifest.get("modelRevision")
+        wan_code_revision = manifest.get("wan_code_revision") or manifest.get("wanCodeRevision")
+        if model_revision != self.config.wan_model_revision:
+            raise ValueError("Wan2.2 model manifest revision does not match pinned revision.")
+        if wan_code_revision != self.config.wan_code_revision:
+            raise ValueError("Wan2.2 code revision does not match pinned revision.")
         files = manifest.get("files")
         if not isinstance(files, list) or not files:
             raise ValueError("Wan2.2 model manifest has no file list.")

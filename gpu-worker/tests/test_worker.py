@@ -71,6 +71,8 @@ def config(tmpdir):
         worker_password="password",
         worker_id="worker-user-id",
         wan_runner="mock",
+        wan_model_revision="921dbaf3f1674a56f47e83fb80a34bac8a8f203e",
+        wan_code_revision="42bf4cfaa384bc21833865abc2f9e6c0e67233dc",
         wan_model_dir="/workspace/models/Wan2.2-TI2V-5B",
         wan_model_manifest="model-cache-manifest.json",
         wan_output_dir=tmpdir,
@@ -83,6 +85,7 @@ def config(tmpdir):
         wan_cpu_offload=True,
         worker_poll_interval_seconds=1,
         worker_lease_seconds=300,
+        first_session_max_claims=0,
     )
 
 
@@ -138,6 +141,8 @@ class WorkerTests(unittest.TestCase):
                 worker_password=cfg.worker_password,
                 worker_id=cfg.worker_id,
                 wan_runner="real",
+                wan_model_revision=cfg.wan_model_revision,
+                wan_code_revision=cfg.wan_code_revision,
                 wan_model_dir=tmp,
                 wan_model_manifest=cfg.wan_model_manifest,
                 wan_output_dir=tmp,
@@ -150,9 +155,48 @@ class WorkerTests(unittest.TestCase):
                 wan_cpu_offload=cfg.wan_cpu_offload,
                 worker_poll_interval_seconds=cfg.worker_poll_interval_seconds,
                 worker_lease_seconds=cfg.worker_lease_seconds,
+                first_session_max_claims=cfg.first_session_max_claims,
             )
             with self.assertRaises(FileNotFoundError):
                 RealWanRunner(cfg)
+
+    def test_first_session_claim_limit_counts_failure(self):
+        class BrokenRunner:
+            def render(self, _job):
+                raise RuntimeError("boom")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config(tmp)
+            limited = WorkerConfig(
+                supabase_url=cfg.supabase_url,
+                supabase_publishable_key=cfg.supabase_publishable_key,
+                worker_email=cfg.worker_email,
+                worker_password=cfg.worker_password,
+                worker_id=cfg.worker_id,
+                wan_runner=cfg.wan_runner,
+                wan_model_revision=cfg.wan_model_revision,
+                wan_code_revision=cfg.wan_code_revision,
+                wan_model_dir=cfg.wan_model_dir,
+                wan_model_manifest=cfg.wan_model_manifest,
+                wan_output_dir=cfg.wan_output_dir,
+                wan_width=cfg.wan_width,
+                wan_height=cfg.wan_height,
+                wan_num_frames=cfg.wan_num_frames,
+                wan_inference_steps=cfg.wan_inference_steps,
+                wan_guidance_scale=cfg.wan_guidance_scale,
+                wan_seed=cfg.wan_seed,
+                wan_cpu_offload=cfg.wan_cpu_offload,
+                worker_poll_interval_seconds=cfg.worker_poll_interval_seconds,
+                worker_lease_seconds=cfg.worker_lease_seconds,
+                first_session_max_claims=1,
+            )
+            fake = FakeSupabase(claim_data=[{"id": "job-3", "user_id": "user-1", "prompt": "make video"}])
+            worker = GpuWorker(limited, supabase_client=fake, runner=BrokenRunner(), logger=logging.getLogger("test"))
+            self.assertTrue(worker.process_one())
+            fake.claim_data = [{"id": "job-4", "user_id": "user-1", "prompt": "second video"}]
+            self.assertFalse(worker.process_one())
+            claim_calls = [call for call in fake.calls if call[0] == "claim_next_video_job"]
+            self.assertEqual(len(claim_calls), 1)
 
 
 if __name__ == "__main__":

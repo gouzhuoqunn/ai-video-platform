@@ -64,6 +64,7 @@ async function main() {
       config,
       execution,
       verifyImage: async (image) => ({ image, exists: true, linuxAmd64: true, method: "mock" }),
+      verifyWatchdogs: async () => undefined,
     });
     assert(candidate.serverId === "95538", "preflight should return the selected candidate.");
 
@@ -76,6 +77,7 @@ async function main() {
       config,
       execution,
       verifyImage: async (image) => ({ image, exists: true, linuxAmd64: true, method: "mock" }),
+      verifyWatchdogs: async () => undefined,
     }).then(
       () => {
         throw new Error("spot candidate should fail.");
@@ -92,6 +94,7 @@ async function main() {
       config,
       execution,
       verifyImage: async (image) => ({ image, exists: true, linuxAmd64: true, method: "mock" }),
+      verifyWatchdogs: async () => undefined,
     }).then(
       () => {
         throw new Error("no queued job should fail.");
@@ -102,7 +105,7 @@ async function main() {
     const body = buildCreateOrderBody({
       serverId: "95538",
       image: config.dockerImage,
-      currency: "USD",
+      currency: "USD-Blockchain",
       sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockPublicKeyForTestsOnly000000000000 test",
       maxPriceUsdPerHour: 0.7,
       requiredPriceForApi: 14.99,

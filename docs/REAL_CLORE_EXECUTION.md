@@ -87,3 +87,25 @@ The first real order attempt exposed Clore API requirements that are now encoded
 - Failure cleanup can call real `cancel_order` before a final video exists when the issue is a pre-inference infrastructure failure such as `ssh_unavailable`.
 
 The first real order for server `107713` was created and then canceled because SSH never became available within the 30-minute window. No model was downloaded and no video was generated.
+
+## 2026-07-13 Watchdog Gate
+
+Real create now requires two independent watchdog layers before any `create_order` call:
+
+1. Remote Cloudflare Worker watchdog armed in the private R2 bucket `ai-video-platform-clore-watchdog-state`.
+2. Local Windows scheduled task `AiVideoPlatformCloreWatchdog` with a fresh healthy heartbeat.
+
+The remote watchdog must be armed before create with:
+
+```powershell
+npm run clore:watchdog:local:install
+npm run clore:watchdog:remote:arm -- --server-id=<server_id>
+```
+
+The real create path checks both watchdogs and fails closed if either one is missing, stale, unarmed, or armed for a different server.
+
+The only allowed rental currency is now `USD-Blockchain`. Ambiguous `USD` is rejected before order body submission.
+
+The remote watchdog cancels only when it is armed and can uniquely identify the active order for the armed server. It does not cancel when unarmed, when multiple active orders exist, when the server id differs, or when the API is temporarily unavailable.
+
+Current deployment caveat: Worker script upload and encrypted secret setup succeeded, but Cloudflare Cron schedule deployment returned 403. Real create must remain blocked until the Cron trigger is successfully deployed and remote heartbeat is verified.

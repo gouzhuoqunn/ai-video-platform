@@ -71,7 +71,7 @@ export function loadCloreConfig(): CloreConfig {
     minDownloadMbps: readNumber("CLORE_MIN_DOWNLOAD_MBPS", 300, fileValues),
     minUploadMbps: readNumber("CLORE_MIN_UPLOAD_MBPS", 100, fileValues),
     allowedCountries: readAllowedCountries(fileValues),
-    rentalCurrency: readString("CLORE_RENTAL_CURRENCY", "USD", fileValues) || "USD",
+    rentalCurrency: readString("CLORE_RENTAL_CURRENCY", "USD-Blockchain", fileValues) || "USD-Blockchain",
     dockerImage: readString("CLORE_DOCKER_IMAGE", DEFAULT_DOCKER_IMAGE, fileValues) || DEFAULT_DOCKER_IMAGE,
     orderType: "on-demand",
     sshPublicKeyPath: readOptionalString("CLORE_SSH_PUBLIC_KEY_PATH", fileValues) ?? path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".ssh", "clore_ai_video_worker_ed25519.pub"),

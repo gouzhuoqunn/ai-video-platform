@@ -375,3 +375,15 @@ npm run clore:create -- --execute --server-id=<server_id> --max-price=<price> --
 - GitHub OAuth 尚未完成，所以私有仓库、首个提交、push、Actions 构建、GHCR 镜像和 digest 尚未创建。
 - Cloudflare OAuth 尚未完成，所以 R2 bucket、管理写入凭据、GPU 只读凭据和权限测试尚未完成。
 - 没有创建 Clore 订单，没有消耗余额，没有连接 GPU/SSH，没有下载 Wan2.2，没有上传模型到 R2。
+
+## 2026-07-13 First GPU Session Safety Gate
+
+- A Cloudflare Worker watchdog has been added under `cloudflare/clore-watchdog`.
+- A separate private R2 state bucket exists: `ai-video-platform-clore-watchdog-state`.
+- The Worker has the encrypted `CLORE_API_KEY` secret configured in Cloudflare; the value is not stored in code or Git.
+- A local Windows scheduled task named `AiVideoPlatformCloreWatchdog` runs the local watchdog tick every minute.
+- Real Clore create now fails closed unless both remote and local watchdogs are armed and healthy for the selected server.
+- `CLORE_RENTAL_CURRENCY` must be `USD-Blockchain`; plain `USD` is rejected.
+- The first GPU Worker session is capped with `FIRST_SESSION_MAX_CLAIMS=1`.
+- Wan code is pinned to `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`; the Wan2.2 TI2V-5B model revision is pinned to `921dbaf3f1674a56f47e83fb80a34bac8a8f203e`.
+- Current blocker: Cloudflare accepted the Worker upload, R2 binding, and secret, but Cron trigger deployment returned 403. Do not run real `clore:create` until Cron is active and remote heartbeat is verified.

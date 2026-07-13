@@ -11,6 +11,8 @@ import type { CloreCandidate, RawCloreServer } from "./types";
 import { acquireOrderCreateLock, readActiveOrder, writeActiveOrder } from "./order-state";
 import type { CloreExecutionConfig } from "./execution-config";
 import { loadModelCacheConfig } from "../model-cache/config";
+import { assertWatchdogsReadyForCreate } from "./watchdog-preflight";
+import { WAN_CODE_REVISION, WAN_MODEL_REVISION } from "../model-cache/model-version";
 
 export type LoadedCloreConfig = ReturnType<typeof loadCloreConfig>;
 
@@ -36,6 +38,7 @@ export type CreateOrderPreflightInput = {
   config: LoadedCloreConfig;
   execution: CloreExecutionConfig;
   verifyImage?: typeof verifyDockerImage;
+  verifyWatchdogs?: () => Promise<void> | void;
 };
 
 export function buildCreateOrderBody(input: {
@@ -56,6 +59,9 @@ export function buildCreateOrderBody(input: {
       PROJECT_TAG,
       WAN_RUNNER: "real",
       WAN_MODEL_DIR: "/workspace/models/Wan2.2-TI2V-5B",
+      WAN_MODEL_REVISION,
+      WAN_CODE_REVISION,
+      FIRST_SESSION_MAX_CLAIMS: "1",
       HF_HUB_DISABLE_TELEMETRY: "1",
       DO_NOT_TRACK: "1",
     },
@@ -74,6 +80,9 @@ export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
   if (body.type !== "on-demand") {
     throw new Error("Only on-demand Clore orders are allowed.");
   }
+  if (body.currency !== "USD-Blockchain") {
+    throw new Error("Clore order currency must be USD-Blockchain.");
+  }
   if (Object.keys(body.ports).length !== 1 || body.ports["22"] !== "tcp") {
     throw new Error("Only SSH port 22/tcp may be opened.");
   }
@@ -91,6 +100,9 @@ export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) 
   }
   if (input.config.dockerImage === DEFAULT_DOCKER_IMAGE) {
     throw new Error("Runtime image is not published/configured; refusing real create_order.");
+  }
+  if (input.config.rentalCurrency !== "USD-Blockchain") {
+    throw new Error("CLORE_RENTAL_CURRENCY must be USD-Blockchain for real create_order.");
   }
   const modelCache = loadModelCacheConfig();
   if (!modelCache.r2Enabled || !modelCache.bucket || !modelCache.endpoint) {
@@ -129,6 +141,7 @@ export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) 
   if (!image.exists || !image.linuxAmd64) {
     throw new Error("Docker image was not verified for linux/amd64.");
   }
+  await input.verifyWatchdogs?.();
 
   return selected;
 }
@@ -173,7 +186,7 @@ export async function createCloreOrder(input: {
       created_at: new Date().toISOString(),
       status: "order_pending",
       usd_per_hour: input.candidate.priceUsdPerHour ?? input.requestBody.required_price,
-      max_price_usd_per_hour: input.requestBody.required_price,
+      max_price_usd_per_hour: input.candidate.priceUsdPerHour ?? input.requestBody.required_price,
       order_type: "on-demand",
       open_ports: ["ssh/tcp"],
     });
@@ -210,6 +223,7 @@ export async function prepareCreateOrderFromLive(input: {
     availableUsdBalance: wallet.availableUsdBalance,
     config: input.config,
     execution: input.execution,
+    verifyWatchdogs: () => assertWatchdogsReadyForCreate(input.serverId),
   });
   const publicKey = readFileSync(input.config.sshPublicKeyPath ?? "", "utf8").split(/\r?\n/)[0].trim();
   const requestBody = buildCreateOrderBody({

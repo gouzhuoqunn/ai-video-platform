@@ -402,3 +402,17 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - The order was canceled through real `cancel_order` with failure cleanup issue `ssh_unavailable`.
 - Final live `my_orders` showed no active order. Wallet moved from about `15.89 USD` to `15.55 USD`, so the failed attempt cost about `0.34 USD`, below the `4.50 USD` cap.
 - The queued local_lab standard-video task remains queued for the next attempt.
+
+## 2026-07-13 First Session Watchdog Safety Patch
+
+- Added a Cloudflare Worker watchdog project at `cloudflare/clore-watchdog` with a private, separate R2 state bucket named `ai-video-platform-clore-watchdog-state`.
+- The watchdog is designed for Cron-only execution every minute, with `workers_dev=false` and no public control API. Its `fetch` handler returns 404.
+- `CLORE_API_KEY` is stored as a Cloudflare encrypted Worker Secret named `CLORE_API_KEY`; it is not written to code, Git, R2 state, GPU env, or logs.
+- Remote watchdog state records only non-secret session data: nonce, server id, order type, `USD-Blockchain`, starting wallet balance, arm time, 350 minute draining time, 380 minute hard deadline, and a 4.50 USD hard budget with safety margin.
+- A dedicated Windows scheduled task `AiVideoPlatformCloreWatchdog` now runs the local watchdog tick every minute. The local tick reads the existing local Clore secret file only on the developer machine and never prints the key.
+- Real `create_order` now fails closed unless `CLORE_RENTAL_CURRENCY=USD-Blockchain`, the remote watchdog is armed and healthy for the selected server, and the local Windows watchdog task plus heartbeat are healthy.
+- Worker first-session mode now uses `FIRST_SESSION_MAX_CLAIMS=1`, counted at claim time. If the first job fails, the Worker will not claim a second job in that session.
+- Wan runtime code is pinned to `Wan-Video/Wan2.2` commit `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`; the fixed model revision is `Wan-AI/Wan2.2-TI2V-5B` commit `921dbaf3f1674a56f47e83fb80a34bac8a8f203e`.
+- The unsafe queued local_lab job was canceled through the normal `cancel_video_job` RPC path, and exactly one safe text-only `standard-video` first-test job was created.
+- Current blocker: Cloudflare accepted the Worker upload, R2 binding, and encrypted secret, but the Cron schedule deployment returned 403 on the Cloudflare schedules API. Until Cron succeeds and writes a fresh remote heartbeat, real Clore create remains blocked by the new preflight.
+- No Clore order was created, no SSH connection was opened, no Wan2.2 weights were downloaded, and no real inference was run in this patch.
