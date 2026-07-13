@@ -116,7 +116,12 @@ jobs:
           docker exec "${container}" test -f /workspace/logs/bootstrap-check.txt
           docker exec "${container}" sh -lc '! printenv SUPABASE_URL >/dev/null'
           docker exec "${container}" sh -lc '! printenv GPU_WORKER_PASSWORD >/dev/null'
-          docker top "${container}" -eo comm,args | awk 'NR > 1 { if (($1 == "python" || $1 == "python3" || $1 == "python3.11") && $0 ~ /\\/app\\/worker\\.py/) exit 1 }'
+          top_output="$(docker top "${container}")"
+          worker_pattern='(^|[[:space:]])([^[:space:]]*/)?python(3)?[[:space:]]+/app/worker[.]py([[:space:]]|$)'
+          if printf '%s\n' "${top_output}" | grep -Eq "${worker_pattern}"; then
+            echo "::error::GPU Worker unexpectedly started during SSH bootstrap idle mode"
+            exit 1
+          fi
           docker logs "${container}" | grep -F "worker autostart is disabled"
 
       - name: Summarize image
