@@ -74,6 +74,36 @@ jobs:
           push: true
           provenance: true
           sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify SSH bootstrap idle mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ steps.image.outputs.image }}:${{ steps.image.outputs.version_tag }}"
+          container="wan22-runtime-bootstrap-check-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" \
+            -e START_GPU_WORKER=false \
+            "${image}" \
+            "echo bootstrap-ok > /workspace/logs/bootstrap-check.txt"
+          cleanup() {
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          sleep 30
+          if ! docker ps --format '{{.Names}}' | grep -Fx "${container}" >/dev/null; then
+            docker logs "${container}" || true
+            echo "container exited before SSH/bootstrap could run"
+            exit 1
+          fi
+
+          docker exec "${container}" test -f /workspace/logs/bootstrap-check.txt
+          docker exec "${container}" sh -lc '! printenv SUPABASE_URL >/dev/null'
+          docker exec "${container}" sh -lc '! printenv GPU_WORKER_PASSWORD >/dev/null'
+          docker exec "${container}" sh -lc 'for f in /proc/[0-9]*/cmdline; do tr "\0" " " < "$f" | grep -q "worker.py" && exit 1; done; exit 0'
+          docker logs "${container}" | grep -F "worker autostart is disabled"
 
       - name: Summarize image
         shell: bash
