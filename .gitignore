@@ -38,6 +38,7 @@ __pycache__/
 /test-results/
 /playwright-report/
 /coverage/
+/artifacts/
 tsconfig.tsbuildinfo
 
 # cloud / worker local state

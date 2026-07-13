@@ -236,8 +236,9 @@ export function LocalCreationStudio() {
   }, []);
 
   const refreshClore = useCallback(async () => {
+    const useVisualMock = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("visual_mock") === "1";
     const [candidateResponse, sessionResponse, autorentResponse] = await Promise.all([
-      fetch("/api/local-lab/clore/candidates"),
+      fetch(`/api/local-lab/clore/candidates${useVisualMock ? "?mock=1" : ""}`),
       fetch("/api/local-lab/clore/session"),
       fetch("/api/local-lab/clore/autorent"),
     ]);
