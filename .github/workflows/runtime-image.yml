@@ -1,0 +1,247 @@
+name: Runtime Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Immutable runtime image tag"
+        required: true
+        default: "v0.1.0-pre-gpu"
+      verify_existing_digest:
+        description: "Existing sha256 digest to verify without rebuilding"
+        required: false
+        default: ""
+      ssh_probe_host:
+        description: "Temporary SSH probe host"
+        required: false
+        default: ""
+      ssh_probe_port:
+        description: "Temporary SSH probe port"
+        required: false
+        default: ""
+      http_probe_host:
+        description: "Temporary HTTP probe host"
+        required: false
+        default: ""
+      http_probe_port:
+        description: "Temporary HTTP probe port"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Secret scan
+        run: npm run secret:scan
+
+      - name: Network probe mode
+        if: ${{ inputs.ssh_probe_host != '' || inputs.http_probe_host != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          classify_ssh_probe() {
+            local host="$1"
+            local port="$2"
+            local result="timeout"
+            echo "::add-mask::${host}"
+            echo "::add-mask::${port}"
+
+            for attempt in 1 2 3; do
+              : > /tmp/ssh-probe.out
+              : > /tmp/ssh-probe.err
+              if timeout 10 ssh-keyscan -T 10 -p "${port}" "${host}" >/tmp/ssh-probe.out 2>/tmp/ssh-probe.err; then
+                if grep -Eq '(^|[[:space:]])(ssh-rsa|ssh-ed25519|ecdsa-sha2-)' /tmp/ssh-probe.out; then
+                  result="success"
+                  break
+                fi
+                result="refused"
+              else
+                combined="$(cat /tmp/ssh-probe.out /tmp/ssh-probe.err 2>/dev/null || true)"
+                if printf '%s' "${combined}" | grep -Eiq 'reset|kex_exchange_identification'; then
+                  result="reset"
+                elif printf '%s' "${combined}" | grep -Eiq 'refused'; then
+                  result="refused"
+                else
+                  result="timeout"
+                fi
+              fi
+              sleep 2
+            done
+
+            echo "ssh_probe_result=${result}"
+          }
+
+          classify_http_probe() {
+            local host="$1"
+            local port="$2"
+            local result="timeout"
+            echo "::add-mask::${host}"
+            echo "::add-mask::${port}"
+
+            : > /tmp/http-probe.out
+            : > /tmp/http-probe.err
+            if curl -I -sS --connect-timeout 10 --max-time 10 "http://${host}:${port}/" >/tmp/http-probe.out 2>/tmp/http-probe.err; then
+              status="$(awk 'toupper($1) ~ /^HTTP/ { code=$2 } END { print code }' /tmp/http-probe.out)"
+              if [ -n "${status}" ]; then
+                result="http_${status}"
+              else
+                result="reachable"
+              fi
+            else
+              curl_code="$?"
+              combined="$(cat /tmp/http-probe.out /tmp/http-probe.err 2>/dev/null || true)"
+              if [ "${curl_code}" = "28" ]; then
+                result="timeout"
+              elif [ "${curl_code}" = "7" ] || printf '%s' "${combined}" | grep -Eiq 'refused'; then
+                result="refused"
+              elif printf '%s' "${combined}" | grep -Eiq 'reset|connection.*closed'; then
+                result="reset"
+              else
+                result="timeout"
+              fi
+            fi
+
+            echo "http_probe_result=${result}"
+          }
+
+          if [ -n "${{ inputs.ssh_probe_host }}" ] || [ -n "${{ inputs.ssh_probe_port }}" ]; then
+            test -n "${{ inputs.ssh_probe_host }}"
+            test -n "${{ inputs.ssh_probe_port }}"
+            classify_ssh_probe "${{ inputs.ssh_probe_host }}" "${{ inputs.ssh_probe_port }}"
+          else
+            echo "ssh_probe_result=skipped"
+          fi
+
+          if [ -n "${{ inputs.http_probe_host }}" ] || [ -n "${{ inputs.http_probe_port }}" ]; then
+            test -n "${{ inputs.http_probe_host }}"
+            test -n "${{ inputs.http_probe_port }}"
+            classify_http_probe "${{ inputs.http_probe_host }}" "${{ inputs.http_probe_port }}"
+          else
+            echo "http_probe_result=skipped"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: ${{ inputs.ssh_probe_host == '' && inputs.http_probe_host == '' }}
+
+      - name: Free runner disk space
+        if: ${{ inputs.ssh_probe_host == '' && inputs.http_probe_host == '' }}
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h
+
+      - name: Log in to GHCR
+        if: ${{ inputs.ssh_probe_host == '' && inputs.http_probe_host == '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image metadata
+        id: image
+        shell: bash
+        run: |
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/wan22-runtime"
+          version_tag="${{ inputs.version_tag }}"
+          sha_tag="sha-${GITHUB_SHA}"
+          {
+            echo "image=${image}"
+            echo "version_tag=${version_tag}"
+            echo "sha_tag=${sha_tag}"
+            echo "tags=${image}:${version_tag},${image}:${sha_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push runtime image
+        if: ${{ inputs.verify_existing_digest == '' && inputs.ssh_probe_host == '' && inputs.http_probe_host == '' }}
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./gpu-worker
+          file: ./gpu-worker/Dockerfile
+          platforms: linux/amd64
+          tags: ${{ steps.image.outputs.tags }}
+          push: true
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify SSH bootstrap idle mode
+        if: ${{ inputs.ssh_probe_host == '' && inputs.http_probe_host == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.verify_existing_digest }}" ]; then
+            image="${{ steps.image.outputs.image }}@${{ inputs.verify_existing_digest }}"
+          else
+            image="${{ steps.image.outputs.image }}:${{ steps.image.outputs.version_tag }}"
+          fi
+          docker buildx imagetools inspect "${image}" >/tmp/runtime-image-inspect.txt
+          grep -F "linux/amd64" /tmp/runtime-image-inspect.txt >/dev/null
+          docker pull --platform linux/amd64 "${image}"
+          entrypoint="$(docker image inspect "${image}" --format '{{json .Config.Entrypoint}}')"
+          test "${entrypoint}" = '["/app/entrypoint.sh"]'
+          container="wan22-runtime-bootstrap-check-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" \
+            -e START_GPU_WORKER=false \
+            "${image}" \
+            "echo bootstrap-ok > /workspace/logs/bootstrap-check.txt"
+          cleanup() {
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          sleep 30
+          if ! docker ps --format '{{.Names}}' | grep -Fx "${container}" >/dev/null; then
+            docker logs "${container}" || true
+            echo "container exited before SSH/bootstrap could run"
+            exit 1
+          fi
+
+          docker exec "${container}" test -f /workspace/logs/bootstrap-check.txt
+          docker exec "${container}" sh -lc '! printenv SUPABASE_URL >/dev/null'
+          docker exec "${container}" sh -lc '! printenv GPU_WORKER_PASSWORD >/dev/null'
+          top_output="$(docker top "${container}")"
+          worker_pattern='(^|[[:space:]])([^[:space:]]*/)?python(3)?[[:space:]]+/app/worker[.]py([[:space:]]|$)'
+          if printf '%s\n' "${top_output}" | grep -Eq "${worker_pattern}"; then
+            echo "::error::GPU Worker unexpectedly started during SSH bootstrap idle mode"
+            exit 1
+          fi
+          docker logs "${container}" | grep -F "worker autostart is disabled"
+
+      - name: Summarize image
+        if: ${{ inputs.ssh_probe_host == '' && inputs.http_probe_host == '' }}
+        shell: bash
+        run: |
+          {
+            echo "### Runtime image"
+            echo ""
+            echo "- Image: \`${{ steps.image.outputs.image }}\`"
+            echo "- Version tag: \`${{ steps.image.outputs.version_tag }}\`"
+            echo "- Commit tag: \`${{ steps.image.outputs.sha_tag }}\`"
+            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "- Platform: \`linux/amd64\`"
+            echo "- Model weights in image: \`false\`"
+          } >> "$GITHUB_STEP_SUMMARY"
