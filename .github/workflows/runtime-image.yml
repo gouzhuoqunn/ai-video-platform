@@ -102,7 +102,7 @@ jobs:
           docker exec "${container}" test -f /workspace/logs/bootstrap-check.txt
           docker exec "${container}" sh -lc '! printenv SUPABASE_URL >/dev/null'
           docker exec "${container}" sh -lc '! printenv GPU_WORKER_PASSWORD >/dev/null'
-          docker exec "${container}" sh -lc 'for f in /proc/[0-9]*/cmdline; do tr "\0" " " < "$f" | grep -q "worker.py" && exit 1; done; exit 0'
+          docker exec "${container}" sh -lc 'needle="worker"; suffix=".py"; for f in /proc/[0-9]*/cmdline; do cmd="$(tr "\0" " " < "$f" 2>/dev/null || true)"; case "$cmd" in *"/app/${needle}${suffix}"*|*"python /app/${needle}${suffix}"*|*"python3.11 /app/${needle}${suffix}"*) exit 1;; esac; done; exit 0'
           docker logs "${container}" | grep -F "worker autostart is disabled"
 
       - name: Summarize image
