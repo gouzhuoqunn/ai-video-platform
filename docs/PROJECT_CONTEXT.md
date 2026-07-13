@@ -429,3 +429,11 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - After a future order is created, the guard validates live `my_orders` fields: price not increased, fee not above 5%, creation fee not above `0.10`, and currency exactly `USD-Blockchain`. A pricing guard failure attempts immediate cancellation.
 - Candidate summaries and local_lab order confirmation now show base hourly price, effective hourly price, one-time creation fee, and maximum-session projected total.
 - This pricing fix did not create a Clore order, SSH into a host, download a model, or push to GitHub.
+
+## 2026-07-13 Zero-cost SSH Root Cause Audit
+
+- Historical orders `1949701` and `1949948` were checked read-only through Clore `my_orders?return_completed=true`; no Clore order was created, no SSH connection was opened, no model was downloaded, and no Git remote sync was attempted.
+- Both real attempts used the pinned GHCR image `ghcr.io/gouzhuoqunn/wan22-runtime@sha256:fd03ef72d7369f59b3af9e535d9f6a75add9430a5c1ef4e7fd5853be0e4c060a`, `autossh_entrypoint: true`, and only `22/tcp`.
+- The audit found a deterministic runtime-image startup issue: `gpu-worker/entrypoint.sh` previously started `worker.py` immediately, while the Clore create order intentionally did not send limited Worker credentials at order time. Missing Worker env could make the container exit before SSH/bootstrap stabilized.
+- The entrypoint now creates workspace directories, runs any Clore-provided bootstrap command, and then stays alive for SSH/bootstrap when Worker credentials are absent. It starts the Worker only when `START_GPU_WORKER` is true or the limited Worker env is present.
+- `runtime-image:test`, `clore:execution:test`, `clore:ssh:test`, and `typecheck` passed after the fix.

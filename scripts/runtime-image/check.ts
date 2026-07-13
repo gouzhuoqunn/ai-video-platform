@@ -10,6 +10,7 @@ function assert(condition: unknown, message: string): asserts condition {
 export function checkRuntimeImageFiles() {
   const dockerfile = readFileSync(path.join(process.cwd(), "gpu-worker", "Dockerfile"), "utf8");
   const dockerignore = readFileSync(path.join(process.cwd(), "gpu-worker", ".dockerignore"), "utf8");
+  const entrypoint = readFileSync(path.join(process.cwd(), "gpu-worker", "entrypoint.sh"), "utf8");
   const requirements = readFileSync(path.join(process.cwd(), "gpu-worker", "requirements.txt"), "utf8");
 
   assert(dockerfile.includes("nvidia/cuda:12.8.0"), "Dockerfile must use a CUDA 12.8 compatible base image.");
@@ -25,6 +26,9 @@ export function checkRuntimeImageFiles() {
   assert(!dockerfile.includes("SUPABASE_SECRET_KEY"), "Runtime image must not reference Supabase Secret key.");
   assert(!dockerfile.includes("CLORE_API_KEY"), "Runtime image must not reference Clore API key.");
   assert(!dockerfile.includes("MODEL_CACHE_SECRET_ACCESS_KEY"), "Runtime image must not bake R2 credentials.");
+  assert(entrypoint.includes("START_GPU_WORKER"), "Entrypoint must not auto-start the worker before bootstrap is ready.");
+  assert(entrypoint.includes("tail -f /dev/null"), "Entrypoint must keep the container alive for SSH/bootstrap when worker env is absent.");
+  assert(entrypoint.includes("has_worker_env"), "Entrypoint must gate worker startup on limited Worker credentials.");
 
   for (const ignored of [".env.local", ".secrets/", "models/", "*.safetensors", "*.ckpt", "*.pt", "*.pth", "*.bin", "*.gguf"]) {
     assert(dockerignore.includes(ignored), `.dockerignore must exclude ${ignored}.`);
