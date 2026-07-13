@@ -179,8 +179,14 @@ export async function createCloreOrder(input: {
           body: JSON.stringify(input.requestBody),
         });
     const created = summarizeCreatedOrder(response);
+    const liveOrders = await readLiveOrdersSummary(input.config);
+    const activeLiveOrders = liveOrders.filter((order) => order.active);
+    const matchingLiveOrder =
+      activeLiveOrders.find((order) => order.serverId === input.candidate.serverId && order.orderId) ??
+      (activeLiveOrders.length === 1 && activeLiveOrders[0].orderId ? activeLiveOrders[0] : null);
+    const orderId = matchingLiveOrder?.orderId ?? created.order_id;
     writeActiveOrder({
-      order_id: created.order_id,
+      order_id: orderId,
       server_id: input.candidate.serverId,
       project_tag: PROJECT_TAG,
       created_at: new Date().toISOString(),
@@ -192,7 +198,7 @@ export async function createCloreOrder(input: {
     });
     return {
       order_created: true,
-      order_id: created.order_id,
+      order_id: orderId,
       create_order_called: true,
       status: "order_pending",
     };

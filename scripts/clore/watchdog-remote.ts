@@ -27,6 +27,10 @@ function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * 60000);
 }
 
+function buildNpmCommand(args: string[]) {
+  return process.platform === "win32" ? { command: "cmd.exe", args: ["/c", "npm", ...args] } : { command: "npm", args };
+}
+
 async function arm() {
   const config = loadCloreConfig();
   const execution = loadCloreExecutionConfig();
@@ -69,7 +73,8 @@ async function arm() {
 
   writeLocalWatchdogArmState(state);
   putRemoteWatchdogState(state);
-  const tick = spawnSync(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "clore:watchdog:local:tick"], {
+  const tickCommand = buildNpmCommand(["run", "clore:watchdog:local:tick"]);
+  const tick = spawnSync(tickCommand.command, tickCommand.args, {
     cwd: process.cwd(),
     encoding: "utf8",
     stdio: "pipe",

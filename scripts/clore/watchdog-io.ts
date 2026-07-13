@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -17,12 +16,20 @@ const WRANGLER_CONFIG = "cloudflare/clore-watchdog/wrangler.toml";
 export const LOCAL_WATCHDOG_HEARTBEAT_PATH = path.join(process.cwd(), ".secrets", "clore-local-watchdog-heartbeat.json");
 export const LOCAL_WATCHDOG_TASK_NAME = "AiVideoPlatformCloreWatchdog";
 
-function npxCommand() {
-  return process.platform === "win32" ? "npx.cmd" : "npx";
-}
-
 function secretsPath(relativePath: string) {
   return path.join(process.cwd(), relativePath);
+}
+
+function buildWranglerCommand(args: string[]) {
+  return process.platform === "win32"
+    ? { command: "cmd.exe", args: ["/c", "npx", "wrangler", ...args] }
+    : { command: "npx", args: ["wrangler", ...args] };
+}
+
+function makeWranglerTempDir() {
+  const baseDir = path.join(process.cwd(), ".secrets");
+  mkdirSync(baseDir, { recursive: true });
+  return mkdtempSync(path.join(baseDir, "clore-watchdog-"));
 }
 
 export function createSessionNonce() {
@@ -45,22 +52,24 @@ export function writeLocalWatchdogArmState(state: WatchdogArmState) {
 }
 
 function runWrangler(args: string[]) {
-  const result = spawnSync(npxCommand(), ["wrangler", ...args], {
+  const wrangler = buildWranglerCommand(args);
+  const result = spawnSync(wrangler.command, wrangler.args, {
     cwd: process.cwd(),
     encoding: "utf8",
     stdio: "pipe",
     timeout: 120000,
   });
   if (result.status !== 0) {
+    const spawnError = result.error ? ` (${result.error.message})` : "";
     const message = `${result.stderr || result.stdout || "wrangler failed"}`.replace(/auth:\s*[A-Za-z0-9_-]+/gi, "auth:<redacted>");
-    throw new Error(message.trim());
+    throw new Error(`${message.trim()}${spawnError}`.trim());
   }
   return result.stdout;
 }
 
 export function putRemoteWatchdogState(state: WatchdogArmState) {
   validateWatchdogArmState(state);
-  const dir = mkdtempSync(path.join(tmpdir(), "clore-watchdog-"));
+  const dir = makeWranglerTempDir();
   const file = path.join(dir, "active-session.json");
   try {
     writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`, "utf8");
@@ -83,7 +92,7 @@ export function putRemoteWatchdogState(state: WatchdogArmState) {
 }
 
 export function getRemoteObjectJson<T>(key: string) {
-  const dir = mkdtempSync(path.join(tmpdir(), "clore-watchdog-"));
+  const dir = makeWranglerTempDir();
   const file = path.join(dir, "object.json");
   try {
     runWrangler(["r2", "object", "get", `${WATCHDOG_BUCKET}/${key}`, "--file", file, "--remote", "--config", WRANGLER_CONFIG]);
@@ -125,8 +134,8 @@ export function installLocalWatchdogTask() {
   if (process.platform !== "win32") {
     throw new Error("Local Clore watchdog scheduled task is currently implemented for Windows only.");
   }
-  const scriptPath = path.join(process.cwd(), "scripts", "clore", "local-watchdog.ps1");
-  const action = `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`;
+  const scriptPath = path.join(process.cwd(), "scripts", "clore", "local-watchdog-hidden.vbs");
+  const action = `wscript.exe //B //Nologo "${scriptPath}"`;
   const result = spawnSync(
     "schtasks.exe",
     ["/Create", "/F", "/SC", "MINUTE", "/MO", "1", "/TN", LOCAL_WATCHDOG_TASK_NAME, "/TR", action],

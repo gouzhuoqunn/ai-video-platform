@@ -85,6 +85,23 @@ async function cloreRequest(env: Env, endpoint: string, init: RequestInit = {}) 
   return "data" in payload ? payload.data : payload;
 }
 
+async function cloreRequestWithRetries(env: Env, endpoint: string, init: RequestInit = {}) {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await cloreRequest(env, endpoint, init);
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error ?? "");
+      if (!/code 5\b/.test(message) || attempt === 2) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Clore API failed");
+}
+
 function summarizeOrdersPayload(data: unknown): WatchdogOrder[] {
   const record = asRecord(data);
   const orders = Array.isArray(record.orders) ? record.orders : Array.isArray(data) ? data : [];
@@ -94,7 +111,7 @@ function summarizeOrdersPayload(data: unknown): WatchdogOrder[] {
     const statusText = (status ?? "").toLowerCase();
     return {
       orderId: firstString(value, ["id", "order_id"]),
-      serverId: firstString(value, ["server_id", "renting_server"]),
+      serverId: firstString(value, ["server_id", "renting_server", "si"]),
       status,
       active: statusText ? !/(cancel|complete|stop|stopped|expire|expired|finish|finished|end|ended)/i.test(statusText) : true,
     };
@@ -145,6 +162,15 @@ function evaluate(input: { state: WatchdogArmState | null; orders: WatchdogOrder
 
 type WorkerDecision = ReturnType<typeof evaluate> | { action: "readonly"; reason: "api_unavailable" };
 
+function sanitizeError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "unknown error");
+  const codeMatch = /\b(?:code|status)\s*[:=]?\s*([A-Za-z0-9_-]+)/i.exec(message);
+  return {
+    code: codeMatch?.[1] ?? null,
+    message: message.replace(/[A-Za-z0-9_-]{24,}/g, "<redacted>").slice(0, 160),
+  };
+}
+
 async function tick(env: Env) {
   const now = new Date();
   let state: WatchdogArmState | null = null;
@@ -152,33 +178,39 @@ async function tick(env: Env) {
   let wallet = { availableUsdBalance: null as number | null };
   let decision: WorkerDecision = { action: "readonly", reason: "not_armed" };
   let cancelCalled = false;
+  let lastError: { code: string | null; message: string } | null = null;
 
   try {
     const storedState = await env.WATCHDOG_STATE.get(STATE_KEY);
     state = parseState(storedState ? await storedState.text() : null);
-    orders = summarizeOrdersPayload(await cloreRequest(env, "/my_orders"));
-    wallet = summarizeWalletPayload(await cloreRequest(env, "/wallets"));
-    decision = evaluate({ state, orders, wallet, now });
-    if (decision.action === "cancel") {
-      await cloreRequest(env, "/cancel_order", {
-        method: "POST",
-        body: JSON.stringify({ id: decision.orderId, issue: `watchdog_${decision.reason}` }),
-      });
-      cancelCalled = true;
-      if (state) {
-        state.lastCancelReason = decision.reason;
-        state.lastCancelOrderId = decision.orderId;
-        state.canceledAt = now.toISOString();
-        await env.WATCHDOG_STATE.put(STATE_KEY, JSON.stringify(state, null, 2), { httpMetadata: { contentType: "application/json" } });
+    if (state?.armed) {
+      orders = summarizeOrdersPayload(await cloreRequestWithRetries(env, "/my_orders"));
+      wallet = summarizeWalletPayload(await cloreRequestWithRetries(env, "/wallets"));
+      decision = evaluate({ state, orders, wallet, now });
+      if (decision.action === "cancel") {
+        await cloreRequestWithRetries(env, "/cancel_order", {
+          method: "POST",
+          body: JSON.stringify({ id: decision.orderId, issue: `watchdog_${decision.reason}` }),
+        });
+        cancelCalled = true;
+        if (state) {
+          state.lastCancelReason = decision.reason;
+          state.lastCancelOrderId = decision.orderId;
+          state.canceledAt = now.toISOString();
+          await env.WATCHDOG_STATE.put(STATE_KEY, JSON.stringify(state, null, 2), { httpMetadata: { contentType: "application/json" } });
+        }
       }
+    } else {
+      decision = evaluate({ state, orders, wallet, now });
     }
-  } catch {
+  } catch (error) {
+    lastError = sanitizeError(error);
     decision = { action: "readonly", reason: "api_unavailable" };
   }
 
   if (cancelCalled) {
     try {
-      orders = summarizeOrdersPayload(await cloreRequest(env, "/my_orders"));
+      orders = summarizeOrdersPayload(await cloreRequestWithRetries(env, "/my_orders"));
     } catch {
       // The next cron will retry the readback.
     }
@@ -192,6 +224,8 @@ async function tick(env: Env) {
     decision: decision.action,
     reason: decision.reason,
     cancel_called: cancelCalled,
+    error_code: lastError?.code ?? null,
+    error_message: lastError?.message ?? null,
     sensitive_fields_included: false,
   };
   await env.WATCHDOG_STATE.put(HEARTBEAT_KEY, JSON.stringify(heartbeat, null, 2), { httpMetadata: { contentType: "application/json" } });

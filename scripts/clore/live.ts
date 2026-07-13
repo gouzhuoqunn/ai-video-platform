@@ -28,6 +28,7 @@ function firstString(record: Record<string, unknown>, names: string[]) {
   for (const name of names) {
     const value = record[name];
     if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
   }
   return null;
 }
@@ -80,7 +81,7 @@ export function summarizeOrdersPayload(data: unknown): CloreOrderSummary[] {
     const active = statusText ? !/(cancel|complete|stop|stopped|expire|expired|finish|finished|end|ended)/i.test(statusText) : true;
     return {
       orderId: firstString(value, ["id", "order_id"]) ?? null,
-      serverId: firstString(value, ["server_id", "renting_server"]) ?? null,
+      serverId: firstString(value, ["server_id", "renting_server", "si"]) ?? null,
       status,
       active,
     };

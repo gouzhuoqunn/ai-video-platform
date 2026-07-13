@@ -13,7 +13,7 @@ function summarizeOrders(data: unknown) {
     const value = order && typeof order === "object" ? (order as Record<string, unknown>) : {};
     return {
       order_id: value.id ?? value.order_id ?? null,
-      server_id: value.server_id ?? value.renting_server ?? null,
+      server_id: value.server_id ?? value.renting_server ?? value.si ?? null,
       status: value.status ?? value.state ?? null,
       price: value.price ?? value.price_usd_per_hour ?? null,
       started_at: value.created_at ?? value.started_at ?? null,

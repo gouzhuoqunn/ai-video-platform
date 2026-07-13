@@ -17,7 +17,7 @@
     "assumed_minimum_rental_hours": 6
   },
   "wallet": {
-    "available_usd_balance": 15.89,
+    "available_usd_balance": 15.55,
     "source": "live wallet read-only"
   },
   "matches": [
@@ -55,7 +55,7 @@
       "six_hour_cost_usd": 1.75,
       "platform_total_price": null,
       "platform_total_price_status": "API not confirmed",
-      "balance_margin_usd": 14.14,
+      "balance_margin_usd": 13.8,
       "balance_sufficient_for_6h": true,
       "currently_rentable": true,
       "missing_fields": [],
@@ -81,7 +81,7 @@
       "disk_gb": 980,
       "download_mbps": 311.4,
       "upload_mbps": 281.88,
-      "reliability": 0.9906,
+      "reliability": 0.9979,
       "rating": 5,
       "rating_count": 5,
       "country": "NL",
@@ -98,7 +98,7 @@
       "six_hour_cost_usd": 2,
       "platform_total_price": null,
       "platform_total_price_status": "API not confirmed",
-      "balance_margin_usd": 13.89,
+      "balance_margin_usd": 13.55,
       "balance_sufficient_for_6h": true,
       "currently_rentable": true,
       "missing_fields": [],
@@ -124,7 +124,7 @@
       "disk_gb": 970,
       "download_mbps": 2070.14,
       "upload_mbps": 881.23,
-      "reliability": 0.9928,
+      "reliability": 0.9927,
       "rating": 5,
       "rating_count": 10,
       "country": "CA",
@@ -141,7 +141,7 @@
       "six_hour_cost_usd": 3.7475,
       "platform_total_price": null,
       "platform_total_price_status": "API not confirmed",
-      "balance_margin_usd": 12.1425,
+      "balance_margin_usd": 11.8025,
       "balance_sufficient_for_6h": true,
       "currently_rentable": true,
       "missing_fields": [],
