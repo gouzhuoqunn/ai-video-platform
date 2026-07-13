@@ -7,6 +7,10 @@ on:
         description: "Immutable runtime image tag"
         required: true
         default: "v0.1.0-pre-gpu"
+      verify_existing_digest:
+        description: "Existing sha256 digest to verify without rebuilding"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -64,6 +68,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push runtime image
+        if: ${{ inputs.verify_existing_digest == '' }}
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -81,7 +86,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image="${{ steps.image.outputs.image }}:${{ steps.image.outputs.version_tag }}"
+          if [ -n "${{ inputs.verify_existing_digest }}" ]; then
+            image="${{ steps.image.outputs.image }}@${{ inputs.verify_existing_digest }}"
+          else
+            image="${{ steps.image.outputs.image }}:${{ steps.image.outputs.version_tag }}"
+          fi
+          docker buildx imagetools inspect "${image}" >/tmp/runtime-image-inspect.txt
+          grep -F "linux/amd64" /tmp/runtime-image-inspect.txt >/dev/null
+          docker pull --platform linux/amd64 "${image}"
+          entrypoint="$(docker image inspect "${image}" --format '{{json .Config.Entrypoint}}')"
+          test "${entrypoint}" = '["/app/entrypoint.sh"]'
           container="wan22-runtime-bootstrap-check-${GITHUB_RUN_ID}"
           docker run -d --name "${container}" \
             -e START_GPU_WORKER=false \
@@ -102,7 +116,7 @@ jobs:
           docker exec "${container}" test -f /workspace/logs/bootstrap-check.txt
           docker exec "${container}" sh -lc '! printenv SUPABASE_URL >/dev/null'
           docker exec "${container}" sh -lc '! printenv GPU_WORKER_PASSWORD >/dev/null'
-          docker exec "${container}" sh -lc 'needle="worker"; suffix=".py"; for f in /proc/[0-9]*/cmdline; do cmd="$(tr "\0" " " < "$f" 2>/dev/null || true)"; case "$cmd" in *"/app/${needle}${suffix}"*|*"python /app/${needle}${suffix}"*|*"python3.11 /app/${needle}${suffix}"*) exit 1;; esac; done; exit 0'
+          docker top "${container}" -eo comm,args | awk 'NR > 1 { if (($1 == "python" || $1 == "python3" || $1 == "python3.11") && $0 ~ /\\/app\\/worker\\.py/) exit 1 }'
           docker logs "${container}" | grep -F "worker autostart is disabled"
 
       - name: Summarize image
