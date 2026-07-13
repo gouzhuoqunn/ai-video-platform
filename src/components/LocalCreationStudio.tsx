@@ -3,17 +3,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { User } from "@supabase/supabase-js";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { VIDEO_JOB_SELECT_FIELDS } from "@/lib/video-jobs/fields";
 import { requestSignedVideoUrl } from "@/lib/video-jobs/signed-url";
 import { videoJobStatusLabels } from "@/types/video-config";
-import type { SignedVideoResponse, VideoJob, VideoJobWithBalance, VideoJobStatus } from "@/types/video-jobs";
+import type { SignedVideoResponse, VideoJob, VideoJobStatus, VideoJobWithBalance } from "@/types/video-jobs";
 
-type JobCounts = Record<VideoJobStatus, number>;
-
-type LocalJobsResponse = {
-  jobs: VideoJob[];
-  counts: Partial<JobCounts>;
-  error?: string;
-};
+type JobCounts = Partial<Record<VideoJobStatus, number>>;
 
 type CloreCandidateSummary = {
   server_id: string;
@@ -45,10 +40,7 @@ type CloreCandidateSummary = {
 type CloreCandidatesResponse = {
   source: string;
   wallet?: { available_usd_balance: number | null };
-  filters?: { max_usd_per_hour: number };
   matches: CloreCandidateSummary[];
-  rejected5090?: CloreCandidateSummary[];
-  closest_rejected_5090?: CloreCandidateSummary[];
   error?: string;
 };
 
@@ -91,13 +83,17 @@ function formatMoney(value: number | null | undefined) {
   return typeof value === "number" ? `$${value.toFixed(3)}` : "未确认";
 }
 
+function formatNumber(value: number | null | undefined, suffix = "") {
+  return typeof value === "number" ? `${Number(value.toFixed(3))}${suffix}` : "未知";
+}
+
 function formatDateTime(value: string | null | undefined) {
   if (!value) return "尚未记录";
   return new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
 }
 
 function safePromptPreview(prompt: string) {
-  return prompt.length > 80 ? `${prompt.slice(0, 80)}...` : prompt;
+  return prompt.length > 76 ? `${prompt.slice(0, 76)}...` : prompt;
 }
 
 function generationLabel(job: VideoJob) {
@@ -129,14 +125,14 @@ function etaText(job: VideoJob | null, jobs: VideoJob[]) {
   if (!job) return "暂无任务";
   const fallbackMinutes = 8;
   if (job.status === "pending_confirmation") return "尚未确认生成";
-  if (job.status === "processing") {
-    const remaining = Math.max(1, Math.round(fallbackMinutes * (1 - job.progress / 100)));
-    return `生成中，约 ${remaining} 分钟`;
-  }
   if (job.status === "queued") {
     const queue = queueOrder(jobs);
     const ahead = Math.max(0, queue.findIndex((item) => item.id === job.id));
     return `前方还有 ${ahead} 个任务，约 ${Math.max(1, (ahead + 1) * fallbackMinutes)} 分钟`;
+  }
+  if (job.status === "processing") {
+    const remaining = Math.max(1, Math.round(fallbackMinutes * (1 - job.progress / 100)));
+    return `生成中，约 ${remaining} 分钟`;
   }
   if (job.status === "succeeded") return "已完成";
   if (job.status === "failed") return "生成失败";
@@ -153,14 +149,15 @@ export function LocalCreationStudio() {
   const [user, setUser] = useState<User | null>(null);
   const [prompt, setPrompt] = useState(starterPrompt);
   const [jobs, setJobs] = useState<VideoJob[]>([]);
-  const [counts, setCounts] = useState<Partial<JobCounts>>({});
+  const [counts, setCounts] = useState<JobCounts>({});
   const [selectedJobId, setSelectedJobId] = useState("");
   const [selectedJobIds, setSelectedJobIds] = useState<string[]>([]);
   const [signedVideos, setSignedVideos] = useState<Record<string, SignedVideoResponse>>({});
   const [localResults, setLocalResults] = useState<LocalResult[]>([]);
   const [candidates, setCandidates] = useState<CloreCandidateSummary[]>([]);
   const [candidateSource, setCandidateSource] = useState("");
-  const [selectedServer, setSelectedServer] = useState<CloreCandidateSummary | null>(null);
+  const [selectedServerId, setSelectedServerId] = useState("");
+  const [detailServer, setDetailServer] = useState<CloreCandidateSummary | null>(null);
   const [session, setSession] = useState<SessionResponse | null>(null);
   const [autorentRequests, setAutorentRequests] = useState<AutorentRequest[]>([]);
   const [notice, setNotice] = useState("正在恢复本地实验会话...");
@@ -200,18 +197,37 @@ export function LocalCreationStudio() {
       });
   }, [candidates, priceGate.max, priceGate.min, priceGate.valid]);
 
-  const refreshJobs = useCallback(async () => {
-    const response = await fetch("/api/local-lab/jobs");
-    const payload = (await response.json().catch(() => ({}))) as LocalJobsResponse;
-    if (!response.ok) {
-      setNotice(payload.error ?? "无法读取本地任务。");
+  const selectedCandidate = selectedServerId ? filteredCandidates.find((candidate) => candidate.server_id === selectedServerId) ?? null : null;
+
+  const refreshJobs = useCallback(async (currentUser: User | null = user) => {
+    if (!supabase || !currentUser) {
+      setJobs([]);
+      setCounts({});
       return;
     }
-    setJobs(payload.jobs);
-    setCounts(payload.counts);
-    setSelectedJobId((current) => current || payload.jobs[0]?.id || "");
-    setSelectedJobIds((current) => current.filter((id) => payload.jobs.some((job) => job.id === id)));
-  }, []);
+
+    const { data, error } = await supabase
+      .from("video_jobs")
+      .select(VIDEO_JOB_SELECT_FIELDS)
+      .eq("user_id", currentUser.id)
+      .is("deleted_at", null)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      setNotice("无法读取本地任务，请确认数据库迁移已应用。");
+      return;
+    }
+
+    const nextJobs = ((data as VideoJob[] | null) ?? []).filter((job) => !job.deleted_at);
+    const nextCounts = nextJobs.reduce<JobCounts>((acc, job) => {
+      acc[job.status] = (acc[job.status] ?? 0) + 1;
+      return acc;
+    }, {});
+    setJobs(nextJobs);
+    setCounts(nextCounts);
+    setSelectedJobId((current) => current || nextJobs[0]?.id || "");
+    setSelectedJobIds((current) => current.filter((id) => nextJobs.some((job) => job.id === id)));
+  }, [supabase, user]);
 
   const refreshResults = useCallback(async () => {
     const response = await fetch("/api/local-lab/results");
@@ -232,6 +248,7 @@ export function LocalCreationStudio() {
     if (candidateResponse.ok) {
       setCandidates(candidatePayload.matches ?? []);
       setCandidateSource(candidatePayload.source ?? "");
+      setSelectedServerId((current) => (current && candidatePayload.matches?.some((candidate) => candidate.server_id === current) ? current : candidatePayload.matches?.[0]?.server_id || ""));
     }
     if (sessionResponse.ok) setSession(sessionPayload);
     if (autorentResponse.ok) setAutorentRequests(autorentPayload.requests ?? []);
@@ -242,6 +259,7 @@ export function LocalCreationStudio() {
     if (!client) return;
     const auth = client.auth;
     let mounted = true;
+
     async function restore() {
       const response = await fetch("/api/local-lab/session", { method: "POST" });
       if (!mounted) return;
@@ -252,9 +270,10 @@ export function LocalCreationStudio() {
       const { data } = await auth.getUser();
       if (!mounted) return;
       setUser(data.user);
-      setNotice("Clore真实自动租用保持关闭；可以先用未生成任务和mock寻机流程。");
-      await Promise.all([refreshJobs(), refreshResults(), refreshClore()]);
+      setNotice("本地实验模式已就绪。GPU自动租用暂时停用，等待Clore平台恢复。");
+      await Promise.all([refreshJobs(data.user), refreshResults(), refreshClore()]);
     }
+
     void restore();
     return () => {
       mounted = false;
@@ -321,6 +340,7 @@ export function LocalCreationStudio() {
       setNotice("请先保存合法的 GPU 单价范围，Max 不得超过 $0.70/h。");
       return;
     }
+
     setIsBatching(true);
     setPendingGpuChoice(null);
     const optimisticDeleteIds = action === "delete" ? targetJobIds : [];
@@ -328,6 +348,7 @@ export function LocalCreationStudio() {
       setJobs((current) => current.filter((job) => !optimisticDeleteIds.includes(job.id)));
       setSelectedJobIds([]);
     }
+
     try {
       const response = await fetch("/api/local-lab/jobs/batch", {
         method: "POST",
@@ -340,7 +361,7 @@ export function LocalCreationStudio() {
           maxEffectiveHourlyUsd: priceGate.max,
         }),
       });
-      const payload = (await response.json().catch(() => ({}))) as { error?: string; autorent_request?: AutorentRequest; regenerated?: VideoJob[] };
+      const payload = (await response.json().catch(() => ({}))) as { error?: string; regenerated?: VideoJob[] };
       if (!response.ok) {
         setNotice(payload.error ?? "批量操作失败。");
         await refreshJobs();
@@ -364,6 +385,13 @@ export function LocalCreationStudio() {
     await refreshClore();
   }
 
+  async function cancelAutorent(requestId: string) {
+    const response = await fetch(`/api/local-lab/clore/autorent/${requestId}`, { method: "DELETE" });
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    setNotice(response.ok ? "自动寻机请求已取消。" : payload.error ?? "取消自动寻机失败。");
+    await refreshClore();
+  }
+
   function toggleSelected(jobId: string) {
     setSelectedJobIds((current) => (current.includes(jobId) ? current.filter((id) => id !== jobId) : [...current, jobId]));
   }
@@ -374,70 +402,99 @@ export function LocalCreationStudio() {
   }
 
   return (
-    <main className="min-h-screen bg-[#f6f3ee] text-stone-950">
-      <header className="sticky top-0 z-30 border-b border-stone-200 bg-[#f6f3ee]/95 px-5 py-4 backdrop-blur">
+    <main className="min-h-screen bg-[#f5f0e8] text-stone-900">
+      <header className="sticky top-0 z-30 border-b border-stone-200 bg-[#f5f0e8]/95 px-5 py-4 backdrop-blur">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-xs font-semibold uppercase text-emerald-700">local_lab</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">local_lab</p>
             <h1 className="text-2xl font-bold">本地创作台</h1>
           </div>
-          <div className="text-sm text-stone-600">积分 ∞ · Clore真实自动租用关闭 · active GPU {session?.orderId ? "存在" : "无"}</div>
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">未生成 {counts.pending_confirmation ?? 0}</span>
+            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">排队 {counts.queued ?? 0}</span>
+            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">GPU {session?.orderId ? "运行中" : "无"}</span>
+            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">Wan2.2 TI2V-5B</span>
+            <span className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 font-semibold text-emerald-800">积分 ∞</span>
+          </div>
         </div>
       </header>
 
-      <div className="mx-auto grid max-w-7xl gap-5 px-5 py-5 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <div className="mx-auto grid max-w-7xl gap-5 px-5 py-6 lg:grid-cols-[minmax(0,1fr)_380px]">
         <section className="space-y-5">
-          <section className="grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
-            <div className="overflow-hidden rounded-lg border border-stone-200 bg-black">
-              <div className="aspect-video">
-                {selectedJob?.status === "succeeded" && mainVideoUrl ? (
-                  <video className="h-full w-full" controls src={mainVideoUrl} />
-                ) : (
-                  <div className="flex h-full flex-col justify-center p-8 text-white">
-                    <p className="text-sm uppercase text-white/60">{selectedJob ? videoJobStatusLabels[selectedJob.status] : "未选择"}</p>
-                    <h2 className="mt-3 text-2xl font-bold">{selectedJob ? generationLabel(selectedJob) : "暂无任务"}</h2>
-                    <p className="mt-3 max-w-2xl text-white/75">
-                      {selectedJob?.status === "pending_confirmation"
-                        ? "尚未确认生成"
-                        : selectedJob?.status === "queued"
-                          ? etaText(selectedJob, jobs)
-                          : selectedJob?.status === "processing"
-                            ? `生成中 ${selectedJob.progress}% · ${etaText(selectedJob, jobs)}`
-                            : selectedJob?.error_message ?? "点击任务卡片可在这里查看状态或播放视频。"}
-                    </p>
-                    {activeAutorent ? <p className="mt-4 text-sm text-emerald-200">自动寻机：{activeAutorent.status}</p> : null}
-                  </div>
-                )}
-              </div>
+          <div className="overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
+            <div className="aspect-video bg-[#1f1f1f]">
+              {selectedJob?.status === "succeeded" && mainVideoUrl ? (
+                <video className="h-full w-full bg-black object-contain" controls playsInline src={mainVideoUrl} />
+              ) : (
+                <div className="flex h-full flex-col items-center justify-center px-6 text-center text-stone-100">
+                  <p className="text-sm font-semibold text-stone-400">{selectedJob ? videoJobStatusLabels[selectedJob.status] : "未选择任务"}</p>
+                  <h2 className="mt-3 text-2xl font-bold">{selectedJob ? generationLabel(selectedJob) : "暂无可播放视频"}</h2>
+                  <p className="mt-2 max-w-xl text-sm text-stone-400">
+                    {selectedJob
+                      ? selectedJob.status === "queued" && activeAutorent
+                        ? "正在寻找符合价格条件的GPU"
+                        : etaText(selectedJob, jobs)
+                      : "在下方输入提示词，先创建未生成任务。"}
+                  </p>
+                  {selectedJob?.status === "processing" ? (
+                    <div className="mt-5 h-2 w-72 overflow-hidden rounded-full bg-stone-700">
+                      <div className="h-full bg-emerald-400" style={{ width: `${selectedJob.progress}%` }} />
+                    </div>
+                  ) : null}
+                </div>
+              )}
             </div>
-
-            <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
-              <h2 className="text-lg font-bold">新提示词</h2>
-              <textarea
-                className="mt-3 min-h-36 w-full resize-y rounded-md border border-stone-200 p-3 text-sm outline-none focus:border-stone-500"
-                maxLength={2000}
-                onChange={(event) => setPrompt(event.target.value)}
-                value={prompt}
-              />
-              <div className="mt-3 flex items-center justify-between gap-3">
-                <span className="text-xs text-stone-500">{prompt.trim().length}/2000</span>
-                <button className="rounded-md bg-stone-900 px-4 py-2 text-sm font-bold text-white disabled:bg-stone-400" disabled={!user || isSubmitting} onClick={() => void submitPrompt()} type="button">
-                  {isSubmitting ? "创建中..." : "创建未生成任务"}
-                </button>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-stone-200 bg-[#faf8f4] px-4 py-3 text-sm">
+              <div>
+                <p className="font-semibold">{selectedJob ? safePromptPreview(selectedJob.prompt) : "选择任务后会在这里显示"}</p>
+                <p className="text-stone-500">{selectedJob ? `${videoJobStatusLabels[selectedJob.status]} · ${etaText(selectedJob, jobs)}` : "未生成任务需要确认或加急后才会进入队列"}</p>
               </div>
-              {notice ? <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">{notice}</p> : null}
-            </section>
+              <span className="rounded-md border border-stone-200 bg-white px-3 py-2 text-xs text-stone-600">短期签名播放 · 本地结果优先</span>
+            </div>
+          </div>
+
+          <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-bold">新提示词</h2>
+                <p className="text-sm text-stone-500">提交后立即扣积分，但先停留为未生成任务。</p>
+              </div>
+              <span className="rounded-md bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">真实GPU自动租用关闭</span>
+            </div>
+            <textarea
+              className="mt-3 min-h-32 w-full resize-y rounded-md border border-stone-200 bg-[#faf8f4] p-4 leading-7 outline-none focus:border-emerald-500"
+              maxLength={2000}
+              onChange={(event) => setPrompt(event.target.value)}
+              value={prompt}
+            />
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+              <span className="text-sm text-stone-500">{prompt.trim().length}/2000</span>
+              <button
+                className="rounded-md bg-emerald-700 px-5 py-3 text-sm font-bold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-400"
+                disabled={isSubmitting || !user}
+                onClick={() => void submitPrompt()}
+                type="button"
+              >
+                {isSubmitting ? "创建中..." : "创建未生成任务"}
+              </button>
+            </div>
+            {notice ? <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">{notice}</p> : null}
           </section>
 
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-bold">任务</h2>
-                <p className="text-sm text-stone-500">未生成 {counts.pending_confirmation ?? 0} · 排队 {counts.queued ?? 0} · 生成中 {counts.processing ?? 0} · 完成 {counts.succeeded ?? 0}</p>
+                <h2 className="text-lg font-bold">任务列表</h2>
+                <p className="text-sm text-stone-500">点击任务切换主播放器；勾选任务后可批量操作。</p>
               </div>
               <div className="flex flex-wrap gap-2 text-sm">
                 {(["all", "pending_confirmation", "queued", "processing", "succeeded", "failed"] as const).map((status) => (
-                  <button className={`rounded-md border px-3 py-1.5 ${filter === status ? "border-stone-900 bg-stone-900 text-white" : "border-stone-200 bg-white"}`} key={status} onClick={() => setFilter(status)} type="button">
+                  <button
+                    className={`rounded-md border px-3 py-1.5 ${filter === status ? "border-stone-900 bg-stone-900 text-white" : "border-stone-200 bg-white"}`}
+                    key={status}
+                    onClick={() => setFilter(status)}
+                    type="button"
+                  >
                     {status === "all" ? "全部" : videoJobStatusLabels[status]}
                   </button>
                 ))}
@@ -499,17 +556,17 @@ export function LocalCreationStudio() {
           </section>
         </section>
 
-        <aside className="space-y-4">
+        <aside className="space-y-4 lg:sticky lg:top-24 lg:self-start">
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <h2 className="text-lg font-bold">GPU 价格筛选</h2>
             <div className="mt-3 grid grid-cols-2 gap-2">
               <label className="text-sm">
                 Min USD/h
-                <input className="mt-1 w-full rounded-md border border-stone-200 px-2 py-2" onChange={(event) => setMinPrice(event.target.value)} value={minPrice} />
+                <input className="mt-1 w-full rounded-md border border-stone-200 bg-[#faf8f4] px-2 py-2" onChange={(event) => setMinPrice(event.target.value)} value={minPrice} />
               </label>
               <label className="text-sm">
                 Max USD/h
-                <input className="mt-1 w-full rounded-md border border-stone-200 px-2 py-2" onChange={(event) => setMaxPrice(event.target.value)} value={maxPrice} />
+                <input className="mt-1 w-full rounded-md border border-stone-200 bg-[#faf8f4] px-2 py-2" onChange={(event) => setMaxPrice(event.target.value)} value={maxPrice} />
               </label>
             </div>
             <p className={`mt-2 text-xs ${priceGate.valid ? "text-emerald-700" : "text-rose-700"}`}>
@@ -519,27 +576,31 @@ export function LocalCreationStudio() {
 
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <div className="flex items-center justify-between gap-2">
-              <h2 className="text-lg font-bold">RTX 5090 候选</h2>
-              <button className="rounded-md border border-stone-200 px-2 py-1 text-xs" onClick={() => void refreshClore()} type="button">
+              <h2 className="text-lg font-bold">Clore RTX 5090 候选</h2>
+              <button className="rounded-md border border-stone-200 bg-[#faf8f4] px-2 py-1 text-xs font-semibold" onClick={() => void refreshClore()} type="button">
                 刷新
               </button>
             </div>
-            <p className="mt-1 text-xs text-stone-500">{candidateSource || "未加载"} · 真实自动租用暂时停用</p>
+            <p className="mt-2 text-xs text-stone-500">来源：{candidateSource || "未加载"} · 默认只显示含费用小时价</p>
             <div className="mt-3 space-y-2">
-              {filteredCandidates.slice(0, 8).map((candidate) => (
-                <button
-                  className={`w-full rounded-md border px-3 py-3 text-left ${selectedServer?.server_id === candidate.server_id ? "border-emerald-600 bg-emerald-50" : "border-stone-200 bg-[#faf8f4]"}`}
-                  key={candidate.server_id}
-                  onClick={() => setSelectedServer(candidate)}
-                  onDoubleClick={() => setSelectedServer(candidate)}
-                  title="双击查看详细信息"
-                  type="button"
-                >
-                  <span className="text-lg font-bold">{formatMoney(candidate.effective_usd_per_hour ?? (candidate.normalized_usd_per_hour ? candidate.normalized_usd_per_hour * 1.05 : null))}/小时</span>
-                </button>
-              ))}
+              {filteredCandidates.slice(0, 8).map((candidate) => {
+                const effective = candidate.effective_usd_per_hour ?? (candidate.normalized_usd_per_hour ? candidate.normalized_usd_per_hour * 1.05 : null);
+                return (
+                  <button
+                    className={`w-full rounded-md border px-3 py-3 text-left ${selectedServerId === candidate.server_id ? "border-emerald-500 bg-emerald-50" : "border-stone-200 bg-[#faf8f4]"}`}
+                    key={candidate.server_id}
+                    onClick={() => setSelectedServerId(candidate.server_id)}
+                    onDoubleClick={() => setDetailServer(candidate)}
+                    title="双击查看详细信息"
+                    type="button"
+                  >
+                    <span className="text-lg font-bold">{formatMoney(effective)}/小时</span>
+                  </button>
+                );
+              })}
               {filteredCandidates.length === 0 ? <p className="text-sm text-stone-500">当前价格范围内没有候选。</p> : null}
             </div>
+            <p className="mt-3 text-xs text-stone-500">当前选中：{selectedCandidate ? `${formatMoney(selectedCandidate.effective_usd_per_hour)}/h` : "未选择"}</p>
           </section>
 
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
@@ -551,8 +612,15 @@ export function LocalCreationStudio() {
             <div className="mt-3 space-y-2 text-sm">
               {autorentRequests.slice(0, 5).map((request) => (
                 <div className="rounded-md border border-stone-200 bg-[#faf8f4] p-2" key={request.id}>
-                  <p className="font-semibold">{request.status} · {request.priority}</p>
-                  <p className="text-xs text-stone-500">Max {formatMoney(Number(request.max_effective_hourly_usd))}/h · {request.selected_server_id ?? "未选主机"}</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-semibold">{request.status} · {request.priority}</p>
+                    {!["assigned", "failed", "cancelled"].includes(request.status) ? (
+                      <button className="rounded-md border border-stone-200 bg-white px-2 py-1 text-xs" onClick={() => void cancelAutorent(request.id)} type="button">
+                        取消寻找
+                      </button>
+                    ) : null}
+                  </div>
+                  <p className="mt-1 text-xs text-stone-500">Max {formatMoney(Number(request.max_effective_hourly_usd))}/h · {request.selected_server_id ?? "未选主机"}</p>
                 </div>
               ))}
             </div>
@@ -564,24 +632,12 @@ export function LocalCreationStudio() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/50 p-4" onClick={() => setPendingGpuChoice(null)}>
           <section className="w-full max-w-md rounded-lg bg-white p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
             <h2 className="text-xl font-bold">已有GPU正在运行</h2>
-            <p className="mt-2 text-sm text-stone-600">
-              同时最多只能有一台GPU。请选择这批任务进入当前GPU队列，或等当前GPU退订后再自动寻找最低价GPU。
-            </p>
+            <p className="mt-2 text-sm text-stone-600">同时最多只能有一台GPU。请选择这批任务进入当前GPU队列，或等当前GPU退订后再自动寻找最低价GPU。</p>
             <div className="mt-4 grid gap-2">
-              <button
-                className="rounded-md bg-stone-900 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-400"
-                disabled={isBatching}
-                onClick={() => void runBatch(pendingGpuChoice.action, "current", pendingGpuChoice.jobIds)}
-                type="button"
-              >
+              <button className="rounded-md bg-stone-900 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-400" disabled={isBatching} onClick={() => void runBatch(pendingGpuChoice.action, "current", pendingGpuChoice.jobIds)} type="button">
                 使用当前GPU并加入{pendingGpuChoice.action === "urgent" ? "加急" : "普通"}队列
               </button>
-              <button
-                className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold disabled:bg-stone-100"
-                disabled={isBatching}
-                onClick={() => void runBatch(pendingGpuChoice.action, "wait_for_current_to_close", pendingGpuChoice.jobIds)}
-                type="button"
-              >
+              <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold disabled:bg-stone-100" disabled={isBatching} onClick={() => void runBatch(pendingGpuChoice.action, "wait_for_current_to_close", pendingGpuChoice.jobIds)} type="button">
                 等当前GPU退订后，再自动寻找最低价GPU
               </button>
               <button className="rounded-md border border-stone-200 px-3 py-2 text-sm font-semibold" onClick={() => setPendingGpuChoice(null)} type="button">
@@ -592,29 +648,29 @@ export function LocalCreationStudio() {
         </div>
       ) : null}
 
-      {selectedServer ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/50 p-4" onClick={() => setSelectedServer(null)}>
+      {detailServer ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/50 p-4" onClick={() => setDetailServer(null)}>
           <section className="w-full max-w-lg rounded-lg bg-white p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-xl font-bold">主机详情</h2>
-                <p className="text-sm text-stone-500">Server {selectedServer.server_id}</p>
+                <p className="text-sm text-stone-500">Server {detailServer.server_id}</p>
               </div>
-              <button className="rounded-md border border-stone-200 px-3 py-2" onClick={() => setSelectedServer(null)} type="button">
+              <button className="rounded-md border border-stone-200 px-3 py-2" onClick={() => setDetailServer(null)} type="button">
                 关闭
               </button>
             </div>
             <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
-              <div><dt className="text-stone-500">GPU</dt><dd>{selectedServer.gpu} x {selectedServer.gpu_count ?? 1}</dd></div>
-              <div><dt className="text-stone-500">显存</dt><dd>{selectedServer.gpu_memory_raw_value ?? selectedServer.gpu_memory_gb} {selectedServer.gpu_memory_raw_unit ?? "GB"}</dd></div>
-              <div><dt className="text-stone-500">RAM</dt><dd>{selectedServer.ram_gb ?? "未知"} GB</dd></div>
-              <div><dt className="text-stone-500">磁盘</dt><dd>{selectedServer.disk_gb ?? "未知"} GB</dd></div>
-              <div><dt className="text-stone-500">网络</dt><dd>{selectedServer.download_mbps ?? "?"}/{selectedServer.upload_mbps ?? "?"} Mbps</dd></div>
-              <div><dt className="text-stone-500">地区</dt><dd>{selectedServer.country ?? "未知"}</dd></div>
-              <div><dt className="text-stone-500">可靠性</dt><dd>{selectedServer.reliability ?? "未知"}</dd></div>
-              <div><dt className="text-stone-500">基础价</dt><dd>{formatMoney(selectedServer.base_usd_per_hour ?? selectedServer.normalized_usd_per_hour)}/h</dd></div>
-              <div><dt className="text-stone-500">含费价</dt><dd>{formatMoney(selectedServer.effective_usd_per_hour)}/h</dd></div>
-              <div><dt className="text-stone-500">预计总价</dt><dd>{formatMoney(selectedServer.max_session_projected_total_usd)}</dd></div>
+              <div><dt className="text-stone-500">GPU</dt><dd>{detailServer.gpu} x {detailServer.gpu_count ?? 1}</dd></div>
+              <div><dt className="text-stone-500">显存</dt><dd>{detailServer.gpu_memory_raw_value ?? detailServer.gpu_memory_gb} {detailServer.gpu_memory_raw_unit ?? "GB"}</dd></div>
+              <div><dt className="text-stone-500">RAM</dt><dd>{formatNumber(detailServer.ram_gb, "GB")}</dd></div>
+              <div><dt className="text-stone-500">磁盘</dt><dd>{formatNumber(detailServer.disk_gb, "GB")}</dd></div>
+              <div><dt className="text-stone-500">网络</dt><dd>{formatNumber(detailServer.download_mbps, "↓")} / {formatNumber(detailServer.upload_mbps, "↑")}</dd></div>
+              <div><dt className="text-stone-500">地区</dt><dd>{detailServer.country ?? "未知"}</dd></div>
+              <div><dt className="text-stone-500">可靠性</dt><dd>{formatNumber(detailServer.reliability)}</dd></div>
+              <div><dt className="text-stone-500">基础价</dt><dd>{formatMoney(detailServer.base_usd_per_hour ?? detailServer.normalized_usd_per_hour)}/h</dd></div>
+              <div><dt className="text-stone-500">含费用价</dt><dd>{formatMoney(detailServer.effective_usd_per_hour)}/h</dd></div>
+              <div><dt className="text-stone-500">预计总价</dt><dd>{formatMoney(detailServer.max_session_projected_total_usd)}</dd></div>
             </dl>
           </section>
         </div>

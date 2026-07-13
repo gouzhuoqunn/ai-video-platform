@@ -28,8 +28,15 @@ function main() {
   assert(studio.includes("GPU自动租用暂时停用"), "Real Clore auto-rent must be visibly disabled.");
   assert(studio.includes("推进mock寻机tick"), "Mock auto-rent tick must be reachable.");
   assert(studio.includes("onDoubleClick"), "Host cards must use double click for details.");
-  assert(studio.includes("formatMoney(candidate.effective_usd_per_hour"), "Host cards must primarily show effective hourly price.");
+  assert(studio.includes("candidate.effective_usd_per_hour") && studio.includes("/小时"), "Host cards must primarily show effective hourly price.");
   assert(!studio.includes("生成时间与任务状态"), "Old right-side generation time/status section must be removed.");
+
+  const studioExperience = read("src/components/StudioExperience.tsx");
+  assert(studioExperience.includes('process.env.NEXT_PUBLIC_APP_MODE !== "commercial"'), "StudioExperience must default to the local confirmed UI when app mode is missing.");
+
+  const globals = read("src/app/globals.css");
+  assert(globals.includes("color-scheme: light"), "Global CSS must not default to the old dark neon shell.");
+  assert(!globals.includes("#070708"), "Global CSS must not keep the old near-black neon background.");
 
   const batchRoute = read("src/app/api/local-lab/jobs/batch/route.ts");
   assert(batchRoute.includes("confirm_video_jobs"), "Batch confirm must use RPC.");

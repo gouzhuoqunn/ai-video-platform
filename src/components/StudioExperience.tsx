@@ -25,7 +25,7 @@ const starterPrompt = "一位穿银色外套的女孩站在雨夜霓虹街道中
 const accountMessages = {
   recharge: "充值功能尚未开放。当前页面没有接入支付服务。",
 };
-const isLocalLabMode = process.env.NEXT_PUBLIC_APP_MODE === "local_lab";
+const isLocalLabMode = process.env.NEXT_PUBLIC_APP_MODE !== "commercial";
 
 function getFriendlyTaskMessage(message: string) {
   const firstLine = message.split("\n")[0] || message;
