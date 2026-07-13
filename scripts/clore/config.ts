@@ -3,6 +3,7 @@ import path from "node:path";
 import type { CloreConfig } from "./types";
 
 const CLORE_ENV_PATH = path.join(process.cwd(), ".secrets", "clore.env");
+const CLORE_TEMP_EXCLUDED_SERVERS_PATH = path.join(process.cwd(), ".secrets", "clore-temp-excluded-servers.json");
 export const PROJECT_TAG = "ai-video-platform-wan22";
 export const DEFAULT_DOCKER_IMAGE = "nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04";
 
@@ -53,6 +54,30 @@ function readAllowedCountries(fileValues: Map<string, string>) {
     .filter(Boolean);
 }
 
+function readExcludedServerIds(fileValues: Map<string, string>) {
+  const fromEnv = readString("CLORE_EXCLUDED_SERVER_IDS", "", fileValues)
+    .split(",")
+    .map((serverId) => serverId.trim())
+    .filter((serverId) => /^\d+$/.test(serverId));
+  if (!existsSync(CLORE_TEMP_EXCLUDED_SERVERS_PATH)) {
+    return [...new Set(fromEnv)];
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(CLORE_TEMP_EXCLUDED_SERVERS_PATH, "utf8")) as unknown;
+    const values = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as { servers?: unknown[] }).servers)
+        ? (parsed as { servers: unknown[] }).servers
+        : [];
+    const fromFile = values
+      .map((value) => (typeof value === "string" || typeof value === "number" ? String(value).trim() : ""))
+      .filter((serverId) => /^\d+$/.test(serverId));
+    return [...new Set([...fromEnv, ...fromFile])];
+  } catch {
+    return [...new Set(fromEnv)];
+  }
+}
+
 export function loadCloreConfig(): CloreConfig {
   const fileValues = parseEnvFile(CLORE_ENV_PATH);
   const apiKey = readOptionalString("CLORE_API_KEY", fileValues);
@@ -77,6 +102,7 @@ export function loadCloreConfig(): CloreConfig {
     sshPublicKeyPath: readOptionalString("CLORE_SSH_PUBLIC_KEY_PATH", fileValues) ?? path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".ssh", "clore_ai_video_worker_ed25519.pub"),
     projectTag: readString("CLORE_PROJECT_TAG", PROJECT_TAG, fileValues) || PROJECT_TAG,
     assumedMinimumRentalHours: readNumber("CLORE_MIN_RENTAL_HOURS", 6, fileValues),
+    excludedServerIds: readExcludedServerIds(fileValues),
   };
 }
 

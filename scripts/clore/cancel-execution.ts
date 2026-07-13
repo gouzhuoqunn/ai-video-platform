@@ -9,6 +9,9 @@ export type CancelOrderRequest = {
   issue?: string;
 };
 
+export const CANCEL_ACTIVE_ORDER_CONFIRMATIONS = 2;
+export const CANCEL_CONFIRMATION_MAX_INTERVAL_MS = 60 * 1000;
+
 export type LoadedCloreConfig = ReturnType<typeof loadCloreConfig>;
 
 export function assertCancelAllowed(input: {

@@ -10,6 +10,24 @@ export type SshTarget = {
   user: string;
 };
 
+export const SSH_READINESS_TIMEOUT_MS = 8 * 60 * 1000;
+export const SSH_READINESS_POLL_INTERVAL_MS = 30 * 1000;
+export const SSH_EARLY_RESET_FAILURES = 5;
+
+export type SshReadinessFailureKind = "connection_reset" | "banner_timeout" | "timeout" | "other";
+
+export function classifySshReadinessFailure(output: string): SshReadinessFailureKind {
+  if (/connection reset|kex_exchange_identification/i.test(output)) return "connection_reset";
+  if (/banner exchange|banner timeout/i.test(output)) return "banner_timeout";
+  if (/timed out|timeout/i.test(output)) return "timeout";
+  return "other";
+}
+
+export function shouldStopSshReadinessEarly(failures: SshReadinessFailureKind[]) {
+  if (failures.length < SSH_EARLY_RESET_FAILURES) return false;
+  return failures.slice(-SSH_EARLY_RESET_FAILURES).every((failure) => failure === "connection_reset");
+}
+
 export function getPrivateKeyPath() {
   return path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".ssh", PRIVATE_KEY_NAME);
 }

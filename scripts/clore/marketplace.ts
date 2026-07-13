@@ -416,6 +416,7 @@ function getRejectionReasons(candidate: Omit<CloreCandidate, "missingFields" | "
   if (candidate.uploadMbps === null || candidate.uploadMbps < config.minUploadMbps) reasons.push("upload bandwidth below minimum or missing");
   if (candidate.priceUsdPerHour === null) reasons.push("missing USD hourly on-demand price");
   if ((candidate.priceUsdPerHour ?? Number.POSITIVE_INFINITY) > config.maxGpuPricePerHour) reasons.push("price above maximum");
+  if (config.excludedServerIds.includes(candidate.serverId)) reasons.push("server is temporarily excluded after a failed session");
   if (!candidate.supportsDocker) reasons.push("custom Docker image is not supported");
   if (!candidate.supportsSsh) reasons.push("SSH is not supported");
   if (candidate.driverCompatible === false) reasons.push("host driver is not marked CUDA 12.8 compatible");

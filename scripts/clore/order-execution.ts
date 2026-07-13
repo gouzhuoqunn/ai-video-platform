@@ -129,6 +129,9 @@ export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) 
   if ((selected.sixHourCostUsd ?? Number.POSITIVE_INFINITY) > input.execution.firstSessionMaxBudgetUsd) {
     throw new Error("Six-hour planning cost exceeds the first-session budget.");
   }
+  if (selected.platformTotalPrice === null) {
+    throw new Error("Clore all-in/platform total price is not confirmed; refusing real create_order.");
+  }
   if (input.availableUsdBalance === null || input.availableUsdBalance - (selected.sixHourCostUsd ?? 0) < input.execution.balanceReserveUsd) {
     throw new Error("Wallet balance is insufficient after reserve.");
   }

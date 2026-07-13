@@ -33,6 +33,7 @@ function mockServer(overrides: RawCloreServer = {}): RawCloreServer {
     supports_docker: true,
     supports_ssh: true,
     driver_compatible: true,
+    price: { usd: { total: 14.99 } },
     ...overrides,
   };
 }
@@ -67,6 +68,23 @@ async function main() {
       verifyWatchdogs: async () => undefined,
     });
     assert(candidate.serverId === "95538", "preflight should return the selected candidate.");
+
+    await runCreateOrderPreflight({
+      serverId: "95538",
+      confirmedMaxPriceUsdPerHour: 0.7,
+      queuedJobCount: 1,
+      marketplace: [mockServer({ price: { usd: { on_demand_usd: 14.99 } } })],
+      availableUsdBalance: 10.99,
+      config,
+      execution,
+      verifyImage: async (image) => ({ image, exists: true, linuxAmd64: true, method: "mock" }),
+      verifyWatchdogs: async () => undefined,
+    }).then(
+      () => {
+        throw new Error("missing all-in total should fail.");
+      },
+      (error) => assert(String(error.message).includes("all-in"), "unknown platform/all-in price must fail closed."),
+    );
 
     await runCreateOrderPreflight({
       serverId: "95538",

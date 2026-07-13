@@ -98,6 +98,8 @@ function main() {
 
   const altered = normalizeCloreServer({ ...readMockMarketplace()[0], price_usd_per_hour: config.maxGpuPricePerHour + 0.01 }, config);
   assert(altered.rejectionReasons.includes("price above maximum"), "old candidate with increased price must be rejected.");
+  const excluded = normalizeCloreServer({ ...readMockMarketplace()[0], id: "95538" }, { ...config, excludedServerIds: ["95538"] });
+  assert(excluded.rejectionReasons.includes("server is temporarily excluded after a failed session"), "temporary server exclude list must reject the failed host.");
   assert(PROJECT_TAG === "ai-video-platform-wan22", "project tag must protect future create/cancel.");
 
   const createScript = readFileSync(path.join(process.cwd(), "scripts", "clore", "create-order.ts"), "utf8");

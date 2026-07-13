@@ -18,6 +18,7 @@ export type CloreConfig = {
   sshPublicKeyPath?: string;
   projectTag: string;
   assumedMinimumRentalHours: number;
+  excludedServerIds: string[];
 };
 
 export type CloreApiResponse<T> = {
