@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { guardLocalLabMutation } from "@/lib/local-lab/route-guard";
 import { LOCAL_LAB_ROLE } from "@/lib/local-lab/config";
+import { guardLocalLabMutation } from "@/lib/local-lab/route-guard";
 import { deleteLocalResultFiles } from "@/lib/local-lab/local-results";
 import { getSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -14,20 +14,20 @@ type RouteContext = {
   params: Promise<{ jobId: string }>;
 };
 
-async function listStoragePathsForJob(userId: string, jobId: string, outputPath: string | null) {
+async function listStoragePathsForJob(userId: string, jobId: string, outputPath: string | null, thumbnailPath: string | null) {
   const admin = getSupabaseAdminClient();
   const prefix = `${userId}/${jobId}`;
   const paths = new Set<string>();
-  if (outputPath?.startsWith(`${prefix}/`)) {
-    paths.add(outputPath);
+  for (const value of [outputPath, thumbnailPath]) {
+    if (value?.startsWith(`${prefix}/`)) {
+      paths.add(value);
+    }
   }
 
-  const { data, error } = await admin.storage.from(GENERATED_VIDEOS_BUCKET).list(prefix, { limit: 100 });
-  if (!error) {
-    for (const item of data ?? []) {
-      if (item.name && !item.name.includes("/") && !item.name.includes("..")) {
-        paths.add(`${prefix}/${item.name}`);
-      }
+  const { data } = await admin.storage.from(GENERATED_VIDEOS_BUCKET).list(prefix, { limit: 100 });
+  for (const item of data ?? []) {
+    if (item.name && !item.name.includes("/") && !item.name.includes("..")) {
+      paths.add(`${prefix}/${item.name}`);
     }
   }
 
@@ -65,12 +65,8 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
   if (readError) {
     return NextResponse.json({ error: "Unable to read the video job." }, { status: 500 });
   }
-  if (!existing) {
-    return NextResponse.json({
-      deleted: true,
-      already_deleted: true,
-      absolute_paths_included: false,
-    });
+  if (!existing || (existing as VideoJob).deleted_at) {
+    return NextResponse.json({ deleted: true, already_deleted: true, absolute_paths_included: false });
   }
 
   const job = existing as VideoJob;
@@ -81,35 +77,53 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
     return NextResponse.json({ error: "视频生成中，不能删除" }, { status: 409 });
   }
 
-  let queuedCanceled = false;
-  if (job.status === "queued") {
-    const { error: cancelError } = await supabase.rpc("cancel_video_job", { p_job_id: jobId });
-    if (cancelError) {
-      return NextResponse.json({ error: "Unable to cancel queued job before deletion." }, { status: 409 });
-    }
-    queuedCanceled = true;
+  const { error: softDeleteError } = await supabase.rpc("soft_delete_video_jobs", { p_job_ids: [jobId] });
+  if (softDeleteError) {
+    return NextResponse.json({ error: softDeleteError.message.split("\n")[0] || "Unable to delete the video job." }, { status: 409 });
   }
 
-  const storagePaths = await listStoragePathsForJob(user.id, jobId, job.output_video_path);
+  const storagePaths = await listStoragePathsForJob(user.id, jobId, job.output_video_path, job.thumbnail_path);
   let supabaseObjectsDeleted = 0;
+  let cleanupStatus: "complete" | "retry" = "complete";
+  let cleanupError: string | null = null;
+
   if (storagePaths.length > 0) {
     const { error: storageError } = await admin.storage.from(GENERATED_VIDEOS_BUCKET).remove(storagePaths);
     if (storageError) {
-      return NextResponse.json({ error: "Unable to delete generated video objects." }, { status: 500 });
+      cleanupStatus = "retry";
+      cleanupError = "Unable to delete generated video objects.";
+    } else {
+      supabaseObjectsDeleted = storagePaths.length;
     }
-    supabaseObjectsDeleted = storagePaths.length;
   }
 
-  const localSummary = deleteLocalResultFiles(jobId);
-  const { error: deleteError } = await admin.from("video_jobs").delete().eq("id", jobId).eq("user_id", user.id);
-  if (deleteError) {
-    return NextResponse.json({ error: "Unable to delete the video job record." }, { status: 500 });
+  let localSummary = {
+    local_video_deleted: false,
+    local_thumbnail_deleted: false,
+    local_metadata_deleted: false,
+    local_job_dir_deleted: false,
+    local_result_found: false,
+    absolute_paths_included: false,
+  };
+  try {
+    localSummary = { ...deleteLocalResultFiles(jobId), absolute_paths_included: false };
+  } catch {
+    cleanupStatus = "retry";
+    cleanupError = cleanupError ?? "Unable to delete local archive files.";
   }
+
+  await admin
+    .from("video_jobs")
+    .update({ deletion_cleanup_status: cleanupStatus, deletion_cleanup_error: cleanupError })
+    .eq("id", jobId)
+    .eq("user_id", user.id);
 
   return NextResponse.json({
     deleted: true,
-    queued_canceled: queuedCanceled,
-    job_record_deleted: true,
+    soft_deleted: true,
+    queued_canceled: job.status === "queued",
+    job_record_deleted: false,
+    cleanup_status: cleanupStatus,
     supabase_objects_deleted: supabaseObjectsDeleted,
     ...localSummary,
     absolute_paths_included: false,

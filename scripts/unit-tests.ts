@@ -29,8 +29,19 @@ function baseJob(overrides: Partial<VideoJob> = {}): VideoJob {
     attempt_count: 1,
     max_attempts: 3,
     output_video_path: "22222222-2222-4222-8222-222222222222/11111111-1111-4111-8111-111111111111/output.mp4",
+    thumbnail_path: "22222222-2222-4222-8222-222222222222/11111111-1111-4111-8111-111111111111/thumbnail.jpg",
+    thumbnail_status: "ready",
     output_size_bytes: 100,
     output_mime_type: "video/mp4",
+    priority: "normal",
+    confirmed_at: "2026-07-06T00:00:00.000Z",
+    queued_at: "2026-07-06T00:00:00.000Z",
+    deleted_at: null,
+    deletion_cleanup_status: "none",
+    deletion_cleanup_error: null,
+    generation_group_id: "11111111-1111-4111-8111-111111111111",
+    generation_number: 1,
+    parent_job_id: null,
     charged_at: "2026-07-06T00:00:00.000Z",
     refunded_at: null,
     created_at: "2026-07-06T00:00:00.000Z",
@@ -54,6 +65,7 @@ function main() {
   }
 
   assert(!canCreateSignedVideoUrl(baseJob({ output_video_path: null })), "缺少输出路径不应允许签名 URL。");
+  assert(!canCreateSignedVideoUrl(baseJob({ deleted_at: "2026-07-06T00:00:00.000Z" })), "已软删除任务不应允许签名 URL。");
   assert(!canCreateSignedVideoUrl(baseJob({ output_video_path: `${succeeded.user_id}/wrong-job/output.mp4` })), "job_id 不匹配应拒绝。");
   assert(!canCreateSignedVideoUrl(baseJob({ output_video_path: `wrong-user/${succeeded.id}/output.mp4` })), "user_id 不匹配应拒绝。");
   assert(!canCreateSignedVideoUrl(baseJob({ output_video_path: `${succeeded.user_id}/${succeeded.id}/output.webm` })), "mime/path 扩展名不匹配应拒绝。");

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import random
+import subprocess
 import time
 from pathlib import Path
 
@@ -61,6 +63,73 @@ class GpuWorker:
             },
         ).execute()
 
+    def make_thumbnail(self, job_id: str, local_output_path: str) -> str | None:
+        output = Path(local_output_path)
+        thumbnail = output.with_name("thumbnail.jpg")
+        try:
+            duration_probe = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(output),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            duration = float(duration_probe.stdout.strip() or "0")
+            rng = random.Random(job_id)
+            seek = duration * rng.uniform(0.10, 0.90) if duration > 0 else 0
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    f"{seek:.3f}",
+                    "-i",
+                    str(output),
+                    "-frames:v",
+                    "1",
+                    "-vf",
+                    "scale=640:360:force_original_aspect_ratio=increase,crop=640:360",
+                    "-q:v",
+                    "3",
+                    str(thumbnail),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
+            return str(thumbnail)
+        except Exception:
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "color=c=0x111827:s=640x360:d=0.1",
+                        "-frames:v",
+                        "1",
+                        str(thumbnail),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    timeout=30,
+                )
+                return str(thumbnail)
+            except Exception:
+                safe_log(self.logger, "thumbnail_failed", job_id=job_id)
+                return None
+
     def complete(self, job: dict, local_output_path: str, mime_type: str) -> None:
         job_id = str(job["id"])
         user_id = str(job["user_id"])
@@ -75,6 +144,17 @@ class GpuWorker:
                 file,
                 {"content-type": mime_type, "upsert": "false"},
             )
+
+        thumbnail_path = self.make_thumbnail(job_id, local_output_path)
+        if thumbnail_path:
+            remote_thumbnail_path = f"{user_id}/{job_id}/thumbnail.jpg"
+            if validate_output_path(user_id, job_id, remote_thumbnail_path):
+                with open(thumbnail_path, "rb") as file:
+                    self.supabase.storage.from_(BUCKET).upload(
+                        remote_thumbnail_path,
+                        file,
+                        {"content-type": "image/jpeg", "upsert": "false"},
+                    )
 
         size_bytes = Path(local_output_path).stat().st_size
         self.supabase.rpc(

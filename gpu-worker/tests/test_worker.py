@@ -100,6 +100,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_output_path_validation(self):
         self.assertTrue(validate_output_path("user", "job", "user/job/output.mp4"))
+        self.assertTrue(validate_output_path("user", "job", "user/job/thumbnail.jpg"))
         self.assertFalse(validate_output_path("user", "job", "user/other/output.mp4"))
 
     def test_mock_success_calls_complete_and_cleans_temp(self):

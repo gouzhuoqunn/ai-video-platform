@@ -14,7 +14,7 @@ function assert(condition: unknown, message: string): asserts condition {
 
 function mockServer(overrides: RawCloreServer = {}): RawCloreServer {
   return {
-    id: "95538",
+    id: "120001",
     gpu_name: "NVIDIA GeForce RTX 5090",
     gpu_count: 1,
     gpu_memory_gb: 32,
@@ -56,7 +56,7 @@ async function main() {
     const config = loadCloreConfig();
     const execution = loadCloreExecutionConfig();
     const candidate = await runCreateOrderPreflight({
-      serverId: "95538",
+      serverId: "120001",
       confirmedMaxPriceUsdPerHour: 0.7,
       queuedJobCount: 1,
       marketplace: [mockServer()],
@@ -66,10 +66,10 @@ async function main() {
       verifyImage: async (image) => ({ image, exists: true, linuxAmd64: true, method: "mock" }),
       verifyWatchdogs: async () => undefined,
     });
-    assert(candidate.serverId === "95538", "preflight should return the selected candidate.");
+    assert(candidate.serverId === "120001", "preflight should return the selected candidate.");
 
     await runCreateOrderPreflight({
-      serverId: "95538",
+      serverId: "120001",
       confirmedMaxPriceUsdPerHour: 0.7,
       queuedJobCount: 1,
       marketplace: [mockServer({ price_usd_per_hour: 0.68 })],
@@ -86,7 +86,7 @@ async function main() {
     );
 
     await runCreateOrderPreflight({
-      serverId: "95538",
+      serverId: "120001",
       confirmedMaxPriceUsdPerHour: 0.7,
       queuedJobCount: 1,
       marketplace: [mockServer()],
@@ -103,7 +103,7 @@ async function main() {
     );
 
     await runCreateOrderPreflight({
-      serverId: "95538",
+      serverId: "120001",
       confirmedMaxPriceUsdPerHour: 0.7,
       queuedJobCount: 1,
       marketplace: [mockServer({ order_type: "spot" })],
@@ -120,7 +120,7 @@ async function main() {
     );
 
     await runCreateOrderPreflight({
-      serverId: "95538",
+      serverId: "120001",
       confirmedMaxPriceUsdPerHour: 0.7,
       queuedJobCount: 0,
       marketplace: [mockServer()],
@@ -137,7 +137,7 @@ async function main() {
     );
 
     const body = buildCreateOrderBody({
-      serverId: "95538",
+      serverId: "120001",
       image: config.dockerImage,
       currency: "USD-Blockchain",
       sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockPublicKeyForTestsOnly000000000000 test",
@@ -182,7 +182,7 @@ async function main() {
       readOrders: async () => [
         {
           orderId: "mock-order-1",
-          serverId: "95538",
+          serverId: "120001",
           status: "running",
           currency: "USD-Blockchain",
           price: 14.99,

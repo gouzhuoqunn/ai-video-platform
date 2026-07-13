@@ -25,6 +25,7 @@ export async function GET(request: NextRequest) {
     .from("video_jobs")
     .select(VIDEO_JOB_SELECT_FIELDS)
     .eq("user_id", user.id)
+    .is("deleted_at", null)
     .order("created_at", { ascending: false })
     .limit(80);
 
@@ -36,6 +37,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     jobs,
     counts: {
+      pending_confirmation: jobs.filter((job) => job.status === "pending_confirmation").length,
       queued: jobs.filter((job) => job.status === "queued").length,
       processing: jobs.filter((job) => job.status === "processing").length,
       succeeded: jobs.filter((job) => job.status === "succeeded").length,

@@ -35,6 +35,8 @@ def validate_output_path(user_id: str, job_id: str, output_path: str) -> bool:
     return output_path in {
         f"{user_id}/{job_id}/output.mp4",
         f"{user_id}/{job_id}/output.webm",
+        f"{user_id}/{job_id}/thumbnail.jpg",
+        f"{user_id}/{job_id}/thumbnail.webp",
     }
 
 

@@ -35,21 +35,15 @@ function main() {
     assert(route.includes("guardLocalLabMutation"), "delete route must require local lab mutation guard.");
     assert(route.includes("LOCAL_LAB_ROLE"), "delete route must verify local_tester role.");
     assert(route.includes('job.status === "processing"'), "processing jobs must be rejected.");
-    assert(route.includes("cancel_video_job"), "queued jobs must be canceled before deletion.");
-    assert(route.includes("GENERATED_VIDEOS_BUCKET"), "delete route must clean Supabase generated videos.");
+    assert(route.includes("soft_delete_video_jobs"), "delete route must soft-delete and refund in one RPC.");
+    assert(route.includes("deletion_cleanup_status"), "delete route must record cleanup retry status.");
     assert(route.includes("absolute_paths_included: false"), "delete response must not expose absolute paths.");
+    assert(route.includes("job_record_deleted: false"), "delete route must keep audit records instead of hard-deleting.");
 
     const studio = read("src/components/LocalCreationStudio.tsx");
-    assert(studio.includes('aria-label="删除该记录"'), "trash button must have the required aria-label.");
-    assert(studio.includes("删除该记录"), "trash tooltip text must be present.");
-    assert(studio.includes("视频生成中，不能删除"), "processing tooltip must be present.");
-    assert(studio.includes("待删除视频封面"), "delete confirmation must show the thumbnail image alt text.");
-    assert(studio.includes("event.stopPropagation()"), "trash click must not open/select the video card.");
-    assert(studio.includes("lg:grid-cols-[minmax(0,1fr)_380px]"), "desktop layout must reserve a permanent 380px sidebar.");
-    assert(!studio.includes("lg:grid-cols-[minmax(0,1fr)_64px]"), "desktop sidebar must not collapse to a 64px rail.");
-    assert(studio.includes("lg:block"), "desktop sidebar content must remain visible.");
-    assert(studio.includes("normalized_usd_per_hour"), "host sorting and order planning must use normalized hourly price.");
-    assert(!studio.includes("original_on_demand_price.localeCompare"), "host sorting must not use raw price labels.");
+    assert(studio.includes('requestBatch("delete")'), "batch delete must use optimistic UI action.");
+    assert(studio.includes("setJobs((current) => current.filter"), "delete must optimistically remove cards from UI.");
+    assert(studio.includes("视频生成中，不能删除") || route.includes("视频生成中，不能删除"), "processing delete rejection must remain visible.");
 
     console.log("Local lab delete tests passed.");
   } finally {

@@ -444,3 +444,18 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - GitHub Actions run `29260394649` verified the existing digest without rebuilding: build/push was skipped, anonymous GHCR access worked, `linux/amd64` was present, `Entrypoint` remained `/app/entrypoint.sh`, the bootstrap marker was created, the container was still running after 30 seconds, and `docker top` did not show `python /app/worker.py`.
 - Local ignored runtime configuration now points `CLORE_DOCKER_IMAGE` at the new pinned digest. The old digest must not be used for future real Clore create attempts.
 - This verification did not create a Clore order, open SSH, download Wan2.2, or generate a video.
+
+## 2026-07-14 Local Pending Queue, Batch Actions, and Mock Auto-rent UI
+
+- Added a local-first task flow where `create_video_job` deducts credits immediately but creates `pending_confirmation` jobs instead of directly entering the GPU queue.
+- Added batch confirmation, batch urgent confirmation, batch soft delete, and regeneration RPCs. Confirmation moves pending jobs to `queued`; urgent jobs are ordered ahead of normal jobs; delete rejects processing jobs; regeneration creates a new pending job with generation lineage.
+- Added soft-delete metadata, thumbnail metadata, priority, confirmation time, queue time, and generation lineage columns to `video_jobs`.
+- Queue claiming now ignores soft-deleted jobs and only claims confirmed `queued` jobs, ordered by urgent priority and confirmation time.
+- Added `gpu_autorent_requests` for the local UI and mock auto-rent state machine. Real auto-rent remains disabled by default with server-only `CLORE_AUTORENT_ENABLED=false`; the UI/API report `create_order_called:false`.
+- When a batch confirm/urgent action sees an active GPU session, the UI now asks whether to use the current GPU queue, wait for the current GPU to close before auto-renting, or cancel. The current-GPU path does not create an auto-rent request, preserving the one-active-GPU rule.
+- The auto-rent budget display uses the existing Clore pricing rules: base hourly, effective hourly with 5% renter fee, one-time creation fee, projected 380-minute total, max effective hourly `0.70`, max projected budget `4.50`, and wallet reserve `1.00`.
+- The local creation studio now shows the current job/video first, a real task list below it, checkboxes for batch actions, quick delete with optimistic removal, generation labels, hidden detailed host pricing until a candidate is selected, and a clear disabled/mock auto-rent panel while Clore is blocked.
+- GPU Worker completion now uploads `output.mp4` first, then best-effort `thumbnail.jpg`. Thumbnail generation uses `ffmpeg`; thumbnail failure does not mark a successful video as failed.
+- Local result deletion now removes local video, thumbnail, metadata, and matching private Supabase objects when possible, then records cleanup status. Signed video URLs are refused for soft-deleted jobs.
+- Existing Clore create/cancel, watchdog, SSH timeout, max-one-active-order, and pricing guards were not relaxed. Mock auto-rent exposes a 60-second session-complete cancel deadline while real cancel remains guarded by the existing two-confirmation active-order checks. No real Clore order, SSH connection, model download, or video generation occurred in this checkpoint.
+- Verified with `local-lab:test`, `local-lab:delete:test`, `local-lab:batch:test`, `test:unit`, GPU Worker unit tests, `clore:execution:test`, `clore:ssh:test`, `clore:session:test`, `lint`, `typecheck`, and `secret:scan`.

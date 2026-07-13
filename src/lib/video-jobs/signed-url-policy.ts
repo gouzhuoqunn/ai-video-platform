@@ -11,6 +11,6 @@ export function getExpectedOutputPath(job: Pick<VideoJob, "id" | "user_id" | "ou
   return `${job.user_id}/${job.id}/output.${job.output_mime_type === "video/webm" ? "webm" : "mp4"}`;
 }
 
-export function canCreateSignedVideoUrl(job: Pick<VideoJob, "id" | "user_id" | "status" | "output_video_path" | "output_mime_type">) {
-  return job.status === "succeeded" && Boolean(job.output_video_path) && job.output_video_path === getExpectedOutputPath(job);
+export function canCreateSignedVideoUrl(job: Pick<VideoJob, "id" | "user_id" | "status" | "output_video_path" | "output_mime_type" | "deleted_at">) {
+  return !job.deleted_at && job.status === "succeeded" && Boolean(job.output_video_path) && job.output_video_path === getExpectedOutputPath(job);
 }

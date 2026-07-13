@@ -1,4 +1,6 @@
-export type VideoJobStatus = "queued" | "processing" | "succeeded" | "failed" | "canceled";
+export type VideoJobStatus = "pending_confirmation" | "queued" | "processing" | "succeeded" | "failed" | "canceled";
+
+export type VideoJobPriority = "normal" | "urgent";
 
 export type VideoModelKey = "lightweight-video" | "standard-video" | "high-quality-video";
 
@@ -28,8 +30,19 @@ export type VideoJob = {
   reference_image_path: string | null;
   output_video_url: string | null;
   thumbnail_url: string | null;
+  thumbnail_path: string | null;
+  thumbnail_status: "pending" | "ready" | "failed" | "default";
   error_message: string | null;
   progress: number;
+  priority: VideoJobPriority;
+  confirmed_at: string | null;
+  queued_at: string | null;
+  deleted_at: string | null;
+  deletion_cleanup_status: "none" | "pending" | "complete" | "retry";
+  deletion_cleanup_error: string | null;
+  generation_group_id: string | null;
+  generation_number: number;
+  parent_job_id: string | null;
   worker_id: string | null;
   lease_expires_at: string | null;
   attempt_count: number;

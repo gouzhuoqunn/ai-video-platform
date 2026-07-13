@@ -11,6 +11,7 @@ import { videoJobStatusLabels, videoModelLabels } from "@/types/video-config";
 import type { SignedVideoResponse, VideoJob } from "@/types/video-jobs";
 
 const statusStyles = {
+  pending_confirmation: "bg-zinc-50 text-zinc-800",
   queued: "bg-amber-50 text-amber-800",
   processing: "bg-sky-50 text-sky-800",
   succeeded: "bg-teal-50 text-teal-800",

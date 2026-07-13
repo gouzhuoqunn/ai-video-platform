@@ -20,18 +20,18 @@ export const videoModels: VideoModelConfig[] = [
     durationSeconds: 5,
     resolution: "480p",
     creditCost: 5,
-    estimatedTime: "约1分钟",
+    estimatedTime: "约 3 分钟",
     supportsFirstFrame: false,
     available: true,
   },
   {
     key: "standard-video",
-    name: "标准视频模型",
+    name: "Wan2.2 TI2V-5B",
     type: "文生视频 / 图生视频",
     durationSeconds: 5,
     resolution: "720p",
     creditCost: 10,
-    estimatedTime: "约3分钟",
+    estimatedTime: "约 6 分钟",
     supportsFirstFrame: true,
     available: true,
   },
@@ -42,7 +42,7 @@ export const videoModels: VideoModelConfig[] = [
     durationSeconds: 5,
     resolution: "720p",
     creditCost: 20,
-    estimatedTime: "约5分钟",
+    estimatedTime: "约 12 分钟",
     supportsFirstFrame: true,
     available: false,
   },
@@ -57,6 +57,7 @@ export const videoModelLabels: Record<VideoModelKey, string> = {
 };
 
 export const videoJobStatusLabels: Record<VideoJobStatus, string> = {
+  pending_confirmation: "未生成",
   queued: "排队中",
   processing: "生成中",
   succeeded: "已完成",
@@ -65,9 +66,10 @@ export const videoJobStatusLabels: Record<VideoJobStatus, string> = {
 };
 
 export const videoJobStatusDescriptions: Record<VideoJobStatus, string> = {
-  queued: "任务正在等待Worker领取。",
-  processing: "Worker正在模拟处理任务。",
+  pending_confirmation: "尚未确认生成，Worker 不会领取。",
+  queued: "任务正在等待 Worker 领取。",
+  processing: "Worker 正在处理任务。",
   succeeded: "任务已完成，可以播放或下载。",
-  failed: "任务失败，已按规则退还积分。",
-  canceled: "任务已取消，已按规则退还积分。",
+  failed: "任务失败，按规则退款。",
+  canceled: "任务已取消，按规则退款。",
 };
