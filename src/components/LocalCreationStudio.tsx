@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import type { User } from "@supabase/supabase-js";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { VIDEO_JOB_SELECT_FIELDS } from "@/lib/video-jobs/fields";
@@ -411,6 +412,12 @@ export function LocalCreationStudio() {
             <h1 className="text-2xl font-bold">本地创作台</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-sm">
+            <Link className="rounded-md border border-stone-200 bg-white px-3 py-2 font-semibold text-stone-700" href="/generate/4090">
+              4090
+            </Link>
+            <Link className="rounded-md border border-stone-200 bg-white px-3 py-2 font-semibold text-stone-700" href="/generate/5090">
+              5090
+            </Link>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">未生成 {counts.pending_confirmation ?? 0}</span>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">排队 {counts.queued ?? 0}</span>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">GPU {session?.orderId ? "运行中" : "无"}</span>

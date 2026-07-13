@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "comfyui": {
+    "repository": "https://github.com/comfyanonymous/ComfyUI.git",
+    "commit": "da2608926eaf68fd532bba4e1ace3402c5d21399",
+    "bindHost": "127.0.0.1",
+    "port": 8188
+  },
+  "runtime": {
+    "includes": ["ComfyUI", "python-dependencies", "ffmpeg", "api-controller", "healthcheck", "bootstrap-entry"],
+    "excludes": ["model-weights", "user-files", "secrets", "ssh-private-keys", "signed-urls"],
+    "buildStatus": "planned"
+  }
+}
