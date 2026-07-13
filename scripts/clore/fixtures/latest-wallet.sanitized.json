@@ -24,11 +24,11 @@
   "balance_source": "direct USD-like wallet/API field",
   "planned_order_currency": "USD-Blockchain",
   "cheapest_compliant_5090": {
-    "server_id": "107713",
-    "usd_per_hour": 0.2916666666666667,
-    "six_hour_cost_usd": 1.75,
+    "server_id": "95538",
+    "usd_per_hour": 0.6245833333333334,
+    "six_hour_cost_usd": 3.7475000000000005,
     "balance_sufficient_for_6h": true,
-    "balance_margin_usd": 13.58
+    "balance_margin_usd": 11.5825
   },
   "balance_changes_made": false,
   "hidden_sensitive_fields": [

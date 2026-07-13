@@ -24,8 +24,11 @@ async function main() {
     cheapest_compliant_5090: cheapest
       ? {
           server_id: cheapest.serverId,
-          usd_per_hour: cheapest.priceUsdPerHour,
-          six_hour_cost_usd: cheapest.sixHourCostUsd,
+          base_usd_per_hour: cheapest.priceUsdPerHour,
+          effective_usd_per_hour: cheapest.effectivePriceUsdPerHour,
+          creation_fee_usd: cheapest.creationFeeUsd,
+          max_session_hours: cheapest.projectedSessionHours,
+          max_session_projected_total_usd: cheapest.projectedSessionCostUsd,
           balance_sufficient_for_6h: cheapest.balanceSufficientForSixHours,
           balance_margin_usd: cheapest.balanceMarginUsd,
         }

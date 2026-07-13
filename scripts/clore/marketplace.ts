@@ -1,5 +1,31 @@
 import type { CloreCandidate, CloreConfig, RawCloreServer } from "./types";
 
+export const CLORE_RENTER_FEE_RATE = 0.05;
+export const CLORE_CREATION_FEE_USD = 0.1;
+export const CLORE_DEFAULT_MAX_SESSION_HOURS = 380 / 60;
+
+export function computeCloreProjectedCost(baseHourlyUsd: number | null, sessionHours: number) {
+  if (baseHourlyUsd === null || !Number.isFinite(sessionHours) || sessionHours <= 0) {
+    return {
+      baseHourlyUsd,
+      effectiveHourlyUsd: null,
+      projectedTotalUsd: null,
+      renterFeeRate: CLORE_RENTER_FEE_RATE,
+      creationFeeUsd: CLORE_CREATION_FEE_USD,
+      sessionHours,
+    };
+  }
+  const effectiveHourlyUsd = baseHourlyUsd * (1 + CLORE_RENTER_FEE_RATE);
+  return {
+    baseHourlyUsd,
+    effectiveHourlyUsd,
+    projectedTotalUsd: CLORE_CREATION_FEE_USD + effectiveHourlyUsd * sessionHours,
+    renterFeeRate: CLORE_RENTER_FEE_RATE,
+    creationFeeUsd: CLORE_CREATION_FEE_USD,
+    sessionHours,
+  };
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
@@ -332,6 +358,7 @@ export function normalizeCloreServer(raw: RawCloreServer, config: CloreConfig): 
   const orderType = spot && !hasOnDemandPrice ? "spot" : (firstString(raw, ["order_type", "rental_type", "type"]) ?? "on-demand").toLowerCase();
   const priceUsdPerHour = price.value;
   const sixHourCostUsd = priceUsdPerHour === null ? null : priceUsdPerHour * config.assumedMinimumRentalHours;
+  const projected = computeCloreProjectedCost(priceUsdPerHour, CLORE_DEFAULT_MAX_SESSION_HOURS);
   const rawCurrency = price.originalCurrency ? [price.originalCurrency] : [];
   const gpu = getGpuName(raw);
   const gpuNormalizedName = normalizeGpuName(gpu);
@@ -373,6 +400,11 @@ export function normalizeCloreServer(raw: RawCloreServer, config: CloreConfig): 
     priceOriginalLabel: price.originalLabel,
     allowedCurrencies: rawCurrency,
     sixHourCostUsd,
+    effectivePriceUsdPerHour: projected.effectiveHourlyUsd,
+    projectedSessionHours: projected.sessionHours,
+    projectedSessionCostUsd: projected.projectedTotalUsd,
+    creationFeeUsd: projected.creationFeeUsd,
+    renterFeeRate: projected.renterFeeRate,
     balanceMarginUsd: null,
     balanceSufficientForSixHours: "unknown" as const,
     platformTotalPrice: nestedNumber(raw, [["price", "usd", "total"], ["price", "usd", "total_clore"]]),
@@ -462,9 +494,17 @@ export function summarizeCandidate(candidate: CloreCandidate) {
     original_price_currency: candidate.priceOriginalCurrency,
     original_price_unit: candidate.priceOriginalUnit,
     normalized_usd_per_hour: candidate.priceUsdPerHour === null ? null : Number(candidate.priceUsdPerHour.toFixed(6)),
+    base_usd_per_hour: candidate.priceUsdPerHour,
     on_demand_usd_per_hour: candidate.priceUsdPerHour,
+    effective_usd_per_hour:
+      candidate.effectivePriceUsdPerHour === null ? null : Number(candidate.effectivePriceUsdPerHour.toFixed(6)),
+    renter_fee_rate: candidate.renterFeeRate,
+    creation_fee_usd: candidate.creationFeeUsd,
     one_hour_cost_usd: candidate.priceUsdPerHour === null ? null : Number(candidate.priceUsdPerHour.toFixed(4)),
     six_hour_cost_usd: candidate.sixHourCostUsd === null ? null : Number(candidate.sixHourCostUsd.toFixed(4)),
+    max_session_hours: Number(candidate.projectedSessionHours.toFixed(4)),
+    max_session_projected_total_usd:
+      candidate.projectedSessionCostUsd === null ? null : Number(candidate.projectedSessionCostUsd.toFixed(4)),
     platform_total_price: candidate.platformTotalPrice,
     platform_total_price_status: candidate.platformTotalPrice === null ? "API not confirmed" : "provided by API",
     balance_margin_usd: candidate.balanceMarginUsd === null ? null : Number(candidate.balanceMarginUsd.toFixed(4)),
@@ -478,10 +518,10 @@ export function summarizeCandidate(candidate: CloreCandidate) {
 
 export function applyWalletBalance(candidates: CloreCandidate[], availableUsdBalance: number | null) {
   return candidates.map((candidate) => {
-    if (availableUsdBalance === null || candidate.sixHourCostUsd === null) {
+    if (availableUsdBalance === null || candidate.projectedSessionCostUsd === null) {
       return { ...candidate, balanceMarginUsd: null, balanceSufficientForSixHours: "unknown" as const };
     }
-    const balanceMarginUsd = availableUsdBalance - candidate.sixHourCostUsd;
+    const balanceMarginUsd = availableUsdBalance - candidate.projectedSessionCostUsd;
     return {
       ...candidate,
       balanceMarginUsd,

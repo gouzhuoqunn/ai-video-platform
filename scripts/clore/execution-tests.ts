@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { loadCloreConfig } from "./config";
 import { loadCloreExecutionConfig } from "./execution-config";
-import { buildCreateOrderBody, createCloreOrder, runCreateOrderPreflight } from "./order-execution";
+import { buildCreateOrderBody, createCloreOrder, runCreateOrderPreflight, validateCreatedOrderPricing } from "./order-execution";
 import { cancelCloreOrder } from "./cancel-execution";
 import { readActiveOrder } from "./order-state";
 import type { RawCloreServer } from "./types";
@@ -33,7 +33,6 @@ function mockServer(overrides: RawCloreServer = {}): RawCloreServer {
     supports_docker: true,
     supports_ssh: true,
     driver_compatible: true,
-    price: { usd: { total: 14.99 } },
     ...overrides,
   };
 }
@@ -73,7 +72,7 @@ async function main() {
       serverId: "95538",
       confirmedMaxPriceUsdPerHour: 0.7,
       queuedJobCount: 1,
-      marketplace: [mockServer({ price: { usd: { on_demand_usd: 14.99 } } })],
+      marketplace: [mockServer({ price_usd_per_hour: 0.68 })],
       availableUsdBalance: 10.99,
       config,
       execution,
@@ -81,9 +80,26 @@ async function main() {
       verifyWatchdogs: async () => undefined,
     }).then(
       () => {
-        throw new Error("missing all-in total should fail.");
+        throw new Error("effective hourly price above cap should fail.");
       },
-      (error) => assert(String(error.message).includes("all-in"), "unknown platform/all-in price must fail closed."),
+      (error) => assert(String(error.message).includes("hourly cap"), "effective hourly price must fail closed."),
+    );
+
+    await runCreateOrderPreflight({
+      serverId: "95538",
+      confirmedMaxPriceUsdPerHour: 0.7,
+      queuedJobCount: 1,
+      marketplace: [mockServer()],
+      availableUsdBalance: 4.7,
+      config,
+      execution,
+      verifyImage: async (image) => ({ image, exists: true, linuxAmd64: true, method: "mock" }),
+      verifyWatchdogs: async () => undefined,
+    }).then(
+      () => {
+        throw new Error("insufficient balance after projected fees should fail.");
+      },
+      (error) => assert(String(error.message).includes("reserve"), "projected total plus reserve must fit wallet."),
     );
 
     await runCreateOrderPreflight({
@@ -133,6 +149,24 @@ async function main() {
     assert(body.autossh_entrypoint === true, "create body must request Clore autossh entrypoint.");
     assert(body.ports["22"] === "tcp" && Object.keys(body.ports).length === 1, "create body must expose SSH only.");
     assert(!JSON.stringify(body).includes("CLORE_API_KEY"), "Clore API key must not enter create body.");
+    validateCreatedOrderPricing({
+      order: { price: 14.99, fee: 0.05, creationFee: 0.1, currency: "USD-Blockchain" },
+      expectedBaseDailyPrice: 14.99,
+    });
+    assert(
+      (() => {
+        try {
+          validateCreatedOrderPricing({
+            order: { price: 15.01, fee: 0.05, creationFee: 0.1, currency: "USD-Blockchain" },
+            expectedBaseDailyPrice: 14.99,
+          });
+          return false;
+        } catch {
+          return true;
+        }
+      })(),
+      "created order price increases must fail.",
+    );
 
     let createCalls = 0;
     const createResult = await createCloreOrder({
@@ -144,6 +178,21 @@ async function main() {
         createCalls += 1;
         return { id: "mock-order-1", status: "created" };
       },
+      readOrders: async () => [
+        {
+          orderId: "mock-order-1",
+          serverId: "95538",
+          status: "running",
+          currency: "USD-Blockchain",
+          price: 14.99,
+          fee: 0.05,
+          creationFee: 0.1,
+          spend: 0,
+          createdTimestamp: 0,
+          expired: false,
+          active: true,
+        },
+      ],
     });
     assert(createCalls === 1, "mock create_order should be called once.");
     assert(createResult.order_created, "mock create should produce an active order.");

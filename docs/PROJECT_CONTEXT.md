@@ -416,3 +416,16 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - The unsafe queued local_lab job was canceled through the normal `cancel_video_job` RPC path, and exactly one safe text-only `standard-video` first-test job was created.
 - Current blocker: Cloudflare accepted the Worker upload, R2 binding, and encrypted secret, but the Cron schedule deployment returned 403 on the Cloudflare schedules API. Until Cron succeeds and writes a fresh remote heartbeat, real Clore create remains blocked by the new preflight.
 - No Clore order was created, no SSH connection was opened, no Wan2.2 weights were downloaded, and no real inference was run in this patch.
+
+## 2026-07-13 Clore Pricing Gate Fix
+
+- Historical order `1949701` was checked through read-only `my_orders?return_completed=true` and saved as a sanitized fixture with only `id`, `si`, `currency`, `price`, `fee`, `creation_fee`, `spend`, `ct`, and `expired`.
+- Clore marketplace prices are treated as base prices before renter fees. The project now computes:
+  - `base_hourly = marketplace_on_demand_price_per_day / 24`
+  - `effective_hourly = base_hourly * 1.05`
+  - `projected_total = 0.10 creation_fee + effective_hourly * session_hours`
+- Real create preflight now requires `effective_hourly <= 0.70 USD`, `projected_total <= 4.50 USD`, and `wallet_balance - projected_total >= 1.00 USD`.
+- The Clore `required_price` field still uses the marketplace base day price and does not include the 5% renter fee or one-time creation fee.
+- After a future order is created, the guard validates live `my_orders` fields: price not increased, fee not above 5%, creation fee not above `0.10`, and currency exactly `USD-Blockchain`. A pricing guard failure attempts immediate cancellation.
+- Candidate summaries and local_lab order confirmation now show base hourly price, effective hourly price, one-time creation fee, and maximum-session projected total.
+- This pricing fix did not create a Clore order, SSH into a host, download a model, or push to GitHub.

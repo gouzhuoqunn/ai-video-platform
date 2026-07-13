@@ -92,9 +92,14 @@ function writePlan(plan: OrderPlan) {
     original_price_unit: plan.selected?.priceOriginalUnit ?? null,
     original_price_label: plan.selected?.priceOriginalLabel ?? null,
     normalized_usd_per_hour: plan.selected?.priceUsdPerHour ?? null,
+    effective_usd_per_hour: plan.selected?.effectivePriceUsdPerHour ?? null,
+    renter_fee_rate: plan.selected?.renterFeeRate ?? null,
+    creation_fee_usd: plan.selected?.creationFeeUsd ?? null,
     minimum_rental_hours: plan.minimumRentalHours,
     minimum_billing_source: minimumBillingConfirmed ? "marketplace_field" : "api_not_confirmed",
     one_hour_cost_usd: plan.selected?.priceUsdPerHour ?? null,
+    max_session_hours: plan.selected?.projectedSessionHours ?? null,
+    max_session_projected_total_usd: plan.selected?.projectedSessionCostUsd ?? null,
     six_hour_cost_usd: plan.selected?.sixHourCostUsd ?? null,
     platform_total_price: plan.selected?.platformTotalPrice ?? null,
     platform_total_price_status: plan.selected?.platformTotalPrice === null ? "api_not_confirmed" : "provided_by_api",
@@ -176,14 +181,25 @@ async function main() {
     selected: plan.selected ? summarizeCandidate(plan.selected) : null,
     estimated_costs: {
       one_hour_usd: plan.selected?.priceUsdPerHour ?? null,
+      effective_one_hour_usd: plan.selected?.effectivePriceUsdPerHour ?? null,
+      creation_fee_usd: plan.selected?.creationFeeUsd ?? null,
+      max_session_hours: plan.selected?.projectedSessionHours ?? null,
+      max_session_projected_total_usd:
+        plan.selected?.projectedSessionCostUsd === null || plan.selected?.projectedSessionCostUsd === undefined
+          ? null
+          : Number(plan.selected.projectedSessionCostUsd.toFixed(2)),
       six_hours_usd: plan.selected?.sixHourCostUsd === null || plan.selected?.sixHourCostUsd === undefined ? null : Number(plan.selected.sixHourCostUsd.toFixed(2)),
       available_usd_balance: plan.availableUsdBalance,
       usable_after_1_usd_reserve: plan.availableUsdBalance === null ? null : Number(Math.max(0, plan.availableUsdBalance - 1).toFixed(2)),
       balance_sufficient_for_6h: plan.selected?.balanceSufficientForSixHours ?? "unknown",
       theoretical_hours_from_balance:
-        plan.availableUsdBalance !== null && plan.selected?.priceUsdPerHour ? Number((plan.availableUsdBalance / plan.selected.priceUsdPerHour).toFixed(2)) : null,
+        plan.availableUsdBalance !== null && plan.selected?.effectivePriceUsdPerHour
+          ? Number(((Math.max(0, plan.availableUsdBalance - (plan.selected.creationFeeUsd ?? 0))) / plan.selected.effectivePriceUsdPerHour).toFixed(2))
+          : null,
       theoretical_hours_after_1_usd_reserve:
-        plan.availableUsdBalance !== null && plan.selected?.priceUsdPerHour ? Number((Math.max(0, plan.availableUsdBalance - 1) / plan.selected.priceUsdPerHour).toFixed(2)) : null,
+        plan.availableUsdBalance !== null && plan.selected?.effectivePriceUsdPerHour
+          ? Number((Math.max(0, plan.availableUsdBalance - 1 - (plan.selected.creationFeeUsd ?? 0)) / plan.selected.effectivePriceUsdPerHour).toFixed(2))
+          : null,
       two_six_hour_sessions_usd:
         plan.selected?.sixHourCostUsd === null || plan.selected?.sixHourCostUsd === undefined ? null : Number((plan.selected.sixHourCostUsd * 2).toFixed(2)),
       estimated_balance_after_two_6h_sessions:

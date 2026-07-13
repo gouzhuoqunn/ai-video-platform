@@ -68,6 +68,13 @@ export type CloreOrderSummary = {
   orderId: string | null;
   serverId: string | null;
   status: string | null;
+  currency: string | null;
+  price: number | null;
+  fee: number | null;
+  creationFee: number | null;
+  spend: number | null;
+  createdTimestamp: number | null;
+  expired: boolean | null;
   active: boolean;
 };
 
@@ -83,6 +90,13 @@ export function summarizeOrdersPayload(data: unknown): CloreOrderSummary[] {
       orderId: firstString(value, ["id", "order_id"]) ?? null,
       serverId: firstString(value, ["server_id", "renting_server", "si"]) ?? null,
       status,
+      currency: firstString(value, ["currency"]) ?? null,
+      price: firstNumber(value, ["price"]),
+      fee: firstNumber(value, ["fee"]),
+      creationFee: firstNumber(value, ["creation_fee"]),
+      spend: firstNumber(value, ["spend"]),
+      createdTimestamp: firstNumber(value, ["ct"]),
+      expired: typeof value.expired === "boolean" ? value.expired : null,
       active,
     };
   });

@@ -5,7 +5,7 @@ import { DEFAULT_DOCKER_IMAGE, PROJECT_TAG } from "./config";
 import type { loadCloreConfig } from "./config";
 import { verifyDockerImage } from "./docker-image";
 import { readLiveOrdersSummary, readWalletSummary } from "./live";
-import { applyWalletBalance, evaluateMarketplace } from "./marketplace";
+import { CLORE_CREATION_FEE_USD, CLORE_RENTER_FEE_RATE, computeCloreProjectedCost, applyWalletBalance, evaluateMarketplace } from "./marketplace";
 import { inspectSshPublicKey } from "./ssh";
 import type { CloreCandidate, RawCloreServer } from "./types";
 import { acquireOrderCreateLock, readActiveOrder, writeActiveOrder } from "./order-state";
@@ -40,6 +40,29 @@ export type CreateOrderPreflightInput = {
   verifyImage?: typeof verifyDockerImage;
   verifyWatchdogs?: () => Promise<void> | void;
 };
+
+export function validateCreatedOrderPricing(input: {
+  order: {
+    price: number | null;
+    fee: number | null;
+    creationFee: number | null;
+    currency: string | null;
+  };
+  expectedBaseDailyPrice: number | null;
+}) {
+  if (input.order.currency !== "USD-Blockchain") {
+    throw new Error("Created Clore order currency is not USD-Blockchain.");
+  }
+  if (input.expectedBaseDailyPrice !== null && input.order.price !== null && input.order.price > input.expectedBaseDailyPrice) {
+    throw new Error("Created Clore order price is higher than the marketplace base price.");
+  }
+  if (input.order.fee !== null && input.order.fee > CLORE_RENTER_FEE_RATE) {
+    throw new Error("Created Clore order fee is higher than the expected renter fee.");
+  }
+  if (input.order.creationFee !== null && input.order.creationFee > CLORE_CREATION_FEE_USD) {
+    throw new Error("Created Clore order creation_fee is higher than 0.10 USD.");
+  }
+}
 
 export function buildCreateOrderBody(input: {
   serverId: string;
@@ -123,16 +146,14 @@ export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) 
   if (selected.priceUsdPerHour === null || selected.priceUsdPerHour > input.confirmedMaxPriceUsdPerHour) {
     throw new Error("Current price exceeds the user's confirmed maximum.");
   }
-  if (selected.priceUsdPerHour > input.execution.maxGpuPricePerHour) {
+  const projected = computeCloreProjectedCost(selected.priceUsdPerHour, input.execution.hardSessionLimitMinutes / 60);
+  if (projected.effectiveHourlyUsd === null || projected.effectiveHourlyUsd > input.execution.maxGpuPricePerHour) {
     throw new Error("Current price exceeds the system hourly cap.");
   }
-  if ((selected.sixHourCostUsd ?? Number.POSITIVE_INFINITY) > input.execution.firstSessionMaxBudgetUsd) {
-    throw new Error("Six-hour planning cost exceeds the first-session budget.");
+  if ((projected.projectedTotalUsd ?? Number.POSITIVE_INFINITY) > input.execution.firstSessionMaxBudgetUsd) {
+    throw new Error("Projected Clore total cost exceeds the first-session budget.");
   }
-  if (selected.platformTotalPrice === null) {
-    throw new Error("Clore all-in/platform total price is not confirmed; refusing real create_order.");
-  }
-  if (input.availableUsdBalance === null || input.availableUsdBalance - (selected.sixHourCostUsd ?? 0) < input.execution.balanceReserveUsd) {
+  if (input.availableUsdBalance === null || input.availableUsdBalance - (projected.projectedTotalUsd ?? 0) < input.execution.balanceReserveUsd) {
     throw new Error("Wallet balance is insufficient after reserve.");
   }
 
@@ -164,6 +185,7 @@ export async function createCloreOrder(input: {
   requestBody: CreateOrderRequest;
   requestId?: string;
   request?: (body: CreateOrderRequest) => Promise<unknown>;
+  readOrders?: typeof readLiveOrdersSummary;
 }) {
   if (!input.execution.enabled) {
     throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false.");
@@ -182,12 +204,34 @@ export async function createCloreOrder(input: {
           body: JSON.stringify(input.requestBody),
         });
     const created = summarizeCreatedOrder(response);
-    const liveOrders = await readLiveOrdersSummary(input.config);
+    const liveOrders = await (input.readOrders ?? readLiveOrdersSummary)(input.config);
     const activeLiveOrders = liveOrders.filter((order) => order.active);
     const matchingLiveOrder =
       activeLiveOrders.find((order) => order.serverId === input.candidate.serverId && order.orderId) ??
       (activeLiveOrders.length === 1 && activeLiveOrders[0].orderId ? activeLiveOrders[0] : null);
     const orderId = matchingLiveOrder?.orderId ?? created.order_id;
+    if (matchingLiveOrder) {
+      try {
+        validateCreatedOrderPricing({
+          order: {
+            price: matchingLiveOrder.price,
+            fee: matchingLiveOrder.fee,
+            creationFee: matchingLiveOrder.creationFee,
+            currency: matchingLiveOrder.currency,
+          },
+          expectedBaseDailyPrice:
+            input.candidate.priceOriginalCurrency === "USD" && input.candidate.priceOriginalUnit === "day"
+              ? input.candidate.priceOriginalAmount
+              : null,
+        });
+      } catch (error) {
+        await cloreRequest<unknown>(input.config, "/cancel_order", {
+          method: "POST",
+          body: JSON.stringify({ id: orderId, issue: "pricing_guard_failed" }),
+        });
+        throw error;
+      }
+    }
     writeActiveOrder({
       order_id: orderId,
       server_id: input.candidate.serverId,

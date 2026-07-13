@@ -40,6 +40,11 @@ type CloreCandidateSummary = {
   country: string | null;
   original_on_demand_price: string | null;
   normalized_usd_per_hour: number | null;
+  base_usd_per_hour?: number | null;
+  effective_usd_per_hour?: number | null;
+  creation_fee_usd?: number | null;
+  max_session_hours?: number | null;
+  max_session_projected_total_usd?: number | null;
   six_hour_cost_usd: number | null;
   currently_rentable: boolean;
   risk_tier: "A" | "B" | "reject";
@@ -136,6 +141,10 @@ type OrderPlan = {
   nonce: string;
   server_id: string;
   max_price_usd_per_hour: number;
+  base_price_usd_per_hour?: number | null;
+  effective_price_usd_per_hour?: number | null;
+  creation_fee_usd?: number | null;
+  max_session_projected_total_usd?: number | null;
   expires_at: string;
   required_confirmation_text: string;
   execution_limits?: {
@@ -729,9 +738,12 @@ export function LocalCreationStudio() {
                       </div>
                       <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-stone-700">
                         <span>{candidate.gpu}</span>
-                        <span>{formatMoney(candidate.normalized_usd_per_hour)}/h</span>
+                        <span>基础 {formatMoney(candidate.base_usd_per_hour ?? candidate.normalized_usd_per_hour)}/h</span>
+                        <span>含费 {formatMoney(candidate.effective_usd_per_hour)}/h</span>
                         <span>原价 {candidate.original_on_demand_price ?? "未知"}</span>
-                        <span>6h {formatMoney(candidate.six_hour_cost_usd)}</span>
+                        <span>创建费 {formatMoney(candidate.creation_fee_usd)}</span>
+                        <span>最长 {formatMoney(candidate.max_session_projected_total_usd)}</span>
+                        <span>6h基础 {formatMoney(candidate.six_hour_cost_usd)}</span>
                         <span>API 显存 {formatNumber(candidate.gpu_memory_raw_value, candidate.gpu_memory_raw_unit ? ` ${candidate.gpu_memory_raw_unit}` : "")}</span>
                         <span>标称 32GB</span>
                         <span>RAM {formatNumber(candidate.ram_gb, "GB")}</span>
@@ -767,7 +779,10 @@ export function LocalCreationStudio() {
                 <p>保留 1 美元后可用：{formatMoney(Math.max(0, (wallet?.available_usd_balance ?? 0) - 1))}</p>
                 <p>价格上限：{formatMoney(candidatePayload?.filters?.max_usd_per_hour)}</p>
                 <p>可租状态：{selectedCandidate?.currently_rentable ? "可租" : "未知或不可租"}</p>
-                <p>平台总价：{selectedCandidate?.platform_total_price_status ?? "API 未确认"}</p>
+                <p>基础小时价：{formatMoney(selectedCandidate?.base_usd_per_hour ?? selectedCandidate?.normalized_usd_per_hour)}</p>
+                <p>含租客费小时价：{formatMoney(selectedCandidate?.effective_usd_per_hour)}</p>
+                <p>一次性创建费：{formatMoney(selectedCandidate?.creation_fee_usd)}</p>
+                <p>最长会话预计总费用：{formatMoney(selectedCandidate?.max_session_projected_total_usd)}</p>
                 {confirmMessage ? <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-900">{confirmMessage}</p> : null}
                 <button className="mt-3 w-full rounded-md bg-stone-900 px-3 py-2 font-bold text-white disabled:bg-stone-400" disabled={!selectedCandidate} onClick={() => void createPlan()} type="button">
                   启动GPU会话

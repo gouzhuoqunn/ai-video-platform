@@ -60,6 +60,11 @@ export type CloreCandidate = {
   priceOriginalLabel: string | null;
   allowedCurrencies: string[];
   sixHourCostUsd: number | null;
+  effectivePriceUsdPerHour: number | null;
+  projectedSessionHours: number;
+  projectedSessionCostUsd: number | null;
+  creationFeeUsd: number;
+  renterFeeRate: number;
   balanceMarginUsd: number | null;
   balanceSufficientForSixHours: boolean | "unknown";
   platformTotalPrice: number | null;

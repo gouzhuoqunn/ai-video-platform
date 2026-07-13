@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { loadCloreConfig } from "../../../scripts/clore/config";
 import { readLiveMarketplace, readWalletSummary } from "../../../scripts/clore/live";
-import { applyWalletBalance, evaluateMarketplace, summarizeCandidate } from "../../../scripts/clore/marketplace";
+import { applyWalletBalance, computeCloreProjectedCost, evaluateMarketplace, summarizeCandidate } from "../../../scripts/clore/marketplace";
 import { stopSessionDryRun } from "../../../scripts/clore/session-orchestrator";
 import { readSessionState } from "../../../scripts/clore/session-state";
 import type { RawCloreServer } from "../../../scripts/clore/types";
@@ -25,6 +25,9 @@ type StoredNonce = {
   hash: string;
   serverId: string;
   maxPriceUsdPerHour: number;
+  effectivePriceUsdPerHour: number | null;
+  creationFeeUsd: number;
+  projectedTotalUsd: number | null;
   expiresAt: string;
   usedAt: string | null;
 };
@@ -50,8 +53,20 @@ function formatPriceForConfirmation(price: number) {
   return Number(price.toFixed(6)).toString();
 }
 
-function expectedConfirmationText(serverId: string, maxPriceUsdPerHour: number) {
-  return `确认租用 ${serverId}，最高每小时 ${formatPriceForConfirmation(maxPriceUsdPerHour)} 美元`;
+function expectedConfirmationText(input: {
+  serverId: string;
+  basePriceUsdPerHour: number;
+  effectivePriceUsdPerHour: number | null;
+  creationFeeUsd: number;
+  projectedTotalUsd: number | null;
+}) {
+  return [
+    `确认租用 ${input.serverId}`,
+    `基础每小时 ${formatPriceForConfirmation(input.basePriceUsdPerHour)} 美元`,
+    `含租客费每小时 ${formatPriceForConfirmation(input.effectivePriceUsdPerHour ?? 0)} 美元`,
+    `创建费 ${formatPriceForConfirmation(input.creationFeeUsd)} 美元`,
+    `最长预计 ${formatPriceForConfirmation(input.projectedTotalUsd ?? 0)} 美元`,
+  ].join("，");
 }
 
 function readNonceStore() {
@@ -238,6 +253,7 @@ export function createOrderPlan(serverId: string, maxPriceUsdPerHour: number) {
     throw new Error("Invalid server id or max price.");
   }
   const execution = loadCloreExecutionConfig();
+  const projected = computeCloreProjectedCost(maxPriceUsdPerHour, execution.hardSessionLimitMinutes / 60);
 
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ORDER_PLAN_TTL_SECONDS * 1000);
@@ -246,6 +262,9 @@ export function createOrderPlan(serverId: string, maxPriceUsdPerHour: number) {
     hash: hashNonce(nonce),
     serverId,
     maxPriceUsdPerHour,
+    effectivePriceUsdPerHour: projected.effectiveHourlyUsd,
+    creationFeeUsd: projected.creationFeeUsd,
+    projectedTotalUsd: projected.projectedTotalUsd,
     expiresAt: expiresAt.toISOString(),
     usedAt: null,
   };
@@ -256,8 +275,18 @@ export function createOrderPlan(serverId: string, maxPriceUsdPerHour: number) {
     nonce,
     server_id: serverId,
     max_price_usd_per_hour: maxPriceUsdPerHour,
+    base_price_usd_per_hour: maxPriceUsdPerHour,
+    effective_price_usd_per_hour: stored.effectivePriceUsdPerHour,
+    creation_fee_usd: stored.creationFeeUsd,
+    max_session_projected_total_usd: stored.projectedTotalUsd,
     expires_at: stored.expiresAt,
-    required_confirmation_text: expectedConfirmationText(serverId, maxPriceUsdPerHour),
+    required_confirmation_text: expectedConfirmationText({
+      serverId,
+      basePriceUsdPerHour: maxPriceUsdPerHour,
+      effectivePriceUsdPerHour: projected.effectiveHourlyUsd,
+      creationFeeUsd: projected.creationFeeUsd,
+      projectedTotalUsd: projected.projectedTotalUsd,
+    }),
     execution_limits: {
       first_session_max_budget_usd: execution.firstSessionMaxBudgetUsd,
       balance_reserve_usd: execution.balanceReserveUsd,
