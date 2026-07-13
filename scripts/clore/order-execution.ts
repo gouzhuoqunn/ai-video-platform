@@ -85,6 +85,7 @@ export function buildCreateOrderBody(input: {
       WAN_MODEL_REVISION,
       WAN_CODE_REVISION,
       FIRST_SESSION_MAX_CLAIMS: "1",
+      START_GPU_WORKER: "false",
       HF_HUB_DISABLE_TELEMETRY: "1",
       DO_NOT_TRACK: "1",
     },

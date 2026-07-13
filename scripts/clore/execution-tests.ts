@@ -148,6 +148,7 @@ async function main() {
     assert(body.required_price === 14.99, "create body should preserve Clore USD/day required_price when provided.");
     assert(body.autossh_entrypoint === true, "create body must request Clore autossh entrypoint.");
     assert(body.ports["22"] === "tcp" && Object.keys(body.ports).length === 1, "create body must expose SSH only.");
+    assert(body.env.START_GPU_WORKER === "false", "create body must keep the Worker disabled until SSH bootstrap starts it explicitly.");
     assert(!JSON.stringify(body).includes("CLORE_API_KEY"), "Clore API key must not enter create body.");
     validateCreatedOrderPricing({
       order: { price: 14.99, fee: 0.05, creationFee: 0.1, currency: "USD-Blockchain" },
