@@ -437,3 +437,10 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - The audit found a deterministic runtime-image startup issue: `gpu-worker/entrypoint.sh` previously started `worker.py` immediately, while the Clore create order intentionally did not send limited Worker credentials at order time. Missing Worker env could make the container exit before SSH/bootstrap stabilized.
 - The entrypoint now creates workspace directories, runs any Clore-provided bootstrap command, and then stays alive for SSH/bootstrap when Worker credentials are absent. It starts the Worker only when `START_GPU_WORKER` is true or the limited Worker env is present.
 - `runtime-image:test`, `clore:execution:test`, `clore:ssh:test`, and `typecheck` passed after the fix.
+
+## 2026-07-13 Runtime Image SSH Bootstrap Verification
+
+- A new GHCR runtime image digest was published from the SSH bootstrap fix: `ghcr.io/gouzhuoqunn/wan22-runtime@sha256:4e3dd6d2610c33ab2b260e970e4a9288043dc2c762cb1b8902b6712cfdfaa96c`.
+- GitHub Actions run `29260394649` verified the existing digest without rebuilding: build/push was skipped, anonymous GHCR access worked, `linux/amd64` was present, `Entrypoint` remained `/app/entrypoint.sh`, the bootstrap marker was created, the container was still running after 30 seconds, and `docker top` did not show `python /app/worker.py`.
+- Local ignored runtime configuration now points `CLORE_DOCKER_IMAGE` at the new pinned digest. The old digest must not be used for future real Clore create attempts.
+- This verification did not create a Clore order, open SSH, download Wan2.2, or generate a video.
