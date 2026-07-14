@@ -27,6 +27,13 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def profile_sha256(profile: dict[str, Any]) -> str:
+    canonical = dict(profile)
+    canonical.pop("profileSha256", None)
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def profile_path(name: str) -> Path:
     normalized = name.replace("_", "-")
     return PROFILE_DIR / f"{normalized}.json"
@@ -38,6 +45,11 @@ def load_profile(name: str) -> dict[str, Any]:
         profile = json.load(handle)
     if profile.get("schemaVersion") != 1:
         raise RuntimeError(f"unsupported node profile schema: {path}")
+    expected_profile_sha = profile.get("profileSha256")
+    if expected_profile_sha and profile_sha256(profile) != expected_profile_sha:
+        raise RuntimeError(f"node profile sha256 mismatch: {path}")
+    if profile.get("status") == "unverified":
+        raise RuntimeError(f"node profile is unverified and cannot be used: {profile.get('profile')}")
     return profile
 
 
@@ -59,6 +71,54 @@ def verify_profile_inputs(profile: dict[str, Any]) -> None:
             raise RuntimeError(f"source audit sha256 mismatch: expected {expected_audit}, got {actual}")
 
 
+def expected_arg_value(argv: list[str], flag: str, default: str) -> str:
+    if flag not in argv:
+        return default
+    index = argv.index(flag)
+    if index + 1 >= len(argv):
+        raise RuntimeError(f"missing value for {flag}")
+    return argv[index + 1]
+
+
+def initialize_comfy_args(comfy_args: list[str]) -> bool:
+    sys.path.insert(0, str(COMFY_DIR))
+    os.chdir(COMFY_DIR)
+    sys.argv = [str(COMFY_DIR / "main.py"), *comfy_args]
+
+    import comfy.options  # type: ignore
+
+    comfy.options.enable_args_parsing()
+    from comfy.cli_args import args as parsed_args  # type: ignore
+
+    require_cpu = os.environ.get("COMFY_RUNTIME_MODE") == "smoke_cpu" or "--cpu" in comfy_args
+    expected_listen = expected_arg_value(comfy_args, "--listen", "127.0.0.1")
+    expected_port = int(expected_arg_value(comfy_args, "--port", "8188"))
+
+    if require_cpu and parsed_args.cpu is not True:
+        raise RuntimeError("ComfyUI args.cpu was not true before importing nodes")
+    if parsed_args.listen != expected_listen:
+        raise RuntimeError(f"ComfyUI args.listen mismatch: expected {expected_listen}, got {parsed_args.listen}")
+    if int(parsed_args.port) != expected_port:
+        raise RuntimeError(f"ComfyUI args.port mismatch: expected {expected_port}, got {parsed_args.port}")
+
+    log(
+        "comfy_args_ready "
+        f"cpu={parsed_args.cpu} listen={parsed_args.listen} port={parsed_args.port}"
+    )
+    return require_cpu
+
+
+def verify_cpu_runtime_state() -> None:
+    import comfy.model_management as model_management  # type: ignore
+
+    if model_management.cpu_state != model_management.CPUState.CPU:
+        raise RuntimeError(f"ComfyUI CPU state mismatch: {model_management.cpu_state}")
+    device = model_management.get_torch_device()
+    if getattr(device, "type", None) != "cpu":
+        raise RuntimeError(f"ComfyUI torch device mismatch: {device}")
+    log("comfy_cpu_state=CPU torch_device=cpu")
+
+
 def load_builtin_extra(nodes_module: Any, relative_file: str) -> None:
     path = COMFY_DIR / relative_file
     if not path.exists():
@@ -78,12 +138,6 @@ def load_builtin_extra(nodes_module: Any, relative_file: str) -> None:
 
 
 def patch_node_profile(profile: dict[str, Any]) -> None:
-    if profile.get("useComfyDefaultBuiltinExtras") is True:
-        log(f"node_profile={profile.get('profile')} builtin_extra_mode=comfy_default")
-        return
-
-    sys.path.insert(0, str(COMFY_DIR))
-    os.chdir(COMFY_DIR)
     import nodes  # type: ignore
 
     builtin_files = list(profile.get("builtinExtraFiles", []))
@@ -102,6 +156,8 @@ def patch_node_profile(profile: dict[str, Any]) -> None:
     log(
         "node_profile="
         + str(profile.get("profile"))
+        + " profile_sha256="
+        + str(profile.get("profileSha256", ""))
         + " workflow_manifest_sha256="
         + str(profile.get("workflowManifestSha256", ""))
         + " source_audit_sha256="
@@ -118,6 +174,12 @@ def main() -> int:
 
     profile = load_profile(args.node_profile)
     verify_profile_inputs(profile)
+    require_cpu = initialize_comfy_args(comfy_args)
+    if require_cpu:
+        # Importing nodes imports model_management; args.cpu must already be active.
+        import nodes  # noqa: F401  # type: ignore
+
+        verify_cpu_runtime_state()
     patch_node_profile(profile)
 
     sys.argv = [str(COMFY_DIR / "main.py"), *comfy_args]

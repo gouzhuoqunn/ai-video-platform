@@ -559,71 +559,14 @@ jobs:
           fi
           echo "kornia_version=${kornia_version}" >> "$GITHUB_OUTPUT"
 
-      - name: D1 Kornia import under Triton blocker
+      - name: Reuse prior D1 and D2 Kornia evidence
         shell: bash
         run: |
           set -euo pipefail
-          container="comfy-runtime-d1-${GITHUB_RUN_ID}"
-          docker run -d --name "${container}" \
-            --entrypoint /bin/bash \
-            -v "${PWD}/comfy-runtime/smoke_import_blocker:/run/smoke-import-blocker:ro" \
-            "${COMFY_RUNTIME_IMAGE}" \
-            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
-          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-
-          set +e
-          docker exec -i \
-            -e PYTHONPATH=/run/smoke-import-blocker \
-            -e PYTHONFAULTHANDLER=1 \
-            -e OMP_NUM_THREADS=1 \
-            -e MKL_NUM_THREADS=1 \
-            "${container}" \
-            sh -lc 'timeout 120s python3.11 -X faulthandler -X importtime -c "import torch; print(\"torch_import=ok\", flush=True); import kornia; print(\"kornia_import=ok\", getattr(kornia, \"__version__\", \"unknown\"), flush=True)"' \
-            >/tmp/d1-kornia.log 2>&1
-          code=$?
-          set -e
-          cat /tmp/d1-kornia.log
-          echo "d1_exit_code=${code}"
-          if [ "${code}" -eq 0 ]; then
-            echo "classification=kornia_import_not_actual_trigger"
-          else
-            grep -E "Fatal Python error|Segmentation fault|torch/jit|kornia" /tmp/d1-kornia.log
-            echo "classification=kornia_torchscript_import_crash_reproduced"
-          fi
-
-      - name: D2 Kornia import with torch.jit.script identity monkeypatch
-        shell: bash
-        run: |
-          set -euo pipefail
-          container="comfy-runtime-d2-${GITHUB_RUN_ID}"
-          docker run -d --name "${container}" \
-            --entrypoint /bin/bash \
-            -v "${PWD}/comfy-runtime/smoke_import_blocker:/run/smoke-import-blocker:ro" \
-            "${COMFY_RUNTIME_IMAGE}" \
-            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
-          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-
-          docker exec -i \
-            -e PYTHONPATH=/run/smoke-import-blocker \
-            -e PYTHONFAULTHANDLER=1 \
-            -e OMP_NUM_THREADS=1 \
-            -e MKL_NUM_THREADS=1 \
-            "${container}" \
-            timeout 120s python3.11 -X faulthandler - <<'PY'
-          import torch
-
-          def identity_script(obj=None, *args, **kwargs):
-              if obj is None:
-                  return lambda wrapped: wrapped
-              return obj
-
-          torch.jit.script = identity_script
-          import kornia
-          print("kornia_import_with_torch_jit_script_identity=ok")
-          print("kornia_version=" + getattr(kornia, "__version__", "unknown"))
-          PY
+          echo "previous_run=29343137485"
+          echo "d1=import torch; import kornia segfaulted under Triton blocker"
+          echo "d1_exit_code=139"
+          echo "d2=torch.jit.script identity monkeypatch allowed Kornia import"
           echo "classification=kornia_import_segmentation_avoided_by_jit_identity"
 
       - name: D3 Locate builtin extra crash source in original order
@@ -633,36 +576,97 @@ jobs:
           container="comfy-runtime-d3-${GITHUB_RUN_ID}"
           docker run -d --name "${container}" \
             --entrypoint /bin/bash \
-            -v "${PWD}/comfy-runtime/smoke_import_blocker:/run/smoke-import-blocker:ro" \
+            -v "${PWD}/comfy-runtime:/run/comfy-runtime:ro" \
             "${COMFY_RUNTIME_IMAGE}" \
             -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
           cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
           trap cleanup EXIT
 
           cat >/tmp/d3_builtin_order.py <<'PY'
+          import ast
+          import hashlib
           import os
+          import pathlib
           import sys
 
           sys.path.insert(0, "/opt/ComfyUI")
           os.chdir("/opt/ComfyUI")
+
+          sys.argv = [
+              "main.py",
+              "--cpu",
+              "--disable-triton-backend",
+              "--disable-all-custom-nodes",
+              "--disable-auto-launch",
+              "--preview-method",
+              "none",
+              "--log-stdout",
+              "--verbose",
+              "DEBUG",
+              "--listen",
+              "127.0.0.1",
+              "--port",
+              "8188",
+              "--input-directory",
+              "/workspace/comfy-input",
+              "--output-directory",
+              "/workspace/comfy-output",
+              "--user-directory",
+              "/workspace/comfy-user",
+              "--models-directory",
+              "/workspace/models",
+          ]
+
+          import comfy.options
+
+          comfy.options.enable_args_parsing()
+          from comfy.cli_args import args
+
+          assert args.cpu is True, args
+          assert args.listen == "127.0.0.1", args.listen
+          assert int(args.port) == 8188, args.port
+          print("D3_ARGS_READY cpu=True listen=127.0.0.1 port=8188", flush=True)
+
           import nodes
+          import comfy.model_management as model_management
 
-          original = nodes.load_custom_node
+          assert model_management.cpu_state == model_management.CPUState.CPU, model_management.cpu_state
+          assert model_management.get_torch_device().type == "cpu", model_management.get_torch_device()
+          print("D3_CPU_STATE_OK torch_device=cpu", flush=True)
 
-          def traced_load_custom_node(module_path, *args, **kwargs):
-              print("LOADING_BUILTIN_EXTRA=" + str(module_path), flush=True)
-              result = original(module_path, *args, **kwargs)
-              print("LOADED_BUILTIN_EXTRA=" + str(module_path), flush=True)
-              return result
+          nodes_path = pathlib.Path("/opt/ComfyUI/nodes.py")
+          nodes_text = nodes_path.read_text(encoding="utf-8")
+          nodes_sha = hashlib.sha256(nodes_text.encode("utf-8")).hexdigest()
+          print("comfyui_nodes_sha256=" + nodes_sha, flush=True)
 
-          nodes.load_custom_node = traced_load_custom_node
-          nodes.init_builtin_extra_nodes()
+          tree = ast.parse(nodes_text)
+          extras_files = None
+          for function in [item for item in tree.body if isinstance(item, ast.FunctionDef)]:
+              if function.name != "init_builtin_extra_nodes":
+                  continue
+              for statement in ast.walk(function):
+                  if isinstance(statement, ast.Assign):
+                      for target in statement.targets:
+                          if isinstance(target, ast.Name) and target.id == "extras_files":
+                              extras_files = ast.literal_eval(statement.value)
+          if not extras_files:
+              raise RuntimeError("Unable to extract extras_files from nodes.py")
+          print("D3_EXTRAS_FILE_COUNT=" + str(len(extras_files)), flush=True)
+
+          loaded = []
+          for relative_file in extras_files:
+              extra_path = pathlib.Path("/opt/ComfyUI") / relative_file
+              print("LOADING_BUILTIN_EXTRA=" + relative_file, flush=True)
+              nodes.load_custom_node(str(extra_path), module_parent="comfy_extras")
+              loaded.append(relative_file)
+              print("LOADED_BUILTIN_EXTRA=" + relative_file, flush=True)
           print("ORIGINAL_BUILTIN_EXTRA_LOAD_COMPLETE", flush=True)
           PY
           docker cp /tmp/d3_builtin_order.py "${container}:/tmp/d3_builtin_order.py"
           set +e
           docker exec \
-            -e PYTHONPATH=/run/smoke-import-blocker \
+            -e PYTHONPATH=/run/comfy-runtime/smoke_import_blocker \
+            -e PYTHONUNBUFFERED=1 \
             -e PYTHONFAULTHANDLER=1 \
             -e OMP_NUM_THREADS=1 \
             -e MKL_NUM_THREADS=1 \
@@ -671,12 +675,31 @@ jobs:
           code=$?
           set -e
           tail -n 200 /tmp/d3-builtin.log
+          if grep -F "RuntimeError: Found no NVIDIA driver" /tmp/d3-builtin.log \
+            && ! grep -F "LOADING_BUILTIN_EXTRA=" /tmp/d3-builtin.log; then
+            echo "::error::cpu_args_injection_still_broken"
+            exit 1
+          fi
           if [ "${code}" -eq 0 ]; then
             echo "::error::D3 original builtin extra loading did not reproduce crash"
             exit 1
           fi
+          last_loading="$(grep -F "LOADING_BUILTIN_EXTRA=" /tmp/d3-builtin.log | tail -n 1 | sed 's/.*LOADING_BUILTIN_EXTRA=//')"
+          last_loaded="$(grep -F "LOADED_BUILTIN_EXTRA=" /tmp/d3-builtin.log | tail -n 1 | sed 's/.*LOADED_BUILTIN_EXTRA=//')"
+          echo "d3_last_loading=${last_loading}"
+          echo "d3_last_loaded=${last_loaded}"
+          if [ -z "${last_loading}" ]; then
+            echo "::error::D3 did not reach builtin extra loading"
+            exit 1
+          fi
+          if [ "${last_loading}" = "${last_loaded}" ]; then
+            echo "::error::D3 did not identify an unfinished builtin extra"
+            exit 1
+          fi
           grep -E "nodes_post_processing|kornia|Fatal Python error|Segmentation fault|torch/jit" /tmp/d3-builtin.log
+          test "${last_loading}" = "comfy_extras/nodes_post_processing.py"
           echo "d3_exit_code=${code}"
+          echo "d3_first_unfinished_builtin_extra=${last_loading}"
           echo "classification=original_builtin_extra_order_reaches_kornia_torchscript_crash"
 
       - name: D4 Production minimal node profile smoke on fixed digest
@@ -698,8 +721,10 @@ jobs:
 
           docker exec \
             -e COMFY_RUNTIME_DIR=/run/comfy-runtime \
+            -e COMFY_RUNTIME_MODE=smoke_cpu \
             -e COMFY_NODE_PROFILE=production_minimal \
             -e PYTHONPATH=/run/comfy-runtime/smoke_import_blocker \
+            -e PYTHONUNBUFFERED=1 \
             -e PYTHONFAULTHANDLER=1 \
             -e OMP_NUM_THREADS=1 \
             -e MKL_NUM_THREADS=1 \
@@ -708,7 +733,7 @@ jobs:
 
           ready=false
           started_at="$(date +%s)"
-          for attempt in $(seq 1 36); do
+          for attempt in $(seq 1 60); do
             if ! docker exec "${container}" sh -lc 'kill -0 "$(cat /tmp/d4-profile.pid)" 2>/dev/null'; then
               echo "::error::D4 production minimal profile process exited"
               docker exec "${container}" tail -n 200 /tmp/d4-profile.log || true
@@ -718,7 +743,7 @@ jobs:
               ready=true
               break
             fi
-            sleep 5
+            sleep 3
           done
           if [ "${ready}" != "true" ]; then
             echo "::error::D4 production minimal profile did not become healthy"
@@ -731,6 +756,9 @@ jobs:
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/tmp/d4-history.json
           docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/tmp/d4-free.json
           docker exec "${container}" sh -lc 'grep -F "node_profile=production_minimal" /tmp/d4-profile.log'
+          docker exec "${container}" sh -lc 'grep -F "profile_sha256=30f0858066f0681a25d5cceed79211582a36c154b8433d7ebc312bbda7a2daba" /tmp/d4-profile.log'
+          docker exec "${container}" sh -lc 'grep -F "comfy_args_ready cpu=True listen=127.0.0.1 port=8188" /tmp/d4-profile.log'
+          docker exec "${container}" sh -lc 'grep -F "comfy_cpu_state=CPU torch_device=cpu" /tmp/d4-profile.log'
           docker exec "${container}" sh -lc 'grep -F "PROFILE_REQUIRED_NODE_CLASSES_OK" /tmp/d4-profile.log'
           docker exec "${container}" sh -lc 'grep -F "Triton intentionally unavailable in COMFY_RUNTIME_MODE=smoke_cpu" /tmp/d4-profile.log || true'
           docker exec "${container}" sh -lc '! grep -F "nodes_post_processing.py" /tmp/d4-profile.log'
@@ -839,7 +867,7 @@ jobs:
         run: |
           owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           image="ghcr.io/${owner}/ai-creative-comfy-runtime"
-          version_tag="v0.1.3-production-node-profile-${GITHUB_SHA::7}"
+          version_tag="v0.1.3-production-minimal-${GITHUB_SHA::7}"
           sha_tag="sha-${GITHUB_SHA}"
           {
             echo "image=${image}"

@@ -56,6 +56,8 @@ function main() {
   assert.match(launcher, /production_minimal/);
   assert.match(launcher, /init_profile_builtin_extra_nodes/);
   assert.match(launcher, /PROFILE_REQUIRED_NODE_CLASSES_OK/);
+  assert.match(launcher, /enable_args_parsing/);
+  assert.match(launcher, /comfy_cpu_state=CPU/);
 
   const controller = read("comfy-runtime/controller.py");
   assert.match(controller, /\/healthz/);

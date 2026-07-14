@@ -15,9 +15,12 @@ type SourceAudit = {
 
 type NodeProfile = {
   profile: string;
+  profileName: string;
   comfyuiCommit: string;
+  comfyuiNodesSha256: string;
   workflowManifestSha256: string;
   sourceAuditSha256: string;
+  profileSha256: string;
   disableCustomNodes: boolean;
   baseNodeClasses: string[];
   generatorVersion: string;
@@ -44,11 +47,14 @@ const workflow = readFileSync(".github/workflows/comfy-runtime-image.yml", "utf8
 const manifestRequired = new Set(manifest.workflows.flatMap((workflowItem) => workflowItem.requiredNodeClasses));
 const profileRequired = new Set(profile.requiredNodeClasses);
 assert.equal(profile.profile, "production_minimal");
+assert.equal(profile.profileName, "production_minimal");
 assert.equal(profile.disableCustomNodes, true);
 assert.equal(profile.generatorVersion, "stage-two-eight-b-static-1");
 assert.equal(profile.comfyuiCommit, audit.commit);
+assert.equal(profile.comfyuiNodesSha256, "aecd111cf3f1ccf5a5ca6b4293d47dfe236f9a717e5190cbb6a66a03afb8d009");
 assert.equal(profile.workflowManifestSha256, "acb0a624f433a174366bc2820ab835c34273f0c102acc0651b09f75e800ca5d5");
 assert.equal(profile.sourceAuditSha256, "93a5eb8ae8af7001bd98080e15ce332c78f5c827e74f595597441574679db3e2");
+assert.match(profile.profileSha256, /^[a-f0-9]{64}$/);
 assert.equal(fullManual.useComfyDefaultBuiltinExtras, true);
 
 for (const requiredNodeClass of manifestRequired) {
@@ -67,11 +73,19 @@ for (const builtinExtra of profile.builtinExtraFiles) {
 
 assert.ok(profile.excludedBuiltinExtraFiles.includes("comfy_extras/nodes_post_processing.py"));
 assert.ok(profile.excludedBuiltinExtraFiles.includes("comfy_extras/nodes_latent.py"));
+assert.ok(profile.excludedBuiltinExtraFiles.includes("comfy_extras/nodes_canny.py"));
+assert.ok(profile.excludedBuiltinExtraFiles.includes("comfy_extras/nodes_morphology.py"));
 assert.ok(profile.builtinExtraFiles.every((file) => !profile.excludedBuiltinExtraFiles.includes(file)));
 assert.ok(existsSync("comfy-runtime/smoke_import_blocker/triton/__init__.py"));
 assert.match(launchComfy, /nodes\.init_builtin_extra_nodes = init_profile_builtin_extra_nodes/);
 assert.match(launchComfy, /PROFILE_REQUIRED_NODE_CLASSES_OK/);
 assert.match(launchComfy, /workflow_manifest_sha256/);
+assert.match(launchComfy, /enable_args_parsing/);
+assert.ok(
+  launchComfy.indexOf("enable_args_parsing") < launchComfy.indexOf("import nodes"),
+  "launch_comfy.py must parse ComfyUI args before importing nodes",
+);
+assert.match(launchComfy, /comfy_cpu_state=CPU/);
 assert.match(supervisor, /COMFY_NODE_PROFILE/);
 assert.match(supervisor, /COMFY_GPU_PROFILE/);
 assert.match(supervisor, /SMOKE_IMPORT_BLOCKER/);

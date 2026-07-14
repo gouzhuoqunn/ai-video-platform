@@ -1,12 +1,15 @@
 {
   "schemaVersion": 1,
   "profile": "production_minimal",
+  "profileName": "production_minimal",
   "generatedAt": "2026-07-14",
   "generatorVersion": "stage-two-eight-b-static-1",
   "purpose": "Minimum ComfyUI builtin node surface required by the locked official FLUX and Wan workflow assets.",
   "comfyuiCommit": "da2608926eaf68fd532bba4e1ace3402c5d21399",
+  "comfyuiNodesSha256": "aecd111cf3f1ccf5a5ca6b4293d47dfe236f9a717e5190cbb6a66a03afb8d009",
   "workflowManifestSha256": "acb0a624f433a174366bc2820ab835c34273f0c102acc0651b09f75e800ca5d5",
   "sourceAuditSha256": "93a5eb8ae8af7001bd98080e15ce332c78f5c827e74f595597441574679db3e2",
+  "profileSha256": "30f0858066f0681a25d5cceed79211582a36c154b8433d7ebc312bbda7a2daba",
   "loadBaseNodes": true,
   "disableCustomNodes": true,
   "baseNodeClasses": [
@@ -29,7 +32,9 @@
     "comfy_extras/nodes_wan.py"
   ],
   "excludedBuiltinExtraFiles": [
+    "comfy_extras/nodes_canny.py",
     "comfy_extras/nodes_latent.py",
+    "comfy_extras/nodes_morphology.py",
     "comfy_extras/nodes_post_processing.py"
   ],
   "requiredNodeClasses": [
