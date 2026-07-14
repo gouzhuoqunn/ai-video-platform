@@ -35,6 +35,162 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  ab-diagnose-fixed-digest:
+    name: A/B diagnose fixed digest
+    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && github.event_name == 'push' && contains(github.event.head_commit.message, '[ab-diagnose]') && contains(github.event.head_commit.message, '[skip build]') }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMFY_RUNTIME_IMAGE: ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:1cfb4740fb8b310a8095500e8fe55160176c619306068d553092182f4888efd1
+    steps:
+      - name: Confirm zero-build diagnostic mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "build=skipped"
+          echo "push=skipped"
+          echo "permissions=contents:read"
+          echo "repository_secrets_used=false"
+
+      - name: Pull fixed digest anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config"
+          mkdir -p "${DOCKER_CONFIG}"
+          docker buildx imagetools inspect "${COMFY_RUNTIME_IMAGE}" >/tmp/comfy-runtime-inspect.txt
+          grep -F "linux/amd64" /tmp/comfy-runtime-inspect.txt >/dev/null
+          docker pull --platform linux/amd64 "${COMFY_RUNTIME_IMAGE}"
+
+      - name: Verify dependency and import order evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="comfy-runtime-ab-evidence-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" --entrypoint /bin/bash "${COMFY_RUNTIME_IMAGE}" -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
+          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          docker exec "${container}" sh -lc 'grep -Fx "comfy-kitchen==0.2.18" /opt/ComfyUI/requirements.txt'
+          docker exec "${container}" python3.11 - <<'PY'
+          import importlib.metadata as metadata
+          import pathlib
+          import re
+          import sys
+
+          import torch
+
+          print("python=" + sys.version.split()[0])
+          print("comfy-kitchen=" + metadata.version("comfy-kitchen"))
+          print("triton=" + metadata.version("triton"))
+          print("torch=" + torch.__version__)
+          print("torch_cuda=" + str(torch.version.cuda))
+
+          init = pathlib.Path("/usr/local/lib/python3.11/dist-packages/comfy_kitchen/__init__.py").read_text(encoding="utf-8")
+          triton_init = pathlib.Path("/usr/local/lib/python3.11/dist-packages/comfy_kitchen/backends/triton/__init__.py").read_text(encoding="utf-8")
+          quantization = pathlib.Path("/usr/local/lib/python3.11/dist-packages/comfy_kitchen/backends/triton/quantization.py").read_text(encoding="utf-8")
+          main = pathlib.Path("/opt/ComfyUI/main.py").read_text(encoding="utf-8")
+          quant_ops = pathlib.Path("/opt/ComfyUI/comfy/quant_ops.py").read_text(encoding="utf-8")
+
+          assert "from .backends import triton as _triton_backend" in init
+          assert re.search(r"except\s+ImportError", triton_init)
+          assert "@triton.autotune" in quantization
+          assert "import comfy_kitchen as ck" in quant_ops
+          assert main.find("import comfy.utils") < main.find("args.disable_triton_backend")
+          print("classification=comfy_kitchen_eager_triton_import_on_cpu")
+          print("comfy_kitchen_init_imports_triton_backend=true")
+          print("triton_backend_catches_import_error_only=true")
+          print("disable_triton_backend_after_comfy_kitchen_import=true")
+          PY
+
+      - name: Test A original CPU behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="comfy-runtime-ab-a-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" --entrypoint /bin/bash "${COMFY_RUNTIME_IMAGE}" -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
+          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          started_at="$(date +%s)"
+          set +e
+          docker exec "${container}" sh -lc 'cd /opt/ComfyUI && timeout 90s python3.11 main.py --cpu --disable-triton-backend --disable-all-custom-nodes --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout >/tmp/test-a.log 2>&1'
+          code=$?
+          set -e
+          seconds="$(( $(date +%s) - started_at ))"
+          tail -n 120 < <(docker exec "${container}" tail -n 120 /tmp/test-a.log)
+          test "${code}" -ne 0
+          docker exec "${container}" grep -F "RuntimeError: 0 active drivers ([]). There should only be one." /tmp/test-a.log
+          echo "test_a_exit_code=${code}"
+          echo "test_a_start_seconds=${seconds}"
+          echo "test_a_crash_phase=comfy_kitchen_eager_triton_import"
+
+      - name: Test B temporary Triton import blocker
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke-import-blocker/triton
+          cat > smoke-import-blocker/triton/__init__.py <<'PY'
+          raise ImportError(
+              "Triton intentionally unavailable in COMFY_RUNTIME_MODE=smoke_cpu"
+          )
+          PY
+
+          container="comfy-runtime-ab-b-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" \
+            --entrypoint /bin/bash \
+            -v "${PWD}/smoke-import-blocker:/run/smoke-import-blocker:ro" \
+            "${COMFY_RUNTIME_IMAGE}" \
+            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
+          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          docker exec -e PYTHONPATH=/run/smoke-import-blocker "${container}" python3.11 - <<'PY'
+          try:
+              import triton  # noqa: F401
+          except ImportError as exc:
+              print(str(exc))
+          else:
+              raise SystemExit("temporary triton blocker was not first on sys.path")
+
+          import comfy_kitchen as ck
+          print("comfy_kitchen_import=ok")
+          print("comfy_kitchen_eager_backend_available=true")
+          print("comfy_kitchen_triton_marked_unavailable=true")
+          PY
+
+          started_at="$(date +%s)"
+          docker exec -e PYTHONPATH=/run/smoke-import-blocker "${container}" sh -lc 'cd /opt/ComfyUI && python3.11 main.py --cpu --disable-triton-backend --disable-all-custom-nodes --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout >/tmp/test-b.log 2>&1 & echo $! >/tmp/test-b.pid'
+          ready=false
+          for attempt in $(seq 1 60); do
+            if ! docker exec "${container}" sh -lc 'kill -0 "$(cat /tmp/test-b.pid)" 2>/dev/null'; then
+              echo "::error::Test B ComfyUI exited"
+              docker exec "${container}" tail -n 200 /tmp/test-b.log || true
+              exit 1
+            fi
+            if docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/tmp/system-stats.json; then
+              ready=true
+              break
+            fi
+            sleep 5
+          done
+          if [ "${ready}" != "true" ]; then
+            echo "::error::Test B did not become healthy"
+            docker exec "${container}" tail -n 200 /tmp/test-b.log || true
+            exit 1
+          fi
+          seconds="$(( $(date +%s) - started_at ))"
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >/tmp/object-info.json
+          docker exec "${container}" sh -lc 'test ! -s /workspace/comfy-output/* 2>/dev/null || exit 1'
+          docker stop --time 15 "${container}" >/dev/null
+          echo "test_b_start_seconds=${seconds}"
+          echo "test_b_system_stats=passed"
+          echo "test_b_object_info=passed"
+          echo "test_b_no_inference=passed"
+          echo "test_b_sigterm=passed"
+
   build-and-push:
     if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip build]')) }}
     permissions:
