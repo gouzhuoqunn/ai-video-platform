@@ -7,8 +7,9 @@ ENV PYTHONUNBUFFERED=1 \
     COMFYUI_COMMIT=da2608926eaf68fd532bba4e1ace3402c5d21399 \
     COMFYUI_HOST=127.0.0.1 \
     COMFYUI_PORT=8188 \
-    COMFY_CONTROLLER_HOST=127.0.0.1 \
+    COMFY_CONTROLLER_HOST=0.0.0.0 \
     COMFY_CONTROLLER_PORT=8080 \
+    COMFY_RUNTIME_MODE=gpu \
     START_GPU_WORKER=false
 
 WORKDIR /opt
@@ -24,7 +25,7 @@ RUN git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
     && mkdir -p /workspace/models /workspace/comfy-input /workspace/comfy-output /workspace/comfy-user /workspace/logs /workspace/r2-cache /workspace/workflows \
     && find /opt/ComfyUI -type d -name ".git" -prune -exec rm -rf {} +
 
-COPY controller.py healthcheck.py entrypoint.sh custom-node-locks.json /opt/comfy-runtime/
+COPY controller.py healthcheck.py supervisor.py entrypoint.sh custom-node-locks.json /opt/comfy-runtime/
 COPY workflows/ /opt/comfy-runtime/workflows/
 
 RUN chmod +x /opt/comfy-runtime/entrypoint.sh \

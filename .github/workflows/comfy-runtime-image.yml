@@ -35,13 +35,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-and-smoke:
+  build-and-push:
     if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip build]')) }}
     permissions:
       contents: read
       packages: write
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      version_tag: ${{ steps.image.outputs.version_tag }}
+      sha_tag: ${{ steps.image.outputs.sha_tag }}
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -80,7 +85,7 @@ jobs:
           image="ghcr.io/${owner}/ai-creative-comfy-runtime"
           version_tag="${{ inputs.version_tag }}"
           if [ -z "${version_tag}" ]; then
-            version_tag="v0.1.0-scaffold-${GITHUB_SHA::7}"
+            version_tag="v0.1.2-no-model-runtime-${GITHUB_SHA::7}"
           fi
           sha_tag="sha-${GITHUB_SHA}"
           {
@@ -91,7 +96,6 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push Comfy runtime image
-        if: ${{ github.event_name == 'push' || inputs.verify_existing_digest == '' }}
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -105,25 +109,74 @@ jobs:
           cache-from: type=gha,scope=comfy-runtime
           cache-to: type=gha,mode=max,scope=comfy-runtime
 
-      - name: Smoke test Comfy runtime image
+      - name: Static image safety scan
         shell: bash
         run: |
           set -euo pipefail
-          verify_digest="${{ inputs.verify_existing_digest }}"
-          if [ -n "${verify_digest}" ] && [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            image="${{ steps.image.outputs.image }}@${{ inputs.verify_existing_digest }}"
-          else
-            image="${{ steps.image.outputs.image }}:${{ steps.image.outputs.version_tag }}"
-          fi
+          image="${{ steps.image.outputs.image }}@${{ steps.build.outputs.digest }}"
+          docker pull --platform linux/amd64 "${image}"
+          container="comfy-runtime-scan-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" --entrypoint /bin/bash "${image}" -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
+          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" -o -name "*.gguf" \) | grep .'
+          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f -path "*/models/*" -name "*.bin" -size +50M | grep .'
+          docker exec "${container}" sh -lc 'test ! -e /.env && test ! -e /.env.local && test ! -e /.secrets'
+          docker rm -f "${container}" >/dev/null
 
+      - name: Summarize image
+        shell: bash
+        run: |
+          {
+            echo "### Comfy Runtime image"
+            echo ""
+            echo "- Image: \`${{ steps.image.outputs.image }}\`"
+            echo "- Version tag: \`${{ steps.image.outputs.version_tag }}\`"
+            echo "- Commit tag: \`${{ steps.image.outputs.sha_tag }}\`"
+            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "- Platform: \`linux/amd64\`"
+            echo "- ComfyUI commit: \`da2608926eaf68fd532bba4e1ace3402c5d21399\`"
+            echo "- Model weights in image: \`false\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-public-digest:
+    needs: build-and-push
+    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip build]')) }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h
+
+      - name: Pull public digest anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config"
+          mkdir -p "${DOCKER_CONFIG}"
+          image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
           docker buildx imagetools inspect "${image}" >/tmp/comfy-runtime-inspect.txt
           grep -F "linux/amd64" /tmp/comfy-runtime-inspect.txt >/dev/null
           docker pull --platform linux/amd64 "${image}"
 
+      - name: Smoke CPU runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config"
+          image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
           container="comfy-runtime-smoke-${GITHUB_RUN_ID}"
           docker run -d --name "${container}" \
             -e START_GPU_WORKER=false \
-            -e COMFYUI_EXTRA_ARGS=--cpu \
+            -e COMFY_RUNTIME_MODE=smoke_cpu \
+            -p 127.0.0.1:8080:8080 \
             "${image}"
           cleanup() {
             docker exec "${container}" sh -lc 'for file in /workspace/logs/*.log; do case "${file}" in *environment-redacted.log) continue ;; esac; echo "===== ${file}"; tail -n 200 "${file}" || true; done' || true
@@ -135,7 +188,7 @@ jobs:
           ready=false
           for attempt in $(seq 1 60); do
             if docker ps --format '{{.Names}}' | grep -Fx "${container}" >/dev/null \
-              && docker exec "${container}" sh -lc 'curl -fsS http://127.0.0.1:8080/healthz | tee /tmp/comfy-health.json | grep -F "\"ok\": true"'; then
+              && curl -fsS http://127.0.0.1:8080/healthz | tee /tmp/comfy-health.json | grep -F "\"ok\": true"; then
               ready=true
               break
             fi
@@ -220,9 +273,20 @@ jobs:
               raise SystemExit("missing Comfy node classes: " + ", ".join(missing))
           PY'
           docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/tmp/interrupt.json
+          docker inspect "${container}" > /tmp/inspect.json
+          python3 - <<'PY'
+          import json
+          data = json.load(open("/tmp/inspect.json", "r", encoding="utf-8"))[0]
+          ports = data["HostConfig"]["PortBindings"]
+          if "8188/tcp" in ports:
+              raise SystemExit("8188 must not be published")
+          binding = ports.get("8080/tcp", [])
+          if not binding or binding[0].get("HostIp") != "127.0.0.1":
+              raise SystemExit("8080 must bind only to host 127.0.0.1")
+          PY
           docker exec "${container}" sh -lc 'test "$(printenv COMFYUI_COMMIT)" = "da2608926eaf68fd532bba4e1ace3402c5d21399"'
           docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" -o -name "*.gguf" \) | grep .'
-          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f -name "*.bin" -size +50M | grep .'
+          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f -path "*/models/*" -name "*.bin" -size +50M | grep .'
           docker exec "${container}" sh -lc '! printenv | grep -E "SUPABASE_SERVICE_ROLE|SUPABASE_SECRET|CLORE_API_KEY|R2_ADMIN|SSH_PRIVATE"'
           docker exec "${container}" sh -lc 'test ! -e /app/worker.py'
           docker exec "${container}" python3.11 -c 'import pathlib,sys; forbidden=False
@@ -238,24 +302,36 @@ jobs:
           fi
 
           docker stop --time 15 "${container}" >/dev/null
+          if docker ps -a --format '{{.Names}}' | grep -Fx "${container}" >/dev/null; then
+            state="$(docker inspect --format '{{.State.Status}}' "${container}")"
+            test "${state}" = "exited"
+          fi
 
-      - name: Summarize image
+      - name: GPU mode fail-closed
         shell: bash
         run: |
-          digest="${{ steps.build.outputs.digest }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.verify_existing_digest }}" ]; then
-            digest="${{ inputs.verify_existing_digest }}"
-          fi
+          set -euo pipefail
+          image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
+          set +e
+          docker run --rm -e COMFY_RUNTIME_MODE=gpu "${image}" >/tmp/gpu-negative.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/gpu-negative.log
+          test "${code}" -ne 0
+          grep -F "gpu_preflight_failed" /tmp/gpu-negative.log
+
+      - name: Summarize verification
+        shell: bash
+        run: |
           {
-            echo "### Comfy Runtime image"
+            echo "### Public digest verification"
             echo ""
-            echo "- Image: \`${{ steps.image.outputs.image }}\`"
-            echo "- Version tag: \`${{ steps.image.outputs.version_tag }}\`"
-            echo "- Commit tag: \`${{ steps.image.outputs.sha_tag }}\`"
-            echo "- Digest: \`${digest}\`"
-            echo "- Platform: \`linux/amd64\`"
-            echo "- ComfyUI commit: \`da2608926eaf68fd532bba4e1ace3402c5d21399\`"
-            echo "- Model weights in image: \`false\`"
+            echo "- Image: \`${{ needs.build-and-push.outputs.image }}\`"
+            echo "- Version tag: \`${{ needs.build-and-push.outputs.version_tag }}\`"
+            echo "- Digest: \`${{ needs.build-and-push.outputs.digest }}\`"
+            echo "- Anonymous pull: \`true\`"
+            echo "- CPU no-model smoke: \`true\`"
+            echo "- GPU no-device fail-closed: \`true\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   verify-existing-digest-smoke:

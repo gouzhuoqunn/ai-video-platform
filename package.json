@@ -69,6 +69,7 @@
     "generation:architecture:test": "tsx scripts/generation-architecture-tests.ts",
     "generation:metadata:test": "tsx scripts/generation-metadata-benchmark-tests.ts",
     "generation:runtime:test": "tsx scripts/comfy-runtime-contract-tests.ts",
+    "generation:runtime-mode:test": "tsx scripts/comfy-runtime-mode-tests.ts",
     "generation:workflow:test": "tsx scripts/workflow-registry-tests.ts",
     "generation:workflow-assets:test": "tsx scripts/workflow-asset-tests.ts",
     "generation:comfy-source:test": "tsx scripts/comfy-source-audit-tests.ts",

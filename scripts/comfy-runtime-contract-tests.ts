@@ -15,6 +15,7 @@ function main() {
   for (const file of [
     "comfy-runtime/Dockerfile",
     "comfy-runtime/entrypoint.sh",
+    "comfy-runtime/supervisor.py",
     "comfy-runtime/controller.py",
     "comfy-runtime/healthcheck.py",
     "comfy-runtime/requirements.lock",
@@ -33,11 +34,17 @@ function main() {
   assert.ok(!/\.secrets|\.env\.local|CLORE_API_KEY|SUPABASE_SERVICE_ROLE_KEY|SUPABASE_SECRET_KEY|model-weights/.test(dockerfile));
 
   const entrypoint = read("comfy-runtime/entrypoint.sh");
-  assert.match(entrypoint, /--listen "\$\{COMFYUI_HOST\}"/);
-  assert.match(entrypoint, /--models-directory \/workspace\/models/);
-  assert.match(entrypoint, /START_GPU_WORKER/);
+  assert.match(entrypoint, /supervisor\.py/);
   assert.ok(!entrypoint.includes("/app/worker.py"), "Comfy entrypoint must not launch the old Worker");
   assert.ok(!entrypoint.includes("0.0.0.0:8188"));
+
+  const supervisor = read("comfy-runtime/supervisor.py");
+  assert.match(supervisor, /START_GPU_WORKER/);
+  assert.match(supervisor, /COMFY_RUNTIME_MODE/);
+  assert.match(supervisor, /smoke_cpu/);
+  assert.match(supervisor, /--disable-triton-backend/);
+  assert.match(supervisor, /gpu_preflight_failed/);
+  assert.match(supervisor, /--models-directory/);
 
   const controller = read("comfy-runtime/controller.py");
   assert.match(controller, /\/healthz/);
@@ -55,7 +62,8 @@ function main() {
   const workflow = read(".github/workflows/comfy-runtime-image.yml");
   assert.match(workflow, /ai-creative-comfy-runtime/);
   assert.match(workflow, /linux\/amd64/);
-  assert.match(workflow, /COMFYUI_EXTRA_ARGS=--cpu/);
+  assert.match(workflow, /COMFY_RUNTIME_MODE=smoke_cpu/);
+  assert.match(workflow, /gpu_preflight_failed/);
   assert.match(workflow, /object_info/);
   assert.match(workflow, /\/interrupt/);
   assert.match(workflow, /START_GPU_WORKER=false/);
