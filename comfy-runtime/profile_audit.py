@@ -11,6 +11,13 @@ from extras_extractor import builtin_extra_list_sha256, extract_builtin_extra_fi
 
 
 EXPECTED_NODES_SHA256 = "aecd111cf3f1ccf5a5ca6b4293d47dfe236f9a717e5190cbb6a66a03afb8d009"
+RISK_MODULES = {"kornia"}
+RISK_FILES = {
+    "comfy_extras/nodes_latent.py",
+    "comfy_extras/nodes_post_processing.py",
+    "comfy_extras/nodes_canny.py",
+    "comfy_extras/nodes_morphology.py",
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -106,6 +113,112 @@ def read_json(path: Path) -> dict[str, Any]:
         return json.load(handle)
 
 
+def module_to_relative_file(module: str) -> str:
+    if module.startswith("comfy_extras."):
+        return module.replace(".", "/") + ".py"
+    if module.startswith("nodes_"):
+        return "comfy_extras/" + module + ".py"
+    return ""
+
+
+def import_name_from_alias(module: str, alias: ast.alias) -> str:
+    if module == "comfy_extras":
+        return f"comfy_extras.{alias.name}"
+    if module:
+        return module
+    return alias.name
+
+
+def imported_module_names(tree: ast.Module) -> tuple[list[str], list[str]]:
+    imports: list[str] = []
+    dynamic_imports: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level and (module.startswith("nodes_") or not module):
+                module = f"comfy_extras.{module}".rstrip(".")
+            for alias in node.names:
+                imports.append(import_name_from_alias(module, alias))
+        elif isinstance(node, ast.Call):
+            name = call_attribute_name(node.func)
+            if name in {"importlib.import_module", "__import__"}:
+                if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                    imports.append(node.args[0].value)
+                else:
+                    dynamic_imports.append(f"line:{getattr(node, 'lineno', 0)}:{name}")
+    return list(dict.fromkeys(imports)), dynamic_imports
+
+
+def build_dependency_audit(comfy_dir: Path, profile: dict[str, Any]) -> dict[str, Any]:
+    extras_dir = comfy_dir / "comfy_extras"
+    graph: dict[str, dict[str, Any]] = {}
+    for source_path in sorted(extras_dir.glob("*.py")):
+        relative = str(source_path.relative_to(comfy_dir)).replace("\\", "/")
+        tree = ast.parse(source_path.read_text(encoding="utf-8", errors="replace"), filename=str(source_path))
+        direct_imports, dynamic_imports = imported_module_names(tree)
+        resolved = sorted(
+            {
+                relative_file
+                for name in direct_imports
+                for relative_file in [module_to_relative_file(name)]
+                if relative_file and (comfy_dir / relative_file).is_file()
+            }
+        )
+        graph[relative] = {
+            "directImports": direct_imports,
+            "dynamicImports": dynamic_imports,
+            "resolvedLocalImports": resolved,
+        }
+
+    files: dict[str, dict[str, Any]] = {}
+    for start in profile.get("builtinExtraFiles", []):
+        visited: set[str] = set()
+        risks: set[str] = set()
+        stack = [start]
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            node = graph.get(current, {"directImports": [], "resolvedLocalImports": [], "dynamicImports": []})
+            for imported in node["directImports"]:
+                if imported.split(".", 1)[0] in RISK_MODULES:
+                    risks.add(imported)
+            for relative_file in node["resolvedLocalImports"]:
+                if relative_file in RISK_FILES:
+                    risks.add(relative_file)
+                if relative_file not in visited:
+                    stack.append(relative_file)
+
+        node = graph.get(start)
+        if node is None:
+            raise RuntimeError(f"profile builtin extra missing from ComfyUI source: {start}")
+        files[start] = {
+            "directImports": node["directImports"],
+            "dynamicImports": node["dynamicImports"],
+            "resolvedLocalImports": node["resolvedLocalImports"],
+            "transitiveLocalImports": sorted(visited.difference({start})),
+            "transitiveRisks": sorted(risks),
+        }
+
+    risk_files = {
+        file_name: details["transitiveRisks"]
+        for file_name, details in files.items()
+        if details["transitiveRisks"]
+    }
+    return {
+        "profileBuiltinExtraFiles": profile.get("builtinExtraFiles", []),
+        "riskModules": sorted(RISK_MODULES),
+        "riskFiles": sorted(RISK_FILES),
+        "files": files,
+        "riskFilesByProfileExtra": risk_files,
+        "hasRisk": bool(risk_files),
+    }
+
+
 def build_profile_diagnostics(comfy_dir: Path, runtime_dir: Path, profile_path: Path) -> dict[str, Any]:
     nodes_path = comfy_dir / "nodes.py"
     nodes_source = nodes_path.read_text(encoding="utf-8")
@@ -154,6 +267,7 @@ def build_profile_diagnostics(comfy_dir: Path, runtime_dir: Path, profile_path: 
         "requiredNodeClasses": required,
         "baseNodeClasses": base_node_classes,
         "builtinExtraFiles": profile_builtin,
+        "dependencyAudit": build_dependency_audit(comfy_dir, profile),
         "generatedRequiredBuiltinExtraFiles": required_extra_files,
         "excludedBuiltinExtraFiles": excluded,
         "missingRequiredNodeClasses": missing,
@@ -174,6 +288,11 @@ def build_profile_diagnostics(comfy_dir: Path, runtime_dir: Path, profile_path: 
         raise RuntimeError("profile builtinExtraFiles do not match generated required builtin extras")
     if diagnostics["profileSha256"] != diagnostics["profileDeclaredSha256"]:
         raise RuntimeError("profileSha256 mismatch")
+    if diagnostics["dependencyAudit"]["hasRisk"]:
+        raise RuntimeError(
+            "production_minimal transitive dependency audit found risk imports: "
+            + json.dumps(diagnostics["dependencyAudit"]["riskFilesByProfileExtra"], sort_keys=True)
+        )
     return diagnostics
 
 
@@ -194,6 +313,7 @@ def main() -> int:
     print("profile_base_node_count=" + str(len(diagnostics["baseNodeClasses"])), flush=True)
     print("profile_builtin_extra_files=" + ",".join(diagnostics["builtinExtraFiles"]), flush=True)
     print("profile_excluded_builtin_extra_count=" + str(len(diagnostics["excludedBuiltinExtraFiles"])), flush=True)
+    print("dependency_audit_has_risk=false", flush=True)
     print("missingRequiredNodeClasses=0", flush=True)
     print("profile_sha256=" + diagnostics["profileSha256"], flush=True)
     return 0

@@ -55,6 +55,9 @@ function main() {
   const launcher = read("comfy-runtime/launch_comfy.py");
   assert.match(launcher, /production_minimal/);
   assert.match(launcher, /init_profile_builtin_extra_nodes/);
+  assert.match(launcher, /async def load_profile_builtin_extra_nodes/);
+  assert.match(launcher, /await nodes_module\.load_custom_node/);
+  assert.match(launcher, /PROFILE_BUILTIN_EXTRA_FAILURES=0/);
   assert.match(launcher, /PROFILE_REQUIRED_NODE_CLASSES_OK/);
   assert.match(launcher, /enable_args_parsing/);
   assert.match(launcher, /comfy_cpu_state=CPU/);
@@ -66,6 +69,8 @@ function main() {
   const profileAudit = read("comfy-runtime/profile_audit.py");
   assert.match(profileAudit, /missingRequiredNodeClasses/);
   assert.match(profileAudit, /NODE_CLASS_MAPPINGS/);
+  assert.match(profileAudit, /dependencyAudit/);
+  assert.match(profileAudit, /nodes_post_processing\.py/);
 
   const controller = read("comfy-runtime/controller.py");
   assert.match(controller, /\/healthz/);
@@ -85,6 +90,8 @@ function main() {
   assert.match(workflow, /linux\/amd64/);
   assert.match(workflow, /COMFY_RUNTIME_MODE=smoke_cpu/);
   assert.match(workflow, /COMFY_NODE_PROFILE=production_minimal/);
+  assert.match(workflow, /D1_D2_D3_REUSED=true/);
+  assert.match(workflow, /AWAITED_PROFILE_EXTRA/);
   assert.match(workflow, /gpu_preflight_failed/);
   assert.match(workflow, /object_info/);
   assert.match(workflow, /\/interrupt/);

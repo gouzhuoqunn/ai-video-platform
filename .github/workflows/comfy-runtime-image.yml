@@ -559,197 +559,25 @@ jobs:
           fi
           echo "kornia_version=${kornia_version}" >> "$GITHUB_OUTPUT"
 
-      - name: Reuse prior D1 and D2 Kornia evidence
+      - name: Reuse prior D1 D2 D3 evidence
         shell: bash
         run: |
           set -euo pipefail
-          echo "previous_run=29343137485"
-          echo "d1=import torch; import kornia segfaulted under Triton blocker"
+          echo "D1_D2_D3_REUSED=true"
+          echo "d1_previous_run=29343137485"
+          echo "d1=import torch; import kornia segmentation fault under Triton blocker"
           echo "d1_exit_code=139"
+          echo "d1_classification=kornia_import_jit_segmentation_confirmed"
+          echo "d2_previous_run=29343137485"
           echo "d2=torch.jit.script identity monkeypatch allowed Kornia import"
-          echo "classification=kornia_import_segmentation_avoided_by_jit_identity"
-
-      - name: D3 Locate builtin extra crash source in original order
-        shell: bash
-        run: |
-          set -euo pipefail
-          container="comfy-runtime-d3-${GITHUB_RUN_ID}"
-          docker run -d --name "${container}" \
-            --entrypoint /bin/bash \
-            -v "${PWD}/comfy-runtime:/run/comfy-runtime:ro" \
-            "${COMFY_RUNTIME_IMAGE}" \
-            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
-          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-
-          cat >/tmp/d3_builtin_order.py <<'PY'
-          import asyncio
-          import hashlib
-          import json
-          import os
-          import pathlib
-          import sys
-          import time
-
-          sys.path.insert(0, "/run/comfy-runtime")
-          from extras_extractor import builtin_extra_list_sha256, extract_builtin_extra_files
-
-          sys.path.insert(0, "/opt/ComfyUI")
-          os.chdir("/opt/ComfyUI")
-
-          sys.argv = [
-              "main.py",
-              "--cpu",
-              "--disable-triton-backend",
-              "--disable-all-custom-nodes",
-              "--disable-auto-launch",
-              "--preview-method",
-              "none",
-              "--log-stdout",
-              "--verbose",
-              "DEBUG",
-              "--listen",
-              "127.0.0.1",
-              "--port",
-              "8188",
-              "--input-directory",
-              "/workspace/comfy-input",
-              "--output-directory",
-              "/workspace/comfy-output",
-              "--user-directory",
-              "/workspace/comfy-user",
-              "--models-directory",
-              "/workspace/models",
-          ]
-
-          import comfy.options
-
-          comfy.options.enable_args_parsing()
-          from comfy.cli_args import args
-
-          assert args.cpu is True, args
-          assert args.listen == "127.0.0.1", args.listen
-          assert int(args.port) == 8188, args.port
-          print("D3_ARGS_READY cpu=True listen=127.0.0.1 port=8188", flush=True)
-
-          nodes_path = pathlib.Path("/opt/ComfyUI/nodes.py")
-          nodes_text = nodes_path.read_text(encoding="utf-8")
-          nodes_sha = hashlib.sha256(nodes_text.encode("utf-8")).hexdigest()
-          print("comfyui_nodes_sha256=" + nodes_sha, flush=True)
-          expected_nodes_sha = "aecd111cf3f1ccf5a5ca6b4293d47dfe236f9a717e5190cbb6a66a03afb8d009"
-          if nodes_sha != expected_nodes_sha:
-              raise RuntimeError(f"nodes.py sha256 mismatch: expected {expected_nodes_sha}, got {nodes_sha}")
-
-          extras_files = extract_builtin_extra_files(nodes_text)
-          extras_list_sha = builtin_extra_list_sha256(extras_files)
-          diagnostics = {
-              "nodesSha256": nodes_sha,
-              "extrasCount": len(extras_files),
-              "extrasListSha256": extras_list_sha,
-              "first5": extras_files[:5],
-              "last5": extras_files[-5:],
-              "contains": {
-                  "nodes_flux.py": "nodes_flux.py" in extras_files,
-                  "nodes_video.py": "nodes_video.py" in extras_files,
-                  "nodes_wan.py": "nodes_wan.py" in extras_files,
-                  "nodes_post_processing.py": "nodes_post_processing.py" in extras_files,
-                  "nodes_canny.py": "nodes_canny.py" in extras_files,
-                  "nodes_morphology.py": "nodes_morphology.py" in extras_files,
-              },
-              "extrasFiles": extras_files,
-          }
-          pathlib.Path("/tmp/d3-extras-diagnostics.json").write_text(
-              json.dumps(diagnostics, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          print("D3_EXTRAS_FILE_COUNT=" + str(len(extras_files)), flush=True)
-          print("D3_EXTRAS_LIST_SHA256=" + extras_list_sha, flush=True)
-          print("D3_EXTRAS_FIRST5=" + ",".join(extras_files[:5]), flush=True)
-          print("D3_EXTRAS_LAST5=" + ",".join(extras_files[-5:]), flush=True)
-          print("D3_CONTAINS_NODES_FLUX=" + str("nodes_flux.py" in extras_files).lower(), flush=True)
-          print("D3_CONTAINS_NODES_VIDEO=" + str("nodes_video.py" in extras_files).lower(), flush=True)
-          print("D3_CONTAINS_NODES_WAN=" + str("nodes_wan.py" in extras_files).lower(), flush=True)
-          print(
-              "D3_CONTAINS_KORNIA_RELATED="
-              + str(all(name in extras_files for name in ["nodes_post_processing.py", "nodes_canny.py", "nodes_morphology.py"])).lower(),
-              flush=True,
-          )
-
-          import nodes
-          import comfy.model_management as model_management
-
-          assert model_management.cpu_state == model_management.CPUState.CPU, model_management.cpu_state
-          assert model_management.get_torch_device().type == "cpu", model_management.get_torch_device()
-          print("D3_CPU_STATE_OK torch_device=cpu", flush=True)
-
-          async def main() -> None:
-              loaded = []
-              started = time.monotonic()
-              for filename in extras_files:
-                  extra_path = pathlib.Path("/opt/ComfyUI/comfy_extras") / filename
-                  print("LOADING_BUILTIN_EXTRA=" + filename, flush=True)
-                  await nodes.load_custom_node(str(extra_path), module_parent="comfy_extras")
-                  loaded.append(filename)
-                  print("LOADED_BUILTIN_EXTRA=" + filename, flush=True)
-              print("ORIGINAL_BUILTIN_EXTRA_LOAD_COMPLETE", flush=True)
-              print("D3_LOAD_SECONDS=" + str(round(time.monotonic() - started, 3)), flush=True)
-
-          asyncio.run(main())
-          PY
-          docker cp /tmp/d3_builtin_order.py "${container}:/tmp/d3_builtin_order.py"
-          started_at="$(date +%s)"
-          set +e
-          docker exec \
-            -e PYTHONPATH=/run/comfy-runtime/smoke_import_blocker \
-            -e PYTHONUNBUFFERED=1 \
-            -e PYTHONFAULTHANDLER=1 \
-            -e OMP_NUM_THREADS=1 \
-            -e MKL_NUM_THREADS=1 \
-            "${container}" \
-            timeout 180s python3.11 -X faulthandler /tmp/d3_builtin_order.py >/tmp/d3-builtin.log 2>&1
-          code=$?
-          set -e
-          d3_seconds="$(( $(date +%s) - started_at ))"
-          docker cp "${container}:/tmp/d3-extras-diagnostics.json" /tmp/d3-extras-diagnostics.json >/dev/null 2>&1 || true
-          tail -n 200 /tmp/d3-builtin.log
-          if grep -F "RuntimeError: Found no NVIDIA driver" /tmp/d3-builtin.log \
-            && ! grep -F "LOADING_BUILTIN_EXTRA=" /tmp/d3-builtin.log; then
-            echo "::error::cpu_args_injection_still_broken"
-            exit 1
-          fi
-          if [ "${code}" -eq 0 ]; then
-            echo "::error::D3 original builtin extra loading did not reproduce crash"
-            exit 1
-          fi
-          last_loading="$({ grep -F "LOADING_BUILTIN_EXTRA=" /tmp/d3-builtin.log || true; } | tail -n 1 | sed 's/.*LOADING_BUILTIN_EXTRA=//')"
-          last_loaded="$({ grep -F "LOADED_BUILTIN_EXTRA=" /tmp/d3-builtin.log || true; } | tail -n 1 | sed 's/.*LOADED_BUILTIN_EXTRA=//')"
-          loaded_count="$({ grep -F "LOADED_BUILTIN_EXTRA=" /tmp/d3-builtin.log || true; } | wc -l | tr -d ' ')"
-          echo "d3_last_loading=${last_loading}"
-          echo "d3_last_loaded=${last_loaded}"
-          echo "d3_loaded_count=${loaded_count}"
-          if [ -z "${last_loading}" ]; then
-            echo "::error::D3 did not reach builtin extra loading"
-            exit 1
-          fi
-          if [ "${last_loading}" = "${last_loaded}" ]; then
-            echo "::error::D3 did not identify an unfinished builtin extra"
-            exit 1
-          fi
-          grep -E "nodes_post_processing|kornia|Fatal Python error|Segmentation fault|torch/jit" /tmp/d3-builtin.log
-          echo "d3_exit_code=${code}"
-          echo "d3_elapsed_seconds=${d3_seconds}"
-          echo "d3_first_unfinished_builtin_extra=${last_loading}"
-          echo "classification=original_builtin_extra_order_reaches_kornia_torchscript_crash"
-
-      - name: Upload D3 builtin extra diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: d3-builtin-extra-diagnostics
-          path: |
-            /tmp/d3-builtin.log
-            /tmp/d3-extras-diagnostics.json
-          if-no-files-found: ignore
+          echo "d2_classification=kornia_import_segmentation_avoided_by_jit_identity"
+          echo "d3_previous_run=29352022219"
+          echo "d3_first_unfinished_builtin_extra=nodes_latent.py"
+          echo "d3_exit_code=139"
+          echo "d3_extras_file_count=124"
+          echo "d3_extras_list_sha256=7029b35b7b3fbac76d2919b5cc14f42e8363f5d2d0ab6e3f6e8cea379a11a565"
+          echo "transitive_failure_path=nodes_latent.py->nodes_post_processing.py->kornia->torch.jit.script->segmentation_fault"
+          echo "classification=prior_d1_d2_d3_evidence_reused_without_rerun"
 
       - name: Generate production minimal profile diagnostics
         shell: bash
@@ -775,7 +603,29 @@ jobs:
               | tee /tmp/production-minimal-profile-audit.log
           docker cp "${container}:/tmp/production-minimal-profile-diagnostics.json" /tmp/production-minimal-profile-diagnostics.json
           grep -F "missingRequiredNodeClasses=0" /tmp/production-minimal-profile-audit.log
+          grep -F "dependency_audit_has_risk=false" /tmp/production-minimal-profile-audit.log
           grep -F "profile_builtin_extra_files=comfy_extras/nodes_flux.py,comfy_extras/nodes_images.py,comfy_extras/nodes_model_advanced.py,comfy_extras/nodes_video.py,comfy_extras/nodes_wan.py" /tmp/production-minimal-profile-audit.log
+          python3 - <<'PY'
+          import json
+
+          with open("/tmp/production-minimal-profile-diagnostics.json", "r", encoding="utf-8") as handle:
+              diagnostics = json.load(handle)
+          audit = diagnostics["dependencyAudit"]
+          assert audit["hasRisk"] is False, audit
+          expected = [
+              "comfy_extras/nodes_flux.py",
+              "comfy_extras/nodes_images.py",
+              "comfy_extras/nodes_model_advanced.py",
+              "comfy_extras/nodes_video.py",
+              "comfy_extras/nodes_wan.py",
+          ]
+          assert audit["profileBuiltinExtraFiles"] == expected, audit["profileBuiltinExtraFiles"]
+          for file_name in expected:
+              assert file_name in audit["files"], file_name
+              assert isinstance(audit["files"][file_name]["directImports"], list)
+              assert isinstance(audit["files"][file_name]["dynamicImports"], list)
+              assert audit["files"][file_name]["transitiveRisks"] == []
+          PY
 
       - name: Upload production minimal profile diagnostics
         if: always()
@@ -803,6 +653,61 @@ jobs:
             docker rm -f "${container}" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
+
+          docker exec \
+            -e COMFY_RUNTIME_DIR=/run/comfy-runtime \
+            -e COMFY_RUNTIME_MODE=smoke_cpu \
+            -e COMFY_NODE_PROFILE=production_minimal \
+            -e PYTHONPATH=/run/comfy-runtime/smoke_import_blocker \
+            -e PYTHONUNBUFFERED=1 \
+            "${container}" \
+            sh -lc 'cd /opt/ComfyUI && sha256sum /run/comfy-runtime/launch_comfy.py && python3.11 - <<'"'"'PY'"'"'
+          import json
+          import hashlib
+          import os
+          import pathlib
+          import sys
+
+          profile_path = pathlib.Path("/run/comfy-runtime/node-profiles/production-minimal.json")
+          manifest_path = pathlib.Path("/run/comfy-runtime/workflows/official/manifest.json")
+          profile = json.loads(profile_path.read_text(encoding="utf-8"))
+          print("d4_launcher_sha256=" + hashlib.sha256(pathlib.Path("/run/comfy-runtime/launch_comfy.py").read_bytes()).hexdigest(), flush=True)
+          print("d4_profile_sha256=" + profile["profileSha256"], flush=True)
+          print("d4_workflow_manifest_sha256=" + profile["workflowManifestSha256"], flush=True)
+          print("d4_workflow_manifest_bytes=" + str(manifest_path.stat().st_size), flush=True)
+          print("d4_builtin_extra_files=" + ",".join(profile["builtinExtraFiles"]), flush=True)
+          print("d4_required_node_count=" + str(len(profile["requiredNodeClasses"])), flush=True)
+
+          sys.path.insert(0, "/opt/ComfyUI")
+          os.chdir("/opt/ComfyUI")
+          sys.argv = [
+              "main.py",
+              "--cpu",
+              "--disable-triton-backend",
+              "--disable-all-custom-nodes",
+              "--listen",
+              "127.0.0.1",
+              "--port",
+              "8188",
+              "--input-directory",
+              "/workspace/comfy-input",
+              "--output-directory",
+              "/workspace/comfy-output",
+              "--user-directory",
+              "/workspace/comfy-user",
+              "--models-directory",
+              "/workspace/models",
+          ]
+          import comfy.options
+
+          comfy.options.enable_args_parsing()
+          from comfy.cli_args import args
+          import comfy.model_management as model_management
+
+          print(f"d4_args_cpu={args.cpu}", flush=True)
+          print("d4_cpu_state=" + str(model_management.cpu_state), flush=True)
+          print("d4_torch_device=" + str(model_management.get_torch_device()), flush=True)
+          PY'
 
           docker exec \
             -e COMFY_RUNTIME_DIR=/run/comfy-runtime \
@@ -844,9 +749,23 @@ jobs:
           docker exec "${container}" sh -lc 'grep -F "profile_sha256=36c5279aaa81b23e73b2a6c6f8f198006ba3402d148ffae57927f6f246c5649c" /tmp/d4-profile.log'
           docker exec "${container}" sh -lc 'grep -F "comfy_args_ready cpu=True listen=127.0.0.1 port=8188" /tmp/d4-profile.log'
           docker exec "${container}" sh -lc 'grep -F "comfy_cpu_state=CPU torch_device=cpu" /tmp/d4-profile.log'
+          for extra in \
+            comfy_extras/nodes_flux.py \
+            comfy_extras/nodes_images.py \
+            comfy_extras/nodes_model_advanced.py \
+            comfy_extras/nodes_video.py \
+            comfy_extras/nodes_wan.py; do
+            docker exec "${container}" sh -lc "grep -F 'AWAITING_PROFILE_EXTRA=${extra}' /tmp/d4-profile.log"
+            docker exec "${container}" sh -lc "grep -F 'AWAITED_PROFILE_EXTRA=${extra} result=true' /tmp/d4-profile.log"
+          done
+          docker exec "${container}" sh -lc 'grep -F "PROFILE_BUILTIN_EXTRA_FAILURES=0" /tmp/d4-profile.log'
           docker exec "${container}" sh -lc 'grep -F "PROFILE_REQUIRED_NODE_CLASSES_OK" /tmp/d4-profile.log'
           docker exec "${container}" sh -lc 'grep -F "Triton intentionally unavailable in COMFY_RUNTIME_MODE=smoke_cpu" /tmp/d4-profile.log || true'
+          docker exec "${container}" sh -lc '! grep -F "coroutine was never awaited" /tmp/d4-profile.log'
+          docker exec "${container}" sh -lc '! grep -F "nodes_latent.py" /tmp/d4-profile.log'
           docker exec "${container}" sh -lc '! grep -F "nodes_post_processing.py" /tmp/d4-profile.log'
+          docker exec "${container}" sh -lc '! grep -F "nodes_canny.py" /tmp/d4-profile.log'
+          docker exec "${container}" sh -lc '! grep -F "nodes_morphology.py" /tmp/d4-profile.log'
           docker exec "${container}" sh -lc '! grep -F "Fatal Python error" /tmp/d4-profile.log'
           docker exec "${container}" sh -lc '! find /workspace/models -type f | grep .'
           docker exec "${container}" sh -lc '! find /workspace/comfy-output -type f | grep .'
@@ -887,7 +806,7 @@ jobs:
           done
           docker exec "${container}" sh -lc '! kill -0 "$(cat /tmp/d4-profile.pid)" 2>/dev/null'
           echo "d4_start_seconds=${seconds}"
-          echo "classification=production_minimal_profile_smoke_passed"
+          echo "classification=production_minimal_async_loader_cpu_boot_proven"
           echo "gate_passed=true" >> "$GITHUB_OUTPUT"
 
   build-node-profile-runtime:
@@ -919,6 +838,7 @@ jobs:
       - name: Static verification
         run: |
           npm run secret:scan
+          npm run generation:async-loader:test
           npm run generation:node-profile:test
 
       - name: Confirm exact Kornia lock from diagnosis
@@ -952,7 +872,7 @@ jobs:
         run: |
           owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           image="ghcr.io/${owner}/ai-creative-comfy-runtime"
-          version_tag="v0.1.3-production-minimal-${GITHUB_SHA::7}"
+          version_tag="v0.1.3-production-minimal-async-${GITHUB_SHA::7}"
           sha_tag="sha-${GITHUB_SHA}"
           {
             echo "image=${image}"
@@ -1078,9 +998,23 @@ jobs:
           docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/tmp/free.json
           docker exec "${container}" sh -lc 'grep -F "node_profile=production_minimal" /workspace/logs/comfyui.log'
           docker exec "${container}" sh -lc 'grep -F "workflow_manifest_sha256=acb0a624f433a174366bc2820ab835c34273f0c102acc0651b09f75e800ca5d5" /workspace/logs/comfyui.log'
+          for extra in \
+            comfy_extras/nodes_flux.py \
+            comfy_extras/nodes_images.py \
+            comfy_extras/nodes_model_advanced.py \
+            comfy_extras/nodes_video.py \
+            comfy_extras/nodes_wan.py; do
+            docker exec "${container}" sh -lc "grep -F 'AWAITING_PROFILE_EXTRA=${extra}' /workspace/logs/comfyui.log"
+            docker exec "${container}" sh -lc "grep -F 'AWAITED_PROFILE_EXTRA=${extra} result=true' /workspace/logs/comfyui.log"
+          done
+          docker exec "${container}" sh -lc 'grep -F "PROFILE_BUILTIN_EXTRA_FAILURES=0" /workspace/logs/comfyui.log'
           docker exec "${container}" sh -lc 'grep -F "PROFILE_REQUIRED_NODE_CLASSES_OK" /workspace/logs/comfyui.log'
           docker exec "${container}" python3.11 -c 'import importlib.metadata as m; assert m.version("kornia") == "${{ needs.build-node-profile-runtime.outputs.kornia_version }}"'
+          docker exec "${container}" sh -lc '! grep -F "coroutine was never awaited" /workspace/logs/comfyui.log'
+          docker exec "${container}" sh -lc '! grep -F "nodes_latent.py" /workspace/logs/comfyui.log'
           docker exec "${container}" sh -lc '! grep -F "nodes_post_processing.py" /workspace/logs/comfyui.log'
+          docker exec "${container}" sh -lc '! grep -F "nodes_canny.py" /workspace/logs/comfyui.log'
+          docker exec "${container}" sh -lc '! grep -F "nodes_morphology.py" /workspace/logs/comfyui.log'
           docker exec "${container}" sh -lc '! grep -F "Fatal Python error" /workspace/logs/comfyui.log'
           docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
           import base64

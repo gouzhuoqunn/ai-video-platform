@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import os
 import runpy
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -39,8 +41,24 @@ def profile_path(name: str) -> Path:
     return PROFILE_DIR / f"{normalized}.json"
 
 
+def validate_profile(profile: dict[str, Any]) -> None:
+    builtin_files = list(profile.get("builtinExtraFiles", []))
+    if len(set(builtin_files)) != len(builtin_files):
+        raise RuntimeError("node profile contains duplicate builtin extra files")
+    for relative_file in builtin_files:
+        if not isinstance(relative_file, str):
+            raise RuntimeError("node profile builtin extra file must be a string")
+        path = Path(relative_file)
+        if path.is_absolute() or ".." in path.parts:
+            raise RuntimeError(f"node profile builtin extra file path is unsafe: {relative_file}")
+        if path.parts[:1] != ("comfy_extras",) or path.suffix != ".py":
+            raise RuntimeError(f"node profile builtin extra file is invalid: {relative_file}")
+
+
 def load_profile(name: str) -> dict[str, Any]:
     path = profile_path(name)
+    if not path.is_file():
+        raise RuntimeError(f"unknown node profile: {name}")
     with path.open("r", encoding="utf-8") as handle:
         profile = json.load(handle)
     if profile.get("schemaVersion") != 1:
@@ -50,6 +68,7 @@ def load_profile(name: str) -> dict[str, Any]:
         raise RuntimeError(f"node profile sha256 mismatch: {path}")
     if profile.get("status") == "unverified":
         raise RuntimeError(f"node profile is unverified and cannot be used: {profile.get('profile')}")
+    validate_profile(profile)
     return profile
 
 
@@ -119,22 +138,49 @@ def verify_cpu_runtime_state() -> None:
     log("comfy_cpu_state=CPU torch_device=cpu")
 
 
-def load_builtin_extra(nodes_module: Any, relative_file: str) -> None:
-    path = COMFY_DIR / relative_file
-    if not path.exists():
-        raise RuntimeError(f"profile builtin extra file missing: {relative_file}")
-
-    log(f"PROFILE_LOADING_BUILTIN_EXTRA {relative_file}")
-    try:
-        success = nodes_module.load_custom_node(str(path), set(), "comfy_extras")
-    except TypeError:
+async def load_profile_builtin_extra_nodes(
+    nodes_module: Any,
+    profile: dict[str, Any],
+    comfy_root: Path,
+) -> list[str]:
+    failed: list[str] = []
+    builtin_files = list(profile.get("builtinExtraFiles", []))
+    for relative_file in builtin_files:
+        path = comfy_root / relative_file
+        log(f"AWAITING_PROFILE_EXTRA={relative_file}")
+        result = False
+        if not path.exists():
+            log(f"PROFILE_EXTRA_EXCEPTION {relative_file}: file does not exist")
+            failed.append(relative_file)
+            log(f"AWAITED_PROFILE_EXTRA={relative_file} result=false")
+            continue
         try:
-            success = nodes_module.load_custom_node(str(path), set())
-        except TypeError:
-            success = nodes_module.load_custom_node(str(path))
-    if success is False:
-        raise RuntimeError(f"profile builtin extra failed to load: {relative_file}")
-    log(f"PROFILE_LOADED_BUILTIN_EXTRA {relative_file}")
+            loaded = await nodes_module.load_custom_node(
+                str(path),
+                module_parent="comfy_extras",
+            )
+            if inspect.isawaitable(loaded):
+                if inspect.iscoroutine(loaded):
+                    loaded.close()
+                raise RuntimeError("load_custom_node returned an awaitable after await")
+            result = bool(loaded)
+        except Exception:
+            log(f"PROFILE_EXTRA_EXCEPTION {relative_file}")
+            log(traceback.format_exc())
+            failed.append(relative_file)
+            log(f"AWAITED_PROFILE_EXTRA={relative_file} result=false")
+            continue
+        if not result:
+            failed.append(relative_file)
+        log(f"AWAITED_PROFILE_EXTRA={relative_file} result={str(result).lower()}")
+    return failed
+
+
+def verify_required_nodes(nodes_module: Any, required_nodes: set[str]) -> None:
+    missing = sorted(required_nodes.difference(nodes_module.NODE_CLASS_MAPPINGS))
+    if missing:
+        raise RuntimeError("profile missing required Comfy node classes: " + ", ".join(missing))
+    log("PROFILE_REQUIRED_NODE_CLASSES_OK " + ",".join(sorted(required_nodes)))
 
 
 def patch_node_profile(profile: dict[str, Any]) -> None:
@@ -143,14 +189,13 @@ def patch_node_profile(profile: dict[str, Any]) -> None:
     builtin_files = list(profile.get("builtinExtraFiles", []))
     required_nodes = set(profile.get("requiredNodeClasses", []))
 
-    def init_profile_builtin_extra_nodes(*_args: Any, **_kwargs: Any) -> None:
-        for relative_file in builtin_files:
-            load_builtin_extra(nodes, relative_file)
-
-        missing = sorted(required_nodes.difference(nodes.NODE_CLASS_MAPPINGS))
-        if missing:
-            raise RuntimeError("profile missing required Comfy node classes: " + ", ".join(missing))
-        log("PROFILE_REQUIRED_NODE_CLASSES_OK " + ",".join(sorted(required_nodes)))
+    async def init_profile_builtin_extra_nodes(*_args: Any, **_kwargs: Any) -> list[str]:
+        failed = await load_profile_builtin_extra_nodes(nodes, profile, COMFY_DIR)
+        if failed:
+            raise RuntimeError("profile builtin extra files failed to load: " + ", ".join(failed))
+        log("PROFILE_BUILTIN_EXTRA_FAILURES=0")
+        verify_required_nodes(nodes, required_nodes)
+        return []
 
     nodes.init_builtin_extra_nodes = init_profile_builtin_extra_nodes
     log(

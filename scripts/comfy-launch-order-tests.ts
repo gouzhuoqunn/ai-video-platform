@@ -38,6 +38,14 @@ assertComfyArgsBeforeNodes(launcher);
 assert.match(launcher, /ComfyUI args\.cpu was not true before importing nodes/);
 assert.match(launcher, /model_management\.CPUState\.CPU/);
 assert.match(launcher, /node profile is unverified and cannot be used/);
+assert.match(launcher, /async def init_profile_builtin_extra_nodes/);
+assert.match(launcher, /await load_profile_builtin_extra_nodes/);
+assert.match(launcher, /await nodes_module\.load_custom_node/);
+assert.doesNotMatch(launcher, /asyncio\.gather|create_task|asyncio\.run|run_until_complete/);
+assert.match(
+  launcher,
+  /async def init_profile_builtin_extra_nodes[\s\S]*await load_profile_builtin_extra_nodes[\s\S]*verify_required_nodes\(nodes, required_nodes\)/,
+);
 
 assert.throws(() => {
   assertComfyArgsBeforeNodes(`
