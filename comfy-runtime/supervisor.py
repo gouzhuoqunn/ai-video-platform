@@ -14,6 +14,8 @@ WORKSPACE = Path("/workspace")
 LOG_DIR = WORKSPACE / "logs"
 COMFY_DIR = Path("/opt/ComfyUI")
 RUNTIME_DIR = Path("/opt/comfy-runtime")
+SMOKE_IMPORT_BLOCKER = RUNTIME_DIR / "smoke_import_blocker"
+GPU_PROFILES = {"rtx4090", "rtx5090"}
 REQUIRED_DIRS = [
     WORKSPACE / "models",
     WORKSPACE / "comfy-input",
@@ -68,6 +70,16 @@ def wait_http(url: str, timeout_seconds: int) -> bool:
 
 
 def gpu_preflight() -> None:
+    gpu_profile = os.environ.get("COMFY_GPU_PROFILE", "")
+    if gpu_profile not in GPU_PROFILES:
+        log("gpu_preflight_failed: COMFY_GPU_PROFILE must be rtx4090 or rtx5090")
+        raise SystemExit(42)
+
+    python_path = os.environ.get("PYTHONPATH", "")
+    if str(SMOKE_IMPORT_BLOCKER) in python_path.split(os.pathsep):
+        log("gpu_preflight_failed: smoke import blocker present in PYTHONPATH")
+        raise SystemExit(42)
+
     try:
         nvidia = subprocess.run(["nvidia-smi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except FileNotFoundError:
@@ -89,9 +101,12 @@ def gpu_preflight() -> None:
 def comfy_args(mode: str) -> list[str]:
     host = os.environ.get("COMFYUI_HOST", "127.0.0.1")
     port = os.environ.get("COMFYUI_PORT", "8188")
+    node_profile = os.environ.get("COMFY_NODE_PROFILE", "production_minimal")
     args = [
         "python3.11",
-        "main.py",
+        str(RUNTIME_DIR / "launch_comfy.py"),
+        "--node-profile",
+        node_profile,
         "--listen",
         host,
         "--port",
@@ -106,16 +121,39 @@ def comfy_args(mode: str) -> list[str]:
         str(WORKSPACE / "models"),
         "--disable-auto-launch",
         "--dont-print-server",
+        "--disable-all-custom-nodes",
+        "--disable-triton-backend",
     ]
     if mode == "smoke_cpu":
-        args.extend(["--cpu", "--disable-triton-backend", "--preview-method", "none"])
+        args.extend(["--cpu", "--preview-method", "none"])
     return args
 
 
-def start_process(name: str, args: list[str], cwd: Path, log_file: str) -> subprocess.Popen[str]:
+def child_env(mode: str) -> dict[str, str]:
+    env = os.environ.copy()
+    if mode == "smoke_cpu":
+        existing = env.get("PYTHONPATH", "")
+        parts = [str(SMOKE_IMPORT_BLOCKER)]
+        if existing:
+            parts.append(existing)
+        env["PYTHONPATH"] = os.pathsep.join(parts)
+        env["PYTHONFAULTHANDLER"] = "1"
+        env.setdefault("OMP_NUM_THREADS", "1")
+        env.setdefault("MKL_NUM_THREADS", "1")
+    return env
+
+
+def start_process(
+    name: str,
+    args: list[str],
+    cwd: Path,
+    log_file: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.Popen[str]:
     process = subprocess.Popen(
         args,
         cwd=str(cwd),
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -157,8 +195,12 @@ def main() -> int:
     if mode == "gpu":
         gpu_preflight()
 
-    log(f"starting ComfyUI runtime at commit {os.environ.get('COMFYUI_COMMIT')} mode={mode}")
-    comfy = start_process("comfyui", comfy_args(mode), COMFY_DIR, "comfyui.log")
+    node_profile = os.environ.get("COMFY_NODE_PROFILE", "production_minimal")
+    log(
+        "starting ComfyUI runtime at commit "
+        f"{os.environ.get('COMFYUI_COMMIT')} mode={mode} node_profile={node_profile}"
+    )
+    comfy = start_process("comfyui", comfy_args(mode), COMFY_DIR, "comfyui.log", child_env(mode))
 
     if not wait_http(f"http://127.0.0.1:{os.environ.get('COMFYUI_PORT', '8188')}/system_stats", 300):
         code = comfy.poll()

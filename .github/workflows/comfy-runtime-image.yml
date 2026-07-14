@@ -8,6 +8,7 @@ on:
       - ".github/workflows/comfy-runtime-image.yml"
       - "comfy-runtime/**"
       - "scripts/comfy-runtime-contract-tests.ts"
+      - "scripts/comfy-node-profile-tests.ts"
       - "scripts/workflow-asset-tests.ts"
       - "src/lib/generation/**"
       - "package.json"
@@ -392,6 +393,690 @@ jobs:
           echo "test_b_no_inference=passed"
           echo "test_b_sigterm=passed"
           echo "classification=comfy_kitchen_triton_import_blocker_ab_proven"
+
+  diagnose-node-profile-fixed-digest:
+    name: Diagnose Kornia gate and production node profile
+    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && github.event_name == 'push' && contains(github.event.head_commit.message, '[node-profile]') && contains(github.event.head_commit.message, '[skip build]') }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      gate_passed: ${{ steps.d4.outputs.gate_passed }}
+      kornia_version: ${{ steps.versions.outputs.kornia_version }}
+    env:
+      COMFY_RUNTIME_IMAGE_NAME: ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime
+      COMFY_RUNTIME_DIGEST: sha256:1cfb4740fb8b310a8095500e8fe55160176c619306068d553092182f4888efd1
+      COMFY_RUNTIME_IMAGE: ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:1cfb4740fb8b310a8095500e8fe55160176c619306068d553092182f4888efd1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm diagnose gate mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "build=skipped_until_diagnosis_gate"
+          echo "push=skipped_until_diagnosis_gate"
+          echo "permissions=contents:read"
+          echo "repository_secrets_used=false"
+          echo "diagnosis_target=${COMFY_RUNTIME_IMAGE}"
+
+      - name: Disk cleanup and anonymous pull fixed digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config-node-profile"
+          mkdir -p "${DOCKER_CONFIG}"
+          printf '{}\n' > "${DOCKER_CONFIG}/config.json"
+          docker system prune -af --volumes || true
+          docker builder prune -af || true
+          sudo apt-get clean
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /usr/share/dotnet /opt/hostedtoolcache/CodeQL || true
+          df -h
+          docker buildx imagetools inspect "${COMFY_RUNTIME_IMAGE}" >/tmp/node-profile-inspect.txt
+          grep -F "linux/amd64" /tmp/node-profile-inspect.txt
+          docker pull --platform linux/amd64 "${COMFY_RUNTIME_IMAGE}"
+          docker image inspect "${COMFY_RUNTIME_IMAGE}" >/tmp/node-profile-image-inspect.json
+          python3 - <<'PY'
+          import json
+          import os
+
+          data = json.load(open("/tmp/node-profile-image-inspect.json", "r", encoding="utf-8"))[0]
+          expected = os.environ["COMFY_RUNTIME_IMAGE"]
+          repo_digests = data.get("RepoDigests", [])
+          print("repo_digests=" + ",".join(repo_digests))
+          if expected not in repo_digests:
+              raise SystemExit("fixed digest did not match RepoDigests exactly")
+          PY
+
+      - name: Record dependency versions and Comfy source facts
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="comfy-runtime-facts-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" --entrypoint /bin/bash "${COMFY_RUNTIME_IMAGE}" -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
+          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          docker exec -i "${container}" python3.11 - <<'PY' >/tmp/runtime-facts.txt
+          import importlib.metadata as metadata
+          import pathlib
+          import platform
+          import re
+          import sys
+          import sysconfig
+
+          allow = [
+              "torch",
+              "torchvision",
+              "torchaudio",
+              "triton",
+              "comfy-kitchen",
+              "kornia",
+              "numpy",
+              "scipy",
+          ]
+
+          print("python_version=" + platform.python_version())
+          print("python_abi=" + sysconfig.get_config_var("SOABI"))
+          print("glibc=" + ",".join(platform.libc_ver()))
+          print("machine=" + platform.machine())
+          cpuinfo = pathlib.Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
+          flags = ""
+          for line in cpuinfo.splitlines():
+              if line.startswith("flags"):
+                  flags = line.split(":", 1)[1].strip()
+                  break
+          print("cpu_flags=" + flags)
+
+          for name in allow:
+              try:
+                  dist = metadata.distribution(name)
+              except metadata.PackageNotFoundError:
+                  print(f"{name}=not_installed")
+                  continue
+              print(f"{name}={dist.version}")
+              print(f"{name}_site_packages={dist.locate_file('')}")
+              installer = dist.read_text("INSTALLER") or ""
+              print(f"{name}_installer={installer.strip() or 'unknown'}")
+              wheel = dist.read_text("WHEEL") or ""
+              wheel_tag = next((line.split(":", 1)[1].strip() for line in wheel.splitlines() if line.startswith("Tag:")), "unknown")
+              print(f"{name}_wheel_tag={wheel_tag}")
+
+          requirements = pathlib.Path("/opt/ComfyUI/requirements.txt").read_text(encoding="utf-8")
+          for line in requirements.splitlines():
+              if "kornia" in line.lower():
+                  print("comfyui_requirements_kornia_line=" + line.strip())
+
+          nodes = pathlib.Path("/opt/ComfyUI/nodes.py").read_text(encoding="utf-8")
+          main = pathlib.Path("/opt/ComfyUI/main.py").read_text(encoding="utf-8")
+          post = pathlib.Path("/opt/ComfyUI/comfy_extras/nodes_post_processing.py").read_text(encoding="utf-8")
+          assert "def init_builtin_extra_nodes" in nodes
+          assert "nodes_post_processing.py" in nodes
+          assert re.search(r"import\s+kornia|from\s+kornia", post)
+          assert "disable_all_custom_nodes" in main
+          assert "init_extra_nodes" in main
+          print("builtin_extra_nodes_not_controlled_by_disable_all_custom_nodes=true")
+          print("nodes_post_processing_imports_kornia=true")
+          print("init_extra_nodes_before_health_server=true")
+
+          search_roots = [
+              pathlib.Path("/opt/ComfyUI/comfy_extras"),
+              pathlib.Path("/opt/ComfyUI/nodes.py"),
+              pathlib.Path("/opt/ComfyUI/comfy_api_nodes"),
+          ]
+          workflow_used_files = {
+              "comfy_extras/nodes_flux.py",
+              "comfy_extras/nodes_images.py",
+              "comfy_extras/nodes_model_advanced.py",
+              "comfy_extras/nodes_video.py",
+              "comfy_extras/nodes_wan.py",
+          }
+          patterns = [
+              "import kornia",
+              "from kornia",
+              "torch.jit.script",
+              "@torch.jit.script",
+          ]
+          print("kornia_import_sources_begin")
+          for root in search_roots:
+              files = [root] if root.is_file() else sorted(root.rglob("*.py"))
+              for path in files:
+                  text = path.read_text(encoding="utf-8", errors="replace")
+                  rel = str(path.relative_to("/opt/ComfyUI"))
+                  used = str(rel in workflow_used_files).lower()
+                  for lineno, line in enumerate(text.splitlines(), start=1):
+                      if any(pattern in line for pattern in patterns):
+                          print(f"{rel}:{lineno}:workflow_used={used}:{line.strip()}")
+          print("kornia_import_sources_end")
+          PY
+          cat /tmp/runtime-facts.txt
+          kornia_version="$(awk -F= '$1=="kornia" {print $2; exit}' /tmp/runtime-facts.txt)"
+          if [ -z "${kornia_version}" ] || [ "${kornia_version}" = "not_installed" ]; then
+            echo "::error::Unable to record exact Kornia version from fixed digest"
+            exit 1
+          fi
+          echo "kornia_version=${kornia_version}" >> "$GITHUB_OUTPUT"
+
+      - name: D1 Kornia import under Triton blocker
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="comfy-runtime-d1-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" \
+            --entrypoint /bin/bash \
+            -v "${PWD}/comfy-runtime/smoke_import_blocker:/run/smoke-import-blocker:ro" \
+            "${COMFY_RUNTIME_IMAGE}" \
+            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
+          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          set +e
+          docker exec -i \
+            -e PYTHONPATH=/run/smoke-import-blocker \
+            -e PYTHONFAULTHANDLER=1 \
+            -e OMP_NUM_THREADS=1 \
+            -e MKL_NUM_THREADS=1 \
+            "${container}" \
+            sh -lc 'timeout 120s python3.11 -X faulthandler -X importtime -c "import torch; print(\"torch_import=ok\", flush=True); import kornia; print(\"kornia_import=ok\", getattr(kornia, \"__version__\", \"unknown\"), flush=True)"' \
+            >/tmp/d1-kornia.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/d1-kornia.log
+          echo "d1_exit_code=${code}"
+          if [ "${code}" -eq 0 ]; then
+            echo "classification=kornia_import_not_actual_trigger"
+          else
+            grep -E "Fatal Python error|Segmentation fault|torch/jit|kornia" /tmp/d1-kornia.log
+            echo "classification=kornia_torchscript_import_crash_reproduced"
+          fi
+
+      - name: D2 Kornia import with torch.jit.script identity monkeypatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="comfy-runtime-d2-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" \
+            --entrypoint /bin/bash \
+            -v "${PWD}/comfy-runtime/smoke_import_blocker:/run/smoke-import-blocker:ro" \
+            "${COMFY_RUNTIME_IMAGE}" \
+            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
+          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          docker exec -i \
+            -e PYTHONPATH=/run/smoke-import-blocker \
+            -e PYTHONFAULTHANDLER=1 \
+            -e OMP_NUM_THREADS=1 \
+            -e MKL_NUM_THREADS=1 \
+            "${container}" \
+            timeout 120s python3.11 -X faulthandler - <<'PY'
+          import torch
+
+          def identity_script(obj=None, *args, **kwargs):
+              if obj is None:
+                  return lambda wrapped: wrapped
+              return obj
+
+          torch.jit.script = identity_script
+          import kornia
+          print("kornia_import_with_torch_jit_script_identity=ok")
+          print("kornia_version=" + getattr(kornia, "__version__", "unknown"))
+          PY
+          echo "classification=kornia_import_segmentation_avoided_by_jit_identity"
+
+      - name: D3 Locate builtin extra crash source in original order
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="comfy-runtime-d3-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" \
+            --entrypoint /bin/bash \
+            -v "${PWD}/comfy-runtime/smoke_import_blocker:/run/smoke-import-blocker:ro" \
+            "${COMFY_RUNTIME_IMAGE}" \
+            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
+          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          cat >/tmp/d3_builtin_order.py <<'PY'
+          import os
+          import sys
+
+          sys.path.insert(0, "/opt/ComfyUI")
+          os.chdir("/opt/ComfyUI")
+          import nodes
+
+          original = nodes.load_custom_node
+
+          def traced_load_custom_node(module_path, *args, **kwargs):
+              print("LOADING_BUILTIN_EXTRA=" + str(module_path), flush=True)
+              result = original(module_path, *args, **kwargs)
+              print("LOADED_BUILTIN_EXTRA=" + str(module_path), flush=True)
+              return result
+
+          nodes.load_custom_node = traced_load_custom_node
+          nodes.init_builtin_extra_nodes()
+          print("ORIGINAL_BUILTIN_EXTRA_LOAD_COMPLETE", flush=True)
+          PY
+          docker cp /tmp/d3_builtin_order.py "${container}:/tmp/d3_builtin_order.py"
+          set +e
+          docker exec \
+            -e PYTHONPATH=/run/smoke-import-blocker \
+            -e PYTHONFAULTHANDLER=1 \
+            -e OMP_NUM_THREADS=1 \
+            -e MKL_NUM_THREADS=1 \
+            "${container}" \
+            timeout 120s python3.11 -X faulthandler /tmp/d3_builtin_order.py >/tmp/d3-builtin.log 2>&1
+          code=$?
+          set -e
+          tail -n 200 /tmp/d3-builtin.log
+          if [ "${code}" -eq 0 ]; then
+            echo "::error::D3 original builtin extra loading did not reproduce crash"
+            exit 1
+          fi
+          grep -E "nodes_post_processing|kornia|Fatal Python error|Segmentation fault|torch/jit" /tmp/d3-builtin.log
+          echo "d3_exit_code=${code}"
+          echo "classification=original_builtin_extra_order_reaches_kornia_torchscript_crash"
+
+      - name: D4 Production minimal node profile smoke on fixed digest
+        id: d4
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="comfy-runtime-d4-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" \
+            --entrypoint /bin/bash \
+            -v "${PWD}/comfy-runtime:/run/comfy-runtime:ro" \
+            "${COMFY_RUNTIME_IMAGE}" \
+            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
+          cleanup() {
+            docker exec "${container}" sh -lc 'tail -n 200 /tmp/d4-profile.log 2>/dev/null || true' || true
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker exec \
+            -e COMFY_RUNTIME_DIR=/run/comfy-runtime \
+            -e COMFY_NODE_PROFILE=production_minimal \
+            -e PYTHONPATH=/run/comfy-runtime/smoke_import_blocker \
+            -e PYTHONFAULTHANDLER=1 \
+            -e OMP_NUM_THREADS=1 \
+            -e MKL_NUM_THREADS=1 \
+            "${container}" \
+            sh -lc 'cd /opt/ComfyUI && python3.11 -X faulthandler /run/comfy-runtime/launch_comfy.py --node-profile production_minimal --cpu --disable-triton-backend --disable-all-custom-nodes --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout --verbose DEBUG >/tmp/d4-profile.log 2>&1 & echo $! >/tmp/d4-profile.pid'
+
+          ready=false
+          started_at="$(date +%s)"
+          for attempt in $(seq 1 36); do
+            if ! docker exec "${container}" sh -lc 'kill -0 "$(cat /tmp/d4-profile.pid)" 2>/dev/null'; then
+              echo "::error::D4 production minimal profile process exited"
+              docker exec "${container}" tail -n 200 /tmp/d4-profile.log || true
+              exit 1
+            fi
+            if docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/tmp/d4-system-stats.json; then
+              ready=true
+              break
+            fi
+            sleep 5
+          done
+          if [ "${ready}" != "true" ]; then
+            echo "::error::D4 production minimal profile did not become healthy"
+            docker exec "${container}" tail -n 200 /tmp/d4-profile.log || true
+            exit 1
+          fi
+          seconds="$(( $(date +%s) - started_at ))"
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >/tmp/d4-object-info.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/tmp/d4-queue.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/tmp/d4-history.json
+          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/tmp/d4-free.json
+          docker exec "${container}" sh -lc 'grep -F "node_profile=production_minimal" /tmp/d4-profile.log'
+          docker exec "${container}" sh -lc 'grep -F "PROFILE_REQUIRED_NODE_CLASSES_OK" /tmp/d4-profile.log'
+          docker exec "${container}" sh -lc 'grep -F "Triton intentionally unavailable in COMFY_RUNTIME_MODE=smoke_cpu" /tmp/d4-profile.log || true'
+          docker exec "${container}" sh -lc '! grep -F "nodes_post_processing.py" /tmp/d4-profile.log'
+          docker exec "${container}" sh -lc '! grep -F "Fatal Python error" /tmp/d4-profile.log'
+          docker exec "${container}" sh -lc '! find /workspace/models -type f | grep .'
+          docker exec "${container}" sh -lc '! find /workspace/comfy-output -type f | grep .'
+          docker exec -i "${container}" python3.11 - <<'PY'
+          import json
+
+          with open("/tmp/d4-object-info.json", "r", encoding="utf-8") as handle:
+              object_info = json.load(handle)
+          required = {
+              "CLIPLoader",
+              "CLIPTextEncode",
+              "DualCLIPLoader",
+              "FluxGuidance",
+              "FluxKontextImageScale",
+              "KSampler",
+              "KSamplerAdvanced",
+              "LoadImage",
+              "ModelSamplingSD3",
+              "SaveAnimatedWEBP",
+              "SaveImage",
+              "SaveWEBM",
+              "UNETLoader",
+              "VAEDecode",
+              "VAELoader",
+              "Wan22ImageToVideoLatent",
+              "WanImageToVideo",
+          }
+          missing = sorted(required.difference(object_info))
+          if missing:
+              raise SystemExit("missing Comfy node classes: " + ", ".join(missing))
+          PY
+          docker exec "${container}" sh -lc 'kill -TERM "$(cat /tmp/d4-profile.pid)"'
+          for attempt in $(seq 1 10); do
+            if ! docker exec "${container}" sh -lc 'kill -0 "$(cat /tmp/d4-profile.pid)" 2>/dev/null'; then
+              break
+            fi
+            sleep 3
+          done
+          docker exec "${container}" sh -lc '! kill -0 "$(cat /tmp/d4-profile.pid)" 2>/dev/null'
+          echo "d4_start_seconds=${seconds}"
+          echo "classification=production_minimal_profile_smoke_passed"
+          echo "gate_passed=true" >> "$GITHUB_OUTPUT"
+
+  build-node-profile-runtime:
+    name: Build production node profile runtime
+    needs: diagnose-node-profile-fixed-digest
+    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && needs.diagnose-node-profile-fixed-digest.outputs.gate_passed == 'true' }}
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      version_tag: ${{ steps.image.outputs.version_tag }}
+      sha_tag: ${{ steps.image.outputs.sha_tag }}
+      digest: ${{ steps.build.outputs.digest }}
+      kornia_version: ${{ steps.locks.outputs.kornia_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Static verification
+        run: |
+          npm run secret:scan
+          npm run generation:node-profile:test
+
+      - name: Confirm exact Kornia lock from diagnosis
+        id: locks
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${{ needs.diagnose-node-profile-fixed-digest.outputs.kornia_version }}"
+          echo "kornia_version=${{ needs.diagnose-node-profile-fixed-digest.outputs.kornia_version }}"
+          echo "kornia_version=${{ needs.diagnose-node-profile-fixed-digest.outputs.kornia_version }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image metadata
+        id: image
+        shell: bash
+        run: |
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/ai-creative-comfy-runtime"
+          version_tag="v0.1.3-production-node-profile-${GITHUB_SHA::7}"
+          sha_tag="sha-${GITHUB_SHA}"
+          {
+            echo "image=${image}"
+            echo "version_tag=${version_tag}"
+            echo "sha_tag=${sha_tag}"
+            echo "tags=${image}:${version_tag},${image}:${sha_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Comfy runtime image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./comfy-runtime
+          file: ./comfy-runtime/Dockerfile
+          platforms: linux/amd64
+          tags: ${{ steps.image.outputs.tags }}
+          build-args: |
+            KORNIA_VERSION=${{ needs.diagnose-node-profile-fixed-digest.outputs.kornia_version }}
+          push: true
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=comfy-runtime
+          cache-to: type=gha,mode=max,scope=comfy-runtime
+
+      - name: Static image safety scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ steps.image.outputs.image }}@${{ steps.build.outputs.digest }}"
+          docker pull --platform linux/amd64 "${image}"
+          container="comfy-runtime-node-profile-scan-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" --entrypoint /bin/bash "${image}" -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
+          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" -o -name "*.gguf" \) | grep .'
+          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f -path "*/models/*" -name "*.bin" -size +50M | grep .'
+          docker exec "${container}" sh -lc 'test ! -e /.env && test ! -e /.env.local && test ! -e /.secrets'
+          docker exec "${container}" sh -lc '! find /opt/comfy-runtime -type f | grep -E "CLORE_API_KEY|SUPABASE_SERVICE_ROLE|SUPABASE_SECRET|R2_ACCESS_KEY|SSH_PRIVATE"'
+
+      - name: Summarize image
+        shell: bash
+        run: |
+          {
+            echo "### Production node profile Comfy Runtime image"
+            echo ""
+            echo "- Image: \`${{ steps.image.outputs.image }}\`"
+            echo "- Version tag: \`${{ steps.image.outputs.version_tag }}\`"
+            echo "- Commit tag: \`${{ steps.image.outputs.sha_tag }}\`"
+            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "- Platform: \`linux/amd64\`"
+            echo "- ComfyUI commit: \`da2608926eaf68fd532bba4e1ace3402c5d21399\`"
+            echo "- Node profile: \`production_minimal\`"
+            echo "- Model weights in image: \`false\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-node-profile-runtime:
+    name: Verify production node profile runtime
+    needs: build-node-profile-runtime
+    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && needs.build-node-profile-runtime.outputs.digest != '' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h
+
+      - name: Pull public digest anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config-node-profile-verify"
+          mkdir -p "${DOCKER_CONFIG}"
+          printf '{}\n' > "${DOCKER_CONFIG}/config.json"
+          image="${{ needs.build-node-profile-runtime.outputs.image }}@${{ needs.build-node-profile-runtime.outputs.digest }}"
+          docker buildx imagetools inspect "${image}" >/tmp/node-profile-runtime-inspect.txt
+          grep -F "linux/amd64" /tmp/node-profile-runtime-inspect.txt
+          docker pull --platform linux/amd64 "${image}"
+
+      - name: Smoke CPU production node profile runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ needs.build-node-profile-runtime.outputs.image }}@${{ needs.build-node-profile-runtime.outputs.digest }}"
+          container="comfy-runtime-node-profile-smoke-${GITHUB_RUN_ID}"
+          started_at="$(date +%s)"
+          docker run -d --name "${container}" \
+            -e START_GPU_WORKER=false \
+            -e COMFY_RUNTIME_MODE=smoke_cpu \
+            -e COMFY_NODE_PROFILE=production_minimal \
+            -p 127.0.0.1:8080:8080 \
+            "${image}"
+          cleanup() {
+            docker exec "${container}" sh -lc 'for file in /workspace/logs/*.log; do case "${file}" in *environment-redacted.log) continue ;; esac; echo "===== ${file}"; tail -n 200 "${file}" || true; done' || true
+            docker logs --tail 200 "${container}" || true
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          ready=false
+          for attempt in $(seq 1 60); do
+            if docker ps --format '{{.Names}}' | grep -Fx "${container}" >/dev/null \
+              && curl -fsS http://127.0.0.1:8080/healthz | tee /tmp/comfy-health.json | grep -F "\"ok\": true"; then
+              ready=true
+              break
+            fi
+            sleep 5
+          done
+          if [ "${ready}" != "true" ]; then
+            echo "::error::Production node profile runtime did not become healthy in time"
+            exit 1
+          fi
+          seconds="$(( $(date +%s) - started_at ))"
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >/tmp/object-info.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/tmp/system-stats.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/tmp/history.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/tmp/queue.json
+          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/tmp/free.json
+          docker exec "${container}" sh -lc 'grep -F "node_profile=production_minimal" /workspace/logs/comfyui.log'
+          docker exec "${container}" sh -lc 'grep -F "workflow_manifest_sha256=acb0a624f433a174366bc2820ab835c34273f0c102acc0651b09f75e800ca5d5" /workspace/logs/comfyui.log'
+          docker exec "${container}" sh -lc 'grep -F "PROFILE_REQUIRED_NODE_CLASSES_OK" /workspace/logs/comfyui.log'
+          docker exec "${container}" python3.11 -c 'import importlib.metadata as m; assert m.version("kornia") == "${{ needs.build-node-profile-runtime.outputs.kornia_version }}"'
+          docker exec "${container}" sh -lc '! grep -F "nodes_post_processing.py" /workspace/logs/comfyui.log'
+          docker exec "${container}" sh -lc '! grep -F "Fatal Python error" /workspace/logs/comfyui.log'
+          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
+          import base64
+          import os
+          import socket
+
+          key = base64.b64encode(os.urandom(16)).decode()
+          request = (
+              "GET /ws?clientId=ci-node-profile-smoke HTTP/1.1\r\n"
+              "Host: 127.0.0.1:8188\r\n"
+              "Upgrade: websocket\r\n"
+              "Connection: Upgrade\r\n"
+              f"Sec-WebSocket-Key: {key}\r\n"
+              "Sec-WebSocket-Version: 13\r\n\r\n"
+          )
+          with socket.create_connection(("127.0.0.1", 8188), timeout=10) as sock:
+              sock.sendall(request.encode())
+              response = sock.recv(512).decode(errors="replace")
+          if " 101 " not in response.split("\r\n", 1)[0]:
+              raise SystemExit(response)
+          PY'
+          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
+          import json
+          import urllib.error
+          import urllib.request
+
+          body = json.dumps({"prompt": {"bad": {"class_type": "MissingNodeForSmoke", "inputs": {}}}}).encode()
+          request = urllib.request.Request(
+              "http://127.0.0.1:8188/prompt",
+              data=body,
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              urllib.request.urlopen(request, timeout=10).read()
+          except urllib.error.HTTPError as exc:
+              payload = exc.read().decode(errors="replace")
+              if exc.code != 400 or "MissingNodeForSmoke" not in payload:
+                  raise
+          else:
+              raise SystemExit("invalid prompt unexpectedly accepted")
+          PY'
+          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
+          import json
+
+          with open("/tmp/object-info.json", "r", encoding="utf-8") as handle:
+              object_info = json.load(handle)
+          required = {
+              "CLIPLoader",
+              "CLIPTextEncode",
+              "DualCLIPLoader",
+              "FluxGuidance",
+              "FluxKontextImageScale",
+              "KSampler",
+              "KSamplerAdvanced",
+              "LoadImage",
+              "ModelSamplingSD3",
+              "SaveAnimatedWEBP",
+              "SaveImage",
+              "SaveWEBM",
+              "UNETLoader",
+              "VAEDecode",
+              "VAELoader",
+              "Wan22ImageToVideoLatent",
+              "WanImageToVideo",
+          }
+          missing = sorted(required.difference(object_info))
+          if missing:
+              raise SystemExit("missing Comfy node classes: " + ", ".join(missing))
+          PY'
+          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/tmp/interrupt.json
+          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" -o -name "*.gguf" \) | grep .'
+          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f -path "*/models/*" -name "*.bin" -size +50M | grep .'
+          docker exec "${container}" sh -lc '! printenv | grep -E "SUPABASE_SERVICE_ROLE|SUPABASE_SECRET|CLORE_API_KEY|R2_ADMIN|SSH_PRIVATE"'
+          docker exec "${container}" sh -lc 'test ! -e /app/worker.py'
+          docker stop --time 15 "${container}" >/dev/null
+          echo "node_profile_smoke_start_seconds=${seconds}"
+
+      - name: GPU mode fail-closed without smoke blocker
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ needs.build-node-profile-runtime.outputs.image }}@${{ needs.build-node-profile-runtime.outputs.digest }}"
+          set +e
+          docker run --rm -e COMFY_RUNTIME_MODE=gpu -e COMFY_NODE_PROFILE=production_minimal -e COMFY_GPU_PROFILE=rtx4090 "${image}" >/tmp/gpu-negative.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/gpu-negative.log
+          test "${code}" -ne 0
+          test "${code}" -eq 42
+          grep -F "gpu_preflight_failed" /tmp/gpu-negative.log
+          ! grep -F "Triton intentionally unavailable in COMFY_RUNTIME_MODE=smoke_cpu" /tmp/gpu-negative.log
+          ! grep -F "starting ComfyUI runtime" /tmp/gpu-negative.log
+
+      - name: Summarize production node profile verification
+        shell: bash
+        run: |
+          {
+            echo "### Production node profile runtime verification"
+            echo ""
+            echo "- Image: \`${{ needs.build-node-profile-runtime.outputs.image }}\`"
+            echo "- Version tag: \`${{ needs.build-node-profile-runtime.outputs.version_tag }}\`"
+            echo "- Digest: \`${{ needs.build-node-profile-runtime.outputs.digest }}\`"
+            echo "- Kornia lock: \`${{ needs.build-node-profile-runtime.outputs.kornia_version }}\`"
+            echo "- Anonymous pull: \`true\`"
+            echo "- Node profile: \`production_minimal\`"
+            echo "- CPU no-model smoke: \`true\`"
+            echo "- GPU no-device fail-closed: \`true\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build-and-push:
     if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip build]')) }}

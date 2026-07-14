@@ -16,10 +16,13 @@ function main() {
     "comfy-runtime/Dockerfile",
     "comfy-runtime/entrypoint.sh",
     "comfy-runtime/supervisor.py",
+    "comfy-runtime/launch_comfy.py",
     "comfy-runtime/controller.py",
     "comfy-runtime/healthcheck.py",
     "comfy-runtime/requirements.lock",
     "comfy-runtime/custom-node-locks.json",
+    "comfy-runtime/node-profiles/production-minimal.json",
+    "comfy-runtime/smoke_import_blocker/triton/__init__.py",
     "comfy-runtime/workflows/safe-object-info.json",
     ".github/workflows/comfy-runtime-image.yml",
   ]) {
@@ -41,10 +44,18 @@ function main() {
   const supervisor = read("comfy-runtime/supervisor.py");
   assert.match(supervisor, /START_GPU_WORKER/);
   assert.match(supervisor, /COMFY_RUNTIME_MODE/);
+  assert.match(supervisor, /COMFY_NODE_PROFILE/);
   assert.match(supervisor, /smoke_cpu/);
+  assert.match(supervisor, /SMOKE_IMPORT_BLOCKER/);
   assert.match(supervisor, /--disable-triton-backend/);
+  assert.match(supervisor, /--disable-all-custom-nodes/);
   assert.match(supervisor, /gpu_preflight_failed/);
   assert.match(supervisor, /--models-directory/);
+
+  const launcher = read("comfy-runtime/launch_comfy.py");
+  assert.match(launcher, /production_minimal/);
+  assert.match(launcher, /init_profile_builtin_extra_nodes/);
+  assert.match(launcher, /PROFILE_REQUIRED_NODE_CLASSES_OK/);
 
   const controller = read("comfy-runtime/controller.py");
   assert.match(controller, /\/healthz/);
@@ -63,6 +74,7 @@ function main() {
   assert.match(workflow, /ai-creative-comfy-runtime/);
   assert.match(workflow, /linux\/amd64/);
   assert.match(workflow, /COMFY_RUNTIME_MODE=smoke_cpu/);
+  assert.match(workflow, /COMFY_NODE_PROFILE=production_minimal/);
   assert.match(workflow, /gpu_preflight_failed/);
   assert.match(workflow, /object_info/);
   assert.match(workflow, /\/interrupt/);

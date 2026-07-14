@@ -1,5 +1,23 @@
 # Project Context
 
+## 2026-07-14 Stage 2.8B Production Minimal Node Profile Gate
+
+- Added a `production_minimal` ComfyUI node profile generated from `comfy-runtime/workflows/official/manifest.json` and `comfy-runtime/comfyui-source-audit.json`. It keeps the base `nodes.py` classes plus only `comfy_extras/nodes_flux.py`, `nodes_images.py`, `nodes_model_advanced.py`, `nodes_video.py`, and `nodes_wan.py`.
+- The profile explicitly excludes the currently suspect full-builtin path entries `comfy_extras/nodes_latent.py` and `comfy_extras/nodes_post_processing.py`. Full manual builtin loading remains `unverified` and is not the default or first benchmark path.
+- Added `comfy-runtime/launch_comfy.py`, which patches `nodes.init_builtin_extra_nodes` in memory without modifying `/opt/ComfyUI` source files, verifies profile/source SHA values, and fails closed if required node classes are missing.
+- `smoke_cpu` and `gpu` both default to `COMFY_NODE_PROFILE=production_minimal`. The Triton import blocker is limited to `COMFY_RUNTIME_MODE=smoke_cpu`; `gpu` mode requires `COMFY_GPU_PROFILE=rtx4090|rtx5090`, runs preflight before ComfyUI import, and fails closed without falling back to CPU.
+- The GitHub Actions workflow now has a single-run `[node-profile] [skip build]` path: diagnose old digest `sha256:1cfb4740fb8b310a8095500e8fe55160176c619306068d553092182f4888efd1`, run D1-D4 diagnostics, and build exactly one new `v0.1.3-production-node-profile-<sha>` image only if the production-minimal CPU boot gate passes.
+- No new Runtime digest has been marked verified in the Registry yet from this local checkpoint. RTX 4090 real startup, model downloads, image/video generation, VRAM/RAM/speed measurement, R2 model cache, and production model selection remain blocked until the CI smoke produces a verified digest.
+
+## 2026-07-14 Stage 2.6 Anonymous Comfy Runtime Pull Gate
+
+- The GHCR package `gouzhuoqunn/ai-creative-comfy-runtime` was changed to Public by the user while the source repository stayed private.
+- Anonymous GHCR Registry API access now returns the fixed OCI index digest `sha256:d88dd518253f27ac8a7841d07b2e02c79a8cda0a940c85b9c579446f105c26bc`, and the index contains `linux/amd64`.
+- Draft PR smoke run `29326808838` used only `contents: read`, did not log in to GHCR, skipped build and push, and anonymously pulled the fixed digest successfully after freeing runner disk space.
+- The same run did not pass the no-model Runtime smoke: the container exited before controller health with `ExitCode=1`, not OOM, after logging only `starting ComfyUI runtime at commit da2608926eaf68fd532bba4e1ace3402c5d21399`.
+- Because the no-model API/WebSocket/node smoke did not pass, `comfy-runtime/comfy-runtime.config.json` is not promoted to a verified digest state. RTX 4090 benchmark, model download, image generation, video generation, VRAM/RAM/speed measurement, R2 model cache, and production model selection remain blocked.
+- The temporary Draft PR `#1` and base branch `ci/comfy-runtime-smoke-base` remain open for failure inspection. Remote `main` was not modified. No Clore order, SSH session, model download, GPU inference, or R2 model upload occurred.
+
 ## 2026-07-14 Stage 2.6 Comfy Runtime CI and RTX 4090 Benchmark Prep
 
 - FLUX.2 Klein 4B Distilled FP8 is now marked `eligible_for_benchmark` because its public primary file and auxiliary Qwen/VAE files are locked. Auxiliary source is the actual public Hugging Face repository `Comfy-Org/vae-text-encorder-for-flux-klein-4b` at commit `a9e4ca87c16db4c4e1a16406a9ddb300ab0ae246`; the `encorder` spelling is part of the real repository URL.

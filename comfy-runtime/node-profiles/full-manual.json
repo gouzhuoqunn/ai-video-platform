@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "profile": "full_manual",
+  "generatedAt": "2026-07-14",
+  "generatorVersion": "stage-two-eight-b-static-1",
+  "purpose": "Manual escape hatch that leaves ComfyUI builtin extra node loading unmodified.",
+  "status": "unverified",
+  "comfyuiCommit": "da2608926eaf68fd532bba4e1ace3402c5d21399",
+  "loadBaseNodes": true,
+  "useComfyDefaultBuiltinExtras": true,
+  "disableCustomNodes": true,
+  "builtinExtraFiles": [],
+  "requiredNodeClasses": []
+}

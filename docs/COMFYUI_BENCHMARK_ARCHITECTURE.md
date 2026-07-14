@@ -24,7 +24,7 @@ This checkpoint is a preparation and mock-validation layer. It does not create C
 
 ## Not Yet GPU Verified
 
-- An independent ComfyUI runtime Docker scaffold and GitHub Actions workflow now exist, but no successful ComfyUI runtime image digest has been recorded in this document yet.
+- An independent ComfyUI runtime Docker scaffold and GitHub Actions workflow now exist. A production-minimal node-profile gate has been added, but no new Stage 2.8B image digest has been recorded as verified yet.
 - No custom ComfyUI node has been installed or verified.
 - No FLUX.2 or Wan A14B metadata has been verified beyond the existing Wan2.2 TI2V-5B pin.
 - No benchmark has been run on RTX 4090 or RTX 5090 hardware.
@@ -50,7 +50,7 @@ This checkpoint is a preparation and mock-validation layer. It does not create C
 
 ## 2026-07-14 Stage 2.6 Runtime CI and Official Workflow Locks
 
-- PR-only anonymous digest smoke attempt: 2026-07-14 retry after GHCR package visibility was changed to Public. This marker exists only to trigger the existing Draft PR smoke workflow and does not change runtime behavior.
+- PR-only anonymous digest smoke attempt: run `29326808838` verified that the public GHCR package can be pulled anonymously by fixed digest, with build and push skipped. The container then exited before controller health, with `ExitCode=1`; no API/WebSocket/node smoke pass has been recorded yet.
 - `.github/workflows/comfy-runtime-image.yml` now has a guarded push trigger for `stage-two-five-comfy-runtime` with path filters, concurrency, default immutable push tags, and the same limited permissions: `contents: read` and `packages: write`.
 - The CI smoke test now covers `/healthz`, `/object_info`, `/system_stats`, `/history`, `/queue`, `/free`, `/interrupt`, WebSocket `/ws`, invalid `/prompt` rejection, required Comfy node classes, no `0.0.0.0:8188` bind, no model-weight files, no secret env, and no legacy `gpu-worker/worker.py` process.
 - `comfy-runtime/workflows/official/` locks the official Wan2.2 TI2V-5B and Wan2.2 A14B I2V UI workflows from `comfyanonymous/ComfyUI_examples` commit `3eb0ae663ac044729494be42cb0f17a8c4151ec5`, plus API-format conversions for future smoke runs.
@@ -58,6 +58,15 @@ This checkpoint is a preparation and mock-validation layer. It does not create C
 - `comfy-runtime/comfyui-source-audit.json` records the fixed ComfyUI routes and required node classes checked against commit `da2608926eaf68fd532bba4e1ace3402c5d21399`.
 - `benchmark/rtx4090-baseline-plan.json` limits the first RTX 4090 plan to FLUX.2 Klein 4B Distilled FP8 and Wan2.2 TI2V-5B. It excludes FLUX.2 9B, Wan A14B, Phr00t, GGUF, Kijai, FLF2V, and Dev quantized candidates from the first 4090 round.
 - This checkpoint still does not create a Clore order, SSH into a GPU, download model weights, run inference, upload to R2, or promote any production candidate.
+
+## 2026-07-14 Stage 2.8B Kornia/TorchScript Diagnosis Gate
+
+- `production_minimal` is the default node profile for both `smoke_cpu` and future `gpu` mode. It is derived from the locked official FLUX.2 Klein 4B Distilled, Wan2.2 TI2V-5B, and Wan2.2 I2V-A14B workflow requirements.
+- The profile loads only `comfy_extras/nodes_flux.py`, `comfy_extras/nodes_images.py`, `comfy_extras/nodes_model_advanced.py`, `comfy_extras/nodes_video.py`, and `comfy_extras/nodes_wan.py`, plus base classes from `nodes.py`.
+- `full_manual` remains an unverified metadata placeholder. It is not default and does not enter the first RTX 4090 benchmark path.
+- CI diagnosis uses the old public digest `sha256:1cfb4740fb8b310a8095500e8fe55160176c619306068d553092182f4888efd1` to record exact dependency versions, Kornia import sources, D1 minimal Kornia import behavior, D2 temporary `torch.jit.script` identity behavior, D3 builtin-extra crash location, and D4 production-minimal no-model boot.
+- A new Runtime build is gated behind D4 success. The build passes the exact Kornia version observed in the old digest as a build argument, avoiding speculative PyTorch/Triton/Kornia/comfy-kitchen upgrades.
+- This architecture update does not claim GPU boot or inference. RTX 4090 hardware startup remains a separate future verification after a CI-verified digest exists.
 
 ## Runtime Boundary
 
