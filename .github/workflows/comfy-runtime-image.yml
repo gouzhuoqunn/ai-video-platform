@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   build-and-smoke:
-    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip build]')) }}
     permissions:
       contents: read
       packages: write
@@ -283,6 +283,14 @@ jobs:
           echo "build=skipped"
           echo "push=skipped"
           echo "image=${COMFY_RUNTIME_IMAGE}"
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h
 
       - name: Pull fixed digest
         shell: bash
