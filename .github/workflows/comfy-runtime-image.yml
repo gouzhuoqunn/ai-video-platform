@@ -9,6 +9,8 @@ on:
       - "comfy-runtime/**"
       - "scripts/comfy-runtime-contract-tests.ts"
       - "scripts/comfy-node-profile-tests.ts"
+      - "scripts/comfy-d4-acceptance-tests.ts"
+      - "scripts/verify-comfy-object-info.py"
       - "scripts/workflow-asset-tests.ts"
       - "src/lib/generation/**"
       - "package.json"
@@ -362,7 +364,7 @@ jobs:
               docker exec "${container}" tail -n 200 /tmp/test-b.log || true
               exit 1
             fi
-            if docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/tmp/system-stats.json; then
+            if docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/dev/null; then
               ready=true
               break
             fi
@@ -374,7 +376,7 @@ jobs:
             exit 1
           fi
           seconds="$(( $(date +%s) - started_at ))"
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >/tmp/object-info.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >/dev/null
           docker exec "${container}" sh -lc '! grep -F "0 active drivers" /tmp/test-b.log'
           docker exec "${container}" sh -lc '! find /workspace/models -type f | grep .'
           docker exec "${container}" sh -lc '! find /workspace/comfy-output -type f | grep .'
@@ -643,16 +645,29 @@ jobs:
         run: |
           set -euo pipefail
           container="comfy-runtime-d4-${GITHUB_RUN_ID}"
+          HOST_D4_OBJECT_INFO="${RUNNER_TEMP}/d4-object-info-${GITHUB_RUN_ID}.json"
+          HOST_D4_OBJECT_INFO_TMP="${HOST_D4_OBJECT_INFO}.tmp"
+          CONTAINER_D4_PROFILE_LOG="/workspace/logs/d4-profile-${GITHUB_RUN_ID}.log"
+          CONTAINER_D4_PROFILE_PID="/workspace/runtime/d4-profile-${GITHUB_RUN_ID}.pid"
+          for host_path in "${HOST_D4_OBJECT_INFO}" "${HOST_D4_OBJECT_INFO_TMP}"; do
+            case "${host_path}" in
+              "${RUNNER_TEMP}"/*) ;;
+              *) echo "host path escapes RUNNER_TEMP: ${host_path}" >&2; exit 1 ;;
+            esac
+          done
+          rm -f -- "${HOST_D4_OBJECT_INFO}" "${HOST_D4_OBJECT_INFO_TMP}"
           docker run -d --name "${container}" \
             --entrypoint /bin/bash \
             -v "${PWD}/comfy-runtime:/run/comfy-runtime:ro" \
             "${COMFY_RUNTIME_IMAGE}" \
             -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
           cleanup() {
-            docker exec "${container}" sh -lc 'tail -n 200 /tmp/d4-profile.log 2>/dev/null || true' || true
+            docker exec "${container}" sh -lc "tail -n 200 '${CONTAINER_D4_PROFILE_LOG}' 2>/dev/null || true" || true
+            rm -f -- "${HOST_D4_OBJECT_INFO}" "${HOST_D4_OBJECT_INFO_TMP}"
             docker rm -f "${container}" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
+          docker exec "${container}" mkdir -p /workspace/logs /workspace/runtime
 
           docker exec \
             -e COMFY_RUNTIME_DIR=/run/comfy-runtime \
@@ -719,17 +734,17 @@ jobs:
             -e OMP_NUM_THREADS=1 \
             -e MKL_NUM_THREADS=1 \
             "${container}" \
-            sh -lc 'cd /opt/ComfyUI && python3.11 -X faulthandler /run/comfy-runtime/launch_comfy.py --node-profile production_minimal --cpu --disable-triton-backend --disable-all-custom-nodes --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout --verbose DEBUG >/tmp/d4-profile.log 2>&1 & echo $! >/tmp/d4-profile.pid'
+            sh -lc "cd /opt/ComfyUI && python3.11 -X faulthandler /run/comfy-runtime/launch_comfy.py --node-profile production_minimal --cpu --disable-triton-backend --disable-all-custom-nodes --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout --verbose DEBUG >'${CONTAINER_D4_PROFILE_LOG}' 2>&1 & echo \$! >'${CONTAINER_D4_PROFILE_PID}'"
 
           ready=false
           started_at="$(date +%s)"
           for attempt in $(seq 1 60); do
-            if ! docker exec "${container}" sh -lc 'kill -0 "$(cat /tmp/d4-profile.pid)" 2>/dev/null'; then
+            if ! docker exec "${container}" sh -lc "kill -0 \"\$(cat '${CONTAINER_D4_PROFILE_PID}')\" 2>/dev/null"; then
               echo "::error::D4 production minimal profile process exited"
-              docker exec "${container}" tail -n 200 /tmp/d4-profile.log || true
+              docker exec "${container}" sh -lc "tail -n 200 '${CONTAINER_D4_PROFILE_LOG}' || true"
               exit 1
             fi
-            if docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/tmp/d4-system-stats.json; then
+            if docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/dev/null; then
               ready=true
               break
             fi
@@ -737,75 +752,70 @@ jobs:
           done
           if [ "${ready}" != "true" ]; then
             echo "::error::D4 production minimal profile did not become healthy"
-            docker exec "${container}" tail -n 200 /tmp/d4-profile.log || true
+            docker exec "${container}" sh -lc "tail -n 200 '${CONTAINER_D4_PROFILE_LOG}' || true"
             exit 1
           fi
           seconds="$(( $(date +%s) - started_at ))"
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >/tmp/d4-object-info.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/tmp/d4-queue.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/tmp/d4-history.json
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/tmp/d4-free.json
-          docker exec "${container}" sh -lc 'grep -F "node_profile=production_minimal" /tmp/d4-profile.log'
-          docker exec "${container}" sh -lc 'grep -F "profile_sha256=36c5279aaa81b23e73b2a6c6f8f198006ba3402d148ffae57927f6f246c5649c" /tmp/d4-profile.log'
-          docker exec "${container}" sh -lc 'grep -F "comfy_args_ready cpu=True listen=127.0.0.1 port=8188" /tmp/d4-profile.log'
-          docker exec "${container}" sh -lc 'grep -F "comfy_cpu_state=CPU torch_device=cpu" /tmp/d4-profile.log'
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >"${HOST_D4_OBJECT_INFO_TMP}"
+          test -s "${HOST_D4_OBJECT_INFO_TMP}"
+          object_info_size="$(wc -c <"${HOST_D4_OBJECT_INFO_TMP}")"
+          test "${object_info_size}" -le $((128 * 1024 * 1024))
+          python3 - "${HOST_D4_OBJECT_INFO_TMP}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          try:
+              payload = json.loads(path.read_text(encoding="utf-8"))
+          except json.JSONDecodeError as exc:
+              raise SystemExit(f"object_info_json_parse_error={exc.msg}")
+          if not isinstance(payload, dict):
+              raise SystemExit("object_info_top_level_is_not_object")
+          print("object_info_top_level_key_count=" + str(len(payload)))
+          PY
+          mv -f -- "${HOST_D4_OBJECT_INFO_TMP}" "${HOST_D4_OBJECT_INFO}"
+          python3 scripts/verify-comfy-object-info.py --input "${HOST_D4_OBJECT_INFO}" --profile comfy-runtime/node-profiles/production-minimal.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/dev/null
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/dev/null
+          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/dev/null
+          docker exec "${container}" sh -lc "grep -F 'node_profile=production_minimal' '${CONTAINER_D4_PROFILE_LOG}'"
+          docker exec "${container}" sh -lc "grep -F 'profile_sha256=36c5279aaa81b23e73b2a6c6f8f198006ba3402d148ffae57927f6f246c5649c' '${CONTAINER_D4_PROFILE_LOG}'"
+          docker exec "${container}" sh -lc "grep -F 'comfy_args_ready cpu=True listen=127.0.0.1 port=8188' '${CONTAINER_D4_PROFILE_LOG}'"
+          docker exec "${container}" sh -lc "grep -F 'comfy_cpu_state=CPU torch_device=cpu' '${CONTAINER_D4_PROFILE_LOG}'"
           for extra in \
             comfy_extras/nodes_flux.py \
             comfy_extras/nodes_images.py \
             comfy_extras/nodes_model_advanced.py \
             comfy_extras/nodes_video.py \
             comfy_extras/nodes_wan.py; do
-            docker exec "${container}" sh -lc "grep -F 'AWAITING_PROFILE_EXTRA=${extra}' /tmp/d4-profile.log"
-            docker exec "${container}" sh -lc "grep -F 'AWAITED_PROFILE_EXTRA=${extra} result=true' /tmp/d4-profile.log"
+            docker exec "${container}" sh -lc "grep -F 'AWAITING_PROFILE_EXTRA=${extra}' '${CONTAINER_D4_PROFILE_LOG}'"
+            docker exec "${container}" sh -lc "grep -F 'AWAITED_PROFILE_EXTRA=${extra} result=true' '${CONTAINER_D4_PROFILE_LOG}'"
           done
-          docker exec "${container}" sh -lc 'grep -F "PROFILE_BUILTIN_EXTRA_FAILURES=0" /tmp/d4-profile.log'
-          docker exec "${container}" sh -lc 'grep -F "PROFILE_REQUIRED_NODE_CLASSES_OK" /tmp/d4-profile.log'
-          docker exec "${container}" sh -lc 'grep -F "Triton intentionally unavailable in COMFY_RUNTIME_MODE=smoke_cpu" /tmp/d4-profile.log || true'
-          docker exec "${container}" sh -lc '! grep -F "coroutine was never awaited" /tmp/d4-profile.log'
-          docker exec "${container}" sh -lc '! grep -F "nodes_latent.py" /tmp/d4-profile.log'
-          docker exec "${container}" sh -lc '! grep -F "nodes_post_processing.py" /tmp/d4-profile.log'
-          docker exec "${container}" sh -lc '! grep -F "nodes_canny.py" /tmp/d4-profile.log'
-          docker exec "${container}" sh -lc '! grep -F "nodes_morphology.py" /tmp/d4-profile.log'
-          docker exec "${container}" sh -lc '! grep -F "Fatal Python error" /tmp/d4-profile.log'
+          docker exec "${container}" sh -lc "grep -F 'PROFILE_BUILTIN_EXTRA_FAILURES=0' '${CONTAINER_D4_PROFILE_LOG}'"
+          docker exec "${container}" sh -lc "grep -F 'PROFILE_REQUIRED_NODE_CLASSES_OK' '${CONTAINER_D4_PROFILE_LOG}'"
+          docker exec "${container}" sh -lc "grep -F 'Triton intentionally unavailable in COMFY_RUNTIME_MODE=smoke_cpu' '${CONTAINER_D4_PROFILE_LOG}' || true"
+          docker exec "${container}" sh -lc "! grep -F 'coroutine was never awaited' '${CONTAINER_D4_PROFILE_LOG}'"
+          docker exec "${container}" sh -lc "! grep -F 'nodes_latent.py' '${CONTAINER_D4_PROFILE_LOG}'"
+          docker exec "${container}" sh -lc "! grep -F 'nodes_post_processing.py' '${CONTAINER_D4_PROFILE_LOG}'"
+          docker exec "${container}" sh -lc "! grep -F 'nodes_canny.py' '${CONTAINER_D4_PROFILE_LOG}'"
+          docker exec "${container}" sh -lc "! grep -F 'nodes_morphology.py' '${CONTAINER_D4_PROFILE_LOG}'"
+          docker exec "${container}" sh -lc "! grep -F 'Fatal Python error' '${CONTAINER_D4_PROFILE_LOG}'"
           docker exec "${container}" sh -lc '! find /workspace/models -type f | grep .'
           docker exec "${container}" sh -lc '! find /workspace/comfy-output -type f | grep .'
-          docker exec -i "${container}" python3.11 - <<'PY'
-          import json
-
-          with open("/tmp/d4-object-info.json", "r", encoding="utf-8") as handle:
-              object_info = json.load(handle)
-          required = {
-              "CLIPLoader",
-              "CLIPTextEncode",
-              "DualCLIPLoader",
-              "FluxGuidance",
-              "FluxKontextImageScale",
-              "KSampler",
-              "KSamplerAdvanced",
-              "LoadImage",
-              "ModelSamplingSD3",
-              "SaveAnimatedWEBP",
-              "SaveImage",
-              "SaveWEBM",
-              "UNETLoader",
-              "VAEDecode",
-              "VAELoader",
-              "Wan22ImageToVideoLatent",
-              "WanImageToVideo",
-          }
-          missing = sorted(required.difference(object_info))
-          if missing:
-              raise SystemExit("missing Comfy node classes: " + ", ".join(missing))
-          PY
-          docker exec "${container}" sh -lc 'kill -TERM "$(cat /tmp/d4-profile.pid)"'
+          docker exec "${container}" sh -lc "kill -TERM \"\$(cat '${CONTAINER_D4_PROFILE_PID}')\""
           for attempt in $(seq 1 10); do
-            if ! docker exec "${container}" sh -lc 'kill -0 "$(cat /tmp/d4-profile.pid)" 2>/dev/null'; then
+            if ! docker exec "${container}" sh -lc "kill -0 \"\$(cat '${CONTAINER_D4_PROFILE_PID}')\" 2>/dev/null"; then
               break
             fi
             sleep 3
           done
-          docker exec "${container}" sh -lc '! kill -0 "$(cat /tmp/d4-profile.pid)" 2>/dev/null'
+          docker exec "${container}" sh -lc "! kill -0 \"\$(cat '${CONTAINER_D4_PROFILE_PID}')\" 2>/dev/null"
           echo "d4_start_seconds=${seconds}"
+          echo "checked_endpoints=system_stats,object_info,queue,history,interrupt,free,websocket"
+          echo "host_files=HOST_D4_OBJECT_INFO"
+          echo "container_files=CONTAINER_D4_PROFILE_LOG,CONTAINER_D4_PROFILE_PID"
+          echo "namespace_conflicts=0"
           echo "classification=production_minimal_async_loader_cpu_boot_proven"
           echo "gate_passed=true" >> "$GITHUB_OUTPUT"
 
@@ -838,6 +848,7 @@ jobs:
       - name: Static verification
         run: |
           npm run secret:scan
+          npm run generation:d4-acceptance:test
           npm run generation:async-loader:test
           npm run generation:node-profile:test
 
@@ -937,6 +948,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+
       - name: Free runner disk space
         shell: bash
         run: |
@@ -963,6 +976,15 @@ jobs:
           set -euo pipefail
           image="${{ needs.build-node-profile-runtime.outputs.image }}@${{ needs.build-node-profile-runtime.outputs.digest }}"
           container="comfy-runtime-node-profile-smoke-${GITHUB_RUN_ID}"
+          HOST_NODE_PROFILE_OBJECT_INFO="${RUNNER_TEMP}/node-profile-object-info-${GITHUB_RUN_ID}.json"
+          HOST_NODE_PROFILE_OBJECT_INFO_TMP="${HOST_NODE_PROFILE_OBJECT_INFO}.tmp"
+          for host_path in "${HOST_NODE_PROFILE_OBJECT_INFO}" "${HOST_NODE_PROFILE_OBJECT_INFO_TMP}"; do
+            case "${host_path}" in
+              "${RUNNER_TEMP}"/*) ;;
+              *) echo "host path escapes RUNNER_TEMP: ${host_path}" >&2; exit 1 ;;
+            esac
+          done
+          rm -f -- "${HOST_NODE_PROFILE_OBJECT_INFO}" "${HOST_NODE_PROFILE_OBJECT_INFO_TMP}"
           started_at="$(date +%s)"
           docker run -d --name "${container}" \
             -e START_GPU_WORKER=false \
@@ -973,6 +995,7 @@ jobs:
           cleanup() {
             docker exec "${container}" sh -lc 'for file in /workspace/logs/*.log; do case "${file}" in *environment-redacted.log) continue ;; esac; echo "===== ${file}"; tail -n 200 "${file}" || true; done' || true
             docker logs --tail 200 "${container}" || true
+            rm -f -- "${HOST_NODE_PROFILE_OBJECT_INFO}" "${HOST_NODE_PROFILE_OBJECT_INFO_TMP}"
             docker rm -f "${container}" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
@@ -980,7 +1003,7 @@ jobs:
           ready=false
           for attempt in $(seq 1 60); do
             if docker ps --format '{{.Names}}' | grep -Fx "${container}" >/dev/null \
-              && curl -fsS http://127.0.0.1:8080/healthz | tee /tmp/comfy-health.json | grep -F "\"ok\": true"; then
+              && curl -fsS http://127.0.0.1:8080/healthz | grep -F "\"ok\": true"; then
               ready=true
               break
             fi
@@ -991,11 +1014,15 @@ jobs:
             exit 1
           fi
           seconds="$(( $(date +%s) - started_at ))"
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >/tmp/object-info.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/tmp/system-stats.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/tmp/history.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/tmp/queue.json
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/tmp/free.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >"${HOST_NODE_PROFILE_OBJECT_INFO_TMP}"
+          test -s "${HOST_NODE_PROFILE_OBJECT_INFO_TMP}"
+          test "$(wc -c <"${HOST_NODE_PROFILE_OBJECT_INFO_TMP}")" -le $((128 * 1024 * 1024))
+          mv -f -- "${HOST_NODE_PROFILE_OBJECT_INFO_TMP}" "${HOST_NODE_PROFILE_OBJECT_INFO}"
+          python3 scripts/verify-comfy-object-info.py --input "${HOST_NODE_PROFILE_OBJECT_INFO}" --profile comfy-runtime/node-profiles/production-minimal.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/dev/null
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/dev/null
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/dev/null
+          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/dev/null
           docker exec "${container}" sh -lc 'grep -F "node_profile=production_minimal" /workspace/logs/comfyui.log'
           docker exec "${container}" sh -lc 'grep -F "workflow_manifest_sha256=acb0a624f433a174366bc2820ab835c34273f0c102acc0651b09f75e800ca5d5" /workspace/logs/comfyui.log'
           for extra in \
@@ -1057,41 +1084,17 @@ jobs:
           else:
               raise SystemExit("invalid prompt unexpectedly accepted")
           PY'
-          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
-          import json
-
-          with open("/tmp/object-info.json", "r", encoding="utf-8") as handle:
-              object_info = json.load(handle)
-          required = {
-              "CLIPLoader",
-              "CLIPTextEncode",
-              "DualCLIPLoader",
-              "FluxGuidance",
-              "FluxKontextImageScale",
-              "KSampler",
-              "KSamplerAdvanced",
-              "LoadImage",
-              "ModelSamplingSD3",
-              "SaveAnimatedWEBP",
-              "SaveImage",
-              "SaveWEBM",
-              "UNETLoader",
-              "VAEDecode",
-              "VAELoader",
-              "Wan22ImageToVideoLatent",
-              "WanImageToVideo",
-          }
-          missing = sorted(required.difference(object_info))
-          if missing:
-              raise SystemExit("missing Comfy node classes: " + ", ".join(missing))
-          PY'
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/tmp/interrupt.json
+          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/dev/null
           docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" -o -name "*.gguf" \) | grep .'
           docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f -path "*/models/*" -name "*.bin" -size +50M | grep .'
           docker exec "${container}" sh -lc '! printenv | grep -E "SUPABASE_SERVICE_ROLE|SUPABASE_SECRET|CLORE_API_KEY|R2_ADMIN|SSH_PRIVATE"'
           docker exec "${container}" sh -lc 'test ! -e /app/worker.py'
           docker stop --time 15 "${container}" >/dev/null
           echo "node_profile_smoke_start_seconds=${seconds}"
+          echo "checked_endpoints=system_stats,object_info,queue,history,interrupt,free,websocket"
+          echo "host_files=HOST_NODE_PROFILE_OBJECT_INFO"
+          echo "container_files=/workspace/logs/*"
+          echo "namespace_conflicts=0"
 
       - name: GPU mode fail-closed without smoke blocker
         shell: bash
@@ -1237,6 +1240,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+
       - name: Free runner disk space
         shell: bash
         run: |
@@ -1263,6 +1268,9 @@ jobs:
           export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config"
           image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
           container="comfy-runtime-smoke-${GITHUB_RUN_ID}"
+          HOST_PUBLIC_OBJECT_INFO="${RUNNER_TEMP}/public-object-info-${GITHUB_RUN_ID}.json"
+          HOST_PUBLIC_OBJECT_INFO_TMP="${HOST_PUBLIC_OBJECT_INFO}.tmp"
+          rm -f -- "${HOST_PUBLIC_OBJECT_INFO}" "${HOST_PUBLIC_OBJECT_INFO_TMP}"
           docker run -d --name "${container}" \
             -e START_GPU_WORKER=false \
             -e COMFY_RUNTIME_MODE=smoke_cpu \
@@ -1271,6 +1279,7 @@ jobs:
           cleanup() {
             docker exec "${container}" sh -lc 'for file in /workspace/logs/*.log; do case "${file}" in *environment-redacted.log) continue ;; esac; echo "===== ${file}"; tail -n 200 "${file}" || true; done' || true
             docker logs --tail 200 "${container}" || true
+            rm -f -- "${HOST_PUBLIC_OBJECT_INFO}" "${HOST_PUBLIC_OBJECT_INFO_TMP}"
             docker rm -f "${container}" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
@@ -1278,7 +1287,7 @@ jobs:
           ready=false
           for attempt in $(seq 1 60); do
             if docker ps --format '{{.Names}}' | grep -Fx "${container}" >/dev/null \
-              && curl -fsS http://127.0.0.1:8080/healthz | tee /tmp/comfy-health.json | grep -F "\"ok\": true"; then
+              && curl -fsS http://127.0.0.1:8080/healthz | grep -F "\"ok\": true"; then
               ready=true
               break
             fi
@@ -1288,11 +1297,15 @@ jobs:
             echo "::error::Comfy runtime did not become healthy in time"
             exit 1
           fi
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >/tmp/object-info.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/tmp/system-stats.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/tmp/history.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/tmp/queue.json
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/tmp/free.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >"${HOST_PUBLIC_OBJECT_INFO_TMP}"
+          test -s "${HOST_PUBLIC_OBJECT_INFO_TMP}"
+          test "$(wc -c <"${HOST_PUBLIC_OBJECT_INFO_TMP}")" -le $((128 * 1024 * 1024))
+          mv -f -- "${HOST_PUBLIC_OBJECT_INFO_TMP}" "${HOST_PUBLIC_OBJECT_INFO}"
+          python3 scripts/verify-comfy-object-info.py --input "${HOST_PUBLIC_OBJECT_INFO}" --profile comfy-runtime/node-profiles/production-minimal.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/dev/null
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/dev/null
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/dev/null
+          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/dev/null
           docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
           import base64
           import os
@@ -1334,35 +1347,7 @@ jobs:
           else:
               raise SystemExit("invalid prompt unexpectedly accepted")
           PY'
-          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
-          import json
-
-          with open("/tmp/object-info.json", "r", encoding="utf-8") as handle:
-              object_info = json.load(handle)
-          required = {
-              "CLIPLoader",
-              "CLIPTextEncode",
-              "DualCLIPLoader",
-              "FluxGuidance",
-              "FluxKontextImageScale",
-              "KSampler",
-              "KSamplerAdvanced",
-              "LoadImage",
-              "ModelSamplingSD3",
-              "SaveAnimatedWEBP",
-              "SaveImage",
-              "SaveWEBM",
-              "UNETLoader",
-              "VAEDecode",
-              "VAELoader",
-              "Wan22ImageToVideoLatent",
-              "WanImageToVideo",
-          }
-          missing = sorted(required.difference(object_info))
-          if missing:
-              raise SystemExit("missing Comfy node classes: " + ", ".join(missing))
-          PY'
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/tmp/interrupt.json
+          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/dev/null
           docker inspect "${container}" > /tmp/inspect.json
           python3 - <<'PY'
           import json
@@ -1434,6 +1419,8 @@ jobs:
     env:
       COMFY_RUNTIME_IMAGE: ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:d88dd518253f27ac8a7841d07b2e02c79a8cda0a940c85b9c579446f105c26bc
     steps:
+      - uses: actions/checkout@v4
+
       - name: Verify PR event guard
         shell: bash
         run: |
@@ -1469,6 +1456,9 @@ jobs:
         run: |
           set -euo pipefail
           container="comfy-runtime-pr-smoke-${GITHUB_RUN_ID}"
+          HOST_PR_OBJECT_INFO="${RUNNER_TEMP}/pr-object-info-${GITHUB_RUN_ID}.json"
+          HOST_PR_OBJECT_INFO_TMP="${HOST_PR_OBJECT_INFO}.tmp"
+          rm -f -- "${HOST_PR_OBJECT_INFO}" "${HOST_PR_OBJECT_INFO_TMP}"
           started_at="$(date +%s)"
 
           diagnose() {
@@ -1482,6 +1472,7 @@ jobs:
           }
 
           cleanup() {
+            rm -f -- "${HOST_PR_OBJECT_INFO}" "${HOST_PR_OBJECT_INFO_TMP}"
             docker rm -f "${container}" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
@@ -1498,7 +1489,7 @@ jobs:
               diagnose
               exit 1
             fi
-            if docker exec "${container}" sh -lc 'curl -fsS http://127.0.0.1:8080/healthz | tee /tmp/comfy-health.json | grep -F "\"ok\": true"'; then
+            if docker exec "${container}" sh -lc 'curl -fsS http://127.0.0.1:8080/healthz | grep -F "\"ok\": true"'; then
               ready=true
               break
             fi
@@ -1512,15 +1503,19 @@ jobs:
           fi
 
           startup_seconds="$(( $(date +%s) - started_at ))"
-          echo "startup_seconds=${startup_seconds}" | tee /tmp/startup-seconds.txt
+          echo "startup_seconds=${startup_seconds}"
 
-          docker exec "${container}" curl -fsS http://127.0.0.1:8080/healthz >/tmp/controller-health.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >/tmp/object-info.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/tmp/system-stats.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/tmp/history.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/tmp/queue.json
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/tmp/free.json
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/tmp/interrupt.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8080/healthz >/dev/null
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >"${HOST_PR_OBJECT_INFO_TMP}"
+          test -s "${HOST_PR_OBJECT_INFO_TMP}"
+          test "$(wc -c <"${HOST_PR_OBJECT_INFO_TMP}")" -le $((128 * 1024 * 1024))
+          mv -f -- "${HOST_PR_OBJECT_INFO_TMP}" "${HOST_PR_OBJECT_INFO}"
+          python3 scripts/verify-comfy-object-info.py --input "${HOST_PR_OBJECT_INFO}" --profile comfy-runtime/node-profiles/production-minimal.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/dev/null
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/dev/null
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/dev/null
+          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/dev/null
+          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/dev/null
 
           docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
           import base64
@@ -1563,35 +1558,6 @@ jobs:
                   raise
           else:
               raise SystemExit("invalid prompt unexpectedly accepted")
-          PY'
-
-          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
-          import json
-
-          with open("/tmp/object-info.json", "r", encoding="utf-8") as handle:
-              object_info = json.load(handle)
-          required = {
-              "CLIPLoader",
-              "CLIPTextEncode",
-              "DualCLIPLoader",
-              "FluxGuidance",
-              "FluxKontextImageScale",
-              "KSampler",
-              "KSamplerAdvanced",
-              "LoadImage",
-              "ModelSamplingSD3",
-              "SaveAnimatedWEBP",
-              "SaveImage",
-              "SaveWEBM",
-              "UNETLoader",
-              "VAEDecode",
-              "VAELoader",
-              "Wan22ImageToVideoLatent",
-              "WanImageToVideo",
-          }
-          missing = sorted(required.difference(object_info))
-          if missing:
-              raise SystemExit("missing Comfy node classes: " + ", ".join(missing))
           PY'
 
           docker exec "${container}" sh -lc 'test "$(printenv COMFYUI_COMMIT)" = "da2608926eaf68fd532bba4e1ace3402c5d21399"'
