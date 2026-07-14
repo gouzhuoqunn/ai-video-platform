@@ -50,6 +50,7 @@ This checkpoint is a preparation and mock-validation layer. It does not create C
 
 ## 2026-07-14 Stage 2.6 Runtime CI and Official Workflow Locks
 
+- PR-only anonymous digest smoke attempt: 2026-07-14 retry after GHCR package visibility was changed to Public. This marker exists only to trigger the existing Draft PR smoke workflow and does not change runtime behavior.
 - `.github/workflows/comfy-runtime-image.yml` now has a guarded push trigger for `stage-two-five-comfy-runtime` with path filters, concurrency, default immutable push tags, and the same limited permissions: `contents: read` and `packages: write`.
 - The CI smoke test now covers `/healthz`, `/object_info`, `/system_stats`, `/history`, `/queue`, `/free`, `/interrupt`, WebSocket `/ws`, invalid `/prompt` rejection, required Comfy node classes, no `0.0.0.0:8188` bind, no model-weight files, no secret env, and no legacy `gpu-worker/worker.py` process.
 - `comfy-runtime/workflows/official/` locks the official Wan2.2 TI2V-5B and Wan2.2 A14B I2V UI workflows from `comfyanonymous/ComfyUI_examples` commit `3eb0ae663ac044729494be42cb0f17a8c4151ec5`, plus API-format conversions for future smoke runs.
