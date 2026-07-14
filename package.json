@@ -72,6 +72,7 @@
     "generation:runtime-mode:test": "tsx scripts/comfy-runtime-mode-tests.ts",
     "generation:node-profile:test": "tsx scripts/comfy-node-profile-tests.ts",
     "generation:launch-order:test": "tsx scripts/comfy-launch-order-tests.ts",
+    "generation:extras-extractor:test": "tsx scripts/comfy-extras-extractor-tests.ts",
     "generation:workflow:test": "tsx scripts/workflow-registry-tests.ts",
     "generation:workflow-assets:test": "tsx scripts/workflow-asset-tests.ts",
     "generation:comfy-source:test": "tsx scripts/comfy-source-audit-tests.ts",

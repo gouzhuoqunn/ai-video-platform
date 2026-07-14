@@ -27,6 +27,8 @@ type NodeProfile = {
   builtinExtraFiles: string[];
   excludedBuiltinExtraFiles: string[];
   requiredNodeClasses: string[];
+  missingRequiredNodeClasses: string[];
+  mappingEvidence: Record<string, string>;
 };
 
 function readJson<T>(path: string): T {
@@ -49,7 +51,7 @@ const profileRequired = new Set(profile.requiredNodeClasses);
 assert.equal(profile.profile, "production_minimal");
 assert.equal(profile.profileName, "production_minimal");
 assert.equal(profile.disableCustomNodes, true);
-assert.equal(profile.generatorVersion, "stage-two-eight-b-static-1");
+assert.equal(profile.generatorVersion, "stage-two-eight-d-ast-audit-1");
 assert.equal(profile.comfyuiCommit, audit.commit);
 assert.equal(profile.comfyuiNodesSha256, "aecd111cf3f1ccf5a5ca6b4293d47dfe236f9a717e5190cbb6a66a03afb8d009");
 assert.equal(profile.workflowManifestSha256, "acb0a624f433a174366bc2820ab835c34273f0c102acc0651b09f75e800ca5d5");
@@ -63,7 +65,10 @@ for (const requiredNodeClass of manifestRequired) {
 
 for (const requiredNodeClass of profile.requiredNodeClasses) {
   assert.ok(audit.coreNodeClasses.includes(requiredNodeClass), `profile node not in Comfy source audit: ${requiredNodeClass}`);
+  assert.ok(profile.mappingEvidence[requiredNodeClass], `profile missing mapping evidence for ${requiredNodeClass}`);
 }
+
+assert.deepEqual(profile.missingRequiredNodeClasses, []);
 
 assert.deepEqual(new Set(profile.baseNodeClasses), new Set(audit.sourceFiles["nodes.py"]));
 
@@ -91,6 +96,8 @@ assert.match(supervisor, /COMFY_GPU_PROFILE/);
 assert.match(supervisor, /SMOKE_IMPORT_BLOCKER/);
 assert.match(supervisor, /gpu_preflight_failed: smoke import blocker present in PYTHONPATH/);
 assert.match(dockerfile, /COPY node-profiles\//);
+assert.match(dockerfile, /extras_extractor\.py/);
+assert.match(dockerfile, /profile_audit\.py/);
 assert.match(dockerfile, /COPY smoke_import_blocker\//);
 assert.match(dockerfile, /ARG KORNIA_VERSION/);
 assert.match(dockerfile, /kornia==\$\{KORNIA_VERSION\}/);

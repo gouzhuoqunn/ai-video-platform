@@ -28,7 +28,7 @@ RUN git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
     && mkdir -p /workspace/models /workspace/comfy-input /workspace/comfy-output /workspace/comfy-user /workspace/logs /workspace/r2-cache /workspace/workflows \
     && find /opt/ComfyUI -type d -name ".git" -prune -exec rm -rf {} +
 
-COPY controller.py healthcheck.py supervisor.py launch_comfy.py entrypoint.sh custom-node-locks.json comfyui-source-audit.json /opt/comfy-runtime/
+COPY controller.py healthcheck.py supervisor.py launch_comfy.py extras_extractor.py profile_audit.py entrypoint.sh custom-node-locks.json comfyui-source-audit.json /opt/comfy-runtime/
 COPY node-profiles/ /opt/comfy-runtime/node-profiles/
 COPY smoke_import_blocker/ /opt/comfy-runtime/smoke_import_blocker/
 COPY workflows/ /opt/comfy-runtime/workflows/

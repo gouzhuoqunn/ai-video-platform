@@ -59,6 +59,14 @@ function main() {
   assert.match(launcher, /enable_args_parsing/);
   assert.match(launcher, /comfy_cpu_state=CPU/);
 
+  const extrasExtractor = read("comfy-runtime/extras_extractor.py");
+  assert.match(extrasExtractor, /ast\.AsyncFunctionDef/);
+  assert.match(extrasExtractor, /extract_builtin_extra_files/);
+
+  const profileAudit = read("comfy-runtime/profile_audit.py");
+  assert.match(profileAudit, /missingRequiredNodeClasses/);
+  assert.match(profileAudit, /NODE_CLASS_MAPPINGS/);
+
   const controller = read("comfy-runtime/controller.py");
   assert.match(controller, /\/healthz/);
   assert.match(controller, /\/interrupt/);
