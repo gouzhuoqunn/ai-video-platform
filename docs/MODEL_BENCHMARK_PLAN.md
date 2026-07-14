@@ -47,7 +47,7 @@ Potential shared components are FLUX VAE files, FLUX Qwen text encoders, and Wan
 
 ## Versioned Test Suite
 
-`benchmarks/v1/` has eight fixed image samples and six fixed video samples. Prompts, negative prompts, seeds, size, frame count, FPS, and steps are versioned. The only fixture is a tiny repository-owned synthetic PPM with a recorded SHA256; there are no real people, unclear-copyright assets, adult content, or violence.
+`benchmarks/v1/` has eight fixed image samples and eight fixed video samples. The root `benchmark/` JSON files mirror the suite for review and future runner input. Prompts, negative prompts, seeds, size, frame count, FPS, steps, input asset references, evaluation dimensions, and timeouts are versioned. The only fixture is a tiny repository-owned synthetic PPM with a recorded SHA256; there are no real people, unclear-copyright assets, adult content, gore, or violence prompts.
 
 Smoke tests run one low-resolution image or one 480P short video twice. They verify startup, fixed nodes, OOM, valid output, no second-run memory leak, and safe unload. Quality tests require 100% smoke success and then record cold/warm timing with the same seed. Video testing stays at 480P before any 720P run; I2V and FLF2V are distinct categories.
 

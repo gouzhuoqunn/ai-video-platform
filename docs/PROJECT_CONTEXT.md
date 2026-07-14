@@ -1,5 +1,20 @@
 # Project Context
 
+## 2026-07-14 Stage 2.5 Candidate Audit and Comfy Runtime Scaffold
+
+- Upgraded the generation registry from loose `planned/metadata_verified` states to strict audit states: `unverified`, `public_verified`, `gated_user_action_required`, `metadata_incomplete`, `eligible_for_benchmark`, and `rejected_before_benchmark`.
+- Added `docs/MODEL_CANDIDATE_AUDIT.md` with a sanitized license and user-action report for FLUX.2 Klein 4B Distilled FP8, FLUX.2 Klein 9B FP8, Wan2.2 TI2V-5B, Wan2.2 I2V-A14B, and unverified community challengers.
+- Read-only public metadata was checked for the first-round official candidates. Wan2.2 TI2V-5B and Wan2.2 I2V-A14B are marked `eligible_for_benchmark`; FLUX.2 Klein 4B Distilled FP8 remains `metadata_incomplete` until exact auxiliary ComfyUI text-encoder/VAE sources are locked; FLUX.2 Klein 9B FP8 is `gated_user_action_required` and must not be synced or benchmarked until the user accepts the Hugging Face/BFL terms.
+- Added an independent `comfy-runtime/` Docker scaffold for `ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime`. It does not replace the existing Wan first-test runtime and does not modify `gpu-worker/Dockerfile`.
+- The Comfy runtime scaffold pins ComfyUI to `da2608926eaf68fd532bba4e1ace3402c5d21399`, reuses the verified Wan runtime CUDA/PyTorch digest as a base layer, starts ComfyUI on `127.0.0.1:8188`, adds a local controller on `127.0.0.1:8080`, keeps `START_GPU_WORKER=false`, and includes no model weights, prompts, generated outputs, `.env.local`, `.secrets`, Clore key, Supabase service key, R2 admin credential, SSH private key, or signed URL.
+- Added `.github/workflows/comfy-runtime-image.yml` as a separate manual CI workflow for the Comfy runtime image. It builds linux/amd64, runs secret scan, uses GHCR cache, runs a no-model CPU smoke test, verifies `/healthz`, `/object_info`, `/queue`, `/interrupt`, confirms 8188 is not bound to `0.0.0.0`, confirms no old `gpu-worker/worker.py` process is started, and checks for absence of model-weight files.
+- The local checkpoint was uploaded to remote temporary branch `stage-two-five-comfy-runtime` through Git Data API with `force=false`; the remote tree was verified to match the local tree. GitHub refused `workflow_dispatch` for `comfy-runtime-image.yml` because new workflow files must exist on the default branch before they can be dispatched. Since this task forbids modifying remote `main`, no Comfy runtime image tag, digest, or CI run ID exists yet.
+- Added root `benchmark/` JSON specs (`image-prompts.json`, `video-prompts.json`, `workflow-cases.json`, `scoring-schema.json`, `benchmark-plan.schema.json`) and expanded `benchmarks/v1` to eight image and eight video cases, including two-person interaction and object motion.
+- R2 production structure is locked to exactly four `production/.../current.json` entries plus shared prefixes for VAE, text encoders, CLIP vision, LoRAs, workflows, and custom-node locks. Production manifests may not read from `benchmark-staging`.
+- New scripts: `generation:runtime:test`, `generation:workflow:test`, `generation:benchmark-schema:test`, and aggregate `check:stage-two-five`.
+- Verified locally with `check:stage-two-five`, which runs generation architecture/metadata/runtime/workflow/benchmark-schema tests, `runtime-image:test`, `model-cache:test`, `lint`, `typecheck`, `secret:scan`, and `build`. The build passes with existing Turbopack NFT trace warnings in local-lab Clore routes.
+- No Clore order, SSH session, model download, R2 model upload, real GPU inference, remote-main modification, force push, reset, rebase, local Docker install, or local CUDA image build occurred in this checkpoint.
+
 ## 2026-07-14 ComfyUI Metadata Audit and Benchmark Plan
 
 - Added a metadata-audit registry, a frozen `benchmarks/v1` suite, capacity planning, smoke/quality benchmark gates, blind-review identifiers, and a written runtime-v1 build checklist.

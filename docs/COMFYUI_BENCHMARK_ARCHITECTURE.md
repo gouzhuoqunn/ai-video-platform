@@ -24,7 +24,7 @@ This checkpoint is a preparation and mock-validation layer. It does not create C
 
 ## Not Yet GPU Verified
 
-- No ComfyUI runtime image has been built from this plan.
+- An independent ComfyUI runtime Docker scaffold and GitHub Actions workflow now exist, but no successful ComfyUI runtime image digest has been recorded in this document yet.
 - No custom ComfyUI node has been installed or verified.
 - No FLUX.2 or Wan A14B metadata has been verified beyond the existing Wan2.2 TI2V-5B pin.
 - No benchmark has been run on RTX 4090 or RTX 5090 hardware.
@@ -38,6 +38,15 @@ This checkpoint is a preparation and mock-validation layer. It does not create C
 - `benchmarks/v1/` is a fixed text/configuration suite with eight image and six video samples plus a tiny synthetic input fixture. It contains no real people, model outputs, or copyrighted reference media.
 - `docs/MODEL_BENCHMARK_PLAN.md` is the source of the first-round capacity plan, smoke/quality gates, human scoring, blind-review rule, and runtime-v1 checklist.
 - This is an official-metadata and mock-plan checkpoint only. No GPU benchmark, model sync, runtime image build, R2 upload, or production promotion has happened.
+
+## 2026-07-14 Stage 2.5 Runtime Scaffold
+
+- `comfy-runtime/Dockerfile` defines a separate `ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime` image path and does not replace the Wan first-test runtime.
+- The runtime pins ComfyUI commit `da2608926eaf68fd532bba4e1ace3402c5d21399`, starts ComfyUI on `127.0.0.1:8188`, and starts a project controller on `127.0.0.1:8080`.
+- The base runtime includes only native ComfyUI plus the project controller. `ComfyUI-GGUF`, Kijai WanVideoWrapper, and other community nodes are optional locked layers and are not installed in the base image.
+- `.github/workflows/comfy-runtime-image.yml` is the manual CI path for building and smoke-testing the new runtime. It uses linux/amd64, immutable tags, GHCR cache, SBOM/provenance, secret scan, no-model CPU smoke checks, and process/file checks that prevent old `gpu-worker/worker.py` autostart.
+- Current CI blocker: GitHub will not dispatch a newly added workflow from a non-default branch. The workflow must first land on the default branch, but this task forbids modifying remote `main`, so no Comfy runtime image digest has been produced.
+- `benchmark/` now contains JSON benchmark specs alongside the code-facing `benchmarks/v1` suite. The suite has eight image cases and eight video cases and does not include real people, unclear-copyright assets, adult content, gore, or violence prompts.
 
 ## Runtime Boundary
 

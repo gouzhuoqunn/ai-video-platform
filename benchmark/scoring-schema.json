@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "objectiveMetrics": [
+    "cold_sync_seconds",
+    "runtime_start_seconds",
+    "model_load_seconds",
+    "generation_seconds",
+    "warm_generation_seconds",
+    "peak_vram_mb",
+    "peak_ram_mb",
+    "disk_bytes",
+    "output_bytes",
+    "oom_count",
+    "crash_count",
+    "retry_count",
+    "unload_seconds",
+    "estimated_cost_usd"
+  ],
+  "manualScale": { "min": 1, "max": 5 },
+  "manualImageScores": ["prompt_adherence", "identity_consistency", "anatomy", "composition", "visual_quality"],
+  "manualVideoScores": ["motion_quality", "identity_consistency", "temporal_stability", "prompt_adherence", "start_frame_adherence", "end_frame_adherence", "camera_motion_quality"],
+  "promotionBySoftware": false,
+  "blindReviewRequired": true
+}

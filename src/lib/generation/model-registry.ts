@@ -2,7 +2,13 @@ import type { GpuProfileKey } from "./gpu-profiles";
 
 export type TaskType = "image" | "video";
 export type ModelSlotKey = "rtx4090_image" | "rtx4090_video" | "rtx5090_image" | "rtx5090_video";
-export type ModelCandidateStatus = "planned" | "metadata_verified" | "runnable" | "benchmarked" | "rejected" | "production";
+export type ModelCandidateStatus =
+  | "unverified"
+  | "public_verified"
+  | "gated_user_action_required"
+  | "metadata_incomplete"
+  | "eligible_for_benchmark"
+  | "rejected_before_benchmark";
 
 export type ModelCandidate = {
   key: string;
@@ -32,7 +38,7 @@ export const MODEL_SLOTS: ModelSlotKey[] = ["rtx4090_image", "rtx4090_video", "r
 export const MODEL_CANDIDATES: ModelCandidate[] = [
   {
     key: "flux2-klein-4b-official",
-    display_name: "FLUX.2 Klein 4B",
+    display_name: "FLUX.2 Klein 4B Distilled FP8",
     task_type: "image",
     gpu_profiles: ["rtx4090"],
     source_repository: "black-forest-labs/FLUX.2-klein-4b-fp8",
@@ -44,13 +50,35 @@ export const MODEL_CANDIDATES: ModelCandidate[] = [
     minimum_vram: 24,
     minimum_ram: 64,
     estimated_disk: 6,
-    license_note: "Apache-2.0 distilled FP8 baseline. ComfyUI auxiliary component hashes remain pending download verification.",
+    license_note: "Apache-2.0 distilled FP8 4090 baseline. Primary file metadata is public; auxiliary ComfyUI text encoder/VAE files still need exact source locks before benchmark.",
     license: "apache-2.0",
-    status: "metadata_verified",
+    status: "metadata_incomplete",
     sha256: "",
     slot: "rtx4090_image",
     origin: "official",
     benchmark_round: "first",
+  },
+  {
+    key: "flux2-klein-4b-base-fp8-challenge",
+    display_name: "FLUX.2 Klein 4B Base FP8",
+    task_type: "image",
+    gpu_profiles: ["rtx4090"],
+    source_repository: "",
+    revision: "",
+    expected_files: [],
+    quantization: "fp8",
+    workflow_key: "image_t2i",
+    required_custom_nodes: [],
+    minimum_vram: 24,
+    minimum_ram: 64,
+    estimated_disk: 6,
+    license_note: "Optional 4090 challenger. No exact public repository/revision/file lock has been proven in this checkpoint.",
+    license: "pending_metadata_verification",
+    status: "unverified",
+    sha256: "",
+    slot: "rtx4090_image",
+    origin: "official",
+    benchmark_round: "second",
   },
   {
     key: "wan22-ti2v-5b-official",
@@ -66,9 +94,9 @@ export const MODEL_CANDIDATES: ModelCandidate[] = [
     minimum_vram: 24,
     minimum_ram: 64,
     estimated_disk: 35,
-    license_note: "Official Wan baseline already pinned for the first GPU session.",
+    license_note: "Apache-2.0 official Wan baseline. Public revision, core files, VAE, and text encoder metadata are locked for a future smoke benchmark.",
     license: "apache-2.0",
-    status: "metadata_verified",
+    status: "eligible_for_benchmark",
     sha256: "",
     slot: "rtx4090_video",
     origin: "official",
@@ -80,17 +108,17 @@ export const MODEL_CANDIDATES: ModelCandidate[] = [
     task_type: "image",
     gpu_profiles: ["rtx5090"],
     source_repository: "black-forest-labs/FLUX.2-klein-9b-fp8",
-    revision: "",
-    expected_files: [],
+    revision: "902d9d510b51533e07729f19211414a3648b77d2",
+    expected_files: ["flux-2-klein-9b-fp8.safetensors"],
     quantization: "fp8",
     workflow_key: "image_t2i",
     required_custom_nodes: [],
     minimum_vram: 31,
     minimum_ram: 80,
     estimated_disk: 12,
-    license_note: "Gated FLUX Non-Commercial baseline. Full revision and auxiliary component metadata require explicit license acceptance.",
+    license_note: "Gated FLUX Non-Commercial 5090 image baseline. User must accept the Hugging Face/BFL terms before any sync or benchmark.",
     license: "flux-non-commercial-license",
-    status: "planned",
+    status: "gated_user_action_required",
     sha256: "",
     slot: "rtx5090_image",
     origin: "official",
@@ -110,9 +138,9 @@ export const MODEL_CANDIDATES: ModelCandidate[] = [
     minimum_vram: 31,
     minimum_ram: 80,
     estimated_disk: 36,
-    license_note: "Quantized official-family candidate; requires metadata and license verification.",
+    license_note: "5090-only high-quality challenger placeholder. No official Blackwell/NVFP4 repository lock was proven in this checkpoint.",
     license: "pending_metadata_verification",
-    status: "planned",
+    status: "unverified",
     sha256: "",
     slot: "rtx5090_image",
     origin: "official",
@@ -132,9 +160,9 @@ export const MODEL_CANDIDATES: ModelCandidate[] = [
     minimum_vram: 31,
     minimum_ram: 80,
     estimated_disk: 152,
-    license_note: "Apache-2.0 official A14B I2V baseline. Native Wan README names 80GB VRAM for its reference runner; 5090 compatibility remains benchmark-only.",
+    license_note: "Apache-2.0 official A14B I2V baseline. Public revision and sharded files are locked; 5090 compatibility remains an offload benchmark question.",
     license: "apache-2.0",
-    status: "metadata_verified",
+    status: "eligible_for_benchmark",
     sha256: "",
     slot: "rtx5090_video",
     origin: "official",
@@ -154,9 +182,9 @@ export const MODEL_CANDIDATES: ModelCandidate[] = [
     minimum_vram: 24,
     minimum_ram: 64,
     estimated_disk: 60,
-    license_note: "Second-round community candidate only; not approved for production.",
+    license_note: "Second-round community candidate only. Exact Phr00t repository, revision, safetensors file, version directory, workflow, CLIP, and VAE are not locked.",
     license: "pending_metadata_verification",
-    status: "planned",
+    status: "unverified",
     sha256: "",
     slot: "rtx4090_video",
     origin: "community",
@@ -164,23 +192,23 @@ export const MODEL_CANDIDATES: ModelCandidate[] = [
   },
   {
     key: "community-gguf-second-round",
-    display_name: "GGUF community candidate",
-    task_type: "image",
+    display_name: "Wan2.2 A14B GGUF community candidate",
+    task_type: "video",
     gpu_profiles: ["rtx4090", "rtx5090"],
     source_repository: "",
     revision: "",
     expected_files: [],
     quantization: "gguf",
-    workflow_key: "image_t2i",
-    required_custom_nodes: [],
+    workflow_key: "video_i2v",
+    required_custom_nodes: ["comfyui_gguf"],
     minimum_vram: 24,
     minimum_ram: 64,
     estimated_disk: 30,
-    license_note: "Second-round community candidate only; not approved for production.",
+    license_note: "Second-round GGUF Q4/Q5/Q6 candidate only. Requires a fixed ComfyUI-GGUF commit and exact quantized files before benchmark.",
     license: "pending_metadata_verification",
-    status: "planned",
+    status: "unverified",
     sha256: "",
-    slot: "rtx4090_image",
+    slot: "rtx4090_video",
     origin: "community",
     benchmark_round: "second",
   },
@@ -198,9 +226,9 @@ export const MODEL_CANDIDATES: ModelCandidate[] = [
     minimum_vram: 24,
     minimum_ram: 64,
     estimated_disk: 60,
-    license_note: "Second-round community candidate only; not approved for production.",
+    license_note: "Second-round Kijai WanVideoWrapper candidate only. Kijai is optional and cannot become a mandatory dependency for official native workflows.",
     license: "pending_metadata_verification",
-    status: "planned",
+    status: "unverified",
     sha256: "",
     slot: "rtx5090_video",
     origin: "community",
@@ -220,9 +248,9 @@ export const MODEL_CANDIDATES: ModelCandidate[] = [
     minimum_vram: 31,
     minimum_ram: 80,
     estimated_disk: 70,
-    license_note: "Second-round community candidate only; not approved for production.",
+    license_note: "Second-round FLF2V community workflow candidate only. I2V and FLF2V stay separate workflows until weights prove otherwise.",
     license: "pending_metadata_verification",
-    status: "planned",
+    status: "unverified",
     sha256: "",
     slot: "rtx5090_video",
     origin: "community",
@@ -242,9 +270,9 @@ export const MODEL_CANDIDATES: ModelCandidate[] = [
     minimum_vram: 31,
     minimum_ram: 80,
     estimated_disk: 0,
-    license_note: "Second-round community candidate only; not approved for production.",
+    license_note: "Second-round first/last-frame candidate only. Not accepted into benchmark until exact model files and node dependencies are locked.",
     license: "pending_metadata_verification",
-    status: "planned",
+    status: "unverified",
     sha256: "",
     slot: "rtx5090_video",
     origin: "community",
@@ -261,13 +289,15 @@ export function validateModelCandidate(candidate: ModelCandidate) {
   if (!candidate.workflow_key) errors.push("workflow_key is required");
   if (!candidate.license) errors.push("license is required");
   if (!MODEL_SLOTS.includes(candidate.slot)) errors.push("slot is invalid");
-  if (!["planned", "metadata_verified", "runnable", "benchmarked", "rejected", "production"].includes(candidate.status)) {
+  if (!["unverified", "public_verified", "gated_user_action_required", "metadata_incomplete", "eligible_for_benchmark", "rejected_before_benchmark"].includes(candidate.status)) {
     errors.push("status is invalid");
   }
   if (candidate.sha256 !== "" && !/^[a-f0-9]{64}$/.test(candidate.sha256)) errors.push("sha256 must be empty or a real hex digest");
-  if (candidate.status === "production" && candidate.origin !== "official") errors.push("community candidates cannot be production");
-  if (candidate.status === "metadata_verified" && !/^[a-f0-9]{40}$/.test(candidate.revision)) {
-    errors.push("metadata_verified candidates require a full revision SHA");
+  if (candidate.status === "eligible_for_benchmark" && !/^[a-f0-9]{40}$/.test(candidate.revision)) {
+    errors.push("eligible_for_benchmark candidates require a full revision SHA");
+  }
+  if (candidate.status === "eligible_for_benchmark" && candidate.expected_files.length === 0) {
+    errors.push("eligible_for_benchmark candidates require expected files");
   }
   if (candidate.benchmark_round === "first" && candidate.origin !== "official") errors.push("first-round candidates must be official");
   return errors;

@@ -54,7 +54,8 @@ async function main() {
   for (const candidate of MODEL_CANDIDATES) {
     assert.deepEqual(validateModelCandidate(candidate), [], `${candidate.key} must satisfy the model schema`);
     assert.ok(candidate.sha256 === "" || /^[a-f0-9]{64}$/.test(candidate.sha256), "unknown sha256 must stay empty");
-    assert.notEqual(candidate.status, "production", "benchmark registry must not auto-promote production");
+    assert.notEqual(candidate.status, "rejected_before_benchmark", "no current candidate should be rejected without an explicit reason");
+    assert.notEqual(candidate.status, "public_verified", "public candidates must be classified more specifically before display");
   }
 
   for (const workflow of Object.values(WORKFLOW_TEMPLATES)) {

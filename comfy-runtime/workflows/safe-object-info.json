@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Runtime smoke fixture that verifies ComfyUI object/schema APIs without requiring any model weights.",
+  "requiresModels": false,
+  "allowedEndpoints": ["/system_stats", "/object_info", "/queue", "/history", "/interrupt"]
+}

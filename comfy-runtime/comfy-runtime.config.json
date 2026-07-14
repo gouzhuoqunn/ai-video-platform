@@ -7,8 +7,14 @@
     "port": 8188
   },
   "runtime": {
-    "includes": ["ComfyUI", "python-dependencies", "ffmpeg", "api-controller", "healthcheck", "bootstrap-entry"],
-    "excludes": ["model-weights", "user-files", "secrets", "ssh-private-keys", "signed-urls"],
-    "buildStatus": "planned"
+    "image": "ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime",
+    "baseImage": "ghcr.io/gouzhuoqunn/wan22-runtime@sha256:4e3dd6d2610c33ab2b260e970e4a9288043dc2c762cb1b8902b6712cfdfaa96c",
+    "includes": ["ComfyUI", "python-dependencies-lock", "ffmpeg", "api-controller", "healthcheck", "bootstrap-entry", "workflow-fixtures", "custom-node-lock-manifest"],
+    "excludes": ["model-weights", "user-files", "prompts", "generated-results", "secrets", "ssh-private-keys", "signed-urls", "r2-admin-credentials"],
+    "buildStatus": "ci-workflow-defined-not-published"
+  },
+  "customNodes": {
+    "baseRuntimeIncludesCustomNodes": false,
+    "optionalLayers": ["comfyui_gguf", "kijai_wan_wrapper"]
   }
 }

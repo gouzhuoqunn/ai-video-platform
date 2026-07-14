@@ -11,6 +11,14 @@ export type R2ProductionManifest = {
 
 export const R2_CACHE_NAMESPACES: R2CacheNamespace[] = ["benchmark-staging", "production", "shared", "workflows", "manifests"];
 export const PRODUCTION_PROFILE_PATHS: ProductionProfilePath[] = ["rtx4090/image", "rtx4090/video", "rtx5090/image", "rtx5090/video"];
+export const PRODUCTION_CURRENT_JSON_KEYS = [
+  "production/rtx4090/image/current.json",
+  "production/rtx4090/video/current.json",
+  "production/rtx5090/image/current.json",
+  "production/rtx5090/video/current.json",
+] as const;
+
+export const R2_SHARED_COMPONENT_PREFIXES = ["shared/vae", "shared/text-encoders", "shared/clip-vision", "shared/loras", "workflows", "custom-node-locks"] as const;
 
 export const BENCHMARK_CACHE_LIFECYCLE = {
   rejectedCandidates: "delete staging model objects after the audit record and small metrics are retained",
@@ -69,5 +77,8 @@ export function validateProductionManifest(manifest: R2ProductionManifest) {
   const sharedKeys = Object.values(manifest.shared).map((entry) => entry.key);
   if (new Set(sharedKeys).size !== sharedKeys.length) errors.push("shared components must be deduplicated by key");
   if (manifest.publishOrder.at(-1) !== "current.json") errors.push("current.json must be published last");
+  for (const entry of Object.values(manifest.production)) {
+    if (entry.manifestKey.startsWith("benchmark-staging/")) errors.push("production manifests must not read benchmark-staging");
+  }
   return errors;
 }

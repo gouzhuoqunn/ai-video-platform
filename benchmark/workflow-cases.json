@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "suiteVersion": "v1",
+  "cases": [
+    { "id": "workflow-image-t2i", "workflowKey": "image_t2i", "task": "T2I", "sampleIds": ["image-cinematic-closeup", "image-full-body-hands", "image-two-people"], "requiresModels": true, "requiresCustomNodes": [] },
+    { "id": "workflow-video-ti2v", "workflowKey": "video_ti2v", "task": "TI2V", "sampleIds": ["video-subtle-motion", "video-body-motion", "video-pan", "video-dolly", "video-object-motion"], "requiresModels": true, "requiresCustomNodes": [] },
+    { "id": "workflow-video-i2v", "workflowKey": "video_i2v", "task": "I2V", "sampleIds": ["video-i2v-single-frame"], "requiresModels": true, "requiresCustomNodes": [] },
+    { "id": "workflow-video-flf2v", "workflowKey": "video_flf2v", "task": "FLF2V", "sampleIds": ["video-flf2v-transition"], "requiresModels": true, "requiresCustomNodes": ["planned-flf2v-node"] }
+  ]
+}

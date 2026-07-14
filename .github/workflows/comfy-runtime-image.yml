@@ -1,0 +1,148 @@
+name: Comfy Runtime Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Immutable ComfyUI runtime tag"
+        required: true
+        default: "v0.1.0-comfy-runtime"
+      verify_existing_digest:
+        description: "Existing sha256 digest to verify without rebuilding"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Secret scan
+        run: npm run secret:scan
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image metadata
+        id: image
+        shell: bash
+        run: |
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/ai-creative-comfy-runtime"
+          version_tag="${{ inputs.version_tag }}"
+          sha_tag="sha-${GITHUB_SHA}"
+          {
+            echo "image=${image}"
+            echo "version_tag=${version_tag}"
+            echo "sha_tag=${sha_tag}"
+            echo "tags=${image}:${version_tag},${image}:${sha_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Comfy runtime image
+        if: ${{ inputs.verify_existing_digest == '' }}
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./comfy-runtime
+          file: ./comfy-runtime/Dockerfile
+          platforms: linux/amd64
+          tags: ${{ steps.image.outputs.tags }}
+          push: true
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=comfy-runtime
+          cache-to: type=gha,mode=max,scope=comfy-runtime
+
+      - name: Smoke test Comfy runtime image
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.verify_existing_digest }}" ]; then
+            image="${{ steps.image.outputs.image }}@${{ inputs.verify_existing_digest }}"
+          else
+            image="${{ steps.image.outputs.image }}:${{ steps.image.outputs.version_tag }}"
+          fi
+
+          docker buildx imagetools inspect "${image}" >/tmp/comfy-runtime-inspect.txt
+          grep -F "linux/amd64" /tmp/comfy-runtime-inspect.txt >/dev/null
+          docker pull --platform linux/amd64 "${image}"
+
+          container="comfy-runtime-smoke-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" \
+            -e START_GPU_WORKER=false \
+            -e COMFYUI_EXTRA_ARGS=--cpu \
+            "${image}"
+          cleanup() {
+            docker logs "${container}" || true
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          sleep 30
+          docker ps --format '{{.Names}}' | grep -Fx "${container}" >/dev/null
+          docker exec "${container}" sh -lc 'curl -fsS http://127.0.0.1:8080/healthz | tee /tmp/comfy-health.json | grep -F "\"ok\": true"'
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >/tmp/object-info.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/tmp/queue.json
+          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/tmp/interrupt.json
+          docker exec "${container}" sh -lc 'test "$(printenv COMFYUI_COMMIT)" = "da2608926eaf68fd532bba4e1ace3402c5d21399"'
+          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" \) | grep .'
+          docker exec "${container}" sh -lc '! printenv | grep -E "SUPABASE_SERVICE_ROLE|SUPABASE_SECRET|CLORE_API_KEY|R2_ADMIN|SSH_PRIVATE"'
+          docker exec "${container}" python3.11 -c 'import pathlib,sys; forbidden=False
+          for path in ("/proc/net/tcp","/proc/net/tcp6"):
+            for line in pathlib.Path(path).read_text().splitlines()[1:]:
+              local=line.split()[1]; host_hex,port_hex=local.rsplit(":",1)
+              forbidden = forbidden or (int(port_hex,16)==8188 and set(host_hex) <= {"0"})
+          sys.exit(1 if forbidden else 0)'
+          top_output="$(docker top "${container}")"
+          if printf '%s\n' "${top_output}" | grep -Eq 'python(3)?[[:space:]]+/app/worker[.]py'; then
+            echo "::error::legacy Wan worker unexpectedly started"
+            exit 1
+          fi
+
+          docker stop --time 15 "${container}" >/dev/null
+
+      - name: Summarize image
+        shell: bash
+        run: |
+          digest="${{ steps.build.outputs.digest }}"
+          if [ -n "${{ inputs.verify_existing_digest }}" ]; then
+            digest="${{ inputs.verify_existing_digest }}"
+          fi
+          {
+            echo "### Comfy Runtime image"
+            echo ""
+            echo "- Image: \`${{ steps.image.outputs.image }}\`"
+            echo "- Version tag: \`${{ steps.image.outputs.version_tag }}\`"
+            echo "- Commit tag: \`${{ steps.image.outputs.sha_tag }}\`"
+            echo "- Digest: \`${digest}\`"
+            echo "- Platform: \`linux/amd64\`"
+            echo "- ComfyUI commit: \`da2608926eaf68fd532bba4e1ace3402c5d21399\`"
+            echo "- Model weights in image: \`false\`"
+          } >> "$GITHUB_STEP_SUMMARY"

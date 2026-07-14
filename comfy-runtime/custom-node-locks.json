@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "baseRuntimeIncludesCustomNodes": false,
+  "nodes": [
+    {
+      "key": "comfyui_gguf",
+      "repository": "",
+      "commit": "",
+      "requirements": [],
+      "compatibilityStatus": "not_installed_pending_lock",
+      "dependentWorkflows": ["video_i2v"],
+      "includedInBaseRuntime": false
+    },
+    {
+      "key": "kijai_wan_wrapper",
+      "repository": "",
+      "commit": "",
+      "requirements": [],
+      "compatibilityStatus": "not_installed_pending_lock",
+      "dependentWorkflows": ["video_i2v", "video_flf2v"],
+      "includedInBaseRuntime": false
+    }
+  ]
+}
