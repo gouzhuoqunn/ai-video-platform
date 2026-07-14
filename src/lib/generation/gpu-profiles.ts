@@ -83,3 +83,12 @@ export function evaluateCandidateForProfile(
 export function listGpuProfiles() {
   return Object.values(GPU_PROFILES);
 }
+
+export function requiredDiskGbForProfile(profileKey: GpuProfileKey, plannedModelSyncGb: number) {
+  if (!Number.isFinite(plannedModelSyncGb) || plannedModelSyncGb < 0) {
+    throw new Error("planned model sync size must be a non-negative number");
+  }
+  const profile = GPU_PROFILES[profileKey];
+  const withReserve = Math.ceil(plannedModelSyncGb * 1.2 * 100) / 100;
+  return Math.max(profile.hardMinimumDiskGb, withReserve);
+}

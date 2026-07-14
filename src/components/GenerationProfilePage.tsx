@@ -12,14 +12,16 @@ function formatGb(value: number) {
 
 export function GenerationProfilePage({ profile }: GenerationProfilePageProps) {
   const data = getGenerationProfilePageData(profile);
-  const allCandidates = [...data.imageCandidates, ...data.videoCandidates];
+  const allCandidates = [...data.imageCandidates, ...data.videoCandidates].sort(
+    (left, right) => Number(right.benchmark_round === "first") - Number(left.benchmark_round === "first"),
+  );
 
   return (
     <main className="min-h-screen bg-[#f5f0e8] text-stone-900">
       <header className="border-b border-stone-200 bg-[#f5f0e8]/95 px-5 py-4">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">mock profile</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">metadata audit / pending benchmark</p>
             <h1 className="text-2xl font-bold">{data.gpu.displayName} generation profile</h1>
           </div>
           <nav className="flex flex-wrap gap-2 text-sm">
@@ -68,7 +70,7 @@ export function GenerationProfilePage({ profile }: GenerationProfilePageProps) {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-bold">Model candidates</h2>
-                <p className="text-sm text-stone-500">Registered only. No model download, R2 upload, or production promotion happens here.</p>
+                <p className="text-sm text-stone-500">Official first-round baseline is listed first. No model download, R2 upload, GPU benchmark, or production promotion happens here.</p>
               </div>
               <span className="rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2 text-sm font-semibold">{data.gpu.offloadPolicy} offload</span>
             </div>
@@ -93,8 +95,8 @@ export function GenerationProfilePage({ profile }: GenerationProfilePageProps) {
                       <dd>{formatGb(candidate.minimum_vram)}</dd>
                     </div>
                     <div>
-                      <dt className="text-stone-500">Disk</dt>
-                      <dd>{formatGb(candidate.estimated_disk)}</dd>
+                      <dt className="text-stone-500">Stage</dt>
+                      <dd>{candidate.benchmark_round === "first" ? "metadata audit" : "second round"}</dd>
                     </div>
                   </dl>
                   <p className="mt-3 text-xs leading-5 text-stone-500">{candidate.license_note}</p>
@@ -120,13 +122,17 @@ export function GenerationProfilePage({ profile }: GenerationProfilePageProps) {
                 <dt className="text-stone-500">Public ports</dt>
                 <dd className="font-semibold">{data.runtime.publicPorts}</dd>
               </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-stone-500">Planned sync</dt>
+                <dd className="font-semibold">{data.plannedSyncGb}GB plus 20% disk reserve</dd>
+              </div>
             </dl>
           </section>
 
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <h2 className="text-lg font-bold">Benchmark status</h2>
             <p className="mt-2 text-sm leading-6 text-stone-600">
-              The runner records startup, sync, load, cold generation, hot generation, resource peaks, output hash, error class, workflow version, model revision, GPU model, and driver. This page uses mock data until a future approved GPU benchmark.
+              The runner records startup, sync, load, cold generation, hot generation, resource peaks, output hash, error class, workflow version, model revision, GPU model, and driver. No result has been measured and no production profile is selected.
             </p>
           </section>
         </aside>

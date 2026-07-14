@@ -31,6 +31,14 @@ This checkpoint is a preparation and mock-validation layer. It does not create C
 - No model cache object has been uploaded to R2 for these new profile slots.
 - No benchmark winner has been promoted to production. Promotion remains a manual approval step.
 
+## 2026-07-14 Metadata Audit and Frozen Benchmark Plan
+
+- First-round baseline slots are now frozen as FLUX.2 Klein 4B Distilled FP8, Wan2.2 TI2V-5B, FLUX.2 Klein 9B FP8, and Wan2.2 I2V-A14B.
+- Public immutable revisions are recorded for the 4B, TI2V-5B, and A14B repositories. The 9B repository is explicitly gated under a non-commercial license, so it has no guessed revision and cannot enter a real sync or benchmark until the terms are accepted.
+- `benchmarks/v1/` is a fixed text/configuration suite with eight image and six video samples plus a tiny synthetic input fixture. It contains no real people, model outputs, or copyrighted reference media.
+- `docs/MODEL_BENCHMARK_PLAN.md` is the source of the first-round capacity plan, smoke/quality gates, human scoring, blind-review rule, and runtime-v1 checklist.
+- This is an official-metadata and mock-plan checkpoint only. No GPU benchmark, model sync, runtime image build, R2 upload, or production promotion has happened.
+
 ## Runtime Boundary
 
 - The future ComfyUI service must bind to `127.0.0.1:8188` or an internal container interface only.

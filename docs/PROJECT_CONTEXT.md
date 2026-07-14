@@ -1,5 +1,14 @@
 # Project Context
 
+## 2026-07-14 ComfyUI Metadata Audit and Benchmark Plan
+
+- Added a metadata-audit registry, a frozen `benchmarks/v1` suite, capacity planning, smoke/quality benchmark gates, blind-review identifiers, and a written runtime-v1 build checklist.
+- First-round official baselines: FLUX.2 Klein 4B Distilled FP8, Wan2.2 TI2V-5B, FLUX.2 Klein 9B FP8, and Wan2.2 I2V-A14B. The 9B candidate is gated under a non-commercial license and remains blocked until the license is explicitly accepted and a full immutable revision can be read.
+- Public metadata is recorded for 4B, TI2V-5B, and A14B. Missing file hashes and incomplete inventories are marked pending rather than invented. The conservative primary-repository cache plan is 173.93 GB with no unverified deduplication.
+- RTX 4090 remains exact model / 24GB VRAM / 64GB RAM hard / 96GB preferred / 200GB disk hard. RTX 5090 remains exact model / 31-32GB display tolerance only / 80GB RAM hard / 128GB preferred / 250GB disk hard. The scheduler helper uses the larger of the hard disk floor and 120% of planned sync size.
+- `/generate/4090` and `/generate/5090` now show the official-first candidate order, metadata-audit/pending-benchmark phase, and planned sync volume. They still use mock data and the confirmed light visual baseline.
+- No Clore order, SSH session, model download, large ComfyUI image build, GPU benchmark, R2 upload, remote-main push, or production promotion occurred in this checkpoint.
+
 ## 2026-07-11 default-off real Clore execution checkpoint
 
 - Added a guarded real-execution code path from local_lab confirmation to Clore `create_order` and protected `cancel_order`, but it is disabled by default with `CLORE_ORDER_EXECUTION_ENABLED=false`.

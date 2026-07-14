@@ -67,6 +67,7 @@
     "model-cache:r2:test": "tsx scripts/model-cache/r2-credentials-check.ts",
     "model-cache:seed:test": "tsx scripts/model-cache/seed-cache.ts",
     "generation:architecture:test": "tsx scripts/generation-architecture-tests.ts",
+    "generation:metadata:test": "tsx scripts/generation-metadata-benchmark-tests.ts",
     "cost:session": "tsx scripts/cost/session-cost.ts",
     "cost:plan": "tsx scripts/cost/session-plan.ts",
     "cost:test": "tsx scripts/cost/cost-tests.ts",
