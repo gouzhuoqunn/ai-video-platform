@@ -260,7 +260,7 @@ jobs:
 
   verify-existing-digest-smoke:
     name: Verify existing digest smoke
-    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'gouzhuoqunn/ai-video-platform' && github.head_ref == 'stage-two-five-comfy-runtime' && github.base_ref == 'ci/comfy-runtime-smoke-base' }}
+    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'gouzhuoqunn/ai-video-platform' && github.head_ref == 'stage-two-five-comfy-runtime' && github.base_ref == 'ci/comfy-runtime-smoke-base' && !contains(github.event.pull_request.title, '[diagnose-only]') }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -454,3 +454,145 @@ jobs:
             echo "- Model weights in image: \`false\`"
             echo "- Repository secrets used: \`false\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  diagnose-existing-digest:
+    name: Diagnose existing digest
+    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'gouzhuoqunn/ai-video-platform' && github.head_ref == 'stage-two-five-comfy-runtime' && github.base_ref == 'ci/comfy-runtime-smoke-base' && contains(github.event.pull_request.title, '[diagnose-only]') }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      COMFY_RUNTIME_IMAGE: ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:d88dd518253f27ac8a7841d07b2e02c79a8cda0a940c85b9c579446f105c26bc
+    steps:
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h
+
+      - name: Pull fixed digest anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config"
+          mkdir -p "${DOCKER_CONFIG}"
+          docker pull --platform linux/amd64 "${COMFY_RUNTIME_IMAGE}"
+
+      - name: Diagnose no-model startup
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config"
+          container="comfy-runtime-diagnostic-${GITHUB_RUN_ID}"
+          docker run -d --name "${container}" \
+            --entrypoint /bin/bash \
+            "${COMFY_RUNTIME_IMAGE}" \
+            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
+          cleanup() {
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          dexec() {
+            docker exec "${container}" "$@"
+          }
+
+          echo "===== runtime basics"
+          dexec python3.11 - <<'PY'
+          import importlib.metadata as metadata
+          import os
+          import pathlib
+          import shutil
+          import stat
+          import subprocess
+          import sys
+
+          print("python=" + sys.version.split()[0])
+          try:
+              import torch
+              print("torch=" + torch.__version__)
+              print("torch_cuda=" + str(torch.version.cuda))
+              print("torch_cuda_available=" + str(torch.cuda.is_available()))
+          except Exception as exc:
+              print("torch_error=" + repr(exc))
+          print("nvidia_smi_exists=" + str(shutil.which("nvidia-smi") is not None))
+          commit = os.environ.get("COMFYUI_COMMIT", "")
+          marker = subprocess.check_output(["git", "-C", "/opt/ComfyUI", "rev-parse", "HEAD"], text=True).strip() if pathlib.Path("/opt/ComfyUI").exists() else ""
+          print("comfyui_env_commit=" + commit)
+          print("comfyui_git_commit=" + marker)
+          for package in ["comfyui-frontend-package", "requests", "torch", "numpy", "aiohttp"]:
+              try:
+                  print(f"package:{package}={metadata.version(package)}")
+              except metadata.PackageNotFoundError:
+                  print(f"package:{package}=missing")
+          for directory in ["/workspace/models", "/workspace/comfy-input", "/workspace/comfy-output", "/workspace/comfy-user", "/workspace/logs", "/tmp"]:
+              path = pathlib.Path(directory)
+              exists = path.exists()
+              writable = os.access(path, os.R_OK | os.W_OK) if exists else False
+              mode = oct(stat.S_IMODE(path.stat().st_mode)) if exists else "missing"
+              owner = f"{path.stat().st_uid}:{path.stat().st_gid}" if exists else "missing"
+              print(f"dir:{directory}:exists={exists}:owner={owner}:mode={mode}:rw={writable}")
+          for script in ["/opt/comfy-runtime/entrypoint.sh", "/opt/comfy-runtime/controller.py", "/opt/comfy-runtime/healthcheck.py"]:
+              path = pathlib.Path(script)
+              print(f"script:{script}:exists={path.exists()}:exec={os.access(path, os.X_OK) if path.exists() else False}")
+          PY
+
+          echo "===== syntax checks"
+          dexec bash -n /opt/comfy-runtime/entrypoint.sh
+          dexec python3.11 -m compileall -q /opt/comfy-runtime
+
+          echo "===== manual ComfyUI CPU startup"
+          dexec bash -lc 'cd /opt/ComfyUI && rm -f /workspace/logs/comfyui-diagnostic.log && (python3.11 main.py --cpu --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout --verbose DEBUG > >(tee /workspace/logs/comfyui-diagnostic.log) 2>&1) & echo $! >/tmp/comfyui-diagnostic.pid'
+          cpu_ready=false
+          for attempt in $(seq 1 36); do
+            if ! dexec bash -lc 'kill -0 "$(cat /tmp/comfyui-diagnostic.pid)" 2>/dev/null'; then
+              echo "::error::manual ComfyUI CPU process exited"
+              dexec bash -lc 'wait "$(cat /tmp/comfyui-diagnostic.pid)"; echo "exit_code=$?"' || true
+              dexec bash -lc 'tail -n 200 /workspace/logs/comfyui-diagnostic.log || true'
+              exit 1
+            fi
+            if dexec curl -fsS http://127.0.0.1:8188/system_stats >/tmp/system_stats.json; then
+              cpu_ready=true
+              break
+            fi
+            sleep 5
+          done
+          if [ "${cpu_ready}" != "true" ]; then
+            echo "::error::manual ComfyUI CPU startup timed out"
+            dexec bash -lc 'tail -n 200 /workspace/logs/comfyui-diagnostic.log || true'
+            exit 1
+          fi
+          echo "manual_cpu_start_seconds=$(( attempt * 5 ))"
+          dexec curl -fsS http://127.0.0.1:8188/object_info >/tmp/object_info.json
+
+          echo "===== standalone controller"
+          dexec bash -lc 'rm -f /workspace/logs/controller-diagnostic.log && (python3.11 /opt/comfy-runtime/controller.py --host 127.0.0.1 --port 8080 --comfy-host 127.0.0.1 --comfy-port 8188 > >(tee /workspace/logs/controller-diagnostic.log) 2>&1) & echo $! >/tmp/controller-diagnostic.pid'
+          controller_ready=false
+          for attempt in $(seq 1 24); do
+            if ! dexec bash -lc 'kill -0 "$(cat /tmp/controller-diagnostic.pid)" 2>/dev/null'; then
+              echo "::error::controller process exited"
+              dexec bash -lc 'wait "$(cat /tmp/controller-diagnostic.pid)"; echo "exit_code=$?"' || true
+              dexec bash -lc 'tail -n 200 /workspace/logs/controller-diagnostic.log || true'
+              exit 1
+            fi
+            if dexec curl -fsS http://127.0.0.1:8080/healthz >/tmp/controller_health.json; then
+              controller_ready=true
+              break
+            fi
+            sleep 5
+          done
+          if [ "${controller_ready}" != "true" ]; then
+            echo "::error::controller health timed out"
+            dexec bash -lc 'tail -n 200 /workspace/logs/controller-diagnostic.log || true'
+            exit 1
+          fi
+
+          echo "===== manual GPU negative startup"
+          dexec bash -lc 'cd /opt/ComfyUI && rm -f /workspace/logs/comfyui-gpu-negative.log && timeout 40s python3.11 main.py --listen 127.0.0.1 --port 8190 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout --verbose DEBUG > >(tee /workspace/logs/comfyui-gpu-negative.log) 2>&1; echo "gpu_negative_exit=$?"'
+          dexec bash -lc 'tail -n 120 /workspace/logs/comfyui-gpu-negative.log || true'
+
+          echo "===== default entrypoint reproduction"
+          dexec bash -lc 'rm -f /workspace/logs/comfyui.log /workspace/logs/controller.log /workspace/logs/comfy-runtime.log; COMFYUI_EXTRA_ARGS=--cpu timeout 30s /opt/comfy-runtime/entrypoint.sh; echo "entrypoint_exit=$?"; echo "===== comfy-runtime.log"; tail -n 200 /workspace/logs/comfy-runtime.log || true; echo "===== comfyui.log"; tail -n 200 /workspace/logs/comfyui.log || true; echo "===== controller.log"; tail -n 200 /workspace/logs/controller.log || true'
