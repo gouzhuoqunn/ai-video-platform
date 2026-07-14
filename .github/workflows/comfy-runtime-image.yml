@@ -35,14 +35,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  ab-diagnose-fixed-digest:
-    name: A/B diagnose fixed digest
+  disk-safe-ab-diagnose:
+    name: Disk-safe A/B diagnose fixed digest
     if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && github.event_name == 'push' && contains(github.event.head_commit.message, '[ab-diagnose]') && contains(github.event.head_commit.message, '[skip build]') }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
+      COMFY_RUNTIME_IMAGE_NAME: ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime
+      COMFY_RUNTIME_DIGEST: sha256:1cfb4740fb8b310a8095500e8fe55160176c619306068d553092182f4888efd1
       COMFY_RUNTIME_IMAGE: ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:1cfb4740fb8b310a8095500e8fe55160176c619306068d553092182f4888efd1
     steps:
       - name: Confirm zero-build diagnostic mode
@@ -53,16 +55,201 @@ jobs:
           echo "push=skipped"
           echo "permissions=contents:read"
           echo "repository_secrets_used=false"
+          echo "classification_previous_run=ci_runner_disk_exhausted_before_ab"
 
-      - name: Pull fixed digest anonymously
+      - name: Disk preflight before pull
         shell: bash
         run: |
           set -euo pipefail
-          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config"
+          echo "runner_os=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2- | tr -d '\"')"
+          echo "runner_kernel=$(uname -a)"
+          echo "===== df -h"
+          df -h
+          echo "===== df -B1 /"
+          df -B1 /
+          echo "initial_free_bytes=$(df -B1 / | awk 'NR==2 {print $4}')" | tee -a "$GITHUB_ENV"
+          echo "===== docker info storage driver"
+          docker info --format 'storage_driver={{.Driver}}'
+          echo "===== docker system df -v"
+          docker system df -v || true
+          echo "===== selected directory sizes"
+          sudo du -sh /var/lib/docker /opt /usr/local /usr/share "${RUNNER_TOOL_CACHE:-/opt/hostedtoolcache}" 2>/dev/null || true
+          echo "===== largest selected directories max-depth=2"
+          sudo du -x -B1 --max-depth=2 /var/lib/docker /opt /usr/local /usr/share 2>/dev/null | sort -nr | head -30 || true
+
+      - name: Compute anonymous manifest layer sizes
+        id: manifest_size
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config-manifest"
           mkdir -p "${DOCKER_CONFIG}"
-          docker buildx imagetools inspect "${COMFY_RUNTIME_IMAGE}" >/tmp/comfy-runtime-inspect.txt
-          grep -F "linux/amd64" /tmp/comfy-runtime-inspect.txt >/dev/null
+          printf '{}\n' > "${DOCKER_CONFIG}/config.json"
+          set +e
+          docker buildx imagetools inspect --raw "${COMFY_RUNTIME_IMAGE}" >/tmp/index.json
+          raw_status=$?
+          set -e
+          if [ "${raw_status}" -ne 0 ]; then
+            fallback_reason="index_inspect_failed"
+            compressed_layer_bytes=0
+            required_free_bytes=$((45 * 1024 * 1024 * 1024))
+            amd64_manifest_digest=""
+          else
+            python3 - <<'PY' >/tmp/manifest-env
+          import json
+          import os
+          import subprocess
+          import sys
+
+          image_name = os.environ["COMFY_RUNTIME_IMAGE_NAME"]
+          expected_digest = os.environ["COMFY_RUNTIME_DIGEST"]
+          index = json.load(open("/tmp/index.json", "r", encoding="utf-8"))
+          manifests = index.get("manifests", [])
+          selected = None
+          for manifest in manifests:
+              platform = manifest.get("platform", {})
+              if platform.get("os") == "linux" and platform.get("architecture") == "amd64":
+                  selected = manifest
+                  break
+          if selected is None:
+              print("fallback_reason=linux_amd64_manifest_not_found")
+              print("compressed_layer_bytes=0")
+              print("required_free_bytes=" + str(45 * 1024 * 1024 * 1024))
+              print("amd64_manifest_digest=")
+              sys.exit(0)
+
+          amd64_digest = selected["digest"]
+          raw = subprocess.check_output(
+              ["docker", "buildx", "imagetools", "inspect", "--raw", f"{image_name}@{amd64_digest}"],
+              text=True,
+          )
+          manifest = json.loads(raw)
+          layers = manifest.get("layers", [])
+          compressed = sum(int(layer.get("size", 0)) for layer in layers)
+          config_size = int(manifest.get("config", {}).get("size", 0))
+          max_layer = max((int(layer.get("size", 0)) for layer in layers), default=0)
+          required = max(35 * 1024 * 1024 * 1024, compressed * 3 + 8 * 1024 * 1024 * 1024)
+          exact_match = str(index.get("mediaType", "")).endswith("image.index.v1+json") and expected_digest.startswith("sha256:")
+          print("fallback_reason=")
+          print(f"layer_count={len(layers)}")
+          print(f"compressed_layer_bytes={compressed}")
+          print(f"config_size_bytes={config_size}")
+          print(f"max_layer_bytes={max_layer}")
+          print(f"required_free_bytes={required}")
+          print(f"amd64_manifest_digest={amd64_digest}")
+          print(f"input_digest_exact={str(exact_match).lower()}")
+          PY
+            set -a
+            # shellcheck disable=SC1091
+            . /tmp/manifest-env
+            set +a
+          fi
+          cat /tmp/manifest-env 2>/dev/null || {
+            echo "fallback_reason=${fallback_reason}"
+            echo "compressed_layer_bytes=${compressed_layer_bytes}"
+            echo "required_free_bytes=${required_free_bytes}"
+            echo "amd64_manifest_digest=${amd64_manifest_digest}"
+          }
+          {
+            echo "compressed_layer_bytes=${compressed_layer_bytes}"
+            echo "required_free_bytes=${required_free_bytes}"
+            echo "amd64_manifest_digest=${amd64_manifest_digest}"
+            echo "manifest_fallback_reason=${fallback_reason}"
+          } >> "$GITHUB_ENV"
+          {
+            echo "compressed_layer_bytes=${compressed_layer_bytes}"
+            echo "required_free_bytes=${required_free_bytes}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Allowlisted runner disk cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_free="$(df -B1 / | awk 'NR==2 {print $4}')"
+          echo "cleanup_before_free_bytes=${before_free}"
+
+          docker system prune -af --volumes || true
+          docker builder prune -af || true
+          docker buildx prune -af || true
+          sudo apt-get clean
+
+          echo "===== allowlisted directory sizes before deletion"
+          for path in /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /usr/share/dotnet /opt/hostedtoolcache/CodeQL /opt/google/chrome /opt/microsoft/msedge; do
+            if [ -d "${path}" ]; then
+              sudo du -sh "${path}"
+            else
+              echo "missing ${path}"
+            fi
+          done
+
+          if [ -d /usr/local/lib/android ]; then sudo rm -rf /usr/local/lib/android; fi
+          if [ -d /opt/ghc ]; then sudo rm -rf /opt/ghc; fi
+          if [ -d /usr/local/.ghcup ]; then sudo rm -rf /usr/local/.ghcup; fi
+          if [ -d /usr/share/swift ]; then sudo rm -rf /usr/share/swift; fi
+          if [ -d /usr/share/dotnet ]; then sudo rm -rf /usr/share/dotnet; fi
+          if [ -d /opt/hostedtoolcache/CodeQL ]; then sudo rm -rf /opt/hostedtoolcache/CodeQL; fi
+          if [ -d /opt/google/chrome ]; then sudo rm -rf /opt/google/chrome; fi
+          if [ -d /opt/microsoft/msedge ]; then sudo rm -rf /opt/microsoft/msedge; fi
+
+          after_free="$(df -B1 / | awk 'NR==2 {print $4}')"
+          reclaimed="$(( after_free - before_free ))"
+          echo "cleanup_after_free_bytes=${after_free}"
+          echo "cleanup_reclaimed_bytes=${reclaimed}" | tee -a "$GITHUB_ENV"
+          echo "===== df after cleanup"
+          df -h
+          df -B1 /
+          echo "===== docker system df after cleanup"
+          docker system df -v || true
+          echo "===== largest selected directories after cleanup"
+          sudo du -x -B1 --max-depth=2 /var/lib/docker /opt /usr/local /usr/share 2>/dev/null | sort -nr | head -30 || true
+
+      - name: Disk gate before fixed digest pull
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_free="$(df -B1 / | awk 'NR==2 {print $4}')"
+          echo "compressed_layer_bytes=${compressed_layer_bytes}"
+          echo "required_free_bytes=${required_free_bytes}"
+          echo "actual_free_bytes=${actual_free}"
+          echo "cleanup_reclaimed_bytes=${cleanup_reclaimed_bytes}"
+          if [ "${actual_free}" -lt "${required_free_bytes}" ]; then
+            echo "classification=insufficient_runner_disk_after_allowlisted_cleanup"
+            echo "===== largest selected directories"
+            sudo du -x -B1 --max-depth=2 /var/lib/docker /opt /usr/local /usr/share 2>/dev/null | sort -nr | head -30 || true
+            exit 1
+          fi
+          echo "disk_gate=passed"
+
+      - name: Pull fixed digest once anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config-pull"
+          mkdir -p "${DOCKER_CONFIG}"
+          printf '{}\n' > "${DOCKER_CONFIG}/config.json"
+          python3 - <<'PY'
+          import json
+          import os
+          config = json.load(open(os.environ["DOCKER_CONFIG"] + "/config.json", "r", encoding="utf-8"))
+          if config.get("auths"):
+              raise SystemExit("docker auths unexpectedly present")
+          PY
+          before_pull_free="$(df -B1 / | awk 'NR==2 {print $4}')"
+          echo "before_pull_free_bytes=${before_pull_free}"
           docker pull --platform linux/amd64 "${COMFY_RUNTIME_IMAGE}"
+          after_pull_free="$(df -B1 / | awk 'NR==2 {print $4}')"
+          echo "after_pull_free_bytes=${after_pull_free}" | tee -a "$GITHUB_ENV"
+          docker image inspect "${COMFY_RUNTIME_IMAGE}" >/tmp/image-inspect.json
+          python3 - <<'PY'
+          import json
+          import os
+          data = json.load(open("/tmp/image-inspect.json", "r", encoding="utf-8"))[0]
+          expected = os.environ["COMFY_RUNTIME_IMAGE"]
+          repo_digests = data.get("RepoDigests", [])
+          print("repo_digests=" + ",".join(repo_digests))
+          if expected not in repo_digests:
+              raise SystemExit("RepoDigest did not exactly match fixed digest")
+          PY
 
       - name: Verify dependency and import order evidence
         shell: bash
@@ -116,16 +303,20 @@ jobs:
 
           started_at="$(date +%s)"
           set +e
-          docker exec "${container}" sh -lc 'cd /opt/ComfyUI && timeout 90s python3.11 main.py --cpu --disable-triton-backend --disable-all-custom-nodes --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout >/tmp/test-a.log 2>&1'
+          docker exec "${container}" sh -lc 'cd /opt/ComfyUI && timeout 60s python3.11 main.py --cpu --disable-triton-backend --disable-all-custom-nodes --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout --verbose DEBUG >/tmp/test-a.log 2>&1'
           code=$?
           set -e
           seconds="$(( $(date +%s) - started_at ))"
-          tail -n 120 < <(docker exec "${container}" tail -n 120 /tmp/test-a.log)
+          tail -n 200 < <(docker exec "${container}" tail -n 200 /tmp/test-a.log)
           test "${code}" -ne 0
-          docker exec "${container}" grep -F "RuntimeError: 0 active drivers ([]). There should only be one." /tmp/test-a.log
+          docker exec "${container}" grep -F "comfy_kitchen" /tmp/test-a.log
+          docker exec "${container}" grep -F "backends/triton" /tmp/test-a.log
+          docker exec "${container}" grep -F "RuntimeError" /tmp/test-a.log
+          docker exec "${container}" grep -F "0 active drivers" /tmp/test-a.log
           echo "test_a_exit_code=${code}"
           echo "test_a_start_seconds=${seconds}"
           echo "test_a_crash_phase=comfy_kitchen_eager_triton_import"
+          echo "test_a_health_before_exit=false"
 
       - name: Test B temporary Triton import blocker
         shell: bash
@@ -162,7 +353,7 @@ jobs:
           PY
 
           started_at="$(date +%s)"
-          docker exec -e PYTHONPATH=/run/smoke-import-blocker "${container}" sh -lc 'cd /opt/ComfyUI && python3.11 main.py --cpu --disable-triton-backend --disable-all-custom-nodes --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout >/tmp/test-b.log 2>&1 & echo $! >/tmp/test-b.pid'
+          docker exec -e PYTHONPATH=/run/smoke-import-blocker "${container}" sh -lc 'cd /opt/ComfyUI && python3.11 main.py --cpu --disable-triton-backend --disable-all-custom-nodes --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout --verbose DEBUG >/tmp/test-b.log 2>&1 & echo $! >/tmp/test-b.pid'
           ready=false
           for attempt in $(seq 1 60); do
             if ! docker exec "${container}" sh -lc 'kill -0 "$(cat /tmp/test-b.pid)" 2>/dev/null'; then
@@ -174,7 +365,7 @@ jobs:
               ready=true
               break
             fi
-            sleep 5
+            sleep 3
           done
           if [ "${ready}" != "true" ]; then
             echo "::error::Test B did not become healthy"
@@ -183,13 +374,24 @@ jobs:
           fi
           seconds="$(( $(date +%s) - started_at ))"
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >/tmp/object-info.json
-          docker exec "${container}" sh -lc 'test ! -s /workspace/comfy-output/* 2>/dev/null || exit 1'
-          docker stop --time 15 "${container}" >/dev/null
+          docker exec "${container}" sh -lc '! grep -F "0 active drivers" /tmp/test-b.log'
+          docker exec "${container}" sh -lc '! find /workspace/models -type f | grep .'
+          docker exec "${container}" sh -lc '! find /workspace/comfy-output -type f | grep .'
+          docker exec "${container}" sh -lc 'kill -TERM "$(cat /tmp/test-b.pid)"'
+          for attempt in $(seq 1 10); do
+            if ! docker exec "${container}" sh -lc 'kill -0 "$(cat /tmp/test-b.pid)" 2>/dev/null'; then
+              break
+            fi
+            sleep 3
+          done
+          docker exec "${container}" sh -lc '! kill -0 "$(cat /tmp/test-b.pid)" 2>/dev/null'
+          docker exec "${container}" sh -lc '! pgrep -af "python3.11 main.py"'
           echo "test_b_start_seconds=${seconds}"
           echo "test_b_system_stats=passed"
           echo "test_b_object_info=passed"
           echo "test_b_no_inference=passed"
           echo "test_b_sigterm=passed"
+          echo "classification=comfy_kitchen_triton_import_blocker_ab_proven"
 
   build-and-push:
     if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip build]')) }}
