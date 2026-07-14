@@ -134,74 +134,74 @@ jobs:
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/tmp/queue.json
           docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/tmp/free.json
           docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
-import base64
-import os
-import socket
+          import base64
+          import os
+          import socket
 
-key = base64.b64encode(os.urandom(16)).decode()
-request = (
-    "GET /ws?clientId=ci-smoke HTTP/1.1\r\n"
-    "Host: 127.0.0.1:8188\r\n"
-    "Upgrade: websocket\r\n"
-    "Connection: Upgrade\r\n"
-    f"Sec-WebSocket-Key: {key}\r\n"
-    "Sec-WebSocket-Version: 13\r\n\r\n"
-)
-with socket.create_connection(("127.0.0.1", 8188), timeout=10) as sock:
-    sock.sendall(request.encode())
-    response = sock.recv(512).decode(errors="replace")
-if " 101 " not in response.split("\r\n", 1)[0]:
-    raise SystemExit(response)
-PY'
+          key = base64.b64encode(os.urandom(16)).decode()
+          request = (
+              "GET /ws?clientId=ci-smoke HTTP/1.1\r\n"
+              "Host: 127.0.0.1:8188\r\n"
+              "Upgrade: websocket\r\n"
+              "Connection: Upgrade\r\n"
+              f"Sec-WebSocket-Key: {key}\r\n"
+              "Sec-WebSocket-Version: 13\r\n\r\n"
+          )
+          with socket.create_connection(("127.0.0.1", 8188), timeout=10) as sock:
+              sock.sendall(request.encode())
+              response = sock.recv(512).decode(errors="replace")
+          if " 101 " not in response.split("\r\n", 1)[0]:
+              raise SystemExit(response)
+          PY'
           docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
-import json
-import urllib.error
-import urllib.request
+          import json
+          import urllib.error
+          import urllib.request
 
-body = json.dumps({"prompt": {"bad": {"class_type": "MissingNodeForSmoke", "inputs": {}}}}).encode()
-request = urllib.request.Request(
-    "http://127.0.0.1:8188/prompt",
-    data=body,
-    headers={"Content-Type": "application/json"},
-    method="POST",
-)
-try:
-    urllib.request.urlopen(request, timeout=10).read()
-except urllib.error.HTTPError as exc:
-    payload = exc.read().decode(errors="replace")
-    if exc.code != 400 or "MissingNodeForSmoke" not in payload:
-        raise
-else:
-    raise SystemExit("invalid prompt unexpectedly accepted")
-PY'
+          body = json.dumps({"prompt": {"bad": {"class_type": "MissingNodeForSmoke", "inputs": {}}}}).encode()
+          request = urllib.request.Request(
+              "http://127.0.0.1:8188/prompt",
+              data=body,
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              urllib.request.urlopen(request, timeout=10).read()
+          except urllib.error.HTTPError as exc:
+              payload = exc.read().decode(errors="replace")
+              if exc.code != 400 or "MissingNodeForSmoke" not in payload:
+                  raise
+          else:
+              raise SystemExit("invalid prompt unexpectedly accepted")
+          PY'
           docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
-import json
+          import json
 
-with open("/tmp/object-info.json", "r", encoding="utf-8") as handle:
-    object_info = json.load(handle)
-required = {
-    "CLIPLoader",
-    "CLIPTextEncode",
-    "DualCLIPLoader",
-    "FluxGuidance",
-    "FluxKontextImageScale",
-    "KSampler",
-    "KSamplerAdvanced",
-    "LoadImage",
-    "ModelSamplingSD3",
-    "SaveAnimatedWEBP",
-    "SaveImage",
-    "SaveWEBM",
-    "UNETLoader",
-    "VAEDecode",
-    "VAELoader",
-    "Wan22ImageToVideoLatent",
-    "WanImageToVideo",
-}
-missing = sorted(required.difference(object_info))
-if missing:
-    raise SystemExit("missing Comfy node classes: " + ", ".join(missing))
-PY'
+          with open("/tmp/object-info.json", "r", encoding="utf-8") as handle:
+              object_info = json.load(handle)
+          required = {
+              "CLIPLoader",
+              "CLIPTextEncode",
+              "DualCLIPLoader",
+              "FluxGuidance",
+              "FluxKontextImageScale",
+              "KSampler",
+              "KSamplerAdvanced",
+              "LoadImage",
+              "ModelSamplingSD3",
+              "SaveAnimatedWEBP",
+              "SaveImage",
+              "SaveWEBM",
+              "UNETLoader",
+              "VAEDecode",
+              "VAELoader",
+              "Wan22ImageToVideoLatent",
+              "WanImageToVideo",
+          }
+          missing = sorted(required.difference(object_info))
+          if missing:
+              raise SystemExit("missing Comfy node classes: " + ", ".join(missing))
+          PY'
           docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/tmp/interrupt.json
           docker exec "${container}" sh -lc 'test "$(printenv COMFYUI_COMMIT)" = "da2608926eaf68fd532bba4e1ace3402c5d21399"'
           docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" \) | grep .'
