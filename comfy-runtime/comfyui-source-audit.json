@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "checkedAt": "2026-07-14",
+  "repository": "comfyanonymous/ComfyUI",
+  "commit": "da2608926eaf68fd532bba4e1ace3402c5d21399",
+  "routes": [
+    "/free",
+    "/history",
+    "/interrupt",
+    "/object_info",
+    "/prompt",
+    "/queue",
+    "/system_stats",
+    "/ws"
+  ],
+  "coreNodeClasses": [
+    "CLIPLoader",
+    "CLIPTextEncode",
+    "DualCLIPLoader",
+    "EmptyFlux2LatentImage",
+    "FluxGuidance",
+    "FluxKontextImageScale",
+    "KSampler",
+    "KSamplerAdvanced",
+    "LoadImage",
+    "ModelSamplingSD3",
+    "SaveAnimatedWEBP",
+    "SaveImage",
+    "SaveWEBM",
+    "UNETLoader",
+    "VAEDecode",
+    "VAELoader",
+    "Wan22ImageToVideoLatent",
+    "WanImageToVideo"
+  ],
+  "sourceFiles": {
+    "server.py": [
+      "/free",
+      "/history",
+      "/interrupt",
+      "/object_info",
+      "/prompt",
+      "/queue",
+      "/system_stats",
+      "/ws"
+    ],
+    "nodes.py": [
+      "CLIPLoader",
+      "CLIPTextEncode",
+      "DualCLIPLoader",
+      "KSampler",
+      "KSamplerAdvanced",
+      "LoadImage",
+      "SaveImage",
+      "UNETLoader",
+      "VAEDecode",
+      "VAELoader"
+    ],
+    "comfy_extras/nodes_flux.py": [
+      "EmptyFlux2LatentImage",
+      "FluxGuidance",
+      "FluxKontextImageScale"
+    ],
+    "comfy_extras/nodes_images.py": [
+      "SaveAnimatedWEBP"
+    ],
+    "comfy_extras/nodes_model_advanced.py": [
+      "ModelSamplingSD3"
+    ],
+    "comfy_extras/nodes_video.py": [
+      "SaveWEBM"
+    ],
+    "comfy_extras/nodes_wan.py": [
+      "Wan22ImageToVideoLatent",
+      "WanImageToVideo"
+    ]
+  }
+}

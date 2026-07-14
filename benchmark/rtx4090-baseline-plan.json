@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-07-14",
+  "profile": "rtx4090",
+  "status": "plan_only_no_gpu_execution",
+  "noRealRental": true,
+  "requiresExplicitFutureApproval": true,
+  "cloreOrderExecutionEnabledRequired": false,
+  "budget": {
+    "platform": "Clore.ai",
+    "maxSessionHours": 6,
+    "diskGbMinimum": 200,
+    "stopAfterFirstSyntheticSmoke": true
+  },
+  "candidates": [
+    {
+      "candidateKey": "flux2-klein-4b-official",
+      "slot": "rtx4090_image",
+      "workflowKey": "image_t2i",
+      "workflowAsset": "comfy-runtime/workflows/official/flux2-klein-4b-distilled-subgraph-api.json",
+      "executionStatus": "subgraph_registration_required",
+      "estimatedDiskGb": 13,
+      "timeoutSeconds": 300,
+      "smokeSamples": 1,
+      "notes": [
+        "Official template is locked but must be unpacked or registered before real execution.",
+        "Use one synthetic prompt only before human inspection."
+      ]
+    },
+    {
+      "candidateKey": "wan22-ti2v-5b-official",
+      "slot": "rtx4090_video",
+      "workflowKey": "video_ti2v",
+      "workflowAsset": "comfy-runtime/workflows/official/wan22-ti2v-5b-api.json",
+      "executionStatus": "api_executable_when_models_present",
+      "estimatedDiskGb": 35,
+      "timeoutSeconds": 1800,
+      "smokeSamples": 1,
+      "notes": [
+        "Use 480p synthetic smoke before any quality benchmark.",
+        "Do not treat official speed claims as pass criteria."
+      ]
+    }
+  ],
+  "excludedFirstRoundCandidates": [
+    "flux2-klein-9b-official",
+    "wan22-a14b-i2v-fp8-official"
+  ],
+  "excludedCandidateFamilies": [
+    "community-phr00t-aio-second-round",
+    "community-gguf-second-round",
+    "community-kijai-second-round",
+    "community-flf2v-second-round",
+    "community-wan22-fun-inp-second-round",
+    "flux2-dev-quant-5090"
+  ]
+}

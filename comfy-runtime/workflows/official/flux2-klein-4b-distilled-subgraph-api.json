@@ -1,0 +1,78 @@
+{
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "75",
+        0
+      ],
+      "filename_prefix": "Flux2-Klein"
+    },
+    "_meta": {
+      "title": "SaveImage"
+    }
+  },
+  "75": {
+    "class_type": "7b34ab90-36f9-45ba-a665-71d418f0df18",
+    "inputs": {
+      "text": "restyle the product with clean studio lighting",
+      "image": [
+        "76",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "7b34ab90-36f9-45ba-a665-71d418f0df18"
+    }
+  },
+  "76": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "handbag_white.png",
+      "upload": "image"
+    },
+    "_meta": {
+      "title": "LoadImage"
+    }
+  },
+  "81": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "comfy_logo_blue.png",
+      "upload": "image"
+    },
+    "_meta": {
+      "title": "LoadImage"
+    }
+  },
+  "92": {
+    "class_type": "65c22b29-59aa-496b-89c6-55a603658670",
+    "inputs": {
+      "text": "stylize the handbag with the colors and logo from the reference image",
+      "image": [
+        "76",
+        0
+      ],
+      "image_1": [
+        "81",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "65c22b29-59aa-496b-89c6-55a603658670"
+    }
+  },
+  "94": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "92",
+        0
+      ],
+      "filename_prefix": "Flux2-Klein"
+    },
+    "_meta": {
+      "title": "SaveImage"
+    }
+  }
+}

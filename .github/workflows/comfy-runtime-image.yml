@@ -1,12 +1,23 @@
 name: Comfy Runtime Image
 
 on:
+  push:
+    branches:
+      - stage-two-five-comfy-runtime
+    paths:
+      - ".github/workflows/comfy-runtime-image.yml"
+      - "comfy-runtime/**"
+      - "scripts/comfy-runtime-contract-tests.ts"
+      - "scripts/workflow-asset-tests.ts"
+      - "src/lib/generation/**"
+      - "package.json"
+      - "package-lock.json"
   workflow_dispatch:
     inputs:
       version_tag:
         description: "Immutable ComfyUI runtime tag"
-        required: true
-        default: "v0.1.0-comfy-runtime"
+        required: false
+        default: ""
       verify_existing_digest:
         description: "Existing sha256 digest to verify without rebuilding"
         required: false
@@ -16,8 +27,13 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: comfy-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-and-smoke:
+    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -57,6 +73,9 @@ jobs:
           owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           image="ghcr.io/${owner}/ai-creative-comfy-runtime"
           version_tag="${{ inputs.version_tag }}"
+          if [ -z "${version_tag}" ]; then
+            version_tag="v0.1.0-scaffold-${GITHUB_SHA::7}"
+          fi
           sha_tag="sha-${GITHUB_SHA}"
           {
             echo "image=${image}"
@@ -66,7 +85,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push Comfy runtime image
-        if: ${{ inputs.verify_existing_digest == '' }}
+        if: ${{ github.event_name == 'push' || inputs.verify_existing_digest == '' }}
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -84,7 +103,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -n "${{ inputs.verify_existing_digest }}" ]; then
+          verify_digest="${{ inputs.verify_existing_digest }}"
+          if [ -n "${verify_digest}" ] && [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             image="${{ steps.image.outputs.image }}@${{ inputs.verify_existing_digest }}"
           else
             image="${{ steps.image.outputs.image }}:${{ steps.image.outputs.version_tag }}"
@@ -109,7 +129,79 @@ jobs:
           docker ps --format '{{.Names}}' | grep -Fx "${container}" >/dev/null
           docker exec "${container}" sh -lc 'curl -fsS http://127.0.0.1:8080/healthz | tee /tmp/comfy-health.json | grep -F "\"ok\": true"'
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >/tmp/object-info.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/tmp/system-stats.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/tmp/history.json
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/tmp/queue.json
+          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/tmp/free.json
+          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
+import base64
+import os
+import socket
+
+key = base64.b64encode(os.urandom(16)).decode()
+request = (
+    "GET /ws?clientId=ci-smoke HTTP/1.1\r\n"
+    "Host: 127.0.0.1:8188\r\n"
+    "Upgrade: websocket\r\n"
+    "Connection: Upgrade\r\n"
+    f"Sec-WebSocket-Key: {key}\r\n"
+    "Sec-WebSocket-Version: 13\r\n\r\n"
+)
+with socket.create_connection(("127.0.0.1", 8188), timeout=10) as sock:
+    sock.sendall(request.encode())
+    response = sock.recv(512).decode(errors="replace")
+if " 101 " not in response.split("\r\n", 1)[0]:
+    raise SystemExit(response)
+PY'
+          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
+import json
+import urllib.error
+import urllib.request
+
+body = json.dumps({"prompt": {"bad": {"class_type": "MissingNodeForSmoke", "inputs": {}}}}).encode()
+request = urllib.request.Request(
+    "http://127.0.0.1:8188/prompt",
+    data=body,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    urllib.request.urlopen(request, timeout=10).read()
+except urllib.error.HTTPError as exc:
+    payload = exc.read().decode(errors="replace")
+    if exc.code != 400 or "MissingNodeForSmoke" not in payload:
+        raise
+else:
+    raise SystemExit("invalid prompt unexpectedly accepted")
+PY'
+          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
+import json
+
+with open("/tmp/object-info.json", "r", encoding="utf-8") as handle:
+    object_info = json.load(handle)
+required = {
+    "CLIPLoader",
+    "CLIPTextEncode",
+    "DualCLIPLoader",
+    "FluxGuidance",
+    "FluxKontextImageScale",
+    "KSampler",
+    "KSamplerAdvanced",
+    "LoadImage",
+    "ModelSamplingSD3",
+    "SaveAnimatedWEBP",
+    "SaveImage",
+    "SaveWEBM",
+    "UNETLoader",
+    "VAEDecode",
+    "VAELoader",
+    "Wan22ImageToVideoLatent",
+    "WanImageToVideo",
+}
+missing = sorted(required.difference(object_info))
+if missing:
+    raise SystemExit("missing Comfy node classes: " + ", ".join(missing))
+PY'
           docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/tmp/interrupt.json
           docker exec "${container}" sh -lc 'test "$(printenv COMFYUI_COMMIT)" = "da2608926eaf68fd532bba4e1ace3402c5d21399"'
           docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" \) | grep .'
@@ -132,7 +224,7 @@ jobs:
         shell: bash
         run: |
           digest="${{ steps.build.outputs.digest }}"
-          if [ -n "${{ inputs.verify_existing_digest }}" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.verify_existing_digest }}" ]; then
             digest="${{ inputs.verify_existing_digest }}"
           fi
           {

@@ -48,6 +48,16 @@ This checkpoint is a preparation and mock-validation layer. It does not create C
 - Current CI blocker: GitHub will not dispatch a newly added workflow from a non-default branch. The workflow must first land on the default branch, but this task forbids modifying remote `main`, so no Comfy runtime image digest has been produced.
 - `benchmark/` now contains JSON benchmark specs alongside the code-facing `benchmarks/v1` suite. The suite has eight image cases and eight video cases and does not include real people, unclear-copyright assets, adult content, gore, or violence prompts.
 
+## 2026-07-14 Stage 2.6 Runtime CI and Official Workflow Locks
+
+- `.github/workflows/comfy-runtime-image.yml` now has a guarded push trigger for `stage-two-five-comfy-runtime` with path filters, concurrency, default immutable push tags, and the same limited permissions: `contents: read` and `packages: write`.
+- The CI smoke test now covers `/healthz`, `/object_info`, `/system_stats`, `/history`, `/queue`, `/free`, `/interrupt`, WebSocket `/ws`, invalid `/prompt` rejection, required Comfy node classes, no `0.0.0.0:8188` bind, no model-weight files, no secret env, and no legacy `gpu-worker/worker.py` process.
+- `comfy-runtime/workflows/official/` locks the official Wan2.2 TI2V-5B and Wan2.2 A14B I2V UI workflows from `comfyanonymous/ComfyUI_examples` commit `3eb0ae663ac044729494be42cb0f17a8c4151ec5`, plus API-format conversions for future smoke runs.
+- The FLUX.2 Klein 4B Distilled official template is locked from `Comfy-Org/workflow_templates` commit `192a158125390ce3caf4c64d38d406eaab85cd68`. It is stored as a subgraph workflow and marked `subgraph_registration_required`; it must be unpacked or registered before a real GPU benchmark.
+- `comfy-runtime/comfyui-source-audit.json` records the fixed ComfyUI routes and required node classes checked against commit `da2608926eaf68fd532bba4e1ace3402c5d21399`.
+- `benchmark/rtx4090-baseline-plan.json` limits the first RTX 4090 plan to FLUX.2 Klein 4B Distilled FP8 and Wan2.2 TI2V-5B. It excludes FLUX.2 9B, Wan A14B, Phr00t, GGUF, Kijai, FLF2V, and Dev quantized candidates from the first 4090 round.
+- This checkpoint still does not create a Clore order, SSH into a GPU, download model weights, run inference, upload to R2, or promote any production candidate.
+
 ## Runtime Boundary
 
 - The future ComfyUI service must bind to `127.0.0.1:8188` or an internal container interface only.

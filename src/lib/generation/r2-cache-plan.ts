@@ -42,17 +42,17 @@ export function withDiskReserve(gb: number) {
 }
 
 export const FIRST_ROUND_CAPACITY_PLAN: CapacityPlan = {
-  allBaselinesGb: 173.93,
+  allBaselinesGb: 182.3,
   verifiedDedupGb: 0,
-  conservativeCacheGb: 173.93,
-  session4090Gb: 38.28,
+  conservativeCacheGb: 182.3,
+  session4090Gb: 46.65,
   session5090Gb: 135.65,
-  requiredDisk4090Gb: withDiskReserve(38.28),
+  requiredDisk4090Gb: withDiskReserve(46.65),
   requiredDisk5090Gb: withDiskReserve(135.65),
   notes: [
     "Figures are publisher-reported repository totals, not downloaded-byte measurements.",
     "No shared component is deducted until matching content hashes are verified.",
-    "The 9B Flux candidate is gated and its auxiliary component inventory is incomplete; these numbers are a conservative registry baseline, not an approval to sync.",
+    "The 9B Flux candidate is gated and excluded from RTX 4090 first-round execution; these numbers are a conservative registry baseline, not an approval to sync.",
   ],
 };
 

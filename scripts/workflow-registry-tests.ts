@@ -15,7 +15,9 @@ function main() {
     }
   }
 
-  assert.notEqual(WORKFLOW_TEMPLATES.video_i2v.template.latent, WORKFLOW_TEMPLATES.video_flf2v.template.latent);
+  assert.equal(WORKFLOW_TEMPLATES.image_t2i.execution_status, "subgraph_registration_required");
+  assert.equal(WORKFLOW_TEMPLATES.video_ti2v.execution_status, "api_executable_when_models_present");
+  assert.notEqual(WORKFLOW_TEMPLATES.video_i2v.template["50"], WORKFLOW_TEMPLATES.video_flf2v.template.latent);
   const injected = injectWorkflowParameters(WORKFLOW_TEMPLATES.video_i2v, {
     prompt: "safe fixture",
     negative_prompt: "watermark",
@@ -24,11 +26,11 @@ function main() {
     height: 480,
     frames: 49,
   }) as Record<string, { inputs: Record<string, unknown> }>;
-  assert.equal(injected.positive_prompt.inputs.text, "safe fixture");
-  assert.equal(injected.negative_prompt.inputs.text, "watermark");
-  assert.equal(injected.sampler.inputs.seed, 123);
-  assert.equal(injected.latent.inputs.width, 854);
-  assert.equal(injected.latent.inputs.frames, 49);
+  assert.equal(injected["6"].inputs.text, "safe fixture");
+  assert.equal(injected["7"].inputs.text, "watermark");
+  assert.equal(injected["57"].inputs.noise_seed, 123);
+  assert.equal(injected["50"].inputs.width, 854);
+  assert.equal(injected["50"].inputs.length, 49);
 
   console.log("workflow registry tests passed");
 }

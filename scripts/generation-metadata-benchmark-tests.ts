@@ -41,10 +41,10 @@ function main() {
     }
   }
 
-  assert.equal(getReportedBaselineTotalGb(), 173.93);
-  assert.equal(FIRST_ROUND_CAPACITY_PLAN.conservativeCacheGb, 173.93);
+  assert.equal(getReportedBaselineTotalGb(), 182.3);
+  assert.equal(FIRST_ROUND_CAPACITY_PLAN.conservativeCacheGb, 182.3);
   assert.equal(FIRST_ROUND_CAPACITY_PLAN.verifiedDedupGb, 0, "never dedupe without matching hashes");
-  assert.equal(FIRST_ROUND_CAPACITY_PLAN.requiredDisk4090Gb, withDiskReserve(38.28));
+  assert.equal(FIRST_ROUND_CAPACITY_PLAN.requiredDisk4090Gb, withDiskReserve(46.65));
   assert.equal(FIRST_ROUND_CAPACITY_PLAN.requiredDisk5090Gb, withDiskReserve(135.65));
   assert.equal(requiredDiskGbForProfile("rtx4090", FIRST_ROUND_CAPACITY_PLAN.session4090Gb), 200);
   assert.equal(requiredDiskGbForProfile("rtx5090", FIRST_ROUND_CAPACITY_PLAN.session5090Gb), 250);
@@ -75,6 +75,8 @@ function main() {
   assert.equal(isProductionPromotionAllowed(), false);
   assert.equal(WORKFLOW_TEMPLATES.video_i2v.key, "video_i2v");
   assert.equal(WORKFLOW_TEMPLATES.video_flf2v.key, "video_flf2v");
+  assert.equal(WORKFLOW_TEMPLATES.image_t2i.execution_status, "subgraph_registration_required");
+  assert.equal(WORKFLOW_TEMPLATES.video_ti2v.execution_status, "api_executable_when_models_present");
   assert.notEqual(WORKFLOW_TEMPLATES.video_i2v.key, WORKFLOW_TEMPLATES.video_flf2v.key);
   const blindId = blindReviewId("wan22-ti2v-5b-official", videos[0], 1);
   assert.ok(!blindId.includes("wan22") && !blindId.includes("flux"));

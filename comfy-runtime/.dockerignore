@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+.secrets
+**/.DS_Store
+**/__pycache__/
+**/*.pyc
+**/*.safetensors
+**/*.ckpt
+**/*.pth
+**/*.pt
+**/*.onnx
+**/*.mp4
+**/*.webm
+**/*.mov

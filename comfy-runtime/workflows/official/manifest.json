@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-14",
+  "comfyuiCommit": "da2608926eaf68fd532bba4e1ace3402c5d21399",
+  "sources": {
+    "comfyWorkflowTemplates": {
+      "repository": "Comfy-Org/workflow_templates",
+      "commit": "192a158125390ce3caf4c64d38d406eaab85cd68",
+      "tree": "18f6ab73b72bc37d243d24d84af9a67926f00f97"
+    },
+    "comfyuiExamples": {
+      "repository": "comfyanonymous/ComfyUI_examples",
+      "commit": "3eb0ae663ac044729494be42cb0f17a8c4151ec5"
+    }
+  },
+  "workflows": [
+    {
+      "key": "flux2-klein-4b-distilled",
+      "candidateKey": "flux2-klein-4b-official",
+      "task": "image-editing",
+      "uiFile": "flux2-klein-4b-distilled-ui.json",
+      "apiFile": "flux2-klein-4b-distilled-subgraph-api.json",
+      "sourcePath": "templates/image_flux2_klein_image_edit_4b_distilled.json",
+      "sourceBlob": "ecf390e55e093138cb58efbe9dc5ad218f35e9c4",
+      "status": "subgraph_registration_required",
+      "note": "Official Comfy template stores the runnable graph as subgraph definitions with UUID node types. It is locked for source provenance, but must be unpacked or registered before GPU benchmark execution.",
+      "requiredNodeClasses": [
+        "LoadImage",
+        "SaveImage",
+        "CLIPTextEncode",
+        "UNETLoader",
+        "DualCLIPLoader",
+        "VAELoader",
+        "FluxGuidance",
+        "FluxKontextImageScale",
+        "KSampler",
+        "VAEDecode"
+      ],
+      "requiredModelFiles": [
+        "flux-2-klein-4b-fp8.safetensors",
+        "qwen_3_4b.safetensors",
+        "flux2-vae.safetensors"
+      ],
+      "uiSha256": "0f80c2530a50fad061dea855c55c50f586a331c5f2d3f37efe7fea59b4ab9610",
+      "apiSha256": "3ff6ea06065f6800caa4ea765439a1976c60c54dd98fb07b041528a6d3ef3ade"
+    },
+    {
+      "key": "wan22-ti2v-5b",
+      "candidateKey": "wan22-ti2v-5b-official",
+      "task": "TI2V",
+      "uiFile": "wan22-ti2v-5b-ui.json",
+      "apiFile": "wan22-ti2v-5b-api.json",
+      "sourcePath": "wan22/text_to_video_wan22_5B.json",
+      "sourceBlob": "25dc2512aec510be1d569226aa8598c42b9e0fbe",
+      "status": "api_executable_when_models_present",
+      "requiredNodeClasses": [
+        "UNETLoader",
+        "CLIPLoader",
+        "VAELoader",
+        "CLIPTextEncode",
+        "ModelSamplingSD3",
+        "Wan22ImageToVideoLatent",
+        "KSampler",
+        "VAEDecode",
+        "SaveWEBM",
+        "SaveAnimatedWEBP"
+      ],
+      "requiredModelFiles": [
+        "wan2.2_ti2v_5B_fp16.safetensors",
+        "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "wan2.2_vae.safetensors"
+      ],
+      "uiSha256": "6a4d79e1891ae1257654fa78d6716936aff9f8c7e578e4e716eb112f4e5a57c4",
+      "apiSha256": "83277e9e9fadfec67d94f5daa05bcde9486bfd0caef297575f0f7f9ac24466da"
+    },
+    {
+      "key": "wan22-i2v-a14b",
+      "candidateKey": "wan22-a14b-i2v-fp8-official",
+      "task": "I2V",
+      "uiFile": "wan22-i2v-a14b-ui.json",
+      "apiFile": "wan22-i2v-a14b-api.json",
+      "sourcePath": "wan22/image_to_video_wan22_14B.json",
+      "sourceBlob": "cea25cd1454a867cca3520fcfc8c3af5b3799ff9",
+      "status": "api_executable_when_models_present",
+      "requiredNodeClasses": [
+        "UNETLoader",
+        "CLIPLoader",
+        "VAELoader",
+        "CLIPTextEncode",
+        "ModelSamplingSD3",
+        "WanImageToVideo",
+        "KSamplerAdvanced",
+        "VAEDecode",
+        "SaveWEBM",
+        "SaveAnimatedWEBP",
+        "LoadImage"
+      ],
+      "requiredModelFiles": [
+        "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+        "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+        "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "wan_2.1_vae.safetensors"
+      ],
+      "uiSha256": "99a5594d9eb5102e5eb535e74133241592dea5fd47229c5135d8a6e893a1b408",
+      "apiSha256": "dabfd1311110606508e54a19f633bb2c194f0f204590c72abc2c9f42f87b51ec"
+    }
+  ]
+}

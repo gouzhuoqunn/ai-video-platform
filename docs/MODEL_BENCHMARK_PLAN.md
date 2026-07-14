@@ -8,7 +8,7 @@ This is a versioned planning and metadata-audit document. It does not download a
 
 | Profile slot | Candidate | Repository and immutable revision | License and access | Reported repository size |
 | --- | --- | --- | --- | --- |
-| `rtx4090/image` | FLUX.2 Klein 4B Distilled FP8 | `black-forest-labs/FLUX.2-klein-4b-fp8` at `5b4408e59397a4a37ccb46afe426d8ed86379441` | Apache-2.0, public, anonymous metadata readable | 4.08 GB |
+| `rtx4090/image` | FLUX.2 Klein 4B Distilled FP8 | `black-forest-labs/FLUX.2-klein-4b-fp8` at `5b4408e59397a4a37ccb46afe426d8ed86379441`, plus `Comfy-Org/vae-text-encorder-for-flux-klein-4b` at `a9e4ca87c16db4c4e1a16406a9ddb300ab0ae246` | Apache-2.0, public, anonymous metadata readable | 12.45 GB |
 | `rtx4090/video` | Wan2.2 TI2V-5B | `Wan-AI/Wan2.2-TI2V-5B` at `921dbaf3f1674a56f47e83fb80a34bac8a8f203e` | Apache-2.0, public, anonymous metadata readable | 34.20 GB |
 | `rtx5090/image` | FLUX.2 Klein 9B FP8 | `black-forest-labs/FLUX.2-klein-9b-fp8` | FLUX Non-Commercial, gated | 9.44 GB |
 | `rtx5090/video` | Wan2.2 I2V-A14B | `Wan-AI/Wan2.2-I2V-A14B` at `206a9ee1b7bfaaf8f7e4d81335650533490646a3` | Apache-2.0, public, anonymous metadata readable | 126.21 GB |
@@ -21,20 +21,22 @@ Official sources: [FLUX.2 Klein 4B FP8](https://huggingface.co/black-forest-labs
 
 - The registry records repository, full revision when public, license, gated state, anonymous readability, reported sizes, storage method, known Xet/content hash, architecture, dtype, required components, workflow source, commercial-use flag, and update date.
 - A missing model-file SHA is `pending_download_verification`; it is never fabricated.
+- FLUX.2 Klein 4B Distilled FP8 now has its public auxiliary Qwen text encoder and VAE files locked from the actual public Hugging Face repository name `Comfy-Org/vae-text-encorder-for-flux-klein-4b`. The misspelling is part of the repository URL, not a local rename.
+- The official FLUX.2 Klein 4B Comfy template is locked from `Comfy-Org/workflow_templates` commit `192a158125390ce3caf4c64d38d406eaab85cd68`, but it is a subgraph workflow. It must be unpacked or registered before a real GPU smoke run.
 - The official Wan native README's 80 GB A14B reference requirement is recorded separately from the RTX 5090 profile. A 5090 result is only a future offload benchmark, not a claim of official support.
 - FLUX.2 Klein 9B's non-commercial license is a visible deployment blocker for this product until licensing is resolved.
 
 ## Capacity and Shared Components
 
-Reported primary repository totals are 173.93 GB. The conservative deduplicated total remains **173.93 GB** because only matching content hashes may deduplicate files.
+Reported first-round repository totals are 182.30 GB. The conservative deduplicated total remains **182.30 GB** because only matching content hashes may deduplicate files.
 
 | Scope | Primary repositories | With 20% reserve |
 | --- | ---: | ---: |
-| RTX 4090 session | 38.28 GB | 45.94 GB |
+| RTX 4090 session | 46.65 GB | 55.98 GB |
 | RTX 5090 session | 135.65 GB | 162.78 GB |
-| All four baseline repositories | 173.93 GB | 208.72 GB |
+| All four baseline repositories | 182.30 GB | 218.76 GB |
 
-Potential shared components are FLUX VAE files, FLUX Qwen text encoders, and Wan UMT5/VAE files. Only the Wan native UMT5 file has a recorded official content SHA in this audit; no cross-repository deduplication is performed until another exact content hash matches. Profile manifests will reference a future `shared/sha256/<hash>` object rather than copy a verified shared component.
+Potential shared components are FLUX VAE files, FLUX Qwen text encoders, and Wan UMT5/VAE files. The FLUX 4B Qwen/VAE auxiliary files and Wan native UMT5 file have recorded content hashes, but no cross-repository deduplication is performed until another exact content hash matches. Profile manifests will reference a future `shared/sha256/<hash>` object rather than copy a verified shared component.
 
 `benchmark-staging/` may be cleaned after rejected-candidate metrics and thumbnails are retained. Production remains `staging -> complete verification -> revision manifest -> current.json last`.
 

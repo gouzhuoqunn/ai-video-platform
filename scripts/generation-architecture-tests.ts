@@ -68,9 +68,9 @@ async function main() {
     height: 704,
     frames: 121,
   }) as Record<string, { inputs: Record<string, unknown> }>;
-  assert.equal(injected.positive_prompt.inputs.text, "hello");
-  assert.equal(injected.sampler.inputs.seed, 42);
-  assert.equal(injected.latent.inputs.frames, 121);
+  assert.equal(injected["6"].inputs.text, "hello");
+  assert.equal(injected["3"].inputs.seed, 42);
+  assert.equal(injected["55"].inputs.length, 121);
 
   assert.equal(classifyBenchmarkError(new Error("CUDA out of memory")), "oom");
   assert.equal(classifyBenchmarkError(new Error("missing node KSampler")), "missing_node");
