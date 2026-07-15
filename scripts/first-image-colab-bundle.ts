@@ -46,6 +46,7 @@ export function buildColabBundle(creds: R2Credentials, now = new Date(), expires
       size_bytes: file.size,
       sha256: file.sha256,
       download_url: createPresignedGetUrl(creds, finalKey(file), expiresSeconds, now),
+      hf_fallback_url: `https://huggingface.co/${file.repository}/resolve/${file.revision}/${file.remotePath}`,
     })),
   };
 }

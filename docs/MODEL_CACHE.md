@@ -176,3 +176,5 @@ Published revision: `flux2-klein-4b-5b4408e59397-a9e4ca87c16d`.
 | `flux2-vae.safetensors` | 336,211,292 | `868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3` |
 
 The revision manifest and `production/rtx4090/image/current.json` are published. Read-only GPU credentials can read both indexes, HEAD all three objects, and read their first and last 1024-byte ranges; Put, overwrite, and Delete probes are denied. `gpu_restore_ready=true`, while `gpu_inference_verified=false` and `production_ready=false`.
+
+Stage 3K kept this cache unchanged. Two budget-gated RunPod creates were deleted before SSH because their reported total hourly price exceeded 0.70 USD, so no R2 object was downloaded and no Hugging Face fallback was attempted. The next accepted SSH GPU still restores this published revision first with concurrency two, `.part` resume, full size/SHA256 verification, and atomic rename.

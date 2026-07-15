@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { inflateSync } from "node:zlib";
 import { archiveFluxFirstImage, buildFluxFirstImageWorkflow } from "./flux-first-image";
 
 type RecordValue = Record<string, unknown>;
@@ -57,6 +58,51 @@ function outputImage(history: unknown) {
   return null;
 }
 
+function validatePngPixels(bytes: Buffer) {
+  if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error("Runtime output is not a PNG.");
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  let colorType = -1;
+  const idat: Buffer[] = [];
+  while (offset + 12 <= bytes.length) {
+    const length = bytes.readUInt32BE(offset);
+    const type = bytes.toString("ascii", offset + 4, offset + 8);
+    const data = bytes.subarray(offset + 8, offset + 8 + length);
+    if (type === "IHDR") { width = data.readUInt32BE(0); height = data.readUInt32BE(4); if (data[8] !== 8) throw new Error("PNG bit depth is unsupported."); colorType = data[9]; }
+    if (type === "IDAT") idat.push(data);
+    offset += length + 12;
+    if (type === "IEND") break;
+  }
+  const channels = colorType === 2 ? 3 : colorType === 6 ? 4 : 0;
+  if (!width || !height || !channels || !idat.length) throw new Error("PNG format is unsupported or incomplete.");
+  const raw = inflateSync(Buffer.concat(idat));
+  const stride = width * channels;
+  const previous = Buffer.alloc(stride);
+  let cursor = 0;
+  let minimum = 255;
+  let maximum = 0;
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[cursor++];
+    const row = Buffer.from(raw.subarray(cursor, cursor + stride));
+    cursor += stride;
+    for (let x = 0; x < stride; x += 1) {
+      const left = x >= channels ? row[x - channels] : 0;
+      const up = previous[x];
+      const upperLeft = x >= channels ? previous[x - channels] : 0;
+      if (filter === 1) row[x] = (row[x] + left) & 255;
+      else if (filter === 2) row[x] = (row[x] + up) & 255;
+      else if (filter === 3) row[x] = (row[x] + Math.floor((left + up) / 2)) & 255;
+      else if (filter === 4) { const p = left + up - upperLeft; const pa = Math.abs(p - left); const pb = Math.abs(p - up); const pc = Math.abs(p - upperLeft); row[x] = (row[x] + (pa <= pb && pa <= pc ? left : pb <= pc ? up : upperLeft)) & 255; }
+      else if (filter !== 0) throw new Error("PNG filter is unsupported.");
+      if (x % channels < 3) { minimum = Math.min(minimum, row[x]); maximum = Math.max(maximum, row[x]); }
+    }
+    row.copy(previous);
+  }
+  if (maximum < 8 || maximum - minimum < 12) throw new Error("Runtime output is black or single-color.");
+  return { width, height, pixel_range: maximum - minimum };
+}
+
 async function main() {
   const baseUrl = (arg("base-url") ?? "").replace(/\/$/, "");
   if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(baseUrl)) {
@@ -97,9 +143,10 @@ async function main() {
   const params = new URLSearchParams({ filename: image.filename, subfolder: image.subfolder, type: image.type });
   const response = await fetch(`${baseUrl}/view?${params}`);
   const bytes = Buffer.from(await response.arrayBuffer());
-  if (!response.ok || bytes.length < 64 || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+  if (!response.ok || bytes.length < 64) {
     throw new Error("Runtime output is not a valid PNG response.");
   }
+  const png = validatePngPixels(bytes);
   const temporaryPng = path.join(os.tmpdir(), `${sessionId}.png`);
   mkdirSync(path.dirname(temporaryPng), { recursive: true });
   writeFileSync(temporaryPng, bytes);
@@ -107,7 +154,7 @@ async function main() {
     sourcePng: temporaryPng,
     sessionId,
     workflow,
-    metadata: { provider, gpu_model: gpuModel, prompt_id: promptId, width, height, steps: 4, seed: 20260715, elapsed_ms: Date.now() - startedAt, r2_restore_elapsed_ms: restoreElapsedMs },
+    metadata: { provider, gpu_model: gpuModel, prompt_id: promptId, width: png.width, height: png.height, steps: 4, seed: 20260715, elapsed_ms: Date.now() - startedAt, r2_restore_elapsed_ms: restoreElapsedMs, png_size_bytes: bytes.length, pixel_range: png.pixel_range },
     evidence: { system_stats: systemStats, required_nodes_verified: true, websocket_verified: true, history_verified: true },
   });
   writeFileSync(path.join(archived.archiveDir, "provider-session.json"), `${JSON.stringify({ provider, gpu_model: gpuModel, session_id: sessionId, runtime_digest_pinned: true }, null, 2)}\n`, "utf8");

@@ -11,7 +11,9 @@ npm run first-image:resume
 
 `manual_ssh` reads `.secrets/manual-gpu-target.json`. It may inspect hardware, pull the pinned Runtime, restore models, generate the first image, sync results, and stop Runtime. It never rents or cancels a provider order.
 
-`runpod` reads `RUNPOD_API_KEY`, `RUNPOD_MAX_HOURLY_USD`, and `RUNPOD_MAX_SESSION_USD` only from process environment or ignored `.secrets/runpod.env`. Without a key, all commands stay dry-run and do not create a Pod. Real execution requires the separately built, digest-pinned `ai-creative-runpod-bootstrap` image, one active Pod maximum, SSH public-key authentication, an hourly cap of 0.70 USD, and a session cap of 2.50 USD.
+`runpod` reads `RUNPOD_API_KEY`, `RUNPOD_MAX_HOURLY_USD`, and `RUNPOD_MAX_SESSION_USD` only from process environment or ignored `.secrets/runpod.env`. Without a key, all commands stay dry-run and do not create a Pod. Real execution uses the private `ai-video-first-image-direct-v1` template with the immutable Comfy Runtime digest. The template overrides the Runtime entrypoint with a root-only OpenSSH bootstrap, exposes only `22/tcp` and `8080/http`, mounts `/workspace`, and waits for the local executor to start Runtime over SSH. The separate bootstrap image remains only a fallback and is not required for this path. Guards enforce one active Pod maximum, SSH public-key authentication, a 0.70 USD hourly cap, and a 2.50 USD session cap.
+
+RunPod may omit `isPublic=false`, `isServerless=false`, and the price fields from create/list responses. Template validation rejects either boolean only when it is explicitly `true`. A newly created Pod must report a concrete `adjustedCostPerHr` or `costPerHr` within 60 seconds and remain at or below the configured cap; otherwise it is deleted before SSH or model restoration.
 
 The ignored checkpoint state advances in this order:
 

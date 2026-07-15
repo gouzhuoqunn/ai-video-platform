@@ -110,6 +110,8 @@
     "model-cache:flux4090:test": "tsx scripts/model-cache/flux4090-cache-tests.ts",
     "gpu:provider:test": "tsx scripts/gpu-provider-contract-tests.ts",
     "runpod:test": "tsx scripts/runpod-provider-tests.ts",
+    "runpod:direct-template:test": "tsx scripts/runpod-direct-template-tests.ts",
+    "runpod:watchdog:test": "tsx scripts/runpod-watchdog-tests.ts",
     "runpod-bootstrap:test": "tsx scripts/runpod-bootstrap-tests.ts",
     "gpu:r2-restore:test": "tsx scripts/r2-restore-tests.ts",
     "first-image:colab:bundle": "tsx scripts/first-image-colab-bundle.ts",

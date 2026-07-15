@@ -3,11 +3,12 @@ import { spawn, spawnSync } from "node:child_process";
 import net from "node:net";
 import path from "node:path";
 import { beginFirstImageState, completeFirstImageStage, nextFirstImageStage } from "./first-image-state";
-import { sanitizeGpuTarget, scpFile, sleep, sshCommand } from "./gpu-providers/common";
+import { FIXED_RUNTIME_DIGEST, sanitizeGpuTarget, scpFile, sleep, sshCommand } from "./gpu-providers/common";
 import { getGpuProvider, parseProviderArg, type GpuProviderId } from "./gpu-providers";
-import { buildRunPodCreatePayload, loadRunPodConfig, RUNPOD_BOOTSTRAP_IMAGE } from "./gpu-providers/runpod";
+import { buildRunPodDirectPodPayload, buildRunPodDirectTemplatePayload, loadRunPodConfig, RUNPOD_DIRECT_LAUNCH_MODE } from "./gpu-providers/runpod";
 import { writeColabBundle } from "./first-image-colab-bundle";
-import type { GpuTarget } from "./gpu-providers/types";
+import type { GpuSession, GpuTarget } from "./gpu-providers/types";
+import { armRunPodWatchdog } from "./runpod-watchdog";
 
 function argument(name: string) {
   const inline = process.argv.find((item) => item.startsWith(`--${name}=`));
@@ -32,8 +33,9 @@ export async function buildProviderDryRun(providerId: GpuProviderId) {
   const credentials = await provider.inspectCredentials();
   const candidates = await provider.listCandidates();
   const candidate = candidates[0];
+  const directTemplate = providerId === "runpod" ? buildRunPodDirectTemplatePayload({ sshPublicKey: dryRunPublicKey() }) : null;
   const runpodPayload = providerId === "runpod" && candidate
-    ? buildRunPodCreatePayload({ sessionId: "dry-run", candidate, sshPublicKey: dryRunPublicKey(), bootstrapImage: RUNPOD_BOOTSTRAP_IMAGE, dryRun: true })
+    ? buildRunPodDirectPodPayload({ sessionId: "dry-run", candidate, sshPublicKey: dryRunPublicKey(), bootstrapImage: FIXED_RUNTIME_DIGEST, dryRun: true }, "dry-run-template")
     : null;
   return {
     dry_run: true,
@@ -41,6 +43,8 @@ export async function buildProviderDryRun(providerId: GpuProviderId) {
     credentials,
     candidates,
     create_session_called: false,
+    launch_mode: providerId === "runpod" ? RUNPOD_DIRECT_LAUNCH_MODE : "external",
+    direct_template: directTemplate,
     payload: runpodPayload,
     model_restore_order: ["R2 current.json", "revision manifest", "read-only presigned downloads", "HF fallback once after R2 failure"],
   };
@@ -107,22 +111,28 @@ async function main() {
 
   const provider = getGpuProvider(providerId);
   const sessionId = argument("session-id") ?? `first-image-${Date.now()}`;
+  const runpodConfig = providerId === "runpod" ? loadRunPodConfig() : null;
+  const watchdog = runpodConfig ? armRunPodWatchdog(sessionId, runpodConfig.maxSessionUsd) : null;
+  const heartbeat = watchdog ? setInterval(() => watchdog.heartbeat(), 60_000) : null;
+  let session: GpuSession | null = null;
+  try {
   let state = beginFirstImageState(providerId, sessionId);
   const candidates = await provider.listCandidates();
-  let session = await provider.recoverExistingSession(sessionId);
+  session = await provider.recoverExistingSession(sessionId);
   if (nextFirstImageStage(state) === "candidate_selected") {
     state = completeFirstImageStage(state, "candidate_selected", { provider: providerId, candidate: candidates[0]?.id ?? "external" });
   }
   if (nextFirstImageStage(state) === "order_created") {
     if (!session && providerId === "runpod") {
-      const config = loadRunPodConfig();
+      const config = runpodConfig ?? loadRunPodConfig();
       const candidate = candidates[0];
       if (!candidate) throw new Error("No RunPod candidate profile is available.");
-      session = await provider.createSession({ sessionId, candidate, sshPublicKey: readPublicKey(config.sshPublicKeyPath), bootstrapImage: config.bootstrapImage, dryRun: false });
+      session = await provider.createSession({ sessionId, candidate, sshPublicKey: readPublicKey(config.sshPublicKeyPath), bootstrapImage: FIXED_RUNTIME_DIGEST, dryRun: false });
     } else if (!session) {
       session = await provider.getSession(providerId);
     }
     if (!session) throw new Error(`${providerId}_session_unavailable`);
+    watchdog?.recordPod(session.id, session.hourlyUsd);
     state = completeFirstImageStage(state, "order_created", { provider_session_id: session.id, lifecycle_managed: providerId === "runpod" });
   }
   session ??= await provider.recoverExistingSession(sessionId);
@@ -156,15 +166,22 @@ async function main() {
     }
     if (nextFirstImageStage(state) === "order_cancelled") {
       await provider.terminateSession(session);
+      watchdog?.disarm();
       state = completeFirstImageStage(state, "order_cancelled", { provider_session_terminated: providerId === "runpod", external_lifecycle_untouched: providerId !== "runpod" });
     }
     console.log(JSON.stringify({ resumed: true, provider: providerId, session_id: session.id, next_stage: nextFirstImageStage(state), completed: state.completed, target: sanitizeGpuTarget(target) }, null, 2));
   } catch (error) {
     if (target) sshCommand(target, "if test -s /workspace/runtime-stage3j.pid; then kill -TERM \"$(cat /workspace/runtime-stage3j.pid)\" 2>/dev/null || true; fi; rm -f /workspace/flux-r2-manifest.json", 60_000);
     if (providerId === "runpod") {
-      try { await provider.terminateSession(session); } catch { /* Preserve the original failure classification. */ }
+      try { await provider.terminateSession(session); watchdog?.disarm(); } catch { /* Keep Watchdog armed when termination is not confirmed. */ }
     }
     throw error;
+  }
+  } catch (error) {
+    if (!session) watchdog?.disarm();
+    throw error;
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
   }
 }
 

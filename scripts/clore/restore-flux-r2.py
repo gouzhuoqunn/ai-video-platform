@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import sys
 import time
 import urllib.error
@@ -53,6 +54,7 @@ def download_once(url, partial, expected_size):
             os.fsync(destination.fileno())
 
 def restore_entry(entry):
+    started = time.monotonic()
     relative = str(entry.get("relative_path", ""))
     target = safe_target(relative)
     expected_size = int(entry["size_bytes"])
@@ -64,7 +66,8 @@ def restore_entry(entry):
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(target.suffix + ".part")
     if target.exists() and hash_file(target) == (expected_size, expected_sha):
-        return {"relative_path": relative, "reused": True, "size_bytes": expected_size}
+        elapsed = max(time.monotonic() - started, 0.001)
+        return {"relative_path": relative, "reused": True, "cache_hit": True, "size_bytes": expected_size, "elapsed_seconds": round(elapsed, 3), "bytes_per_second": 0}
     last_error = None
     for url_index, url in enumerate(urls):
         for retry in range(2):
@@ -74,7 +77,8 @@ def restore_entry(entry):
                 if size != expected_size or sha256 != expected_sha:
                     raise ValueError("flux_r2_integrity_failed")
                 partial.replace(target)
-                return {"relative_path": relative, "reused": False, "source": "r2" if url_index == 0 else "hf", "size_bytes": size}
+                elapsed = max(time.monotonic() - started, 0.001)
+                return {"relative_path": relative, "reused": False, "cache_hit": False, "source": "r2" if url_index == 0 else "hf", "size_bytes": size, "elapsed_seconds": round(elapsed, 3), "bytes_per_second": round(size / elapsed)}
             except (OSError, ValueError, urllib.error.URLError) as error:
                 last_error = error
                 if retry == 0:
@@ -98,7 +102,8 @@ def main():
                 results.append(future.result())
     except Exception as error:
         fail(f"flux_r2_restore_failed:{type(error).__name__}")
-    print(json.dumps({"flux_r2_restore_complete": True, "parallelism": 2, "elapsed_seconds": round(time.monotonic() - started, 3), "files": sorted(results, key=lambda item: item["relative_path"])}, separators=(",", ":")))
+    remaining = shutil.disk_usage("/workspace").free
+    print(json.dumps({"flux_r2_restore_complete": True, "parallelism": 2, "elapsed_seconds": round(time.monotonic() - started, 3), "remaining_workspace_bytes": remaining, "files": sorted(results, key=lambda item: item["relative_path"])}, separators=(",", ":")))
 
 if __name__ == "__main__":
     main()

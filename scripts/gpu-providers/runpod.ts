@@ -15,6 +15,25 @@ export const RUNPOD_GPU_PRIORITY = [
   ["NVIDIA A40", 48],
 ] as const;
 export const RUNPOD_BOOTSTRAP_IMAGE = "ghcr.io/gouzhuoqunn/ai-creative-runpod-bootstrap:v0.1.0-stage3j";
+export const RUNPOD_DIRECT_TEMPLATE_NAME = "ai-video-first-image-direct-v1";
+export const RUNPOD_DIRECT_LAUNCH_MODE = "runpod_direct_template" as const;
+export const RUNPOD_DIRECT_SSH_COMMAND = [
+  "set -euo pipefail",
+  "test \"$(id -u)\" -eq 0",
+  "case \"${PUBLIC_KEY:-}\" in ssh-ed25519\\ *|ssh-rsa\\ *|ecdsa-*\\ *) ;; *) echo runpod_public_key_invalid >&2; exit 64 ;; esac",
+  "export DEBIAN_FRONTEND=noninteractive",
+  "apt-get update",
+  "apt-get install -y --no-install-recommends openssh-server",
+  "rm -rf /var/lib/apt/lists/*",
+  "install -d -m 0700 /root/.ssh",
+  "install -d -m 0755 /run/sshd",
+  "printf '%s\\n' \"${PUBLIC_KEY}\" > /root/.ssh/authorized_keys",
+  "chmod 0600 /root/.ssh/authorized_keys",
+  "ssh-keygen -A",
+  "printf '%s\\n' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' 'PermitEmptyPasswords no' 'PermitRootLogin prohibit-password' > /etc/ssh/sshd_config.d/99-runpod-first-image.conf",
+  "unset PUBLIC_KEY",
+  "exec /usr/sbin/sshd -D -e",
+].join("; ");
 
 type RunPodPod = {
   id: string;
@@ -30,6 +49,22 @@ type RunPodPod = {
   gpu?: { displayName?: string; count?: number } | null;
 };
 
+export type RunPodTemplate = {
+  id: string;
+  name: string;
+  imageName: string;
+  category?: string;
+  containerDiskInGb?: number;
+  dockerEntrypoint?: string[];
+  dockerStartCmd?: string[];
+  env?: Record<string, string>;
+  isPublic?: boolean;
+  isServerless?: boolean;
+  ports?: string[];
+  volumeInGb?: number;
+  volumeMountPath?: string;
+};
+
 export type RunPodConfig = {
   apiKey: string;
   keySource: "environment" | "secret_file" | "none";
@@ -38,6 +73,8 @@ export type RunPodConfig = {
   sshPublicKeyPath: string;
   sshPrivateKeyPath: string;
   bootstrapImage: string;
+  launchMode: typeof RUNPOD_DIRECT_LAUNCH_MODE | "bootstrap_image_fallback";
+  directTemplateName: string;
 };
 
 const ENV_PATH = path.join(process.cwd(), ".secrets", "runpod.env");
@@ -62,6 +99,8 @@ export function loadRunPodConfig(): RunPodConfig {
     sshPublicKeyPath: read("RUNPOD_SSH_PUBLIC_KEY_PATH") || `${getPrivateKeyPath()}.pub`,
     sshPrivateKeyPath: read("RUNPOD_SSH_PRIVATE_KEY_PATH") || getPrivateKeyPath(),
     bootstrapImage: read("RUNPOD_BOOTSTRAP_IMAGE") || RUNPOD_BOOTSTRAP_IMAGE,
+    launchMode: read("RUNPOD_LAUNCH_MODE") === "bootstrap_image_fallback" ? "bootstrap_image_fallback" : RUNPOD_DIRECT_LAUNCH_MODE,
+    directTemplateName: read("RUNPOD_DIRECT_TEMPLATE_NAME") || RUNPOD_DIRECT_TEMPLATE_NAME,
   };
 }
 
@@ -103,8 +142,10 @@ export class RunPodRestClient {
   }
 
   listPods() { return this.request<RunPodPod[]>("GET", "/pods?computeType=GPU&includeMachine=true"); }
+  listTemplates() { return this.request<RunPodTemplate[]>("GET", "/templates"); }
+  createTemplate(payload: Record<string, unknown>) { return this.request<RunPodTemplate>("POST", "/templates", payload, 0); }
   getPod(id: string) { return this.request<RunPodPod>("GET", `/pods/${encodeURIComponent(id)}?includeMachine=true`); }
-  createPod(payload: Record<string, unknown>) { return this.request<RunPodPod>("POST", "/pods", payload, 2); }
+  createPod(payload: Record<string, unknown>) { return this.request<RunPodPod>("POST", "/pods", payload, 0); }
   stopPod(id: string) { return this.request<void>("POST", `/pods/${encodeURIComponent(id)}/stop`); }
   deletePod(id: string) { return this.request<void>("DELETE", `/pods/${encodeURIComponent(id)}`); }
 }
@@ -118,12 +159,45 @@ export function buildRunPodCreatePayload(input: CreateSessionInput) {
   if (input.candidate.containerDiskGb < 50 || input.candidate.volumeGb < 30) throw new Error("runpod_disk_gate_failed");
   if (input.candidate.interruptible) throw new Error("runpod_spot_forbidden");
   if (!/^ssh-(ed25519|rsa|ecdsa-[^ ]+) [A-Za-z0-9+/=]+(?: .*)?$/.test(input.sshPublicKey) || /PRIVATE KEY/.test(input.sshPublicKey)) throw new Error("runpod_ssh_public_key_invalid");
+  return buildRunPodDirectPodPayload(input, "dry-run-template");
+}
+
+function assertSshPublicKey(value: string) {
+  if (!/^ssh-(ed25519|rsa|ecdsa-[^ ]+) [A-Za-z0-9+/=]+(?: .*)?$/.test(value) || /PRIVATE KEY/.test(value)) throw new Error("runpod_ssh_public_key_invalid");
+}
+
+export function buildRunPodDirectTemplatePayload(input: { name?: string; runtimeImage?: string; sshPublicKey: string }) {
+  const imageName = input.runtimeImage ?? FIXED_RUNTIME_DIGEST;
+  if (imageName !== FIXED_RUNTIME_DIGEST || !imageName.includes("@sha256:")) throw new Error("runpod_direct_runtime_digest_invalid");
+  assertSshPublicKey(input.sshPublicKey);
+  return {
+    name: input.name ?? RUNPOD_DIRECT_TEMPLATE_NAME,
+    imageName,
+    category: "NVIDIA",
+    containerDiskInGb: 50,
+    dockerEntrypoint: ["/bin/bash", "-lc"],
+    dockerStartCmd: [RUNPOD_DIRECT_SSH_COMMAND],
+    env: { PUBLIC_KEY: input.sshPublicKey },
+    isPublic: false,
+    isServerless: false,
+    ports: ["22/tcp", "8080/http"],
+    readme: "Private direct SSH bootstrap for one first-image session.",
+    volumeInGb: 30,
+    volumeMountPath: "/workspace",
+  };
+}
+
+export function buildRunPodDirectPodPayload(input: CreateSessionInput, templateId: string) {
+  if (!templateId) throw new Error("runpod_direct_template_id_missing");
+  if (input.candidate.gpuCount !== 1 || input.candidate.vramGb < 16 || input.candidate.minimumRamGb < 32) throw new Error("runpod_hardware_gate_failed");
+  if (input.candidate.containerDiskGb < 50 || input.candidate.volumeGb < 30) throw new Error("runpod_disk_gate_failed");
+  if (input.candidate.interruptible) throw new Error("runpod_spot_forbidden");
   return {
     name: `ai-video-first-image-${input.sessionId}`.slice(0, 191),
-    imageName: input.bootstrapImage,
+    templateId,
     cloudType: "SECURE",
     computeType: "GPU",
-    gpuTypeIds: [input.candidate.gpuType],
+    gpuTypeIds: RUNPOD_GPU_PRIORITY.map(([gpuType]) => gpuType),
     gpuTypePriority: "custom",
     gpuCount: 1,
     minRAMPerGPU: 32,
@@ -134,8 +208,22 @@ export function buildRunPodCreatePayload(input: CreateSessionInput) {
     interruptible: false,
     locked: false,
     ports: ["22/tcp", "8080/http"],
-    env: { SSH_PUBLIC_KEY: input.sshPublicKey },
   };
+}
+
+export function validateRunPodDirectTemplate(template: RunPodTemplate, expected: ReturnType<typeof buildRunPodDirectTemplatePayload>) {
+  const errors: string[] = [];
+  if (template.imageName !== expected.imageName) errors.push("imageName");
+  // RunPod omits false boolean fields from GET /templates responses.
+  if (template.isPublic === true) errors.push("isPublic");
+  if (template.isServerless === true) errors.push("isServerless");
+  if (template.containerDiskInGb !== expected.containerDiskInGb) errors.push("containerDiskInGb");
+  if (template.volumeInGb !== expected.volumeInGb || template.volumeMountPath !== expected.volumeMountPath) errors.push("volume");
+  if (JSON.stringify(template.dockerEntrypoint) !== JSON.stringify(expected.dockerEntrypoint)) errors.push("dockerEntrypoint");
+  if (JSON.stringify(template.dockerStartCmd) !== JSON.stringify(expected.dockerStartCmd)) errors.push("dockerStartCmd");
+  if (JSON.stringify(template.ports) !== JSON.stringify(expected.ports)) errors.push("ports");
+  if (template.env?.PUBLIC_KEY !== expected.env.PUBLIC_KEY || Object.keys(template.env ?? {}).some((key) => key !== "PUBLIC_KEY")) errors.push("env");
+  return errors;
 }
 
 function profileForGpu(gpu: string) {
@@ -185,7 +273,7 @@ export class RunPodProvider implements GpuProvider {
 
   private async createSessionLocked(input: CreateSessionInput) {
     if (!this.config.apiKey) throw new Error("RUNPOD_API_KEY is missing.");
-    if (!input.bootstrapImage.includes("@sha256:")) throw new Error("RunPod bootstrap image must use an immutable digest for real execution.");
+    if (this.config.launchMode !== RUNPOD_DIRECT_LAUNCH_MODE) throw new Error("runpod_bootstrap_fallback_not_enabled_for_stage3k");
     if ((input.candidate.hourlyUsd ?? Infinity) > this.config.maxHourlyUsd) throw new Error("runpod_hourly_budget_exceeded");
     if ((input.candidate.hourlyUsd ?? Infinity) * 3.5 > this.config.maxSessionUsd) throw new Error("runpod_session_budget_exceeded");
     mkdirSync(path.dirname(LOCK_PATH), { recursive: true });
@@ -198,9 +286,36 @@ export class RunPodProvider implements GpuProvider {
       if (existing) return existing;
       const active = (await this.client.listPods()).filter(isActive);
       if (active.length > 0) throw new Error("runpod_active_pod_exists");
-      const created = await this.client.createPod(buildRunPodCreatePayload(input));
-      const session = toSession(created, this.config);
-      if ((session.hourlyUsd ?? Infinity) > this.config.maxHourlyUsd) { await this.client.deletePod(session.id); throw new Error("runpod_created_price_exceeded"); }
+      const expectedTemplate = buildRunPodDirectTemplatePayload({ name: this.config.directTemplateName, runtimeImage: FIXED_RUNTIME_DIGEST, sshPublicKey: input.sshPublicKey });
+      const existingTemplates = await this.client.listTemplates();
+      const matches = existingTemplates.filter((template) => template.name === this.config.directTemplateName);
+      if (matches.length > 1) throw new Error("runpod_direct_template_duplicate");
+      let template = matches[0];
+      if (template) {
+        const drift = validateRunPodDirectTemplate(template, expectedTemplate);
+        if (drift.length) throw new Error(`runpod_direct_template_drift:${drift.join(",")}`);
+      } else {
+        template = await this.client.createTemplate(expectedTemplate);
+      }
+      if (!template.id) throw new Error("runpod_direct_template_id_missing");
+      const created = await this.client.createPod(buildRunPodDirectPodPayload(input, template.id));
+      let session = toSession(created, this.config);
+      const priceDeadline = Date.now() + 60_000;
+      while (session.hourlyUsd === null && Date.now() < priceDeadline) {
+        const current = await this.getSession(session.id);
+        if (current) session = current;
+        if (session.hourlyUsd === null) await sleep(2_000);
+      }
+      if (session.hourlyUsd === null) {
+        console.log(JSON.stringify({ provider: "runpod", event: "post_create_price_gate", pod_id: session.id, hourly_usd: null, max_hourly_usd: this.config.maxHourlyUsd, action: "delete" }));
+        await this.client.deletePod(session.id);
+        throw new Error("runpod_created_price_unavailable");
+      }
+      if (session.hourlyUsd > this.config.maxHourlyUsd) {
+        console.log(JSON.stringify({ provider: "runpod", event: "post_create_price_gate", pod_id: session.id, hourly_usd: session.hourlyUsd, max_hourly_usd: this.config.maxHourlyUsd, action: "delete" }));
+        await this.client.deletePod(session.id);
+        throw new Error("runpod_created_price_exceeded");
+      }
       return session;
     } catch (error) {
       if (error instanceof Error && (error.name === "AbortError" || /timeout/i.test(error.message))) {
