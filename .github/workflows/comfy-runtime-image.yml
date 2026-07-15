@@ -103,12 +103,14 @@ jobs:
           object_info="${RUNNER_TEMP}/runtime-hygiene-gate-object-info-${GITHUB_RUN_ID}.json"
           rm -f -- "${object_info}"
           docker run -d --name "${container}" \
+            --entrypoint /bin/bash \
             -e START_GPU_WORKER=false \
             -e COMFY_RUNTIME_MODE=smoke_cpu \
             -e COMFY_NODE_PROFILE=production_minimal \
             -p 127.0.0.1:8080:8080 \
             -v "${GITHUB_WORKSPACE}/comfy-runtime:/opt/comfy-runtime:ro" \
-            "${OLD_RUNTIME_IMAGE}"
+            "${OLD_RUNTIME_IMAGE}" \
+            -lc 'exec /bin/bash /opt/comfy-runtime/entrypoint.sh'
           cleanup() {
             docker logs --tail 200 "${container}" || true
             docker rm -f "${container}" >/dev/null 2>&1 || true

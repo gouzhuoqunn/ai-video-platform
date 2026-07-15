@@ -13,9 +13,12 @@ const launcher = readFileSync("comfy-runtime/launch_comfy.py", "utf8");
 const workflow = readFileSync(".github/workflows/comfy-runtime-image.yml", "utf8");
 const inventory = path.join(root, "scripts", "legacy-worker-inventory.py");
 
+assert.match(readFileSync(".gitattributes", "utf8"), /^comfy-runtime\/\*\.sh text eol=lf$/m);
+
 assert.match(dockerfile, /rm -f \/app\/worker\.py/);
 assert.match(dockerfile, /test ! -e \/app\/worker\.py/);
 assert.doesNotMatch(dockerfile, /rm -rf \/app(?:\s|$|\/\*)/);
+assert.match(dockerfile, /COPY --chmod=0755 entrypoint\.sh \/opt\/comfy-runtime\/entrypoint\.sh/);
 assert.match(supervisor, /COMFY_USER_DIR = WORKSPACE \/ "comfy-user"/);
 assert.match(supervisor, /--user-directory[\s\S]*str\(COMFY_USER_DIR\)/);
 assert.match(supervisor, /--database-url[\s\S]*database_url\(\)/);
@@ -39,6 +42,17 @@ assert.match(workflow, /verify-public-digest/);
 assert.match(workflow, /v0\.1\.4-runtime-hygiene-/);
 assert.match(workflow, /CPU_NO_MODEL_SMOKE_COMPLETE=true/);
 assert.match(workflow, /GPU_FAIL_CLOSED_COMPLETE=true/);
+const gate = workflow.slice(workflow.indexOf("  runtime-hygiene-gate:"), workflow.indexOf("  build-and-push:"));
+const gateLaunch = gate.slice(gate.indexOf("Validate SQLite repair and D4 surface without a build"));
+assert.match(gateLaunch, /--entrypoint \/bin\/bash/);
+assert.match(gateLaunch, /exec \/bin\/bash \/opt\/comfy-runtime\/entrypoint\.sh/);
+assert.doesNotMatch(gateLaunch, /"\$\{OLD_RUNTIME_IMAGE\}"\s*$/m);
+const entrypointIndex = execFileSync("git", ["ls-files", "--stage", "comfy-runtime/entrypoint.sh"], {
+  cwd: root,
+  encoding: "utf8",
+});
+assert.match(entrypointIndex, /^100755\s/);
+assert.ok(!readFileSync("comfy-runtime/entrypoint.sh").includes("\r\n"));
 
 const temp = mkdtempSync(path.join(os.tmpdir(), "comfy-runtime-hygiene-"));
 try {
