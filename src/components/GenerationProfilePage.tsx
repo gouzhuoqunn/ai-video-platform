@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { GpuProfileKey } from "@/lib/generation/gpu-profiles";
+import { MODEL_CACHE_REGISTRY } from "@/lib/generation/model-registry";
 import { getGenerationProfilePageData } from "@/lib/generation/profile-page-data";
 import { listLocalImageResults } from "@/lib/local-lab/local-results";
 
@@ -14,6 +15,7 @@ function formatGb(value: number) {
 export function GenerationProfilePage({ profile }: GenerationProfilePageProps) {
   const data = getGenerationProfilePageData(profile);
   const localImages = profile === "rtx4090" ? listLocalImageResults().slice(0, 4) : [];
+  const modelCache = profile === "rtx4090" ? MODEL_CACHE_REGISTRY.rtx4090_image : undefined;
   const allCandidates = [...data.imageCandidates, ...data.videoCandidates].sort(
     (left, right) => Number(right.benchmark_round === "first") - Number(left.benchmark_round === "first"),
   );
@@ -133,6 +135,30 @@ export function GenerationProfilePage({ profile }: GenerationProfilePageProps) {
         </section>
 
         <aside className="space-y-4 lg:sticky lg:top-6 lg:self-start">
+          {modelCache ? (
+            <section className="rounded-lg border border-emerald-200 bg-white p-4 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-lg font-bold">FLUX model cache</h2>
+                <span className="rounded-md bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800">R2 ready</span>
+              </div>
+              <dl className="mt-3 space-y-2 text-sm">
+                <div className="flex justify-between gap-3">
+                  <dt className="text-stone-500">Verified size</dt>
+                  <dd className="font-semibold">12.45GB</dd>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <dt className="text-stone-500">Restore</dt>
+                  <dd className="font-semibold">R2 first</dd>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <dt className="text-stone-500">GPU inference</dt>
+                  <dd className="font-semibold">Not verified</dd>
+                </div>
+              </dl>
+              <p className="mt-3 break-all text-xs leading-5 text-stone-500">{modelCache.revision}</p>
+            </section>
+          ) : null}
+
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <h2 className="text-lg font-bold">Runtime</h2>
             <dl className="mt-3 space-y-2 text-sm">

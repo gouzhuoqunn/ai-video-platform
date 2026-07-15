@@ -33,7 +33,43 @@ export type ModelCandidate = {
   benchmark_round: "first" | "second";
 };
 
+export type ModelCacheRegistryEntry = {
+  candidate_key: string;
+  cache_status: "ready";
+  revision: string;
+  current_key: string;
+  manifest_key: string;
+  total_size_bytes: number;
+  github_actions_run_id: number;
+  verified_at: string;
+  gpu_restore_ready: true;
+  gpu_inference_verified: false;
+  production_ready: false;
+  files: Array<{ filename: string; size_bytes: number; sha256: string }>;
+};
+
 export const MODEL_SLOTS: ModelSlotKey[] = ["rtx4090_image", "rtx4090_video", "rtx5090_image", "rtx5090_video"];
+
+export const MODEL_CACHE_REGISTRY: Partial<Record<ModelSlotKey, ModelCacheRegistryEntry>> = {
+  rtx4090_image: {
+    candidate_key: "flux2-klein-4b-official",
+    cache_status: "ready",
+    revision: "flux2-klein-4b-5b4408e59397-a9e4ca87c16d",
+    current_key: "production/rtx4090/image/current.json",
+    manifest_key: "production/rtx4090/image/revisions/flux2-klein-4b-5b4408e59397-a9e4ca87c16d/manifest.json",
+    total_size_bytes: 12_451_817_860,
+    github_actions_run_id: 29431562820,
+    verified_at: "2026-07-15T16:23:59Z",
+    gpu_restore_ready: true,
+    gpu_inference_verified: false,
+    production_ready: false,
+    files: [
+      { filename: "flux-2-klein-4b-fp8.safetensors", size_bytes: 4_070_624_520, sha256: "97ed34fe0567e436200f2faee3939b88f2b5d99f8af2a4dc16532c4245c0ccb6" },
+      { filename: "qwen_3_4b.safetensors", size_bytes: 8_044_982_048, sha256: "6c671498573ac2f7a5501502ccce8d2b08ea6ca2f661c458e708f36b36edfc5a" },
+      { filename: "flux2-vae.safetensors", size_bytes: 336_211_292, sha256: "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3" },
+    ],
+  },
+};
 
 export const MODEL_CANDIDATES: ModelCandidate[] = [
   {

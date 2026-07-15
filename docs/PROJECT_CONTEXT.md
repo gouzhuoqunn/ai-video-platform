@@ -585,3 +585,11 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - On 2026-07-15 the FLUX seed made no model upload: Hugging Face metadata HEAD succeeded, while the first actual ranged data connection timed out before a part was received. R2 admin and read-only boundary probes passed. `current.json` was not published.
 - `GpuTarget`, `manual_ssh`, `gpu:first-image`, and `first-image:resume` provide a checkpointed recovery path. `manual_ssh` reads only `.secrets/manual-gpu-target.json`, does not manage payment/cancellation, and keeps host/key material outside Git.
 - No new Clore order, SSH session, model inference, Runtime rebuild, or remote `main` update occurred. `production_ready` remains false.
+
+## 2026-07-15 Phase 3I: FLUX Cache Published
+
+- Fixed invalid job-level `runner.temp` expressions by exporting independent Qwen and VAE `HF_HOME` paths from `$RUNNER_TEMP` in executable steps. YAML parsing, DAG context regression tests, and actionlint passed before the remote run.
+- GitHub Actions run `29431562820` started the existing FLUX verification, Qwen cache, and VAE cache jobs in parallel, then ran publish-and-verify only after all three succeeded. Total wall time was about 9 minutes 43 seconds. No Runtime image build ran.
+- The existing FLUX object and newly cached Qwen/VAE objects total 12,451,817,860 bytes. Their exact sizes and SHA256 values are recorded in `docs/MODEL_CACHE.md` and `MODEL_CACHE_REGISTRY`. Qwen completed with the official Xet client and did not use HTTP fallback.
+- Published revision `flux2-klein-4b-5b4408e59397-a9e4ca87c16d` has an independently read revision manifest and final `production/rtx4090/image/current.json` pointer. GPU read-only credentials passed GET, HEAD, and first/last Range probes; Put, overwrite, and Delete were denied.
+- `gpu_restore_ready=true` and `r2_restore_plan_valid=true`. No Clore order, SSH connection, GPU inference, image generation, Runtime build, or model artifact in Git/Actions artifacts occurred. `gpu_inference_verified=false` and `production_ready=false`.

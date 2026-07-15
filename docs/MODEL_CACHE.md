@@ -165,6 +165,14 @@ npm run model-cache:status:flux4090
 npm run model-cache:resume:flux4090
 ```
 
-The controller streams Hugging Face ranges into 64MiB R2 multipart parts, stores only non-secret resume metadata under `.secrets`, validates pinned source SHA256/object size, writes the revision manifest, and writes `current.json` last. GPU restore is read-only and falls back to Hugging Face only on a cache miss.
+GitHub Actions run `29431562820` completed the cache on 2026-07-15. Qwen used the official Hugging Face Xet client without HTTP fallback. Local files were checked by full SHA256 before AWS SDK multipart upload with 128MiB parts and were removed from each Runner after upload.
 
-Current status: no FLUX part is cached and `current.json` is absent. The first seed stopped safely because actual Hugging Face range data timed out despite successful metadata HEAD and R2 credential probes. Resume is safe after source connectivity recovers.
+Published revision: `flux2-klein-4b-5b4408e59397-a9e4ca87c16d`.
+
+| File | Size (bytes) | SHA256 |
+| --- | ---: | --- |
+| `flux-2-klein-4b-fp8.safetensors` | 4,070,624,520 | `97ed34fe0567e436200f2faee3939b88f2b5d99f8af2a4dc16532c4245c0ccb6` |
+| `qwen_3_4b.safetensors` | 8,044,982,048 | `6c671498573ac2f7a5501502ccce8d2b08ea6ca2f661c458e708f36b36edfc5a` |
+| `flux2-vae.safetensors` | 336,211,292 | `868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3` |
+
+The revision manifest and `production/rtx4090/image/current.json` are published. Read-only GPU credentials can read both indexes, HEAD all three objects, and read their first and last 1024-byte ranges; Put, overwrite, and Delete probes are denied. `gpu_restore_ready=true`, while `gpu_inference_verified=false` and `production_ready=false`.

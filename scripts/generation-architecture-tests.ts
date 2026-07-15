@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { MockComfyRuntimeClient, COMFYUI_BIND_HOST, COMFYUI_COMMIT } from "../src/lib/generation/comfy-runtime";
 import { classifyBenchmarkError, runMockBenchmark } from "../src/lib/generation/benchmark-runner";
 import { evaluateCandidateForProfile, GPU_PROFILES } from "../src/lib/generation/gpu-profiles";
-import { MODEL_CANDIDATES, MODEL_SLOTS, validateModelCandidate } from "../src/lib/generation/model-registry";
+import { MODEL_CACHE_REGISTRY, MODEL_CANDIDATES, MODEL_SLOTS, validateModelCandidate } from "../src/lib/generation/model-registry";
 import { PRODUCTION_PROFILE_PATHS, validateProductionManifest, type R2ProductionManifest } from "../src/lib/generation/r2-cache-plan";
 import { injectWorkflowParameters, validateWorkflowTemplate, WORKFLOW_TEMPLATES } from "../src/lib/generation/workflow-registry";
 
@@ -57,6 +57,13 @@ async function main() {
     assert.notEqual(candidate.status, "rejected_before_benchmark", "no current candidate should be rejected without an explicit reason");
     assert.notEqual(candidate.status, "public_verified", "public candidates must be classified more specifically before display");
   }
+  const fluxCache = MODEL_CACHE_REGISTRY.rtx4090_image;
+  assert.equal(fluxCache?.cache_status, "ready");
+  assert.equal(fluxCache?.files.length, 3);
+  assert.equal(fluxCache?.files.reduce((total, file) => total + file.size_bytes, 0), 12_451_817_860);
+  assert.equal(fluxCache?.gpu_restore_ready, true);
+  assert.equal(fluxCache?.gpu_inference_verified, false);
+  assert.equal(fluxCache?.production_ready, false);
 
   for (const workflow of Object.values(WORKFLOW_TEMPLATES)) {
     assert.deepEqual(validateWorkflowTemplate(workflow), [], `${workflow.key} workflow schema must be valid`);
@@ -137,6 +144,7 @@ async function main() {
   assert.ok(profilePage.includes("4090") && profilePage.includes("5090"), "profile route must support both 4090 and 5090");
   assert.ok(localStudio.includes("/generate/4090") && localStudio.includes("/generate/5090"), "home must expose minimal profile links");
   assert.ok(!/neon|glow|from-purple|to-blue|backdrop-blur-xl/i.test(profileComponent), "profile page must not reintroduce neon styling");
+  assert.ok(profileComponent.includes("R2 ready") && profileComponent.includes("Not verified"), "4090 page must show cache-ready without claiming GPU inference");
 
   console.log("generation architecture tests passed");
 }
