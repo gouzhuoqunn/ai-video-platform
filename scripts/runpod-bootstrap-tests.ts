@@ -28,4 +28,6 @@ assert.equal(jobs.filter((job) => job.permissions?.packages === "write").length,
 assert.equal(jobs.flatMap((job) => job.steps ?? []).filter((step) => step.uses?.startsWith("docker/build-push-action@")).length, 1);
 assert.match(workflowText, /empty-docker-config-runpod-bootstrap/);
 assert.match(workflowText, /docker logout ghcr\.io/);
+assert.match(workflowText, /skip runpod-bootstrap/);
+assert.match(workflowText, /Reclaim hosted runner disk/);
 console.log("RunPod bootstrap image tests passed.");

@@ -22,7 +22,7 @@ env:
 
 jobs:
   build-and-verify:
-    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' }}
+    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && (github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip runpod-bootstrap]')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -38,6 +38,14 @@ jobs:
       - run: npm ci
       - run: npm run runpod-bootstrap:test
       - run: npm run secret:scan
+
+      - name: Reclaim hosted runner disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/share/dotnet /opt/ghc
+          docker system prune --all --force || true
+          df -h
 
       - uses: docker/setup-buildx-action@v3
 

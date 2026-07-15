@@ -19,6 +19,8 @@ RunPod is the second GPU supplier adapter for the FLUX first-image recovery path
 
 The independent `.github/workflows/runpod-bootstrap-image.yml` builds only `linux/amd64`, publishes no `latest` tag, performs an anonymous pull, and statically confirms that neither Comfy GPU Runtime nor the retired Worker starts during bootstrap.
 
+The first hosted build attempt, run `29435088336`, failed inside `docker/build-push-action` because the hosted runner exhausted its filesystem and could not write its own diagnostic log. No bootstrap package, tag, or digest was created. The workflow now reclaims the preinstalled Android, CodeQL, .NET, and GHC payloads before Buildx. It has not been rerun because Stage 3J permits only one actual bootstrap build.
+
 ## Commands
 
 ```powershell
