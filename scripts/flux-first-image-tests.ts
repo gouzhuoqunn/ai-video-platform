@@ -31,4 +31,10 @@ assert.match(downloader, /\.part/);
 assert.match(downloader, /os\.replace/);
 assert.match(downloader, /sha256/);
 assert.match(downloader, /range/i);
+const executor = readFileSync(path.join(root, "scripts", "flux-first-image-executor.ts"), "utf8");
+for (const endpoint of ["/system_stats", "/object_info", "/prompt", "/history/", "/view?"]) {
+  assert.ok(executor.includes(endpoint), `executor is missing ${endpoint}`);
+}
+assert.match(executor, /WebSocket/);
+assert.match(executor, /archiveFluxFirstImage/);
 console.log("FLUX first-image workflow and downloader tests passed.");

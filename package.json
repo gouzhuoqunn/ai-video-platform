@@ -85,6 +85,7 @@
     "generation:workflow:test": "tsx scripts/workflow-registry-tests.ts",
     "generation:workflow-assets:test": "tsx scripts/workflow-asset-tests.ts",
     "generation:flux-first-image:test": "tsx scripts/flux-first-image-tests.ts",
+    "clore:first-image:execute": "tsx scripts/flux-first-image-executor.ts",
     "generation:comfy-source:test": "tsx scripts/comfy-source-audit-tests.ts",
     "generation:4090-plan:test": "tsx scripts/rtx4090-baseline-plan-tests.ts",
     "generation:benchmark-schema:test": "tsx scripts/benchmark-schema-tests.ts",
