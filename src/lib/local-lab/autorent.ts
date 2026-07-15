@@ -1,6 +1,7 @@
 import "server-only";
 
 import { getSupabaseAdminClient } from "@/lib/supabase/admin";
+import { AUTOMATIC_GPU_PROVIDER } from "./studio-mode";
 
 export type AutorentStatus = "waiting" | "searching" | "candidate_found" | "provisioning" | "assigned" | "failed" | "cancelled";
 
@@ -44,7 +45,7 @@ export async function advanceMockAutorentRequests(userId: string) {
 
     const patch: Record<string, unknown> = {
       status: next,
-      provider: "mock",
+      provider: AUTOMATIC_GPU_PROVIDER,
       real_create_enabled: false,
     };
     if (next === "candidate_found") {
@@ -73,8 +74,8 @@ export async function advanceMockAutorentRequests(userId: string) {
     create_order_called: false,
     session_complete_cancel_deadline_ms: SESSION_COMPLETE_CANCEL_DEADLINE_MS,
     note: isRealAutorentEnabled()
-      ? "Real auto-rent is enabled, but this local_lab tick remains mock-only."
-      : "GPU自动租用暂时停用，等待Clore平台恢复。当前只推进mock状态机。",
+      ? "Clore自动调度已启用；此界面推进调度状态，但只有任务就绪且存在合规主机时才允许创建订单。"
+      : "Clore自动调度当前处于安全暂停状态，只保留任务池和调度状态。",
     updates,
   };
 }

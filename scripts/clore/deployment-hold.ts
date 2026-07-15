@@ -38,5 +38,6 @@ if (process.argv[1]?.endsWith("deployment-hold.ts")) {
   const enabled = process.argv.includes("--enable");
   const disabled = process.argv.includes("--disable");
   if (enabled === disabled) throw new Error("Use exactly one of --enable or --disable.");
-  console.log(JSON.stringify(setCloreDeploymentHold(enabled), null, 2));
+  const reasonArg = process.argv.find((value) => value.startsWith("--reason="))?.slice("--reason=".length);
+  console.log(JSON.stringify(setCloreDeploymentHold(enabled, reasonArg || "platform_deployment_incident"), null, 2));
 }

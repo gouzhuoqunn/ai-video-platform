@@ -5,6 +5,8 @@ import path from "node:path";
 import { cloreRequest, sleep } from "./client";
 import { loadCloreConfig } from "./config";
 import { buildSshArgs, type SshTarget } from "./ssh-client";
+import { readActiveOrder } from "./order-state";
+import { FIXED_RUNTIME_DIGEST } from "../gpu-providers/common";
 
 type ReadinessFailure =
   | "order_never_running"
@@ -104,9 +106,9 @@ function failureFor(input: { running: boolean; status: string; sshPublished: boo
 async function main() {
   const orderId = getArg("order-id");
   if (!orderId) throw new Error("clore:readiness requires --order-id=<id>.");
-  const requestedTimeout = Number(getArg("timeout-minutes") ?? 15);
-  if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0 || requestedTimeout > 15) {
-    throw new Error("clore:readiness --timeout-minutes must be between 1 and 15.");
+  const requestedTimeout = Number(getArg("timeout-minutes") ?? 10);
+  if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0 || requestedTimeout > 10) {
+    throw new Error("clore:readiness --timeout-minutes must be between 1 and 10.");
   }
   const timeoutMs = requestedTimeout * 60 * 1000;
   const startedAt = Date.now();
@@ -135,7 +137,8 @@ async function main() {
           if (ssh.ok) {
             const targetPath = path.join(process.cwd(), ".secrets", "clore-ssh-target.json");
             mkdirSync(path.dirname(targetPath), { recursive: true });
-            writeFileSync(targetPath, `${JSON.stringify({ order_id: orderId, ...connection.ssh, updated_at: new Date().toISOString() }, null, 2)}\n`, "utf8");
+            const active = readActiveOrder();
+            writeFileSync(targetPath, `${JSON.stringify({ order_id: orderId, ...connection.ssh, username: connection.ssh.user, gpuProfile: active?.gpu_profile ?? "rtx4090", runtimeDigest: FIXED_RUNTIME_DIGEST, updated_at: new Date().toISOString() }, null, 2)}\n`, "utf8");
             console.log(JSON.stringify({ ready: true, order_id: orderId, elapsed_seconds: Math.round((Date.now() - startedAt) / 1000), order_running: running, ssh_proxy_published: true, ssh_tcp_reachable: true, ssh_command_true: true, http_proxy_published: httpPublished, secrets_printed: false }, null, 2));
             return;
           }

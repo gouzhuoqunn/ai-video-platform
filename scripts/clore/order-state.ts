@@ -1,6 +1,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { PROJECT_TAG } from "./config";
+import type { GpuProfile } from "../gpu-providers/types";
 
 export const ACTIVE_ORDER_PATH = path.join(process.cwd(), ".secrets", "clore-active-order.json");
 export const ORDER_CREATE_LOCK_PATH = path.join(process.cwd(), ".secrets", "clore-order-create.lock");
@@ -15,7 +16,10 @@ export type ActiveCloreOrder = {
   usd_per_hour: number;
   max_price_usd_per_hour: number;
   order_type: "on-demand";
-  open_ports: ["ssh/tcp", "controller/http:8080"];
+  open_ports: ["ssh/tcp"] | ["ssh/tcp", "controller/http:8080"];
+  gpu_type?: string;
+  gpu_profile?: GpuProfile;
+  bootstrap_image?: string;
 };
 
 export function readActiveOrder() {

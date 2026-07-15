@@ -1,6 +1,7 @@
 import { closeSync, mkdirSync, openSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { getPrivateKeyPath } from "../clore/ssh-client";
+import { assertRunPodDeploymentAllowed } from "../runpod-deployment-hold";
 import { FIXED_RUNTIME_DIGEST, parseEnvFile, sleep, sshCommand, tcpReachable } from "./common";
 import type { CreateSessionInput, GpuCandidate, GpuProvider, GpuSession, GpuTarget, ProviderPriceBreakdown } from "./types";
 
@@ -414,6 +415,7 @@ export class RunPodProvider implements GpuProvider {
   }
 
   async createSession(input: CreateSessionInput): Promise<GpuSession> {
+    assertRunPodDeploymentAllowed();
     if (input.dryRun) {
       const price = input.candidate.hourlyUsd === null ? null : buildRunPodPriceBreakdown({ costPerHr: input.candidate.hourlyUsd, containerDiskInGb: input.candidate.containerDiskGb, volumeInGb: input.candidate.volumeGb });
       return { provider: this.id, id: "dry-run", name: `ai-video-first-image-${input.sessionId}`, status: "DRY_RUN", createdAt: null, lastStatusChange: null, hourlyUsd: price?.totalHourly ?? null, price, costPerHr: input.candidate.hourlyUsd, adjustedCostPerHr: null, containerDiskInGb: input.candidate.containerDiskGb, volumeInGb: input.candidate.volumeGb, cloudType: input.candidate.cloudType ?? "SECURE", gpuType: input.candidate.gpuType, target: null };

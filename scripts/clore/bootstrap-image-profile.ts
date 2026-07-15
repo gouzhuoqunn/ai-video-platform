@@ -3,10 +3,12 @@ import type { LoadedCloreConfig } from "./order-execution";
 import type { CloreCandidate, RawCloreServer } from "./types";
 
 export const BOOTSTRAP_IMAGE_GPU_PROFILE = "bootstrap_image_gpu";
-export const FIRST_IMAGE_SESSION_HOURS = 5;
+export const AMPERE_IMAGE_GPU_PROFILE = "ampere_image_gpu";
+export const FIRST_IMAGE_SESSION_HOURS = 3.5;
+export const FIRST_IMAGE_SESSION_BUDGET_USD = 2.5;
 
 export type BootstrapImageCandidate = CloreCandidate & {
-  runtimeGpuProfile: "rtx4090" | "rtx5090" | typeof BOOTSTRAP_IMAGE_GPU_PROFILE;
+  runtimeGpuProfile: "rtx4090" | "rtx5090" | typeof AMPERE_IMAGE_GPU_PROFILE;
   gpuPriority: number;
   projectedFirstImageCostUsd: number | null;
 };
@@ -15,8 +17,7 @@ function gpuProfile(candidate: CloreCandidate): BootstrapImageCandidate["runtime
   const name = candidate.gpuNormalizedName.toLowerCase();
   if (name.includes("rtx 4090")) return "rtx4090";
   if (name.includes("rtx 5090")) return "rtx5090";
-  if (/(rtx 3090|rtx a5000|rtx a6000)/.test(name)) return BOOTSTRAP_IMAGE_GPU_PROFILE;
-  if (/nvidia/.test(name) && (candidate.gpuMemoryGb ?? 0) >= 16) return BOOTSTRAP_IMAGE_GPU_PROFILE;
+  if (/(a40|rtx a6000|rtx 3090)/.test(name)) return AMPERE_IMAGE_GPU_PROFILE;
   return null;
 }
 
@@ -24,16 +25,17 @@ function priority(candidate: CloreCandidate) {
   const name = candidate.gpuNormalizedName.toLowerCase();
   if (name.includes("rtx 4090")) return 0;
   if (name.includes("rtx 5090")) return 1;
-  if (/rtx 3090/.test(name)) return 2;
-  if (/rtx a5000|rtx a6000/.test(name)) return 3;
-  return 4;
+  if (/\ba40\b/.test(name)) return 2;
+  if (/rtx a6000/.test(name)) return 3;
+  if (/rtx 3090/.test(name)) return 4;
+  return 99;
 }
 
 export function findBootstrapImageCandidates(rawServers: RawCloreServer[], config: LoadedCloreConfig): BootstrapImageCandidate[] {
   const permissive = {
     ...config,
     targetGpu: "NVIDIA GeForce RTX 4090" as const,
-    minGpuVramGb: 16,
+    minGpuVramGb: 20,
     minRamGb: 32,
     minDiskGb: 120,
     minCpuCores: 1,
@@ -60,19 +62,21 @@ export function findBootstrapImageCandidates(rawServers: RawCloreServer[], confi
         candidate.supportsDocker &&
         candidate.supportsSsh &&
         candidate.driverCompatible !== false &&
-        (candidate.gpuMemoryGb ?? 0) >= 16 &&
+        (candidate.gpuMemoryGb ?? 0) >= 20 &&
         (candidate.ramGb ?? 0) >= 32 &&
         (candidate.diskGb ?? 0) >= 120 &&
         candidate.effectivePriceUsdPerHour !== null && candidate.effectivePriceUsdPerHour <= 0.7 &&
-        candidate.projectedFirstImageCostUsd !== null && candidate.projectedFirstImageCostUsd <= 4.5 &&
+        candidate.projectedFirstImageCostUsd !== null && candidate.projectedFirstImageCostUsd <= FIRST_IMAGE_SESSION_BUDGET_USD &&
         !config.excludedServerIds.includes(candidate.serverId);
     })
     .sort((left, right) => {
+      if (left.gpuPriority !== right.gpuPriority) return left.gpuPriority - right.gpuPriority;
       const reliability = (right.reliability ?? -1) - (left.reliability ?? -1);
       if (reliability) return reliability;
       const rating = (right.rating ?? -1) - (left.rating ?? -1);
       if (rating) return rating;
-      if (left.gpuPriority !== right.gpuPriority) return left.gpuPriority - right.gpuPriority;
+      const network = ((right.downloadMbps ?? 0) + (right.uploadMbps ?? 0)) - ((left.downloadMbps ?? 0) + (left.uploadMbps ?? 0));
+      if (network) return network;
       const price = (left.effectivePriceUsdPerHour ?? Infinity) - (right.effectivePriceUsdPerHour ?? Infinity);
       if (price) return price;
       const ram = (right.ramGb ?? 0) - (left.ramGb ?? 0);

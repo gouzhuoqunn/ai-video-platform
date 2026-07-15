@@ -1,0 +1,19 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { currentKey, finalKey, manifestKey, wanFiles } from "./model-cache/wan-stage3m-cache";
+
+assert.equal(wanFiles.length, 3);
+assert.equal(wanFiles.reduce((total, file) => total + file.sizeBytes, 0), 18_144_966_705);
+assert.ok(wanFiles.every((file) => /^[a-f0-9]{64}$/.test(file.sha256)));
+assert.ok(wanFiles.every((file) => finalKey(file).startsWith("production/rtx4090/video/revisions/")));
+assert.match(manifestKey, /manifest\.json$/);
+assert.match(currentKey, /current\.json$/);
+const workflow = readFileSync(".github/workflows/wan-stage3m-model-cache.yml", "utf8");
+assert.match(workflow, /workflow_dispatch/);
+assert.match(workflow, /alias: \[unet, text, vae\]/);
+assert.match(workflow, /hf_xet/);
+assert.match(workflow, /leavePartsOnError|multipart|wan-stage3m-cache\.ts upload-local/);
+assert.match(workflow, /current pointer/);
+assert.doesNotMatch(workflow, /upload-artifact/);
+assert.doesNotMatch(workflow, /docker build|buildx/);
+console.log("Wan Stage 3M cache manifest and workflow tests passed.");

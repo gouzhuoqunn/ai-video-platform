@@ -14,7 +14,7 @@ export function loadManualTarget(): GpuTarget {
     port: Number(input.port),
     username: String(input.username ?? input.user ?? "root"),
     sshKeyPath: String(input.sshKeyPath ?? ""),
-    gpuProfile: input.gpuProfile === "rtx5090" || input.gpuProfile === "bootstrap_image_gpu" ? input.gpuProfile : "rtx4090",
+    gpuProfile: input.gpuProfile === "rtx5090" || input.gpuProfile === "bootstrap_image_gpu" || input.gpuProfile === "ampere_image_gpu" ? input.gpuProfile : "rtx4090",
     runtimeDigest: String(input.runtimeDigest ?? FIXED_RUNTIME_DIGEST),
   });
 }

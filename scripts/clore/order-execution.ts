@@ -13,6 +13,8 @@ import type { CloreExecutionConfig } from "./execution-config";
 import { loadModelCacheConfig } from "../model-cache/config";
 import { assertWatchdogsReadyForCreate } from "./watchdog-preflight";
 import { assertCloreDeploymentAllowed } from "./deployment-hold";
+import { CLORE_LIGHT_BOOTSTRAP_IMAGE, CLORE_LIGHT_BOOTSTRAP_PROFILE } from "./public-image";
+import type { GpuProfile } from "../gpu-providers/types";
 
 export type LoadedCloreConfig = ReturnType<typeof loadCloreConfig>;
 
@@ -71,27 +73,24 @@ export function buildCreateOrderBody(input: {
   sshPublicKey: string;
   maxPriceUsdPerHour: number;
   requiredPriceForApi?: number;
+  bootstrapProfile?: typeof CLORE_LIGHT_BOOTSTRAP_PROFILE | "fixed_runtime";
 }): CreateOrderRequest {
-  if (input.image && input.image !== COMFY_RUNTIME_IMAGE) {
-    throw new Error("Clore Runtime image must use the fixed Comfy Runtime digest.");
-  }
+  const bootstrapProfile = input.bootstrapProfile ?? "fixed_runtime";
+  const image = bootstrapProfile === CLORE_LIGHT_BOOTSTRAP_PROFILE ? CLORE_LIGHT_BOOTSTRAP_IMAGE : COMFY_RUNTIME_IMAGE;
+  if (input.image && input.image !== image) throw new Error("Clore order image does not match the selected bootstrap profile.");
   return {
     currency: input.currency,
-    image: COMFY_RUNTIME_IMAGE,
+    image,
     renting_server: Number(input.serverId),
     type: "on-demand",
-    ports: { "22": "tcp", "8080": "http" },
-    env: {
-      PROJECT_TAG,
-      COMFY_RUNTIME_MODE: "gpu",
-      COMFY_GPU_PROFILE: "rtx4090",
-      COMFY_NODE_PROFILE: "production_minimal",
-      START_GPU_WORKER: "false",
-      HF_HUB_DISABLE_TELEMETRY: "1",
-      DO_NOT_TRACK: "1",
-    },
+    ports: bootstrapProfile === CLORE_LIGHT_BOOTSTRAP_PROFILE ? { "22": "tcp" } : { "22": "tcp", "8080": "http" },
+    env: bootstrapProfile === CLORE_LIGHT_BOOTSTRAP_PROFILE
+      ? { PROJECT_TAG, RUNTIME_BOOTSTRAP_PROFILE: CLORE_LIGHT_BOOTSTRAP_PROFILE, HF_HUB_DISABLE_TELEMETRY: "1", DO_NOT_TRACK: "1" }
+      : { PROJECT_TAG, COMFY_RUNTIME_MODE: "gpu", COMFY_GPU_PROFILE: "rtx4090", COMFY_NODE_PROFILE: "production_minimal", START_GPU_WORKER: "false", HF_HUB_DISABLE_TELEMETRY: "1", DO_NOT_TRACK: "1" },
     ssh_key: input.sshPublicKey,
-    command: "bash -lc 'mkdir -p /workspace/ai-video-platform /workspace/models /workspace/jobs /workspace/logs'",
+    command: bootstrapProfile === CLORE_LIGHT_BOOTSTRAP_PROFILE
+      ? "bash -lc 'mkdir -p /workspace/ai-runtime /workspace/models /workspace/jobs /workspace/logs; while sleep 3600; do :; done'"
+      : "bash -lc 'mkdir -p /workspace/ai-video-platform /workspace/models /workspace/jobs /workspace/logs'",
     required_price: input.requiredPriceForApi ?? input.maxPriceUsdPerHour,
     autossh_entrypoint: true,
   };
@@ -108,11 +107,15 @@ export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
   if (body.currency !== "USD-Blockchain") {
     throw new Error("Clore order currency must be USD-Blockchain.");
   }
-  if (body.image !== COMFY_RUNTIME_IMAGE || !/@sha256:[a-f0-9]{64}$/.test(body.image)) {
-    throw new Error("Clore order must use the fixed Comfy Runtime digest, never a mutable tag.");
+  const fixedRuntime = body.image === COMFY_RUNTIME_IMAGE && /@sha256:[a-f0-9]{64}$/.test(body.image);
+  const lightBootstrap = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.env.RUNTIME_BOOTSTRAP_PROFILE === CLORE_LIGHT_BOOTSTRAP_PROFILE;
+  if (!fixedRuntime && !lightBootstrap) throw new Error("Clore order image must be the pinned Runtime or the exact approved light bootstrap image.");
+  const ports = Object.keys(body.ports);
+  if (body.ports["22"] !== "tcp" || body.ports["8188"] !== undefined || ports.some((port) => !["22", "8080"].includes(port)) || ports.filter((port) => body.ports[port] === "http").length > 1) {
+    throw new Error("Order must expose SSH and at most one HTTP port; ComfyUI 8188 is forbidden.");
   }
-  if (body.ports["22"] !== "tcp" || body.ports["8080"] !== "http" || body.ports["8188"] !== undefined || Object.keys(body.ports).length !== 2) {
-    throw new Error("Order must expose only 22/tcp and 8080/http; ComfyUI 8188 is forbidden.");
+  if (lightBootstrap && ports.length !== 1) {
+    throw new Error("clore_light_bootstrap exposes SSH only.");
   }
   if (!/^ssh-ed25519\s+[A-Za-z0-9+/=]+(?:\s+.*)?$/.test(body.ssh_key) || /private key|-----begin/i.test(body.ssh_key)) {
     throw new Error("Order must contain a non-empty SSH public key only.");
@@ -201,6 +204,7 @@ export async function createCloreOrder(input: {
   requestId?: string;
   request?: (body: CreateOrderRequest) => Promise<unknown>;
   readOrders?: typeof readLiveOrdersSummary;
+  sessionMetadata?: { gpuType: string; gpuProfile: GpuProfile; bootstrapImage: string };
 }) {
   assertCloreDeploymentAllowed();
   if (!input.execution.enabled) {
@@ -257,7 +261,10 @@ export async function createCloreOrder(input: {
       usd_per_hour: input.candidate.priceUsdPerHour ?? input.requestBody.required_price,
       max_price_usd_per_hour: input.candidate.priceUsdPerHour ?? input.requestBody.required_price,
       order_type: "on-demand",
-      open_ports: ["ssh/tcp", "controller/http:8080"],
+      open_ports: input.requestBody.ports["8080"] === "http" ? ["ssh/tcp", "controller/http:8080"] : ["ssh/tcp"],
+      gpu_type: input.sessionMetadata?.gpuType ?? input.candidate.gpu,
+      gpu_profile: input.sessionMetadata?.gpuProfile ?? "rtx4090",
+      bootstrap_image: input.sessionMetadata?.bootstrapImage ?? input.requestBody.image,
     });
     return {
       order_created: true,

@@ -1,0 +1,90 @@
+name: Wan Stage 3M Model Cache
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: wan-stage3m-model-cache-once
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  MODEL_CACHE_REGION: auto
+
+jobs:
+  verify-clore-bootstrap:
+    name: Verify public Clore bootstrap manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Inspect linux/amd64 public manifest
+        run: |
+          docker manifest inspect --verbose cloreai/jupyter:ubuntu24.04-v2 | tee /tmp/clore-bootstrap-manifest.json
+          jq -e '.. | objects | select(.platform?.os == "linux" and .platform?.architecture == "amd64")' /tmp/clore-bootstrap-manifest.json >/dev/null
+          grep -oE 'sha256:[a-f0-9]{64}' /tmp/clore-bootstrap-manifest.json | head -1
+
+  cache-model:
+    name: Cache Wan ${{ matrix.alias }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        alias: [unet, text, vae]
+    env:
+      HF_HOME: ${{ runner.temp }}/hf-wan-${{ matrix.alias }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/share/dotnet /opt/ghc
+          docker system prune --all --force || true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install locked tooling
+        run: |
+          npm ci
+          python -m pip install --disable-pip-version-check "huggingface_hub[hf_xet]>=0.30,<2"
+      - name: Download through hf_xet
+        id: download
+        run: timeout --signal=TERM --kill-after=30s 22m python scripts/model-cache/wan-stage3m-download.py --model "${{ matrix.alias }}" --cache-dir "$HF_HOME" --github-output "$GITHUB_OUTPUT"
+      - name: Validate size and SHA256
+        run: timeout --signal=TERM --kill-after=30s 5m npx tsx scripts/model-cache/wan-stage3m-cache.ts validate-local "${{ matrix.alias }}" "${{ steps.download.outputs.model_path }}"
+      - name: AWS SDK multipart upload and Range verify
+        run: timeout --signal=TERM --kill-after=30s 13m npx tsx scripts/model-cache/wan-stage3m-cache.ts upload-local "${{ matrix.alias }}" "${{ steps.download.outputs.model_path }}"
+      - name: Remove local model data
+        if: always()
+        run: rm -rf -- "$HF_HOME"
+
+  publish-and-verify:
+    name: Publish Wan manifest and current pointer
+    needs: [cache-model]
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_READONLY_ACCESS_KEY_ID: ${{ secrets.R2_READONLY_ACCESS_KEY_ID }}
+      R2_READONLY_SECRET_ACCESS_KEY: ${{ secrets.R2_READONLY_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm ci
+      - name: Publish revision manifest, then current.json last
+        run: npx tsx scripts/model-cache/wan-stage3m-cache.ts publish
+      - name: Read-only HEAD and first/last Range probe
+        run: npx tsx scripts/model-cache/wan-stage3m-cache.ts verify

@@ -9,6 +9,8 @@ import { buildRunPodDirectPodPayload, buildRunPodDirectTemplatePayload, loadRunP
 import { writeColabBundle } from "./first-image-colab-bundle";
 import type { GpuSession, GpuTarget } from "./gpu-providers/types";
 import { armRunPodWatchdog } from "./runpod-watchdog";
+import { buildRuntimeOverlay } from "./runtime-overlay";
+import { getCloreDeploymentHold, setCloreDeploymentHold } from "./clore/deployment-hold";
 
 function argument(name: string) {
   const inline = process.argv.find((item) => item.startsWith(`--${name}=`));
@@ -64,37 +66,50 @@ async function availableLoopbackPort(start = 18188) {
 }
 
 function requireSuccess(result: ReturnType<typeof spawnSync>, classification: string) {
-  if (result.status !== 0) throw new Error(classification);
+  if (result.status !== 0) throw new Error(`${classification}:${String(result.stderr ?? result.stdout ?? "").trim().slice(-1000)}`);
   return String(result.stdout ?? "");
 }
 
 async function runRemoteFirstImage(target: GpuTarget, providerId: GpuProviderId, sessionId: string, gpuModel: string) {
   const { outputPath: bundlePath } = writeColabBundle();
   const restorePath = path.join(process.cwd(), "scripts", "clore", "restore-flux-r2.py");
+  const cloreBootstrapPath = path.join(process.cwd(), "scripts", "clore", "clore-light-bootstrap.sh");
   try {
+    if (providerId === "clore") {
+      const overlay = buildRuntimeOverlay();
+      requireSuccess(scpFile(target, overlay.outputPath, "/workspace/runtime-overlay.tgz", 5 * 60_000), "runtime_overlay_copy_failed");
+      requireSuccess(scpFile(target, cloreBootstrapPath, "/workspace/clore-light-bootstrap.sh", 2 * 60_000), "clore_light_bootstrap_copy_failed");
+      requireSuccess(sshCommand(target, "chmod 700 /workspace/clore-light-bootstrap.sh; /workspace/clore-light-bootstrap.sh prepare /workspace/runtime-overlay.tgz", 30 * 60_000), "clore_light_bootstrap_prepare_failed");
+    }
     requireSuccess(scpFile(target, bundlePath, "/workspace/flux-r2-manifest.json", 5 * 60_000), "r2_bundle_copy_failed");
     requireSuccess(scpFile(target, restorePath, "/workspace/restore-flux-r2.py", 2 * 60_000), "r2_restore_script_copy_failed");
     const restoreStarted = Date.now();
-    const restore = sshCommand(target, "set -e; FLUX_R2_RESTORE_MANIFEST=/workspace/flux-r2-manifest.json python3.11 /workspace/restore-flux-r2.py", 90 * 60_000);
+    const restore = sshCommand(target, "set -e; FLUX_R2_RESTORE_MANIFEST=/workspace/flux-r2-manifest.json python3 /workspace/restore-flux-r2.py", 90 * 60_000);
     requireSuccess(restore, "r2_model_restore_failed");
     const restoreElapsedMs = Date.now() - restoreStarted;
-    const runtime = sshCommand(target, `set -e; mkdir -p /workspace/logs; if test -s /workspace/runtime-stage3j.pid && kill -0 \"$(cat /workspace/runtime-stage3j.pid)\" 2>/dev/null; then exit 0; fi; nohup env COMFY_RUNTIME_MODE=gpu COMFY_NODE_PROFILE=production_minimal COMFY_GPU_PROFILE=${target.gpuProfile} /opt/comfy-runtime/entrypoint.sh >/workspace/logs/runtime-stage3j.log 2>&1 </dev/null & echo $! >/workspace/runtime-stage3j.pid`, 60_000);
+    const runtimeCommand = providerId === "clore"
+      ? `/workspace/clore-light-bootstrap.sh start ${target.gpuProfile}`
+      : `set -e; mkdir -p /workspace/logs; if test -s /workspace/runtime-stage3j.pid && kill -0 \"$(cat /workspace/runtime-stage3j.pid)\" 2>/dev/null; then exit 0; fi; nohup env COMFY_RUNTIME_MODE=gpu COMFY_NODE_PROFILE=production_minimal COMFY_GPU_PROFILE=${target.gpuProfile} /opt/comfy-runtime/entrypoint.sh >/workspace/logs/runtime-stage3j.log 2>&1 </dev/null & echo $! >/workspace/runtime-stage3j.pid`;
+    const runtime = sshCommand(target, runtimeCommand, 60_000);
     requireSuccess(runtime, "runtime_start_failure");
     const healthDeadline = Date.now() + 5 * 60_000;
     while (Date.now() < healthDeadline) {
-      if (sshCommand(target, "curl -fsS --max-time 5 http://127.0.0.1:8080/health >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8188/system_stats >/dev/null", 20_000).status === 0) break;
+      if (sshCommand(target, "curl -fsS --max-time 5 http://127.0.0.1:8080/healthz >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8188/system_stats >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8188/object_info >/dev/null && test -r /workspace/comfy-user/comfyui.db", 20_000).status === 0) break;
       await sleep(5_000);
     }
-    if (sshCommand(target, "curl -fsS --max-time 5 http://127.0.0.1:8080/health >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8188/system_stats >/dev/null", 20_000).status !== 0) throw new Error("runtime_health_timeout");
+    if (sshCommand(target, "curl -fsS --max-time 5 http://127.0.0.1:8080/healthz >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8188/system_stats >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8188/object_info >/dev/null && test -r /workspace/comfy-user/comfyui.db", 20_000).status !== 0) throw new Error("runtime_health_timeout");
     const port = await availableLoopbackPort();
     const tunnel = spawn("ssh", ["-N", "-i", target.sshKeyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "PasswordAuthentication=no", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-p", String(target.port), "-L", `127.0.0.1:${port}:127.0.0.1:8188`, `${target.username}@${target.host}`], { stdio: "ignore" });
     try {
       await sleep(1500);
       if (tunnel.exitCode !== null) throw new Error("ssh_tunnel_failed");
       const tsxCli = path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
-      const generated = spawnSync(process.execPath, [tsxCli, "scripts/flux-first-image-executor.ts", `--base-url=http://127.0.0.1:${port}`, `--session-id=${sessionId}`, `--provider=${providerId}`, `--gpu-model=${gpuModel}`, `--restore-elapsed-ms=${restoreElapsedMs}`], { cwd: process.cwd(), encoding: "utf8", timeout: 40 * 60_000 });
+      const executeImage = (id: string, width: number, height: number, seed: number) => spawnSync(process.execPath, [tsxCli, "scripts/flux-first-image-executor.ts", `--base-url=http://127.0.0.1:${port}`, `--session-id=${id}`, `--provider=${providerId}`, `--gpu-model=${gpuModel}`, `--restore-elapsed-ms=${restoreElapsedMs}`, `--width=${width}`, `--height=${height}`, `--seed=${seed}`], { cwd: process.cwd(), encoding: "utf8", timeout: 40 * 60_000 });
+      let generated = executeImage(sessionId, 1024, 1024, 20260715);
+      if (generated.status !== 0 && /out of memory|cuda.*memory|oom/i.test(String(generated.stderr ?? generated.stdout ?? ""))) generated = executeImage(sessionId, 768, 768, 20260715);
       const output = requireSuccess(generated, "flux_first_image_generation_failed");
-      return { restoreElapsedMs, generated: JSON.parse(output) as Record<string, unknown> };
+      const warm = executeImage(`${sessionId}-warm`, 768, 768, 20260716);
+      return { restoreElapsedMs, generated: JSON.parse(output) as Record<string, unknown>, warm: warm.status === 0 ? JSON.parse(String(warm.stdout)) as Record<string, unknown> : { attempted: true, succeeded: false } };
     } finally {
       tunnel.kill();
     }
@@ -112,6 +127,7 @@ async function main() {
     console.log(JSON.stringify(await buildProviderDryRun(providerId, requestedGpuType, requestedCloudType), null, 2));
     return;
   }
+  if (providerId === "clore" && !process.argv.includes("--controlled-clore-session")) throw new Error("Real Clore execution requires --controlled-clore-session.");
   if (providerId === "runpod" && !requestedGpuType) throw new Error("Real RunPod execution requires an explicit --gpu-type; the fixed Runtime currently supports RTX 4090/5090 only.");
 
   const provider = getGpuProvider(providerId);
@@ -120,6 +136,8 @@ async function main() {
   const watchdog = runpodConfig ? armRunPodWatchdog(sessionId, runpodConfig.maxSessionUsd) : null;
   const heartbeat = watchdog ? setInterval(() => watchdog.heartbeat(), 60_000) : null;
   let session: GpuSession | null = null;
+  const priorCloreHold = providerId === "clore" ? getCloreDeploymentHold() : null;
+  if (providerId === "clore") setCloreDeploymentHold(false, "stage3m_controlled_execution_session");
   try {
   let state = beginFirstImageState(providerId, sessionId);
   const allCandidates = await provider.listCandidates();
@@ -130,17 +148,17 @@ async function main() {
     state = completeFirstImageStage(state, "candidate_selected", { provider: providerId, candidate: candidates[0]?.id ?? "external" });
   }
   if (nextFirstImageStage(state) === "order_created") {
-    if (!session && providerId === "runpod") {
-      const config = runpodConfig ?? loadRunPodConfig();
+    if (!session && (providerId === "runpod" || providerId === "clore")) {
       const candidate = candidates[0];
-      if (!candidate) throw new Error("No RunPod candidate profile is available.");
-      session = await provider.createSession({ sessionId, candidate, sshPublicKey: readPublicKey(config.sshPublicKeyPath), bootstrapImage: FIXED_RUNTIME_DIGEST, dryRun: false });
+      if (!candidate) throw new Error(`No ${providerId} candidate profile is available.`);
+      const sshPublicKey = providerId === "runpod" ? readPublicKey((runpodConfig ?? loadRunPodConfig()).sshPublicKeyPath) : "managed-by-clore-provider";
+      session = await provider.createSession({ sessionId, candidate, sshPublicKey, bootstrapImage: FIXED_RUNTIME_DIGEST, dryRun: false });
     } else if (!session) {
       session = await provider.getSession(providerId);
     }
     if (!session) throw new Error(`${providerId}_session_unavailable`);
     watchdog?.recordPod(session.id, session.hourlyUsd);
-    state = completeFirstImageStage(state, "order_created", { provider_session_id: session.id, lifecycle_managed: providerId === "runpod", gpu_type: session.gpuType, cloud_type: session.cloudType, costPerHr: session.costPerHr, adjustedCostPerHr: session.adjustedCostPerHr, containerDiskInGb: session.containerDiskInGb, volumeInGb: session.volumeInGb, ...(session.price ?? { computeHourly: null, storageHourly: null, totalHourly: null, projectedSessionTotal: null }) });
+    state = completeFirstImageStage(state, "order_created", { provider_session_id: session.id, lifecycle_managed: providerId !== "manual_ssh", gpu_type: session.gpuType, cloud_type: session.cloudType, costPerHr: session.costPerHr, adjustedCostPerHr: session.adjustedCostPerHr, containerDiskInGb: session.containerDiskInGb, volumeInGb: session.volumeInGb, ...(session.price ?? { computeHourly: null, storageHourly: null, totalHourly: null, projectedSessionTotal: null }) });
   }
   session ??= await provider.recoverExistingSession(sessionId);
   if (!session) throw new Error(`${providerId}_session_recovery_failed`);
@@ -153,7 +171,7 @@ async function main() {
     target ??= await provider.waitForSsh(session, 60_000);
     let gpuModel = "unknown";
     if (nextFirstImageStage(state) === "hardware_verified") {
-      const hardware = sshCommand(target, "set -e; nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader; free -b; df -B1 /workspace; python3.11 -c 'import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"no-cuda\")'", 120_000);
+      const hardware = sshCommand(target, "set -e; nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader; nvidia-smi; free -b; df -B1 /workspace; python3 --version; python3 -c 'import importlib.util; print(\"torch_present=\"+str(importlib.util.find_spec(\"torch\") is not None)); import torch; print(\"torch_version=\"+torch.__version__); print(\"cuda_available=\"+str(torch.cuda.is_available())); print(\"cuda_version=\"+str(torch.version.cuda)); print(\"compute_capability=\"+str(torch.cuda.get_device_capability(0)) if torch.cuda.is_available() else \"compute_capability=none\")' || true; (docker version || true)", 120_000);
       if (hardware.status !== 0) throw new Error("gpu_hardware_verification_failed");
       gpuModel = String(hardware.stdout).split(/\r?\n/)[0]?.split(",")[0]?.trim() || "unknown";
       state = completeFirstImageStage(state, "hardware_verified", { verified: true, gpu_model: gpuModel, inspection_output: String(hardware.stdout), output_sha256_recorded_separately: true });
@@ -163,23 +181,23 @@ async function main() {
       if (nextFirstImageStage(state) === "runtime_ready") state = completeFirstImageStage(state, "runtime_ready", { controller_and_comfy_health_verified: true });
       if (nextFirstImageStage(state) === "models_restored") state = completeFirstImageStage(state, "models_restored", { source: "r2_presigned_get", elapsed_ms: result.restoreElapsedMs, size_and_sha_verified: true });
       state = completeFirstImageStage(state, "prompt_submitted", { submitted_by_existing_executor: true });
-      state = completeFirstImageStage(state, "image_generated", { result: result.generated });
+      state = completeFirstImageStage(state, "image_generated", { result: result.generated, warm_run: result.warm });
       state = completeFirstImageStage(state, "result_synced", { local_archive: true, provider_session_json: true });
     }
     if (nextFirstImageStage(state) === "session_stopped") {
-      sshCommand(target, "if test -s /workspace/runtime-stage3j.pid; then kill -TERM \"$(cat /workspace/runtime-stage3j.pid)\" 2>/dev/null || true; fi; rm -f /workspace/flux-r2-manifest.json", 60_000);
+      sshCommand(target, providerId === "clore" ? "/workspace/clore-light-bootstrap.sh stop || true" : "if test -s /workspace/runtime-stage3j.pid; then kill -TERM \"$(cat /workspace/runtime-stage3j.pid)\" 2>/dev/null || true; fi; rm -f /workspace/flux-r2-manifest.json", 60_000);
       await provider.stopSession(session);
       state = completeFirstImageStage(state, "session_stopped", { runtime_stopped: true });
     }
     if (nextFirstImageStage(state) === "order_cancelled") {
       await provider.terminateSession(session);
       watchdog?.disarm();
-      state = completeFirstImageStage(state, "order_cancelled", { provider_session_terminated: providerId === "runpod", external_lifecycle_untouched: providerId !== "runpod" });
+      state = completeFirstImageStage(state, "order_cancelled", { provider_session_terminated: providerId !== "manual_ssh", external_lifecycle_untouched: providerId === "manual_ssh" });
     }
     console.log(JSON.stringify({ resumed: true, provider: providerId, session_id: session.id, next_stage: nextFirstImageStage(state), completed: state.completed, target: sanitizeGpuTarget(target) }, null, 2));
   } catch (error) {
-    if (target) sshCommand(target, "if test -s /workspace/runtime-stage3j.pid; then kill -TERM \"$(cat /workspace/runtime-stage3j.pid)\" 2>/dev/null || true; fi; rm -f /workspace/flux-r2-manifest.json", 60_000);
-    if (providerId === "runpod") {
+    if (target) sshCommand(target, providerId === "clore" ? "/workspace/clore-light-bootstrap.sh stop || true" : "if test -s /workspace/runtime-stage3j.pid; then kill -TERM \"$(cat /workspace/runtime-stage3j.pid)\" 2>/dev/null || true; fi; rm -f /workspace/flux-r2-manifest.json", 60_000);
+    if (providerId !== "manual_ssh") {
       try { await provider.terminateSession(session); watchdog?.disarm(); } catch { /* Keep Watchdog armed when termination is not confirmed. */ }
     }
     throw error;
@@ -189,6 +207,7 @@ async function main() {
     throw error;
   } finally {
     if (heartbeat) clearInterval(heartbeat);
+    if (providerId === "clore") setCloreDeploymentHold(true, priorCloreHold?.reason || "stage3m_session_complete");
   }
 }
 

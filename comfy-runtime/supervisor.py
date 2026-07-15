@@ -15,10 +15,11 @@ WORKSPACE = Path("/workspace")
 LOG_DIR = WORKSPACE / "logs"
 COMFY_USER_DIR = WORKSPACE / "comfy-user"
 COMFY_DATABASE_PATH = COMFY_USER_DIR / "comfyui.db"
-COMFY_DIR = Path("/opt/ComfyUI")
-RUNTIME_DIR = Path("/opt/comfy-runtime")
+COMFY_DIR = Path(os.environ.get("COMFYUI_DIR", "/opt/ComfyUI"))
+RUNTIME_DIR = Path(os.environ.get("COMFY_RUNTIME_DIR", "/opt/comfy-runtime"))
+COMFY_PYTHON = os.environ.get("COMFY_PYTHON", "python3.11")
 SMOKE_IMPORT_BLOCKER = RUNTIME_DIR / "smoke_import_blocker"
-GPU_PROFILES = {"rtx4090", "rtx5090"}
+GPU_PROFILES = {"rtx4090", "rtx5090", "ampere_image_gpu"}
 REQUIRED_DIRS = [
     WORKSPACE / "models",
     WORKSPACE / "comfy-input",
@@ -115,7 +116,7 @@ def wait_http(url: str, timeout_seconds: int) -> bool:
 def gpu_preflight() -> None:
     gpu_profile = os.environ.get("COMFY_GPU_PROFILE", "")
     if gpu_profile not in GPU_PROFILES:
-        log("gpu_preflight_failed: COMFY_GPU_PROFILE must be rtx4090 or rtx5090")
+        log("gpu_preflight_failed: unsupported COMFY_GPU_PROFILE")
         raise SystemExit(42)
 
     python_path = os.environ.get("PYTHONPATH", "")
@@ -132,13 +133,36 @@ def gpu_preflight() -> None:
         log("gpu_preflight_failed: nvidia-smi unavailable")
         raise SystemExit(42)
     code = (
-        "import torch,sys; "
-        "sys.exit(0 if torch.cuda.is_available() and torch.cuda.device_count() > 0 else 1)"
+        "import json,torch,sys; "
+        "ok=torch.cuda.is_available() and torch.cuda.device_count()>0; "
+        "p=torch.cuda.get_device_properties(0) if ok else None; "
+        "print(json.dumps({'ok':ok,'name':p.name if p else None,'capability':[p.major,p.minor] if p else None,'vram_bytes':p.total_memory if p else 0})); "
+        "sys.exit(0 if ok else 1)"
     )
-    torch_check = subprocess.run(["python3.11", "-c", code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    torch_check = subprocess.run([COMFY_PYTHON, "-c", code], capture_output=True, text=True)
     if torch_check.returncode != 0:
         log("gpu_preflight_failed: torch cuda unavailable")
         raise SystemExit(42)
+    import json
+    hardware = json.loads(torch_check.stdout.strip().splitlines()[-1])
+    capability = tuple(hardware.get("capability") or [0, 0])
+    vram_gb = float(hardware.get("vram_bytes", 0)) / 1024**3
+    if capability < (8, 0):
+        log(f"gpu_preflight_failed: compute capability {capability[0]}.{capability[1]} is below Ampere")
+        raise SystemExit(42)
+    if vram_gb < 20:
+        log(f"gpu_preflight_failed: VRAM {vram_gb:.2f}GB is below 20GB")
+        raise SystemExit(42)
+    if capability < (8, 9):
+        os.environ["COMFY_FORCE_FP16"] = "1"
+    if vram_gb < 24:
+        os.environ["COMFY_CPU_OFFLOAD_REQUIRED"] = "1"
+    log(
+        "gpu_preflight_ok "
+        f"profile={gpu_profile} name={hardware.get('name')} capability={capability[0]}.{capability[1]} "
+        f"vram_gb={vram_gb:.2f} fp16_compute={os.environ.get('COMFY_FORCE_FP16') == '1'} "
+        f"cpu_offload={os.environ.get('COMFY_CPU_OFFLOAD_REQUIRED') == '1'}"
+    )
 
 
 def comfy_args(mode: str) -> list[str]:
@@ -146,7 +170,7 @@ def comfy_args(mode: str) -> list[str]:
     port = os.environ.get("COMFYUI_PORT", "8188")
     node_profile = os.environ.get("COMFY_NODE_PROFILE", "production_minimal")
     args = [
-        "python3.11",
+        COMFY_PYTHON,
         str(RUNTIME_DIR / "launch_comfy.py"),
         "--node-profile",
         node_profile,
@@ -171,6 +195,10 @@ def comfy_args(mode: str) -> list[str]:
     ]
     if mode == "smoke_cpu":
         args.extend(["--cpu", "--preview-method", "none"])
+    elif os.environ.get("COMFY_FORCE_FP16") == "1":
+        args.append("--force-fp16")
+    if mode != "smoke_cpu" and os.environ.get("COMFY_CPU_OFFLOAD_REQUIRED") == "1":
+        args.append("--lowvram")
     return args
 
 
@@ -259,7 +287,7 @@ def main() -> int:
     controller = start_process(
         "controller",
         [
-            "python3.11",
+            COMFY_PYTHON,
             str(RUNTIME_DIR / "controller.py"),
             "--host",
             controller_host,

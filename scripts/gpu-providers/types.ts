@@ -1,6 +1,6 @@
 export type GpuProviderId = "clore" | "runpod" | "manual_ssh";
 
-export type GpuProfile = "rtx4090" | "rtx5090" | "bootstrap_image_gpu";
+export type GpuProfile = "rtx4090" | "rtx5090" | "ampere_image_gpu" | "bootstrap_image_gpu";
 
 export type GpuTarget = {
   provider: GpuProviderId;

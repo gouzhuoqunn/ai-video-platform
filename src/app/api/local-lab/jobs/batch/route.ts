@@ -3,6 +3,7 @@ import { LOCAL_LAB_ROLE } from "@/lib/local-lab/config";
 import { guardLocalLabMutation } from "@/lib/local-lab/route-guard";
 import { getSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { batchThreshold, shouldArmCloreScheduler } from "@/lib/local-lab/studio-mode";
 
 type BatchAction = "confirm" | "urgent" | "delete" | "regenerate";
 
@@ -52,6 +53,13 @@ async function createAutoRentRequest(input: {
   return { request: data, error: null };
 }
 
+async function queuedCount(userId: string) {
+  const admin = getSupabaseAdminClient();
+  const { count, error } = await admin.from("video_jobs").select("id", { count: "exact", head: true }).eq("user_id", userId).eq("status", "queued").is("deleted_at", null);
+  if (error) throw new Error("Unable to count queued tasks.");
+  return count ?? 0;
+}
+
 export async function POST(request: NextRequest) {
   const guard = guardLocalLabMutation(request);
   if (guard) return guard;
@@ -96,8 +104,10 @@ export async function POST(request: NextRequest) {
   if (action === "confirm") {
     const { data, error } = await supabase.rpc("confirm_video_jobs", { p_job_ids: jobIds, p_urgent: false });
     if (error) return NextResponse.json({ error: error.message.split("\n")[0] }, { status: 409 });
+    const queueSize = await queuedCount(user.id);
+    const scheduler = shouldArmCloreScheduler({ immediate: false, queuedCount: queueSize, threshold: batchThreshold() });
     const autorent =
-      gpuMode === "current"
+      gpuMode === "current" || !scheduler.schedulerArmed
         ? { request: null, error: null }
         : await createAutoRentRequest({ supabase, jobIds, priority: "normal", minEffectiveHourlyUsd, maxEffectiveHourlyUsd });
     return NextResponse.json({
@@ -108,12 +118,18 @@ export async function POST(request: NextRequest) {
       autorent_error: autorent.error,
       real_clore_create_enabled: process.env.CLORE_AUTORENT_ENABLED === "true",
       create_order_called: false,
+      automatic_provider: scheduler.provider,
+      scheduler_armed: scheduler.schedulerArmed,
+      batch_threshold: batchThreshold(),
+      queued_count: queueSize,
     });
   }
 
   if (action === "urgent") {
     const { data, error } = await supabase.rpc("mark_video_jobs_urgent", { p_job_ids: jobIds });
     if (error) return NextResponse.json({ error: error.message.split("\n")[0] }, { status: 409 });
+    const queueSize = await queuedCount(user.id);
+    const scheduler = shouldArmCloreScheduler({ immediate: true, queuedCount: queueSize, threshold: batchThreshold() });
     const autorent =
       gpuMode === "current"
         ? { request: null, error: null }
@@ -126,6 +142,10 @@ export async function POST(request: NextRequest) {
       autorent_error: autorent.error,
       real_clore_create_enabled: process.env.CLORE_AUTORENT_ENABLED === "true",
       create_order_called: false,
+      automatic_provider: scheduler.provider,
+      scheduler_armed: scheduler.schedulerArmed,
+      batch_threshold: batchThreshold(),
+      queued_count: queueSize,
     });
   }
 

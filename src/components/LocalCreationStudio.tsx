@@ -8,6 +8,7 @@ import { VIDEO_JOB_SELECT_FIELDS } from "@/lib/video-jobs/fields";
 import { requestSignedVideoUrl } from "@/lib/video-jobs/signed-url";
 import { videoJobStatusLabels } from "@/types/video-config";
 import type { SignedVideoResponse, VideoJob, VideoJobStatus, VideoJobWithBalance } from "@/types/video-jobs";
+import { normalizeStudioMode, STUDIO_MODE_STORAGE_KEY, type StudioMode } from "@/lib/local-lab/studio-mode";
 
 type JobCounts = Partial<Record<VideoJobStatus, number>>;
 
@@ -74,6 +75,9 @@ type AutorentRequest = {
 };
 
 type BatchGpuMode = "auto" | "current" | "wait_for_current_to_close";
+
+type ImageResult = { sessionId: string; date: string; metadata: Record<string, unknown> | null; imageUrl: string };
+type PendingImage = { sessionId: string; completedStages: string[]; status: "pending" | "completed" };
 
 const starterPrompt = "A clean text-only 5 second video title card, cinematic lighting, no people, no logos.";
 
@@ -170,6 +174,10 @@ export function LocalCreationStudio() {
   const [filter, setFilter] = useState<"all" | VideoJobStatus>("all");
   const [minPrice, setMinPrice] = useState("0");
   const [maxPrice, setMaxPrice] = useState("0.70");
+  const [mode, setMode] = useState<StudioMode>("video");
+  const [imageResults, setImageResults] = useState<ImageResult[]>([]);
+  const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
+  const [selectedImageId, setSelectedImageId] = useState("");
 
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
   const localResultForSelected = selectedJob ? localResults.find((result) => result.jobId === selectedJob.id) : null;
@@ -178,6 +186,7 @@ export function LocalCreationStudio() {
   const pendingJobs = visibleJobs.filter((job) => job.status === "pending_confirmation");
   const selectedPendingCount = selectedJobIds.filter((id) => jobs.find((job) => job.id === id)?.status === "pending_confirmation").length;
   const activeAutorent = autorentRequests.find((request) => !["assigned", "failed", "cancelled"].includes(request.status));
+  const selectedImage = imageResults.find((result) => result.sessionId === selectedImageId) ?? imageResults[0] ?? null;
 
   const priceGate = useMemo(() => {
     const min = parsePrice(minPrice);
@@ -238,6 +247,15 @@ export function LocalCreationStudio() {
     if (response.ok) setLocalResults(payload.results ?? []);
   }, []);
 
+  const refreshImageResults = useCallback(async () => {
+    const response = await fetch("/api/local-lab/image-results");
+    const payload = (await response.json().catch(() => ({}))) as { results?: ImageResult[]; pending?: PendingImage | null };
+    if (!response.ok) return;
+    setImageResults(payload.results ?? []);
+    setPendingImage(payload.pending ?? null);
+    setSelectedImageId((current) => current || payload.results?.[0]?.sessionId || "");
+  }, []);
+
   const refreshClore = useCallback(async () => {
     const useVisualMock = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("visual_mock") === "1";
     const [candidateResponse, sessionResponse, autorentResponse] = await Promise.all([
@@ -274,24 +292,34 @@ export function LocalCreationStudio() {
       const { data } = await auth.getUser();
       if (!mounted) return;
       setUser(data.user);
-      setNotice("本地实验模式已就绪。GPU自动租用暂时停用，等待Clore平台恢复。");
-      await Promise.all([refreshJobs(data.user), refreshResults(), refreshClore()]);
+      setNotice("本地实验模式已就绪。自动调度仅使用Clore，并受任务与候选安全门控制。");
+      await Promise.all([refreshJobs(data.user), refreshResults(), refreshImageResults(), refreshClore()]);
     }
 
     void restore();
     return () => {
       mounted = false;
     };
-  }, [refreshClore, refreshJobs, refreshResults, supabase]);
+  }, [refreshClore, refreshImageResults, refreshJobs, refreshResults, supabase]);
+
+  useEffect(() => {
+    setMode(normalizeStudioMode(window.localStorage.getItem(STUDIO_MODE_STORAGE_KEY)));
+  }, []);
+
+  function selectMode(next: StudioMode) {
+    setMode(next);
+    window.localStorage.setItem(STUDIO_MODE_STORAGE_KEY, next);
+  }
 
   useEffect(() => {
     const interval = window.setInterval(() => {
       void refreshJobs();
       void refreshResults();
+      void refreshImageResults();
       void refreshClore();
     }, 5000);
     return () => window.clearInterval(interval);
-  }, [refreshClore, refreshJobs, refreshResults]);
+  }, [refreshClore, refreshImageResults, refreshJobs, refreshResults]);
 
   useEffect(() => {
     if (!selectedJob || selectedJob.status !== "succeeded" || localResultForSelected?.videoUrl || signedVideos[selectedJob.id]) return;
@@ -341,7 +369,7 @@ export function LocalCreationStudio() {
   async function runBatch(action: "confirm" | "urgent" | "delete" | "regenerate", gpuMode: BatchGpuMode = "auto", targetJobIds = selectedJobIds) {
     if (targetJobIds.length === 0 || isBatching) return;
     if (!priceGate.valid || priceGate.min === null || priceGate.max === null) {
-      setNotice("请先保存合法的 GPU 单价范围，Max 不得超过 $0.70/h。");
+      setNotice("请先保存合法的GPU单价范围，最高不得超过 $0.70/小时。");
       return;
     }
 
@@ -373,8 +401,8 @@ export function LocalCreationStudio() {
       }
       setSelectedJobIds([]);
       if (payload.regenerated?.[0]) setSelectedJobId(payload.regenerated[0].id);
-      const labels = { confirm: "确认生成", urgent: "加急生成", delete: "删除", regenerate: "重新生成" };
-      const gpuModeNote = gpuMode === "current" ? "已加入当前GPU队列，不创建新的自动寻机请求。" : "真实Clore自动租用暂时停用，mock寻机状态会继续推进。";
+      const labels = { confirm: "确认生成", urgent: "立即生成", delete: "删除", regenerate: "重新生成" };
+      const gpuModeNote = gpuMode === "current" ? "已加入当前GPU队列，不创建新的寻机请求。" : "任务已进入Clore调度安全门；没有合规主机时不会创建订单。";
       setNotice(`${labels[action]}已提交。${gpuModeNote}`);
       await Promise.all([refreshJobs(), refreshClore()]);
     } finally {
@@ -385,7 +413,7 @@ export function LocalCreationStudio() {
   async function tickAutorent() {
     const response = await fetch("/api/local-lab/clore/autorent", { method: "POST" });
     const payload = (await response.json().catch(() => ({}))) as { note?: string; error?: string };
-    setNotice(payload.note ?? payload.error ?? "mock自动寻机已推进。");
+    setNotice(payload.note ?? payload.error ?? "调度状态已推进。");
     await refreshClore();
   }
 
@@ -420,8 +448,8 @@ export function LocalCreationStudio() {
             <Link className="rounded-md border border-stone-200 bg-white px-3 py-2 font-semibold text-stone-700" href="/generate/5090">
               5090
             </Link>
-            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">未生成 {counts.pending_confirmation ?? 0}</span>
-            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">排队 {counts.queued ?? 0}</span>
+            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? `图片 ${imageResults.length}` : `未生成 ${counts.pending_confirmation ?? 0}`}</span>
+            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? `图片任务 ${pendingImage?.status === "pending" ? 1 : 0}` : `排队 ${counts.queued ?? 0}`}</span>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">GPU {session?.orderId ? "运行中" : "无"}</span>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">Wan2.2 TI2V-5B</span>
             <span className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 font-semibold text-emerald-800">积分 ∞</span>
@@ -433,14 +461,19 @@ export function LocalCreationStudio() {
         <section className="space-y-5">
           <div className="overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
             <div className="aspect-video bg-[#1f1f1f]">
-              {selectedJob?.status === "succeeded" && mainVideoUrl ? (
+              {mode === "image" && selectedImage ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img alt="生成图片预览" className="h-full w-full bg-black object-contain" src={selectedImage.imageUrl} />
+              ) : mode === "video" && selectedJob?.status === "succeeded" && mainVideoUrl ? (
                 <video className="h-full w-full bg-black object-contain" controls playsInline src={mainVideoUrl} />
               ) : (
                 <div className="flex h-full flex-col items-center justify-center px-6 text-center text-stone-100">
-                  <p className="text-sm font-semibold text-stone-400">{selectedJob ? videoJobStatusLabels[selectedJob.status] : "未选择任务"}</p>
-                  <h2 className="mt-3 text-2xl font-bold">{selectedJob ? generationLabel(selectedJob) : "暂无可播放视频"}</h2>
+                  <p className="text-sm font-semibold text-stone-400">{mode === "image" ? (pendingImage?.status === "pending" ? "等待真实GPU" : "未选择图片") : selectedJob ? videoJobStatusLabels[selectedJob.status] : "未选择任务"}</p>
+                  <h2 className="mt-3 text-2xl font-bold">{mode === "image" ? "暂无可预览图片" : selectedJob ? generationLabel(selectedJob) : "暂无可播放视频"}</h2>
                   <p className="mt-2 max-w-xl text-sm text-stone-400">
-                    {selectedJob
+                    {mode === "image"
+                      ? "首张FLUX图片任务保留在任务池，受控Clore会话就绪后执行。"
+                      : selectedJob
                       ? selectedJob.status === "queued" && activeAutorent
                         ? "正在寻找符合价格条件的GPU"
                         : etaText(selectedJob, jobs)
@@ -456,8 +489,8 @@ export function LocalCreationStudio() {
             </div>
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-stone-200 bg-[#faf8f4] px-4 py-3 text-sm">
               <div>
-                <p className="font-semibold">{selectedJob ? safePromptPreview(selectedJob.prompt) : "选择任务后会在这里显示"}</p>
-                <p className="text-stone-500">{selectedJob ? `${videoJobStatusLabels[selectedJob.status]} · ${etaText(selectedJob, jobs)}` : "未生成任务需要确认或加急后才会进入队列"}</p>
+                <p className="font-semibold">{mode === "image" ? (selectedImage?.sessionId ?? pendingImage?.sessionId ?? "首张FLUX图片") : selectedJob ? safePromptPreview(selectedJob.prompt) : "选择任务后会在这里显示"}</p>
+                <p className="text-stone-500">{mode === "image" ? (selectedImage ? "图片已完成并保存到本地" : "图片任务等待受控Clore调度") : selectedJob ? `${videoJobStatusLabels[selectedJob.status]} · ${etaText(selectedJob, jobs)}` : "未生成任务需要确认或立即生成后才会进入队列"}</p>
               </div>
               <span className="rounded-md border border-stone-200 bg-white px-3 py-2 text-xs text-stone-600">短期签名播放 · 本地结果优先</span>
             </div>
@@ -467,25 +500,31 @@ export function LocalCreationStudio() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-bold">新提示词</h2>
-                <p className="text-sm text-stone-500">提交后立即扣积分，但先停留为未生成任务。</p>
+                <p className="text-sm text-stone-500">{mode === "image" ? "图片模式显示首图任务和本地图片结果。" : "提交后立即扣积分，但先停留为未生成任务。"}</p>
               </div>
-              <span className="rounded-md bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">真实GPU自动租用关闭</span>
+              <span className="rounded-md bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">Clore安全调度</span>
             </div>
-            <textarea
-              className="mt-3 min-h-32 w-full resize-y rounded-md border border-stone-200 bg-[#faf8f4] p-4 leading-7 outline-none focus:border-emerald-500"
-              maxLength={2000}
-              onChange={(event) => setPrompt(event.target.value)}
-              value={prompt}
-            />
+            <div className="relative mt-3">
+              <textarea
+                className="min-h-32 w-full resize-y rounded-md border border-stone-200 bg-[#faf8f4] p-4 pb-16 leading-7 outline-none focus:border-emerald-500"
+                maxLength={2000}
+                onChange={(event) => setPrompt(event.target.value)}
+                value={prompt}
+              />
+              <div className="absolute bottom-3 right-3 flex rounded-md border border-stone-300 bg-white p-1 text-sm font-semibold">
+                <button className={`rounded px-3 py-1.5 ${mode === "image" ? "bg-stone-900 text-white" : "text-stone-600"}`} onClick={() => selectMode("image")} type="button">图片</button>
+                <button className={`rounded px-3 py-1.5 ${mode === "video" ? "bg-stone-900 text-white" : "text-stone-600"}`} onClick={() => selectMode("video")} type="button">视频</button>
+              </div>
+            </div>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
               <span className="text-sm text-stone-500">{prompt.trim().length}/2000</span>
               <button
                 className="rounded-md bg-emerald-700 px-5 py-3 text-sm font-bold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-400"
-                disabled={isSubmitting || !user}
+                disabled={isSubmitting || !user || mode === "image"}
                 onClick={() => void submitPrompt()}
                 type="button"
               >
-                {isSubmitting ? "创建中..." : "创建未生成任务"}
+                {mode === "image" ? "首图任务已在任务池" : isSubmitting ? "创建中..." : "创建未生成任务"}
               </button>
             </div>
             {notice ? <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">{notice}</p> : null}
@@ -494,10 +533,10 @@ export function LocalCreationStudio() {
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-bold">任务列表</h2>
-                <p className="text-sm text-stone-500">点击任务切换主播放器；勾选任务后可批量操作。</p>
+                <h2 className="text-lg font-bold">{mode === "image" ? "图片任务" : "视频任务"}</h2>
+                <p className="text-sm text-stone-500">{mode === "image" ? "显示待执行首图任务和已保存图片。" : "点击任务切换主播放器；勾选任务后可批量操作。"}</p>
               </div>
-              <div className="flex flex-wrap gap-2 text-sm">
+              {mode === "video" ? <div className="flex flex-wrap gap-2 text-sm">
                 {(["all", "pending_confirmation", "queued", "processing", "succeeded", "failed"] as const).map((status) => (
                   <button
                     className={`rounded-md border px-3 py-1.5 ${filter === status ? "border-stone-900 bg-stone-900 text-white" : "border-stone-200 bg-white"}`}
@@ -508,14 +547,14 @@ export function LocalCreationStudio() {
                     {status === "all" ? "全部" : videoJobStatusLabels[status]}
                   </button>
                 ))}
-              </div>
+              </div> : null}
             </div>
 
-            {selectedJobIds.length > 0 ? (
+            {mode === "video" && selectedJobIds.length > 0 ? (
               <div className="mt-4 flex flex-wrap items-center gap-2 rounded-md border border-stone-200 bg-[#faf8f4] p-3">
                 <span className="text-sm font-semibold">已选 {selectedJobIds.length}</span>
                 <button className="rounded-md bg-emerald-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-400" disabled={isBatching} onClick={() => requestBatch("urgent")} type="button">
-                  加急生成
+                  立即生成
                 </button>
                 <button className="rounded-md bg-stone-900 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-400" disabled={isBatching} onClick={() => requestBatch("confirm")} type="button">
                   确认生成
@@ -529,15 +568,33 @@ export function LocalCreationStudio() {
               </div>
             ) : null}
 
-            <div className="mt-4 flex items-center gap-2">
+            {mode === "video" ? <div className="mt-4 flex items-center gap-2">
               <input checked={pendingJobs.length > 0 && pendingJobs.length === selectedPendingCount} className="h-4 w-4" onChange={selectAllPending} type="checkbox" />
               <button className="text-sm font-semibold text-stone-700" onClick={selectAllPending} type="button">
                 全选未生成任务
               </button>
-            </div>
+            </div> : null}
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              {visibleJobs.map((job) => {
+              {mode === "image" ? (
+                <>
+                  {pendingImage?.status === "pending" ? (
+                    <article className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                      <div className="flex items-center justify-between gap-2"><p className="font-semibold">首张FLUX真实图片</p><span className="rounded-md border border-amber-200 bg-white px-2 py-1 text-xs">等待调度</span></div>
+                      <p className="mt-3 text-sm text-stone-600">已完成 {pendingImage.completedStages.length} 个执行阶段；任务继续保留在任务池。</p>
+                    </article>
+                  ) : null}
+                  {imageResults.map((image) => (
+                    <article className={`rounded-lg border p-3 ${selectedImage?.sessionId === image.sessionId ? "border-stone-900 bg-[#faf8f4]" : "border-stone-200"}`} key={image.sessionId}>
+                      <button className="aspect-square w-full overflow-hidden rounded-md bg-stone-100" onClick={() => setSelectedImageId(image.sessionId)} type="button">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img alt="已完成图片" className="h-full w-full object-cover" src={image.imageUrl} />
+                      </button>
+                      <p className="mt-3 break-all text-sm font-semibold">{image.sessionId}</p><p className="mt-1 text-xs text-stone-500">{image.date} · 已完成</p>
+                    </article>
+                  ))}
+                </>
+              ) : visibleJobs.map((job) => {
                 const localResult = localResults.find((result) => result.jobId === job.id);
                 const selectable = job.status === "pending_confirmation" || job.status === "queued" || job.status === "failed" || job.status === "canceled" || job.status === "succeeded";
                 return (
@@ -571,22 +628,22 @@ export function LocalCreationStudio() {
             <h2 className="text-lg font-bold">GPU 价格筛选</h2>
             <div className="mt-3 grid grid-cols-2 gap-2">
               <label className="text-sm">
-                Min USD/h
+                最低美元/小时
                 <input className="mt-1 w-full rounded-md border border-stone-200 bg-[#faf8f4] px-2 py-2" onChange={(event) => setMinPrice(event.target.value)} value={minPrice} />
               </label>
               <label className="text-sm">
-                Max USD/h
+                最高美元/小时
                 <input className="mt-1 w-full rounded-md border border-stone-200 bg-[#faf8f4] px-2 py-2" onChange={(event) => setMaxPrice(event.target.value)} value={maxPrice} />
               </label>
             </div>
             <p className={`mt-2 text-xs ${priceGate.valid ? "text-emerald-700" : "text-rose-700"}`}>
-              {priceGate.valid ? "价格范围有效，按含5%租客费小时价过滤。" : "非法输入不会保存或触发寻机，Max 不得超过 $0.70/h。"}
+              {priceGate.valid ? "价格范围有效，按含5%租客费小时价过滤。" : "非法输入不会保存或触发寻机，最高价不得超过 $0.70/小时。"}
             </p>
           </section>
 
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <div className="flex items-center justify-between gap-2">
-              <h2 className="text-lg font-bold">Clore RTX 5090 候选</h2>
+              <h2 className="text-lg font-bold">Clore 合规GPU候选</h2>
               <button className="rounded-md border border-stone-200 bg-[#faf8f4] px-2 py-1 text-xs font-semibold" onClick={() => void refreshClore()} type="button">
                 刷新
               </button>
@@ -615,9 +672,9 @@ export function LocalCreationStudio() {
 
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <h2 className="text-lg font-bold">自动寻机</h2>
-            <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">{session?.deploymentHold ? "Clore部署异常，等待平台处理" : "GPU自动租用暂时停用，等待Clore平台恢复。"}</p>
+            <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">{session?.deploymentHold ? "Clore自动调度已安全暂停" : "任务就绪且存在合规主机时，调度器才允许创建订单。"}</p>
             <button className="mt-3 w-full rounded-md border border-stone-300 bg-white px-3 py-2 font-semibold" onClick={() => void tickAutorent()} type="button">
-              推进mock寻机tick
+              推进调度状态
             </button>
             <div className="mt-3 space-y-2 text-sm">
               {autorentRequests.slice(0, 5).map((request) => (
@@ -630,7 +687,7 @@ export function LocalCreationStudio() {
                       </button>
                     ) : null}
                   </div>
-                  <p className="mt-1 text-xs text-stone-500">Max {formatMoney(Number(request.max_effective_hourly_usd))}/h · {request.selected_server_id ?? "未选主机"}</p>
+                  <p className="mt-1 text-xs text-stone-500">最高 {formatMoney(Number(request.max_effective_hourly_usd))}/小时 · {request.selected_server_id ?? "未选主机"}</p>
                 </div>
               ))}
             </div>

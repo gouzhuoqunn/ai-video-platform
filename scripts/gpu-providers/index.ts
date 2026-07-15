@@ -10,7 +10,7 @@ export function getGpuProvider(id: GpuProviderId): GpuProvider {
 }
 
 export function parseProviderArg(argv = process.argv): GpuProviderId {
-  const value = argv.find((item) => item.startsWith("--provider="))?.slice("--provider=".length) ?? "runpod";
+  const value = argv.find((item) => item.startsWith("--provider="))?.slice("--provider=".length) ?? "clore";
   if (value !== "clore" && value !== "runpod" && value !== "manual_ssh") throw new Error("Use --provider=clore, --provider=runpod, or --provider=manual_ssh.");
   return value;
 }

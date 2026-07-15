@@ -29,14 +29,16 @@
       "fluxFirstImageVerified": false,
       "gpuPipelineBootVerified": false,
       "bootstrapImageGpuProfile": {
-        "status": "orchestration-ready-runtime-not-yet-compatible",
-        "minimumVramGb": 16,
+        "status": "stage3m-prototype-overlay-ready",
+        "profile": "ampere_image_gpu",
+        "acceptedComputeCapability": ">=8.0",
+        "minimumVramGb": 20,
         "minimumRamGb": 32,
         "minimumDiskGb": 120,
         "maxEffectiveHourlyUsd": 0.7,
         "productionReady": false,
         "rtx4090BenchmarkVerified": false,
-        "note": "The fixed Runtime digest accepts only rtx4090 and rtx5090. Lower-tier bootstrap candidates remain fail-closed until a separately authorized Runtime image adds that profile."
+        "note": "The immutable image remains unchanged. A small Stage 3M runtime overlay adds capability-based Ampere admission, FP16 compute fallback below capability 8.9, and low-VRAM CPU offload only below 24GB."
       },
       "lastFirstImageAttempt": {
         "provider": "Clore",
