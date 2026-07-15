@@ -28,6 +28,7 @@ env:
 jobs:
   verify-existing-flux:
     name: Verify existing FLUX 4B object
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip model-cache]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -60,6 +61,7 @@ jobs:
 
   cache-qwen:
     name: Cache Qwen FLUX text encoder
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip model-cache]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
     outputs:
@@ -122,6 +124,7 @@ jobs:
 
   cache-vae:
     name: Cache FLUX VAE
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip model-cache]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     outputs:
@@ -186,7 +189,8 @@ jobs:
       - cache-qwen
       - cache-vae
     if: >-
-      ${{ needs.verify-existing-flux.outputs.flux_verified == 'true' &&
+      ${{ (github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip model-cache]')) &&
+          needs.verify-existing-flux.outputs.flux_verified == 'true' &&
           needs.cache-qwen.outputs.qwen_verified == 'true' &&
           needs.cache-vae.outputs.vae_verified == 'true' }}
     env:

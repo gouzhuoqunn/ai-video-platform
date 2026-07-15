@@ -3,7 +3,7 @@ import path from "node:path";
 
 export const FIRST_IMAGE_STAGES = ["candidate_selected", "order_created", "ssh_ready", "hardware_verified", "runtime_ready", "models_restored", "prompt_submitted", "image_generated", "result_synced", "session_stopped", "order_cancelled"] as const;
 export type FirstImageStage = (typeof FIRST_IMAGE_STAGES)[number];
-export type FirstImageState = { schema_version: 1; provider: "clore" | "manual_ssh"; completed: FirstImageStage[]; updated_at: string; session_id: string; details: Record<string, unknown> };
+export type FirstImageState = { schema_version: 1; provider: "clore" | "runpod" | "manual_ssh"; completed: FirstImageStage[]; updated_at: string; session_id: string; details: Record<string, unknown> };
 function statePath() {
   return path.join(process.cwd(), ".secrets", "first-image-state.json");
 }

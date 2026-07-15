@@ -1,58 +1,173 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import net from "node:net";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
-import { beginFirstImageState, completeFirstImageStage, nextFirstImageStage, readFirstImageState } from "./first-image-state";
-import { COMFY_RUNTIME_IMAGE } from "./clore/config";
-import { getPrivateKeyPath } from "./clore/ssh-client";
-import { getCloreDeploymentHold } from "./clore/deployment-hold";
+import { beginFirstImageState, completeFirstImageStage, nextFirstImageStage } from "./first-image-state";
+import { sanitizeGpuTarget, scpFile, sleep, sshCommand } from "./gpu-providers/common";
+import { getGpuProvider, parseProviderArg, type GpuProviderId } from "./gpu-providers";
+import { buildRunPodCreatePayload, loadRunPodConfig, RUNPOD_BOOTSTRAP_IMAGE } from "./gpu-providers/runpod";
+import { writeColabBundle } from "./first-image-colab-bundle";
+import type { GpuTarget } from "./gpu-providers/types";
 
-export type GpuTarget = { provider: "clore" | "manual_ssh"; host: string; port: number; username: string; sshKeyPath: string; gpuProfile: "rtx4090" | "rtx5090" | "bootstrap_image_gpu"; runtimeDigest: string };
-const MANUAL_TARGET_PATH = path.join(process.cwd(), ".secrets", "manual-gpu-target.json");
-const CLORE_TARGET_PATH = path.join(process.cwd(), ".secrets", "clore-ssh-target.json");
+function argument(name: string) {
+  const inline = process.argv.find((item) => item.startsWith(`--${name}=`));
+  if (inline) return inline.slice(name.length + 3);
+  const index = process.argv.indexOf(`--${name}`);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+}
 
-function providerArg() {
-  const value = process.argv.find((item) => item.startsWith("--provider="))?.slice("--provider=".length);
-  if (value !== "clore" && value !== "manual_ssh") throw new Error("Use --provider=clore or --provider=manual_ssh.");
+function dryRunPublicKey() {
+  return "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFN0YWdlM0pEcnlSdW5Pbmx5S2V5 stage3j-dry-run";
+}
+
+function readPublicKey(filePath: string) {
+  if (!existsSync(filePath)) throw new Error("RunPod SSH public key is missing.");
+  const value = readFileSync(filePath, "utf8").split(/\r?\n/)[0].trim();
+  if (!value || /PRIVATE KEY/.test(value)) throw new Error("RunPod requires an SSH public key, not a private key.");
   return value;
 }
 
-export function loadGpuTarget(provider: GpuTarget["provider"]): GpuTarget {
-  const source = provider === "manual_ssh" ? MANUAL_TARGET_PATH : CLORE_TARGET_PATH;
-  if (!existsSync(source)) throw new Error(`${provider} target is missing from .secrets.`);
-  const input = JSON.parse(readFileSync(source, "utf8")) as Partial<GpuTarget> & { user?: string };
-  const target: GpuTarget = { provider, host: String(input.host ?? ""), port: Number(input.port), username: String(input.username ?? input.user ?? "root"), sshKeyPath: String(input.sshKeyPath ?? (provider === "clore" ? getPrivateKeyPath() : "")), gpuProfile: input.gpuProfile === "rtx5090" || input.gpuProfile === "bootstrap_image_gpu" ? input.gpuProfile : "rtx4090", runtimeDigest: String(input.runtimeDigest ?? COMFY_RUNTIME_IMAGE) };
-  if (!target.host || !Number.isInteger(target.port) || target.port < 1 || target.port > 65535 || !target.sshKeyPath || !target.runtimeDigest.includes("@sha256:")) throw new Error("GpuTarget is incomplete or does not use a fixed Runtime digest.");
-  if (!existsSync(target.sshKeyPath)) throw new Error("GpuTarget SSH private key path is unavailable.");
-  return target;
+export async function buildProviderDryRun(providerId: GpuProviderId) {
+  const provider = getGpuProvider(providerId);
+  const credentials = await provider.inspectCredentials();
+  const candidates = await provider.listCandidates();
+  const candidate = candidates[0];
+  const runpodPayload = providerId === "runpod" && candidate
+    ? buildRunPodCreatePayload({ sessionId: "dry-run", candidate, sshPublicKey: dryRunPublicKey(), bootstrapImage: RUNPOD_BOOTSTRAP_IMAGE, dryRun: true })
+    : null;
+  return {
+    dry_run: true,
+    provider: providerId,
+    credentials,
+    candidates,
+    create_session_called: false,
+    payload: runpodPayload,
+    model_restore_order: ["R2 current.json", "revision manifest", "read-only presigned downloads", "HF fallback once after R2 failure"],
+  };
 }
 
-export function sanitizeGpuTarget(target: GpuTarget) {
-  return { provider: target.provider, host_suffix: target.host.split(".").slice(-2).join("."), port: target.port, username: target.username, gpu_profile: target.gpuProfile, runtime_digest_pinned: target.runtimeDigest.includes("@sha256:"), ssh_private_key_returned: false };
+async function availableLoopbackPort(start = 18188) {
+  for (let port = start; port < start + 32; port += 1) {
+    const available = await new Promise<boolean>((resolve) => {
+      const server = net.createServer();
+      server.once("error", () => resolve(false));
+      server.listen(port, "127.0.0.1", () => server.close(() => resolve(true)));
+    });
+    if (available) return port;
+  }
+  throw new Error("local_ssh_tunnel_port_unavailable");
 }
 
-function ssh(target: GpuTarget, command: string) {
-  return spawnSync("ssh", ["-i", target.sshKeyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "PasswordAuthentication=no", "-p", String(target.port), `${target.username}@${target.host}`, command], { encoding: "utf8", timeout: 60_000 });
+function requireSuccess(result: ReturnType<typeof spawnSync>, classification: string) {
+  if (result.status !== 0) throw new Error(classification);
+  return String(result.stdout ?? "");
+}
+
+async function runRemoteFirstImage(target: GpuTarget, providerId: GpuProviderId, sessionId: string, gpuModel: string) {
+  const { outputPath: bundlePath } = writeColabBundle();
+  const restorePath = path.join(process.cwd(), "scripts", "clore", "restore-flux-r2.py");
+  try {
+    requireSuccess(scpFile(target, bundlePath, "/workspace/flux-r2-manifest.json", 5 * 60_000), "r2_bundle_copy_failed");
+    requireSuccess(scpFile(target, restorePath, "/workspace/restore-flux-r2.py", 2 * 60_000), "r2_restore_script_copy_failed");
+    const restoreStarted = Date.now();
+    const restore = sshCommand(target, "set -e; FLUX_R2_RESTORE_MANIFEST=/workspace/flux-r2-manifest.json python3.11 /workspace/restore-flux-r2.py", 90 * 60_000);
+    requireSuccess(restore, "r2_model_restore_failed");
+    const restoreElapsedMs = Date.now() - restoreStarted;
+    const runtime = sshCommand(target, `set -e; mkdir -p /workspace/logs; if test -s /workspace/runtime-stage3j.pid && kill -0 \"$(cat /workspace/runtime-stage3j.pid)\" 2>/dev/null; then exit 0; fi; nohup env COMFY_RUNTIME_MODE=gpu COMFY_NODE_PROFILE=production_minimal COMFY_GPU_PROFILE=${target.gpuProfile} /opt/comfy-runtime/entrypoint.sh >/workspace/logs/runtime-stage3j.log 2>&1 </dev/null & echo $! >/workspace/runtime-stage3j.pid`, 60_000);
+    requireSuccess(runtime, "runtime_start_failure");
+    const healthDeadline = Date.now() + 5 * 60_000;
+    while (Date.now() < healthDeadline) {
+      if (sshCommand(target, "curl -fsS --max-time 5 http://127.0.0.1:8080/health >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8188/system_stats >/dev/null", 20_000).status === 0) break;
+      await sleep(5_000);
+    }
+    if (sshCommand(target, "curl -fsS --max-time 5 http://127.0.0.1:8080/health >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8188/system_stats >/dev/null", 20_000).status !== 0) throw new Error("runtime_health_timeout");
+    const port = await availableLoopbackPort();
+    const tunnel = spawn("ssh", ["-N", "-i", target.sshKeyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "PasswordAuthentication=no", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-p", String(target.port), "-L", `127.0.0.1:${port}:127.0.0.1:8188`, `${target.username}@${target.host}`], { stdio: "ignore" });
+    try {
+      await sleep(1500);
+      if (tunnel.exitCode !== null) throw new Error("ssh_tunnel_failed");
+      const tsxCli = path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
+      const generated = spawnSync(process.execPath, [tsxCli, "scripts/flux-first-image-executor.ts", `--base-url=http://127.0.0.1:${port}`, `--session-id=${sessionId}`, `--provider=${providerId}`, `--gpu-model=${gpuModel}`, `--restore-elapsed-ms=${restoreElapsedMs}`], { cwd: process.cwd(), encoding: "utf8", timeout: 40 * 60_000 });
+      const output = requireSuccess(generated, "flux_first_image_generation_failed");
+      return { restoreElapsedMs, generated: JSON.parse(output) as Record<string, unknown> };
+    } finally {
+      tunnel.kill();
+    }
+  } finally {
+    rmSync(bundlePath, { force: true });
+  }
 }
 
 async function main() {
-  const provider = providerArg();
-  if (provider === "clore" && getCloreDeploymentHold().enabled) throw new Error("CLORE_DEPLOYMENT_HOLD=true: refusing Clore first-image execution.");
-  const target = loadGpuTarget(provider);
-  const sessionId = process.argv.find((item) => item.startsWith("--session-id="))?.slice("--session-id=".length) ?? `first-image-${Date.now()}`;
-  let state = beginFirstImageState(provider, sessionId);
+  const providerId = parseProviderArg();
   if (!process.argv.includes("--execute")) {
-    console.log(JSON.stringify({ dry_run: true, target: sanitizeGpuTarget(target), next_stage: nextFirstImageStage(state), runtime_pull: target.runtimeDigest, model_restore_order: ["R2 current.json", "revision manifest", "read-only R2 download", "HF fallback only on cache miss"], create_order_called: false }, null, 2));
+    console.log(JSON.stringify(await buildProviderDryRun(providerId), null, 2));
     return;
   }
-  if (nextFirstImageStage(state) === "candidate_selected") state = completeFirstImageStage(state, "candidate_selected", { provider, target: sanitizeGpuTarget(target) });
-  if (nextFirstImageStage(state) === "order_created" && provider === "manual_ssh") state = completeFirstImageStage(state, "order_created", { external_provider_payment_or_cancel_not_managed: true });
-  if (nextFirstImageStage(state) === "ssh_ready") {
-    const result = ssh(target, "true");
-    if (result.status !== 0) throw new Error("manual_ssh_connection_failed");
-    state = completeFirstImageStage(state, "ssh_ready", { ssh_true: true });
+
+  const provider = getGpuProvider(providerId);
+  const sessionId = argument("session-id") ?? `first-image-${Date.now()}`;
+  let state = beginFirstImageState(providerId, sessionId);
+  const candidates = await provider.listCandidates();
+  let session = await provider.recoverExistingSession(sessionId);
+  if (nextFirstImageStage(state) === "candidate_selected") {
+    state = completeFirstImageStage(state, "candidate_selected", { provider: providerId, candidate: candidates[0]?.id ?? "external" });
   }
-  console.log(JSON.stringify({ resumed: true, provider, next_stage: nextFirstImageStage(state), completed: state.completed, create_order_called: false, manual_adapter_does_not_manage_payment_or_cancel: provider === "manual_ssh" }, null, 2));
+  if (nextFirstImageStage(state) === "order_created") {
+    if (!session && providerId === "runpod") {
+      const config = loadRunPodConfig();
+      const candidate = candidates[0];
+      if (!candidate) throw new Error("No RunPod candidate profile is available.");
+      session = await provider.createSession({ sessionId, candidate, sshPublicKey: readPublicKey(config.sshPublicKeyPath), bootstrapImage: config.bootstrapImage, dryRun: false });
+    } else if (!session) {
+      session = await provider.getSession(providerId);
+    }
+    if (!session) throw new Error(`${providerId}_session_unavailable`);
+    state = completeFirstImageStage(state, "order_created", { provider_session_id: session.id, lifecycle_managed: providerId === "runpod" });
+  }
+  session ??= await provider.recoverExistingSession(sessionId);
+  if (!session) throw new Error(`${providerId}_session_recovery_failed`);
+  let target = session.target;
+  try {
+    if (nextFirstImageStage(state) === "ssh_ready") {
+      target = await provider.waitForSsh(session);
+      state = completeFirstImageStage(state, "ssh_ready", { target: sanitizeGpuTarget(target), ssh_true: true });
+    }
+    target ??= await provider.waitForSsh(session, 60_000);
+    let gpuModel = "unknown";
+    if (nextFirstImageStage(state) === "hardware_verified") {
+      const hardware = sshCommand(target, "set -e; nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader; free -b; df -B1 /workspace; python3.11 -c 'import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"no-cuda\")'", 120_000);
+      if (hardware.status !== 0) throw new Error("gpu_hardware_verification_failed");
+      gpuModel = String(hardware.stdout).split(/\r?\n/)[0]?.split(",")[0]?.trim() || "unknown";
+      state = completeFirstImageStage(state, "hardware_verified", { verified: true, gpu_model: gpuModel, output_sha256_recorded_separately: true });
+    }
+    if (["runtime_ready", "models_restored"].includes(String(nextFirstImageStage(state)))) {
+      const result = await runRemoteFirstImage(target, providerId, sessionId, gpuModel);
+      if (nextFirstImageStage(state) === "runtime_ready") state = completeFirstImageStage(state, "runtime_ready", { controller_and_comfy_health_verified: true });
+      if (nextFirstImageStage(state) === "models_restored") state = completeFirstImageStage(state, "models_restored", { source: "r2_presigned_get", elapsed_ms: result.restoreElapsedMs, size_and_sha_verified: true });
+      state = completeFirstImageStage(state, "prompt_submitted", { submitted_by_existing_executor: true });
+      state = completeFirstImageStage(state, "image_generated", { result: result.generated });
+      state = completeFirstImageStage(state, "result_synced", { local_archive: true, provider_session_json: true });
+    }
+    if (nextFirstImageStage(state) === "session_stopped") {
+      sshCommand(target, "if test -s /workspace/runtime-stage3j.pid; then kill -TERM \"$(cat /workspace/runtime-stage3j.pid)\" 2>/dev/null || true; fi; rm -f /workspace/flux-r2-manifest.json", 60_000);
+      await provider.stopSession(session);
+      state = completeFirstImageStage(state, "session_stopped", { runtime_stopped: true });
+    }
+    if (nextFirstImageStage(state) === "order_cancelled") {
+      await provider.terminateSession(session);
+      state = completeFirstImageStage(state, "order_cancelled", { provider_session_terminated: providerId === "runpod", external_lifecycle_untouched: providerId !== "runpod" });
+    }
+    console.log(JSON.stringify({ resumed: true, provider: providerId, session_id: session.id, next_stage: nextFirstImageStage(state), completed: state.completed, target: sanitizeGpuTarget(target) }, null, 2));
+  } catch (error) {
+    if (target) sshCommand(target, "if test -s /workspace/runtime-stage3j.pid; then kill -TERM \"$(cat /workspace/runtime-stage3j.pid)\" 2>/dev/null || true; fi; rm -f /workspace/flux-r2-manifest.json", 60_000);
+    if (providerId === "runpod") {
+      try { await provider.terminateSession(session); } catch { /* Preserve the original failure classification. */ }
+    }
+    throw error;
+  }
 }
+
 if (process.argv[1]?.endsWith("gpu-first-image.ts")) {
   void main().catch((error) => { console.error(error instanceof Error ? error.message : "first image orchestration failed"); process.exitCode = 1; });
 }

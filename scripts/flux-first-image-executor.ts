@@ -65,6 +65,9 @@ async function main() {
   const width = Number(arg("width") ?? 1024);
   const height = Number(arg("height") ?? 1024);
   const sessionId = arg("session-id") ?? `flux-${new Date().toISOString().replace(/[-:.TZ]/g, "")}-${crypto.randomUUID().slice(0, 8)}`;
+  const provider = arg("provider") ?? "unknown";
+  const gpuModel = arg("gpu-model") ?? "unknown";
+  const restoreElapsedMs = Number(arg("restore-elapsed-ms") ?? 0);
   const workflow = buildFluxFirstImageWorkflow({ width, height, seed: 20260715, steps: 4 });
   const startedAt = Date.now();
   const systemStats = await json(`${baseUrl}/system_stats`);
@@ -104,9 +107,10 @@ async function main() {
     sourcePng: temporaryPng,
     sessionId,
     workflow,
-    metadata: { prompt_id: promptId, width, height, steps: 4, seed: 20260715, elapsed_ms: Date.now() - startedAt },
+    metadata: { provider, gpu_model: gpuModel, prompt_id: promptId, width, height, steps: 4, seed: 20260715, elapsed_ms: Date.now() - startedAt, r2_restore_elapsed_ms: restoreElapsedMs },
     evidence: { system_stats: systemStats, required_nodes_verified: true, websocket_verified: true, history_verified: true },
   });
+  writeFileSync(path.join(archived.archiveDir, "provider-session.json"), `${JSON.stringify({ provider, gpu_model: gpuModel, session_id: sessionId, runtime_digest_pinned: true }, null, 2)}\n`, "utf8");
   console.log(JSON.stringify({ flux_first_image_verified: true, prompt_id: promptId, elapsed_ms: Date.now() - startedAt, archive: archived }, null, 2));
 }
 

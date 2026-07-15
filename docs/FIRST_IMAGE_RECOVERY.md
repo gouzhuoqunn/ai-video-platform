@@ -2,11 +2,16 @@
 
 ```powershell
 npm run gpu:first-image -- --provider=clore
+npm run gpu:first-image -- --provider=runpod
 npm run gpu:first-image -- --provider=manual_ssh
+npm run gpu:doctor
+npm run gpu:candidates -- --provider=runpod
 npm run first-image:resume
 ```
 
 `manual_ssh` reads `.secrets/manual-gpu-target.json`. It may inspect hardware, pull the pinned Runtime, restore models, generate the first image, sync results, and stop Runtime. It never rents or cancels a provider order.
+
+`runpod` reads `RUNPOD_API_KEY`, `RUNPOD_MAX_HOURLY_USD`, and `RUNPOD_MAX_SESSION_USD` only from process environment or ignored `.secrets/runpod.env`. Without a key, all commands stay dry-run and do not create a Pod. Real execution requires the separately built, digest-pinned `ai-creative-runpod-bootstrap` image, one active Pod maximum, SSH public-key authentication, an hourly cap of 0.70 USD, and a session cap of 2.50 USD.
 
 The ignored checkpoint state advances in this order:
 
@@ -25,6 +30,17 @@ order_cancelled
 ```
 
 Resume starts at the first incomplete stage and must not repeat verified model restoration, image generation, or result sync. Model restore checks `production/rtx4090/image/current.json` and its revision manifest before using the pinned Hugging Face fallback.
+
+GPU-side R2 restore accepts only a two-hour presigned GET bundle. It resumes `.part` files with HTTP Range requests, downloads at concurrency two, validates full size and SHA256, and atomically renames each model. R2 administrator credentials never enter the GPU target.
+
+Emergency Colab preparation is separate from Provider rental:
+
+```powershell
+npm run first-image:colab:bundle
+npm run first-image:colab:validate
+```
+
+The ignored bundle is written to `.secrets/flux-first-image-colab-bundle.json`. `notebooks/flux-first-image-colab.ipynb` uses the fixed ComfyUI commit and never embeds a long-lived R2 credential, SSH key, or provider API key.
 
 ## FLUX R2 Restore Status
 

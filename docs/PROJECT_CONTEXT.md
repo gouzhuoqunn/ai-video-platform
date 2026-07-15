@@ -593,3 +593,14 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - The existing FLUX object and newly cached Qwen/VAE objects total 12,451,817,860 bytes. Their exact sizes and SHA256 values are recorded in `docs/MODEL_CACHE.md` and `MODEL_CACHE_REGISTRY`. Qwen completed with the official Xet client and did not use HTTP fallback.
 - Published revision `flux2-klein-4b-5b4408e59397-a9e4ca87c16d` has an independently read revision manifest and final `production/rtx4090/image/current.json` pointer. GPU read-only credentials passed GET, HEAD, and first/last Range probes; Put, overwrite, and Delete were denied.
 - `gpu_restore_ready=true` and `r2_restore_plan_valid=true`. No Clore order, SSH connection, GPU inference, image generation, Runtime build, or model artifact in Git/Actions artifacts occurred. `gpu_inference_verified=false` and `production_ready=false`.
+
+## 2026-07-16 Phase 3J: Second GPU Provider Preparation
+
+- Added a unified `GpuProvider` contract with `clore`, `runpod`, and `manual_ssh` adapters. The first-image entry command no longer imports Clore order functions directly.
+- Added a RunPod REST adapter for Pod list/create/get/stop/delete/recovery with 30-second request timeout, bounded 429/5xx retries, create idempotency, one-active-Pod enforcement, SSH readiness, post-create price enforcement, and a 15-minute termination Watchdog plan.
+- Added a separate SSH bootstrap image inheriting the immutable Comfy Runtime digest. It adds only OpenSSH, accepts one public key, disables password login, exposes 22/tcp and 8080/http only, and does not automatically start GPU Runtime.
+- GPU-side R2 recovery now uses two concurrent downloads, `.part` Range resume, streaming size/SHA256 checks, atomic rename, and no R2 administrator credential on the GPU.
+- Added a two-hour presigned GET bundle generator and `notebooks/flux-first-image-colab.ipynb` as an emergency manual check. Colab is not part of automated provider rental and contains no long-lived credentials.
+- `/generate/4090` can display Provider, GPU model, and generation duration from an archived first-image result without adding a database or changing image storage semantics.
+- Local RunPod credentials are absent, so Stage 3J executed only mock tests and dry-run; no Pod, SSH session, GPU inference, model upload, model download, or provider charge occurred. Clore deployment hold remains enabled and live Clore active order count remains zero.
+- The FLUX R2 cache remains ready at 12,451,817,860 bytes. `gpu_inference_verified=false`, `flux_first_image_verified=false`, and `production_ready=false` remain unchanged until a real GPU succeeds.

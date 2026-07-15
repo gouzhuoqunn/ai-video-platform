@@ -1,0 +1,249 @@
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { getPrivateKeyPath } from "../clore/ssh-client";
+import { FIXED_RUNTIME_DIGEST, parseEnvFile, sleep, sshCommand, tcpReachable } from "./common";
+import type { CreateSessionInput, GpuCandidate, GpuProvider, GpuSession, GpuTarget } from "./types";
+
+export const RUNPOD_API_BASE = "https://rest.runpod.io/v1";
+export const RUNPOD_GPU_PRIORITY = [
+  ["NVIDIA GeForce RTX 4090", 24],
+  ["NVIDIA GeForce RTX 5090", 32],
+  ["NVIDIA GeForce RTX 3090", 24],
+  ["NVIDIA GeForce RTX 3090 Ti", 24],
+  ["NVIDIA RTX A5000", 24],
+  ["NVIDIA RTX A6000", 48],
+  ["NVIDIA A40", 48],
+] as const;
+export const RUNPOD_BOOTSTRAP_IMAGE = "ghcr.io/gouzhuoqunn/ai-creative-runpod-bootstrap:v0.1.0-stage3j";
+
+type RunPodPod = {
+  id: string;
+  name?: string;
+  desiredStatus?: string;
+  lastStartedAt?: string | null;
+  lastStatusChange?: string | null;
+  adjustedCostPerHr?: number | string | null;
+  costPerHr?: number | string | null;
+  publicIp?: string | null;
+  portMappings?: Record<string, number> | null;
+  interruptible?: boolean;
+  gpu?: { displayName?: string; count?: number } | null;
+};
+
+export type RunPodConfig = {
+  apiKey: string;
+  keySource: "environment" | "secret_file" | "none";
+  maxHourlyUsd: number;
+  maxSessionUsd: number;
+  sshPublicKeyPath: string;
+  sshPrivateKeyPath: string;
+  bootstrapImage: string;
+};
+
+const ENV_PATH = path.join(process.cwd(), ".secrets", "runpod.env");
+const LOCK_PATH = path.join(process.cwd(), ".secrets", "runpod-create.lock");
+let createInFlight: Promise<GpuSession> | null = null;
+
+function numberValue(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function loadRunPodConfig(): RunPodConfig {
+  const values = parseEnvFile(ENV_PATH);
+  const envKey = process.env.RUNPOD_API_KEY?.trim() ?? "";
+  const fileKey = values.get("RUNPOD_API_KEY")?.trim() ?? "";
+  const read = (name: string) => process.env[name]?.trim() || values.get(name)?.trim();
+  return {
+    apiKey: envKey || fileKey,
+    keySource: envKey ? "environment" : fileKey ? "secret_file" : "none",
+    maxHourlyUsd: numberValue(read("RUNPOD_MAX_HOURLY_USD"), 0.7),
+    maxSessionUsd: numberValue(read("RUNPOD_MAX_SESSION_USD"), 2.5),
+    sshPublicKeyPath: read("RUNPOD_SSH_PUBLIC_KEY_PATH") || `${getPrivateKeyPath()}.pub`,
+    sshPrivateKeyPath: read("RUNPOD_SSH_PRIVATE_KEY_PATH") || getPrivateKeyPath(),
+    bootstrapImage: read("RUNPOD_BOOTSTRAP_IMAGE") || RUNPOD_BOOTSTRAP_IMAGE,
+  };
+}
+
+function redactedLog(endpoint: string, status: number | string, retry: number) {
+  console.log(JSON.stringify({ provider: "runpod", endpoint, at: new Date().toISOString(), status, retry }));
+}
+
+export class RunPodRestClient {
+  constructor(private readonly config: RunPodConfig, private readonly fetchImpl: typeof fetch = fetch) {}
+
+  async request<T>(method: string, endpoint: string, body?: unknown, maxRetries = 3): Promise<T> {
+    if (!this.config.apiKey) throw new Error("RUNPOD_API_KEY is missing.");
+    for (let retry = 0; retry <= maxRetries; retry += 1) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30_000);
+      try {
+        const response = await this.fetchImpl(`${RUNPOD_API_BASE}${endpoint}`, {
+          method,
+          signal: controller.signal,
+          headers: { Authorization: `Bearer ${this.config.apiKey}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        redactedLog(endpoint, response.status, retry);
+        if (response.ok) return response.status === 204 ? (undefined as T) : (await response.json()) as T;
+        if (response.status !== 429 && response.status < 500) throw new Error(`runpod_deterministic_http_${response.status}`);
+        if (retry === maxRetries) throw new Error(`runpod_retry_exhausted_http_${response.status}`);
+        const retryAfter = Number(response.headers.get("retry-after"));
+        await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000 * (2 ** retry));
+      } catch (error) {
+        const timeout = error instanceof Error && error.name === "AbortError";
+        if (!timeout || retry === maxRetries) throw error;
+        redactedLog(endpoint, "timeout", retry);
+        await sleep(1000 * (2 ** retry));
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    throw new Error("runpod_request_failed");
+  }
+
+  listPods() { return this.request<RunPodPod[]>("GET", "/pods?computeType=GPU&includeMachine=true"); }
+  getPod(id: string) { return this.request<RunPodPod>("GET", `/pods/${encodeURIComponent(id)}?includeMachine=true`); }
+  createPod(payload: Record<string, unknown>) { return this.request<RunPodPod>("POST", "/pods", payload, 2); }
+  stopPod(id: string) { return this.request<void>("POST", `/pods/${encodeURIComponent(id)}/stop`); }
+  deletePod(id: string) { return this.request<void>("DELETE", `/pods/${encodeURIComponent(id)}`); }
+}
+
+export function runPodCandidates(maxHourlyUsd = 0.7): GpuCandidate[] {
+  return RUNPOD_GPU_PRIORITY.map(([gpuType, vramGb], priority) => ({ id: gpuType, gpuType, priority: priority + 1, vramGb, gpuCount: 1, minimumRamGb: 32, containerDiskGb: 50, volumeGb: 30, hourlyUsd: maxHourlyUsd, interruptible: false }));
+}
+
+export function buildRunPodCreatePayload(input: CreateSessionInput) {
+  if (input.candidate.gpuCount !== 1 || input.candidate.vramGb < 16 || input.candidate.minimumRamGb < 32) throw new Error("runpod_hardware_gate_failed");
+  if (input.candidate.containerDiskGb < 50 || input.candidate.volumeGb < 30) throw new Error("runpod_disk_gate_failed");
+  if (input.candidate.interruptible) throw new Error("runpod_spot_forbidden");
+  if (!/^ssh-(ed25519|rsa|ecdsa-[^ ]+) [A-Za-z0-9+/=]+(?: .*)?$/.test(input.sshPublicKey) || /PRIVATE KEY/.test(input.sshPublicKey)) throw new Error("runpod_ssh_public_key_invalid");
+  return {
+    name: `ai-video-first-image-${input.sessionId}`.slice(0, 191),
+    imageName: input.bootstrapImage,
+    cloudType: "SECURE",
+    computeType: "GPU",
+    gpuTypeIds: [input.candidate.gpuType],
+    gpuTypePriority: "custom",
+    gpuCount: 1,
+    minRAMPerGPU: 32,
+    containerDiskInGb: 50,
+    volumeInGb: 30,
+    volumeMountPath: "/workspace",
+    supportPublicIp: true,
+    interruptible: false,
+    locked: false,
+    ports: ["22/tcp", "8080/http"],
+    env: { SSH_PUBLIC_KEY: input.sshPublicKey },
+  };
+}
+
+function profileForGpu(gpu: string) {
+  if (gpu === "NVIDIA GeForce RTX 4090") return "rtx4090" as const;
+  if (gpu === "NVIDIA GeForce RTX 5090") return "rtx5090" as const;
+  return "bootstrap_image_gpu" as const;
+}
+
+function toSession(pod: RunPodPod, config: RunPodConfig): GpuSession {
+  const hourly = Number(pod.adjustedCostPerHr ?? pod.costPerHr);
+  const host = pod.publicIp ?? "";
+  const port = Number(pod.portMappings?.["22"] ?? 0);
+  const gpu = pod.gpu?.displayName ?? "";
+  const target: GpuTarget | null = host && port ? { provider: "runpod", host, port, username: "root", sshKeyPath: config.sshPrivateKeyPath, gpuProfile: profileForGpu(gpu), runtimeDigest: FIXED_RUNTIME_DIGEST } : null;
+  return { provider: "runpod", id: pod.id, name: pod.name ?? pod.id, status: pod.desiredStatus ?? "UNKNOWN", createdAt: pod.lastStartedAt ?? null, lastStatusChange: pod.lastStatusChange ?? null, hourlyUsd: Number.isFinite(hourly) ? hourly : null, target };
+}
+
+function isActive(pod: RunPodPod) { return pod.desiredStatus !== "TERMINATED"; }
+
+export class RunPodProvider implements GpuProvider {
+  readonly id = "runpod" as const;
+  readonly config: RunPodConfig;
+  readonly client: RunPodRestClient;
+
+  constructor(options: { config?: RunPodConfig; fetchImpl?: typeof fetch } = {}) {
+    this.config = options.config ?? loadRunPodConfig();
+    this.client = new RunPodRestClient(this.config, options.fetchImpl);
+  }
+
+  async inspectCredentials() { return { provider: this.id, credentials_present: Boolean(this.config.apiKey), source: this.config.keySource, safe_to_query: Boolean(this.config.apiKey) }; }
+  async getBalance() { return { availableUsd: null, supported: false }; }
+  async listCandidates() { return runPodCandidates(this.config.maxHourlyUsd); }
+  async getSession(id: string) { try { return toSession(await this.client.getPod(id), this.config); } catch (error) { if (String(error).includes("404")) return null; throw error; } }
+  async recoverExistingSession(sessionId?: string) {
+    if (!this.config.apiKey) return null;
+    const name = sessionId ? `ai-video-first-image-${sessionId}` : "ai-video-first-image-";
+    const found = (await this.client.listPods()).filter(isActive).find((pod) => (pod.name ?? "").startsWith(name));
+    return found ? toSession(found, this.config) : null;
+  }
+
+  async createSession(input: CreateSessionInput): Promise<GpuSession> {
+    if (input.dryRun) return { provider: this.id, id: "dry-run", name: `ai-video-first-image-${input.sessionId}`, status: "DRY_RUN", createdAt: null, lastStatusChange: null, hourlyUsd: input.candidate.hourlyUsd, target: null };
+    if (createInFlight) return createInFlight;
+    createInFlight = this.createSessionLocked(input).finally(() => { createInFlight = null; });
+    return createInFlight;
+  }
+
+  private async createSessionLocked(input: CreateSessionInput) {
+    if (!this.config.apiKey) throw new Error("RUNPOD_API_KEY is missing.");
+    if (!input.bootstrapImage.includes("@sha256:")) throw new Error("RunPod bootstrap image must use an immutable digest for real execution.");
+    if ((input.candidate.hourlyUsd ?? Infinity) > this.config.maxHourlyUsd) throw new Error("runpod_hourly_budget_exceeded");
+    if ((input.candidate.hourlyUsd ?? Infinity) * 3.5 > this.config.maxSessionUsd) throw new Error("runpod_session_budget_exceeded");
+    mkdirSync(path.dirname(LOCK_PATH), { recursive: true });
+    let fd: number;
+    try { fd = openSync(LOCK_PATH, "wx"); } catch { throw new Error("runpod_create_lock_exists"); }
+    try {
+      writeFileSync(fd, `${JSON.stringify({ session_id: input.sessionId, created_at: new Date().toISOString() })}\n`);
+      closeSync(fd);
+      const existing = await this.recoverExistingSession(input.sessionId);
+      if (existing) return existing;
+      const active = (await this.client.listPods()).filter(isActive);
+      if (active.length > 0) throw new Error("runpod_active_pod_exists");
+      const created = await this.client.createPod(buildRunPodCreatePayload(input));
+      const session = toSession(created, this.config);
+      if ((session.hourlyUsd ?? Infinity) > this.config.maxHourlyUsd) { await this.client.deletePod(session.id); throw new Error("runpod_created_price_exceeded"); }
+      return session;
+    } catch (error) {
+      if (error instanceof Error && (error.name === "AbortError" || /timeout/i.test(error.message))) {
+        const recovered = await this.recoverExistingSession(input.sessionId);
+        if (recovered) return recovered;
+      }
+      throw error;
+    } finally {
+      rmSync(LOCK_PATH, { force: true });
+    }
+  }
+
+  async waitForSsh(session: GpuSession, timeoutMs = 10 * 60_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const current = await this.getSession(session.id);
+      if (!current) throw new Error("runpod_session_disappeared");
+      if (current.status === "RUNNING" && current.target && await tcpReachable(current.target.host, current.target.port)) {
+        if (sshCommand(current.target, "true").status === 0) return current.target;
+      }
+      await sleep(10_000);
+    }
+    throw new Error("runpod_ssh_timeout");
+  }
+
+  async stopSession(session: GpuSession) { if (session.id !== "dry-run") await this.client.stopPod(session.id); }
+  async terminateSession(session: GpuSession) {
+    if (session.id === "dry-run") return;
+    await this.client.deletePod(session.id);
+    const deadline = Date.now() + 2 * 60_000;
+    while (Date.now() < deadline) {
+      const current = await this.getSession(session.id);
+      if (!current || current.status === "TERMINATED") return;
+      await sleep(5_000);
+    }
+    throw new Error("runpod_termination_not_confirmed");
+  }
+  async getBilling(session: GpuSession) {
+    const elapsedSeconds = session.createdAt ? Math.max(0, (Date.now() - Date.parse(session.createdAt)) / 1000) : null;
+    return { hourlyUsd: session.hourlyUsd, elapsedSeconds, estimatedSpendUsd: elapsedSeconds !== null && session.hourlyUsd !== null ? session.hourlyUsd * elapsedSeconds / 3600 : null };
+  }
+}
+
+export function runPodWatchdogPlan(sessionId: string, deadlineMinutes = 15) {
+  return { provider: "runpod", session_id: sessionId, action: "terminate", deadline_minutes: deadlineMinutes, terminate_priority: true };
+}

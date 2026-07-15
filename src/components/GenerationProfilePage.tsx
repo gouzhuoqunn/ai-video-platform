@@ -12,6 +12,16 @@ function formatGb(value: number) {
   return `${value}GB`;
 }
 
+function metadataText(metadata: Record<string, unknown> | null, key: string, fallback = "pending") {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function metadataElapsed(metadata: Record<string, unknown> | null) {
+  const value = metadata?.elapsed_ms;
+  return typeof value === "number" && Number.isFinite(value) ? `${(value / 1000).toFixed(1)}s` : "pending";
+}
+
 export function GenerationProfilePage({ profile }: GenerationProfilePageProps) {
   const data = getGenerationProfilePageData(profile);
   const localImages = profile === "rtx4090" ? listLocalImageResults().slice(0, 4) : [];
@@ -123,6 +133,11 @@ export function GenerationProfilePage({ profile }: GenerationProfilePageProps) {
                       <div className="p-3 text-sm">
                         <p className="font-semibold">{image.date}</p>
                         <p className="mt-1 break-all text-xs text-stone-500">{image.sessionId}</p>
+                        <dl className="mt-2 grid grid-cols-3 gap-2 text-xs">
+                          <div><dt className="text-stone-500">Provider</dt><dd className="font-semibold">{metadataText(image.metadata, "provider")}</dd></div>
+                          <div><dt className="text-stone-500">GPU</dt><dd className="font-semibold">{metadataText(image.metadata, "gpu_model")}</dd></div>
+                          <div><dt className="text-stone-500">Time</dt><dd className="font-semibold">{metadataElapsed(image.metadata)}</dd></div>
+                        </dl>
                       </div>
                     </a>
                   ))}

@@ -1,0 +1,31 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import YAML from "yaml";
+
+const dockerfile = readFileSync("runpod-bootstrap/Dockerfile", "utf8");
+const entrypoint = readFileSync("runpod-bootstrap/entrypoint.sh", "utf8");
+const sshd = readFileSync("runpod-bootstrap/sshd_config", "utf8");
+const workflowText = readFileSync(".github/workflows/runpod-bootstrap-image.yml", "utf8");
+const workflow = YAML.parse(workflowText) as { jobs: Record<string, { permissions?: Record<string, string>; steps?: Array<{ uses?: string }> }> };
+
+assert.match(dockerfile, /FROM ghcr\.io\/gouzhuoqunn\/ai-creative-comfy-runtime@sha256:187a7eb304075863dbd3f7a1b527530a06783ad8ea0fec5e51e2b9725d1bf137/);
+assert.match(dockerfile, /apt-get install -y --no-install-recommends openssh-server/);
+assert.match(dockerfile, /COPY --chmod=0755 entrypoint\.sh/);
+assert.doesNotMatch(dockerfile, /curl|wget|pip install|npm install|8188/);
+assert.match(entrypoint, /SSH_PUBLIC_KEY/);
+assert.match(entrypoint, /authorized_keys/);
+assert.match(entrypoint, /chmod 0600/);
+assert.match(entrypoint, /sshd -D -e/);
+assert.ok(!entrypoint.includes("\r\n"));
+assert.match(sshd, /^PasswordAuthentication no$/m);
+assert.match(sshd, /^PermitRootLogin prohibit-password$/m);
+assert.doesNotMatch(sshd, /PasswordAuthentication yes/);
+const mode = execFileSync("git", ["ls-files", "--stage", "runpod-bootstrap/entrypoint.sh"], { encoding: "utf8" }).trim().split(/\s+/)[0];
+assert.equal(mode, "100755");
+const jobs = Object.values(workflow.jobs);
+assert.equal(jobs.filter((job) => job.permissions?.packages === "write").length, 1);
+assert.equal(jobs.flatMap((job) => job.steps ?? []).filter((step) => step.uses?.startsWith("docker/build-push-action@")).length, 1);
+assert.match(workflowText, /empty-docker-config-runpod-bootstrap/);
+assert.match(workflowText, /docker logout ghcr\.io/);
+console.log("RunPod bootstrap image tests passed.");

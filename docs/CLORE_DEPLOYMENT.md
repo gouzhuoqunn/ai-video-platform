@@ -69,6 +69,7 @@ Current status:
 - No Clore order has been created.
 - No GPU has been rented, no Wan2.2 weights have been downloaded, and nothing has been deployed publicly.
 - RunPod Secure Cloud is retained only as a last-resort fallback.
+- Phase 3J implements RunPod as an independent fallback Provider. This does not clear `CLORE_DEPLOYMENT_HOLD`; Clore create remains blocked while the hold is enabled.
 - The current application priority is `local_lab` mode. This round did not spend Clore balance.
 
 ## 2026-07-11 Read-only Clore result

@@ -1,0 +1,84 @@
+name: RunPod SSH Bootstrap Image
+
+on:
+  push:
+    branches:
+      - stage-two-five-comfy-runtime
+    paths:
+      - ".github/workflows/runpod-bootstrap-image.yml"
+      - "runpod-bootstrap/**"
+      - "scripts/runpod-bootstrap-tests.ts"
+  workflow_dispatch:
+
+concurrency:
+  group: runpod-bootstrap-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/gouzhuoqunn/ai-creative-runpod-bootstrap
+
+jobs:
+  build-and-verify:
+    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - run: npm ci
+      - run: npm run runpod-bootstrap:test
+      - run: npm run secret:scan
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push bootstrap once
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: runpod-bootstrap
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:v0.1.0-stage3j
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+
+      - name: Verify image metadata and anonymous pull
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "${DIGEST}"
+          image="${IMAGE}@${DIGEST}"
+          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config-runpod-bootstrap"
+          mkdir -p "${DOCKER_CONFIG}"
+          printf '{}\n' > "${DOCKER_CONFIG}/config.json"
+          docker logout ghcr.io || true
+          docker pull --platform linux/amd64 "${image}"
+          test "$(docker image inspect "${image}" --format '{{json .Config.Entrypoint}}')" = '["/opt/runpod-bootstrap/entrypoint.sh"]'
+          docker run --rm --entrypoint /bin/bash "${image}" -lc '
+            set -e
+            test -x /opt/runpod-bootstrap/entrypoint.sh
+            test -x /opt/comfy-runtime/entrypoint.sh
+            grep -Fx "PasswordAuthentication no" /etc/ssh/sshd_config
+            grep -Fx "PermitRootLogin prohibit-password" /etc/ssh/sshd_config
+            test ! -e /app/worker.py
+            ! find / -xdev -type f \( -name "*.safetensors" -o -name "*.gguf" -o -name "*.ckpt" \) -print -quit | grep -q .
+          '
+          echo "RUNPOD_BOOTSTRAP_IMAGE=${image}"
