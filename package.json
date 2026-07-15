@@ -75,6 +75,7 @@
     "model-cache:seed:flux4090": "tsx scripts/model-cache/flux4090-cache.ts seed",
     "model-cache:status:flux4090": "tsx scripts/model-cache/flux4090-cache.ts status",
     "model-cache:resume:flux4090": "tsx scripts/model-cache/flux4090-cache.ts seed",
+    "model-cache:verify:flux4090": "tsx scripts/model-cache/flux4090-cache.ts verify",
     "generation:architecture:test": "tsx scripts/generation-architecture-tests.ts",
     "generation:metadata:test": "tsx scripts/generation-metadata-benchmark-tests.ts",
     "generation:runtime:test": "tsx scripts/comfy-runtime-contract-tests.ts",

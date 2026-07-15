@@ -15,7 +15,22 @@ for (const file of manifest.files) {
 }
 const source = readFileSync(path.join(process.cwd(), "scripts", "model-cache", "flux4090-cache.ts"), "utf8");
 assert.match(source, /PART_BYTES = 64 \* 1024 \* 1024/);
+assert.match(source, /CONCURRENT_PARTS = 2/);
+assert.match(source, /HTTP_TIMEOUT_MS = 120_000/);
+assert.match(source, /FLUX_R2_SEED_STATE_DIR/);
 assert.match(source, /seed_time_limit_reached/);
 assert.match(source, /current\.json publish/);
 assert.match(source, /\.secrets/);
-console.log("FLUX R2 multipart, resume, and publish-last tests passed.");
+assert.match(source, /verifyFlux4090Cache/);
+assert.match(source, /gpu_readonly_restore_probe/);
+assert.match(source, /range: `bytes=/);
+const workflow = readFileSync(path.join(process.cwd(), ".github", "workflows", "flux4090-model-cache.yml"), "utf8");
+assert.match(workflow, /timeout-minutes: 180/);
+assert.match(workflow, /group: flux4090-model-cache/);
+assert.match(workflow, /permissions:\s*\n\s*contents: read/);
+assert.match(workflow, /npm run model-cache:seed:flux4090/);
+assert.match(workflow, /npm run model-cache:status:flux4090/);
+assert.match(workflow, /npm run model-cache:verify:flux4090/);
+assert.match(workflow, /retention-days: 7/);
+assert.doesNotMatch(workflow, /build-push-action|packages:\s*write/);
+console.log("FLUX R2 multipart, resume, hosted runner workflow, and publish-last tests passed.");

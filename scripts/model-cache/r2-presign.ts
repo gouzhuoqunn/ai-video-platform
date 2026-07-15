@@ -24,8 +24,16 @@ function parseEnvFile(filePath: string) {
   return values;
 }
 
-function required(values: Map<string, string>, name: string) {
-  const value = values.get(name)?.trim();
+function readValue(values: Map<string, string>, name: string, fallbacks: string[] = []) {
+  for (const key of [name, ...fallbacks]) {
+    const value = values.get(key)?.trim() || process.env[key]?.trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+function required(values: Map<string, string>, name: string, fallbacks: string[] = []) {
+  const value = readValue(values, name, fallbacks);
   if (!value) throw new Error(`Missing ${name}`);
   return value;
 }
@@ -34,14 +42,19 @@ export function loadR2Credentials(fileName: string): R2Credentials {
   const config = loadModelCacheConfig();
   const filePath = path.join(process.cwd(), ".secrets", fileName);
   const values = parseEnvFile(filePath);
-  if (!existsSync(filePath)) throw new Error(`Missing ${fileName}`);
+  const accountId = readValue(values, "R2_ACCOUNT_ID");
+  const endpoint = readValue(values, "MODEL_CACHE_ENDPOINT", ["R2_ENDPOINT"]) || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : config.endpoint);
+  const readonly = fileName.includes("readonly");
+  const accessFallbacks = readonly ? ["R2_READONLY_ACCESS_KEY_ID", "R2_ACCESS_KEY_ID"] : ["R2_ACCESS_KEY_ID"];
+  const secretFallbacks = readonly ? ["R2_READONLY_SECRET_ACCESS_KEY", "R2_SECRET_ACCESS_KEY"] : ["R2_SECRET_ACCESS_KEY"];
+  if (!existsSync(filePath) && !process.env.R2_ACCESS_KEY_ID && !process.env.MODEL_CACHE_ACCESS_KEY_ID && !process.env.R2_READONLY_ACCESS_KEY_ID) throw new Error(`Missing ${fileName}`);
   return {
-    accessKeyId: required(values, "MODEL_CACHE_ACCESS_KEY_ID"),
-    secretAccessKey: required(values, "MODEL_CACHE_SECRET_ACCESS_KEY"),
-    bucket: values.get("MODEL_CACHE_BUCKET") || config.bucket,
-    endpoint: values.get("MODEL_CACHE_ENDPOINT") || config.endpoint,
-    region: values.get("MODEL_CACHE_REGION") || config.region || "auto",
-    prefix: values.get("MODEL_CACHE_PREFIX") || config.prefix,
+    accessKeyId: required(values, "MODEL_CACHE_ACCESS_KEY_ID", accessFallbacks),
+    secretAccessKey: required(values, "MODEL_CACHE_SECRET_ACCESS_KEY", secretFallbacks),
+    bucket: readValue(values, "MODEL_CACHE_BUCKET", ["R2_BUCKET_NAME"]) || config.bucket,
+    endpoint,
+    region: readValue(values, "MODEL_CACHE_REGION", ["R2_REGION"]) || config.region || "auto",
+    prefix: readValue(values, "MODEL_CACHE_PREFIX") || config.prefix,
   };
 }
 

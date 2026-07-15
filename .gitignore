@@ -39,6 +39,7 @@ __pycache__/
 /playwright-report/
 /coverage/
 /artifacts/
+/.cache/
 tsconfig.tsbuildinfo
 
 # cloud / worker local state

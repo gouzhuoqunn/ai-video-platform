@@ -1,0 +1,71 @@
+name: FLUX 4090 Model Cache
+
+on:
+  push:
+    branches:
+      - stage-two-five-comfy-runtime
+    paths:
+      - ".github/workflows/flux4090-model-cache.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/flux-first-image.ts"
+      - "scripts/model-cache/**"
+  workflow_dispatch:
+
+concurrency:
+  group: flux4090-model-cache
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  seed-flux4090-cache:
+    name: Seed FLUX4090 HF to R2 cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      FLUX_R2_SEED_MAX_MINUTES: "170"
+      FLUX_R2_SEED_STATE_DIR: ".cache/flux4090-seed-state"
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      R2_READONLY_ACCESS_KEY_ID: ${{ secrets.R2_READONLY_ACCESS_KEY_ID }}
+      R2_READONLY_SECRET_ACCESS_KEY: ${{ secrets.R2_READONLY_SECRET_ACCESS_KEY }}
+      MODEL_CACHE_REGION: "auto"
+      MODEL_CACHE_PREFIX: "production/rtx4090/image"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Secret scan
+        run: npm run secret:scan
+
+      - name: Seed FLUX4090 cache
+        run: npm run model-cache:seed:flux4090
+
+      - name: Show cache status
+        if: always()
+        run: npm run model-cache:status:flux4090
+
+      - name: Verify published cache
+        run: npm run model-cache:verify:flux4090
+
+      - name: Upload multipart resume state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flux4090-seed-state
+          path: .cache/flux4090-seed-state/
+          if-no-files-found: ignore
+          retention-days: 7
