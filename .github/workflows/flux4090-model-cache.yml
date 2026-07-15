@@ -35,6 +35,7 @@ jobs:
       R2_READONLY_SECRET_ACCESS_KEY: ${{ secrets.R2_READONLY_SECRET_ACCESS_KEY }}
       MODEL_CACHE_REGION: "auto"
       MODEL_CACHE_PREFIX: "production/rtx4090/image"
+      FLUX_R2_RECOVERY_STAGING_KEYS_JSON: '{"diffusion_models/flux-2-klein-4b-fp8.safetensors":"production/rtx4090/image/staging/7d6d7683-d4ea-492d-b445-5d47378ae900/files/diffusion_models/flux-2-klein-4b-fp8.safetensors"}'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,6 +51,9 @@ jobs:
 
       - name: Secret scan
         run: npm run secret:scan
+
+      - name: Probe SDK multipart
+        run: npm run model-cache:probe:flux4090
 
       - name: Seed FLUX4090 cache
         run: npm run model-cache:seed:flux4090

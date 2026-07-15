@@ -76,6 +76,7 @@
     "model-cache:status:flux4090": "tsx scripts/model-cache/flux4090-cache.ts status",
     "model-cache:resume:flux4090": "tsx scripts/model-cache/flux4090-cache.ts seed",
     "model-cache:verify:flux4090": "tsx scripts/model-cache/flux4090-cache.ts verify",
+    "model-cache:probe:flux4090": "tsx scripts/model-cache/flux4090-cache.ts probe",
     "generation:architecture:test": "tsx scripts/generation-architecture-tests.ts",
     "generation:metadata:test": "tsx scripts/generation-metadata-benchmark-tests.ts",
     "generation:runtime:test": "tsx scripts/comfy-runtime-contract-tests.ts",
@@ -126,6 +127,7 @@
   "author": "",
   "license": "UNLICENSED",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1087.0",
     "@supabase/ssr": "^0.12.0",
     "@supabase/supabase-js": "^2.110.0",
     "next": "^16.2.10",
