@@ -147,3 +147,24 @@ WAN_MODEL_EXPECTED_SIZE_GB=34.2
 ```
 
 The runtime Dockerfile installs Wan code from the pinned commit instead of drifting `main`. The Python real runner refuses to start if the generated model manifest does not match the pinned model and code revisions.
+
+## 2026-07-15 FLUX First-image Cache
+
+FLUX uses a separate publish order:
+
+```text
+production/rtx4090/image/staging/<session>/files/<model-path>
+production/rtx4090/image/revisions/<revision>/files/<model-path>
+production/rtx4090/image/revisions/<revision>/manifest.json
+production/rtx4090/image/current.json
+```
+
+```powershell
+npm run model-cache:seed:flux4090
+npm run model-cache:status:flux4090
+npm run model-cache:resume:flux4090
+```
+
+The controller streams Hugging Face ranges into 64MiB R2 multipart parts, stores only non-secret resume metadata under `.secrets`, validates pinned source SHA256/object size, writes the revision manifest, and writes `current.json` last. GPU restore is read-only and falls back to Hugging Face only on a cache miss.
+
+Current status: no FLUX part is cached and `current.json` is absent. The first seed stopped safely because actual Hugging Face range data timed out despite successful metadata HEAD and R2 credential probes. Resume is safe after source connectivity recovers.

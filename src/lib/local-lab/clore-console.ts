@@ -14,6 +14,7 @@ import { loadCloreExecutionConfig } from "../../../scripts/clore/execution-confi
 import { DEFAULT_DOCKER_IMAGE } from "../../../scripts/clore/config";
 import { loadModelCacheConfig } from "../../../scripts/model-cache/config";
 import { MODEL_CACHE_CURRENT_KEY } from "../../../scripts/model-cache/manifest";
+import { getCloreDeploymentHold } from "../../../scripts/clore/deployment-hold";
 
 const MOCK_MARKETPLACE_PATH = path.join(process.cwd(), "scripts", "clore", "mock-marketplace.json");
 const LATEST_MARKETPLACE_PATH = path.join(process.cwd(), "scripts", "clore", "fixtures", "latest-marketplace.sanitized.json");
@@ -197,6 +198,8 @@ export function getLocalLabSessionSummary() {
 
   return {
     ...state,
+    deploymentHold: getCloreDeploymentHold().enabled,
+    deploymentHoldMessage: getCloreDeploymentHold().enabled ? "Clore部署异常，等待平台处理" : null,
     deploymentTimeline: [
       "尚未租用",
       "订单创建中",

@@ -71,6 +71,16 @@ async function main() {
   await timeoutScheduler.request(config, "/create_order", { method: "POST" }, { onCreateUncertain: async () => { uncertainChecks += 1; return false; } });
   assert.equal(uncertainChecks, 1, "timeout must check order state before a create retry");
   assert.equal(timeoutCalls, 2, "timeout without an active order may retry once");
+  const abortSignals: AbortSignal[] = [];
+  const aborting = new CloreRequestScheduler({
+    now: () => now,
+    sleep: async () => undefined,
+    jitter: () => 0,
+    log: () => undefined,
+    fetch: async (_url, init) => { abortSignals.push(init?.signal as AbortSignal); return success(); },
+  });
+  await aborting.request(config, "/wallets", {}, { forceRefresh: true });
+  assert.ok(abortSignals[0] instanceof AbortSignal, "live requests must receive a bounded abort signal");
   console.log("Clore request scheduler tests passed.");
 }
 

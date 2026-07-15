@@ -16,6 +16,7 @@ const CREATE_INTERVAL_MS = 6000;
 const MARKETPLACE_CACHE_MS = 60_000;
 const STATE_CACHE_MS = 10_000;
 const RATE_LIMIT_BACKOFF_MS = [2000, 4000, 8000, 15000];
+const REQUEST_TIMEOUT_MS = 30_000;
 
 export type CloreRequestOptions = {
   forceRefresh?: boolean;
@@ -156,7 +157,13 @@ export class CloreRequestScheduler {
         await this.waitForSlot(endpoint);
         let response: Response;
         try {
-          response = await this.fetchFn(url, { ...init, headers: { ...createCloreHeaders(config.apiKey!), ...(init.headers ?? {}) } });
+          const timeout = new AbortController();
+          const timer = setTimeout(() => timeout.abort(), REQUEST_TIMEOUT_MS);
+          try {
+            response = await this.fetchFn(url, { ...init, signal: init.signal ?? timeout.signal, headers: { ...createCloreHeaders(config.apiKey!), ...(init.headers ?? {}) } });
+          } finally {
+            clearTimeout(timer);
+          }
         } catch (error) {
           if (networkAttempts >= 2) throw error;
           networkAttempts += 1;

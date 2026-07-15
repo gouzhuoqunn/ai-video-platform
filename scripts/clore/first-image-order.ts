@@ -8,6 +8,7 @@ import { buildCreateOrderBody, createCloreOrder } from "./order-execution";
 import { assertWatchdogsReadyForCreate } from "./watchdog-preflight";
 import { findBootstrapImageCandidates, summarizeBootstrapImageCandidate } from "./bootstrap-image-profile";
 import { inspectSshPublicKey } from "./ssh";
+import { assertCloreDeploymentAllowed } from "./deployment-hold";
 
 function argument(name: string) {
   const inline = process.argv.find((value) => value.startsWith(`--${name}=`));
@@ -17,6 +18,7 @@ function argument(name: string) {
 }
 
 async function main() {
+  assertCloreDeploymentAllowed();
   if (!process.argv.includes("--execute")) throw new Error("First-image order requires --execute.");
   const serverId = argument("server-id");
   if (!serverId || argument("confirm-project") !== PROJECT_TAG) {

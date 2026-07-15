@@ -1,3 +1,5 @@
+import { getCloreDeploymentHold } from "./deployment-hold";
+
 export type CloreExecutionConfig = {
   enabled: boolean;
   firstSessionMaxBudgetUsd: number;
@@ -7,6 +9,7 @@ export type CloreExecutionConfig = {
   orderStartTimeoutMinutes: number;
   workerReadyTimeoutMinutes: number;
   firstGpuSession: boolean;
+  deploymentHold: boolean;
 };
 
 function readNumber(name: string, fallback: number) {
@@ -24,5 +27,6 @@ export function loadCloreExecutionConfig(): CloreExecutionConfig {
     orderStartTimeoutMinutes: readNumber("CLORE_ORDER_START_TIMEOUT_MINUTES", 15),
     workerReadyTimeoutMinutes: readNumber("CLORE_WORKER_READY_TIMEOUT_MINUTES", 120),
     firstGpuSession: process.env.CLORE_FIRST_GPU_SESSION !== "false",
+    deploymentHold: getCloreDeploymentHold().enabled,
   };
 }

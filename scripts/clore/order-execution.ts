@@ -12,6 +12,7 @@ import { acquireOrderCreateLock, readActiveOrder, writeActiveOrder } from "./ord
 import type { CloreExecutionConfig } from "./execution-config";
 import { loadModelCacheConfig } from "../model-cache/config";
 import { assertWatchdogsReadyForCreate } from "./watchdog-preflight";
+import { assertCloreDeploymentAllowed } from "./deployment-hold";
 
 export type LoadedCloreConfig = ReturnType<typeof loadCloreConfig>;
 
@@ -122,6 +123,7 @@ export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
 }
 
 export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) {
+  assertCloreDeploymentAllowed();
   if (!input.execution.enabled) {
     throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false.");
   }
@@ -200,6 +202,7 @@ export async function createCloreOrder(input: {
   request?: (body: CreateOrderRequest) => Promise<unknown>;
   readOrders?: typeof readLiveOrdersSummary;
 }) {
+  assertCloreDeploymentAllowed();
   if (!input.execution.enabled) {
     throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false.");
   }

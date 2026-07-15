@@ -83,14 +83,23 @@ export function buildR2ObjectUrl(creds: Pick<R2Credentials, "endpoint" | "bucket
   return new URL(`${creds.endpoint.replace(/\/$/, "")}/${creds.bucket}/${encodePath(key)}`);
 }
 
-export async function signedR2Fetch(creds: R2Credentials, method: string, key: string, body: Buffer | string = "") {
+export async function signedR2Fetch(
+  creds: R2Credentials,
+  method: string,
+  key: string,
+  body: Buffer | string = "",
+  options: { query?: Record<string, string>; headers?: Record<string, string> } = {},
+) {
   const now = new Date();
   const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
   const dateStamp = amzDate.slice(0, 8);
   const url = buildR2ObjectUrl(creds, key);
+  for (const [name, value] of Object.entries(options.query ?? {})) url.searchParams.set(name, value);
   const payloadHash = sha256Hex(body);
-  const canonicalHeaders = `host:${url.host}\nx-amz-content-sha256:${payloadHash}\nx-amz-date:${amzDate}\n`;
-  const signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+  const extraHeaders = Object.entries(options.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value.trim()] as const).sort(([a], [b]) => a.localeCompare(b));
+  const headersForSignature = [["host", url.host], ["x-amz-content-sha256", payloadHash], ["x-amz-date", amzDate], ...extraHeaders] as const;
+  const canonicalHeaders = headersForSignature.map(([name, value]) => `${name}:${value}\n`).join("");
+  const signedHeaders = headersForSignature.map(([name]) => name).join(";");
   const canonicalRequest = [method, url.pathname, canonicalQuery(url), canonicalHeaders, signedHeaders, payloadHash].join("\n");
   const scope = `${dateStamp}/${creds.region}/s3/aws4_request`;
   const stringToSign = ["AWS4-HMAC-SHA256", amzDate, scope, sha256Hex(canonicalRequest)].join("\n");
@@ -102,6 +111,7 @@ export async function signedR2Fetch(creds: R2Credentials, method: string, key: s
       Authorization: `AWS4-HMAC-SHA256 Credential=${creds.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
       "x-amz-content-sha256": payloadHash,
       "x-amz-date": amzDate,
+      ...Object.fromEntries(extraHeaders),
     },
   });
 }

@@ -313,3 +313,10 @@ R2 and runtime readiness:
 - No model upload exists yet.
 
 No Clore order was created during this image work.
+
+## 2026-07-15 Deployment Incident Hold
+
+- `CLORE_DEPLOYMENT_HOLD=true` is stored locally while platform deployment support is pending. It blocks every `create_order` path but leaves market, wallet, status, evidence export, and read-only monitoring available.
+- `npm run clore:support:export` writes sanitized incident files under `artifacts/clore-support/` for orders `1954464`, `1954484`, `1954507`, plus historical comparison `1950673`.
+- `npm run clore:deployment:watch` performs read-only rounds with a five-minute default interval and never creates an order.
+- The current incident orders did not become running and did not publish SSH or HTTP endpoints. Final active order count remains zero.
