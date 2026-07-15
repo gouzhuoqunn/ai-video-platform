@@ -9,6 +9,8 @@ on:
       - "package.json"
       - "package-lock.json"
       - "scripts/flux-first-image.ts"
+      - "scripts/first-image-preflight.ts"
+      - "scripts/first-image-preflight-tests.ts"
       - "scripts/model-cache/**"
   workflow_dispatch:
 
@@ -19,23 +21,22 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  MODEL_CACHE_REGION: auto
+  MODEL_CACHE_PREFIX: production/rtx4090/image
+
 jobs:
-  seed-flux4090-cache:
-    name: Seed FLUX4090 HF to R2 cache
+  verify-existing-flux:
+    name: Verify existing FLUX 4B object
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 10
+    outputs:
+      flux_verified: ${{ steps.verify.outputs.flux_verified }}
     env:
-      FLUX_R2_SEED_MAX_MINUTES: "170"
-      FLUX_R2_SEED_STATE_DIR: ".cache/flux4090-seed-state"
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
       R2_READONLY_ACCESS_KEY_ID: ${{ secrets.R2_READONLY_ACCESS_KEY_ID }}
       R2_READONLY_SECRET_ACCESS_KEY: ${{ secrets.R2_READONLY_SECRET_ACCESS_KEY }}
-      MODEL_CACHE_REGION: "auto"
-      MODEL_CACHE_PREFIX: "production/rtx4090/image"
-      FLUX_R2_RECOVERY_STAGING_KEYS_JSON: '{"diffusion_models/flux-2-klein-4b-fp8.safetensors":"production/rtx4090/image/staging/7d6d7683-d4ea-492d-b445-5d47378ae900/files/diffusion_models/flux-2-klein-4b-fp8.safetensors"}'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,7 +45,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: npm
 
       - name: Install dependencies
         run: npm ci
@@ -52,24 +52,166 @@ jobs:
       - name: Secret scan
         run: npm run secret:scan
 
-      - name: Probe SDK multipart
-        run: npm run model-cache:probe:flux4090
+      - name: Verify completed FLUX object without downloading
+        id: verify
+        run: |
+          npm run model-cache:verify-object:flux4090 -- flux
+          echo "flux_verified=true" >> "$GITHUB_OUTPUT"
 
-      - name: Seed FLUX4090 cache
-        run: npm run model-cache:seed:flux4090
+  cache-qwen:
+    name: Cache Qwen FLUX text encoder
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    outputs:
+      qwen_verified: ${{ steps.upload.outputs.qwen_verified }}
+    env:
+      HF_HOME: ${{ runner.temp }}/hf-qwen
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Show cache status
+      - name: Reclaim runner disk
+        run: |
+          df -h
+          sudo rm -rf /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/share/dotnet /opt/ghc
+          docker system prune --all --force || true
+          df -h
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          python -m pip install --disable-pip-version-check "huggingface_hub[hf_xet]>=0.30,<2"
+
+      - name: Require 11 GiB free disk
+        run: npm run model-cache:disk-guard:flux4090 -- 11
+
+      - name: Download locked Qwen with official Hugging Face client
+        id: download
+        run: timeout --signal=TERM --kill-after=30s 25m python scripts/model-cache/hf_download_model.py --model qwen --cache-dir "$HF_HOME" --github-output "$GITHUB_OUTPUT" --max-minutes 25 --stall-minutes 10
+
+      - name: Verify complete Qwen SHA256
+        run: timeout --signal=TERM --kill-after=30s 8m npm run model-cache:validate-local:flux4090 -- qwen "${{ steps.download.outputs.model_path }}"
+
+      - name: Upload and verify Qwen with AWS SDK
+        id: upload
+        run: |
+          timeout --signal=TERM --kill-after=30s 20m npm run model-cache:upload-local:flux4090 -- qwen "${{ steps.download.outputs.model_path }}"
+          echo "qwen_verified=true" >> "$GITHUB_OUTPUT"
+
+      - name: Remove Qwen and Hugging Face cache
         if: always()
-        run: npm run model-cache:status:flux4090
+        run: |
+          rm -f -- "${{ steps.download.outputs.model_path }}"
+          rm -rf -- "$HF_HOME"
 
-      - name: Verify published cache
+  cache-vae:
+    name: Cache FLUX VAE
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      vae_verified: ${{ steps.upload.outputs.vae_verified }}
+    env:
+      HF_HOME: ${{ runner.temp }}/hf-vae
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          python -m pip install --disable-pip-version-check "huggingface_hub[hf_xet]>=0.30,<2"
+
+      - name: Check runner disk
+        run: |
+          df -h
+          npm run model-cache:disk-guard:flux4090 -- 3
+
+      - name: Download locked VAE with official Hugging Face client
+        id: download
+        run: timeout --signal=TERM --kill-after=30s 10m python scripts/model-cache/hf_download_model.py --model vae --cache-dir "$HF_HOME" --github-output "$GITHUB_OUTPUT" --max-minutes 10 --stall-minutes 5
+
+      - name: Verify complete VAE SHA256
+        run: timeout --signal=TERM --kill-after=30s 3m npm run model-cache:validate-local:flux4090 -- vae "${{ steps.download.outputs.model_path }}"
+
+      - name: Upload and verify VAE with AWS SDK
+        id: upload
+        run: |
+          timeout --signal=TERM --kill-after=30s 10m npm run model-cache:upload-local:flux4090 -- vae "${{ steps.download.outputs.model_path }}"
+          echo "vae_verified=true" >> "$GITHUB_OUTPUT"
+
+      - name: Remove VAE and Hugging Face cache
+        if: always()
+        run: |
+          rm -f -- "${{ steps.download.outputs.model_path }}"
+          rm -rf -- "$HF_HOME"
+
+  publish-and-verify:
+    name: Publish and verify FLUX cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+      - verify-existing-flux
+      - cache-qwen
+      - cache-vae
+    if: >-
+      ${{ needs.verify-existing-flux.outputs.flux_verified == 'true' &&
+          needs.cache-qwen.outputs.qwen_verified == 'true' &&
+          needs.cache-vae.outputs.vae_verified == 'true' }}
+    env:
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      R2_READONLY_ACCESS_KEY_ID: ${{ secrets.R2_READONLY_ACCESS_KEY_ID }}
+      R2_READONLY_SECRET_ACCESS_KEY: ${{ secrets.R2_READONLY_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Publish manifest and current pointer last
+        run: npm run model-cache:publish:flux4090
+
+      - name: Verify GPU read-only restore boundary
         run: npm run model-cache:verify:flux4090
 
-      - name: Upload multipart resume state
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: flux4090-seed-state
-          path: .cache/flux4090-seed-state/
-          if-no-files-found: ignore
-          retention-days: 7
+      - name: Show published cache status
+        run: npm run model-cache:status:flux4090
+
+      - name: Validate first-image R2 restore plan
+        run: npm run first-image:preflight

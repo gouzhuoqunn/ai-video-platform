@@ -72,11 +72,17 @@
     "model-cache:hf:check": "tsx scripts/model-cache/hf-metadata-check.ts",
     "model-cache:r2:test": "tsx scripts/model-cache/r2-credentials-check.ts",
     "model-cache:seed:test": "tsx scripts/model-cache/seed-cache.ts",
-    "model-cache:seed:flux4090": "tsx scripts/model-cache/flux4090-cache.ts seed",
+    "model-cache:verify-object:flux4090": "tsx scripts/model-cache/flux4090-cache.ts verify-object",
+    "model-cache:validate-local:flux4090": "tsx scripts/model-cache/flux4090-cache.ts validate-local",
+    "model-cache:upload-local:flux4090": "tsx scripts/model-cache/flux4090-cache.ts upload-local",
+    "model-cache:publish:flux4090": "tsx scripts/model-cache/flux4090-cache.ts publish",
+    "model-cache:abort-empty:flux4090": "tsx scripts/model-cache/flux4090-cache.ts abort-empty-upload",
+    "model-cache:disk-guard:flux4090": "tsx scripts/model-cache/flux4090-cache.ts disk-guard",
     "model-cache:status:flux4090": "tsx scripts/model-cache/flux4090-cache.ts status",
-    "model-cache:resume:flux4090": "tsx scripts/model-cache/flux4090-cache.ts seed",
     "model-cache:verify:flux4090": "tsx scripts/model-cache/flux4090-cache.ts verify",
-    "model-cache:probe:flux4090": "tsx scripts/model-cache/flux4090-cache.ts probe",
+    "model-cache:hf:test": "python scripts/model-cache/hf_download_model_tests.py",
+    "first-image:preflight": "tsx scripts/first-image-preflight.ts",
+    "first-image:preflight:test": "tsx scripts/first-image-preflight-tests.ts",
     "generation:architecture:test": "tsx scripts/generation-architecture-tests.ts",
     "generation:metadata:test": "tsx scripts/generation-metadata-benchmark-tests.ts",
     "generation:runtime:test": "tsx scripts/comfy-runtime-contract-tests.ts",
@@ -128,6 +134,7 @@
   "license": "UNLICENSED",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1087.0",
+    "@aws-sdk/lib-storage": "^3.1087.0",
     "@supabase/ssr": "^0.12.0",
     "@supabase/supabase-js": "^2.110.0",
     "next": "^16.2.10",
@@ -149,6 +156,7 @@
     "tailwindcss": "^4.3.2",
     "tsx": "^4.21.0",
     "typescript": "^6.0.3",
-    "wrangler": "^4.110.0"
+    "wrangler": "^4.110.0",
+    "yaml": "^2.9.0"
   }
 }
