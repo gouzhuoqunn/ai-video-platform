@@ -65,7 +65,6 @@ jobs:
     outputs:
       qwen_verified: ${{ steps.upload.outputs.qwen_verified }}
     env:
-      HF_HOME: ${{ runner.temp }}/hf-qwen
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -73,6 +72,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set Qwen Hugging Face cache directory
+        run: echo "HF_HOME=$RUNNER_TEMP/hf-qwen" >> "$GITHUB_ENV"
 
       - name: Reclaim runner disk
         run: |
@@ -101,7 +103,7 @@ jobs:
 
       - name: Download locked Qwen with official Hugging Face client
         id: download
-        run: timeout --signal=TERM --kill-after=30s 25m python scripts/model-cache/hf_download_model.py --model qwen --cache-dir "$HF_HOME" --github-output "$GITHUB_OUTPUT" --max-minutes 25 --stall-minutes 10
+        run: timeout --signal=TERM --kill-after=30s 30m python scripts/model-cache/hf_download_model.py --model qwen --cache-dir "$HF_HOME" --github-output "$GITHUB_OUTPUT" --max-minutes 30 --stall-minutes 10
 
       - name: Verify complete Qwen SHA256
         run: timeout --signal=TERM --kill-after=30s 8m npm run model-cache:validate-local:flux4090 -- qwen "${{ steps.download.outputs.model_path }}"
@@ -125,7 +127,6 @@ jobs:
     outputs:
       vae_verified: ${{ steps.upload.outputs.vae_verified }}
     env:
-      HF_HOME: ${{ runner.temp }}/hf-vae
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -133,6 +134,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set VAE Hugging Face cache directory
+        run: echo "HF_HOME=$RUNNER_TEMP/hf-vae" >> "$GITHUB_ENV"
 
       - name: Setup Node
         uses: actions/setup-node@v4

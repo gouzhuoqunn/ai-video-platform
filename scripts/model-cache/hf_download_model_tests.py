@@ -22,8 +22,12 @@ assert MODULE.MODELS["vae"]["size"] == 336_211_292
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     (root / "part.incomplete").write_bytes(b"x" * 17)
+    (root / "download.lock").write_text("locked", encoding="utf-8")
     current, total = MODULE.cache_progress(root, 100)
-    assert current == 17
-    assert total == 17
+    assert current == 23
+    assert total == 23
+    assert MODULE.remove_incomplete_locks(root) == 1
+    assert not (root / "download.lock").exists()
+    assert (root / "part.incomplete").read_bytes() == b"x" * 17
 
 print("Official Hugging Face Xet fallback and progress tests passed.")

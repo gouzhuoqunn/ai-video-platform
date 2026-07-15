@@ -60,6 +60,18 @@ def terminate_process(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=10)
 
 
+def remove_incomplete_locks(cache_dir: Path) -> int:
+    removed = 0
+    for item in cache_dir.rglob("*.lock"):
+        try:
+            if item.is_file() or item.is_symlink():
+                item.unlink()
+                removed += 1
+        except FileNotFoundError:
+            continue
+    return removed
+
+
 def worker(args: argparse.Namespace) -> int:
     from huggingface_hub import hf_hub_download
 
@@ -149,6 +161,7 @@ def run_download(args: argparse.Namespace) -> Path:
             if should_fallback(last_change_at, now, stall_seconds, mode):
                 print(json.dumps({"stage": "hf_download", "mode": mode, "fallback": "ordinary_http", "reason": "no_byte_progress"}), flush=True)
                 terminate_process(process)
+                print(json.dumps({"stage": "hf_download", "mode": mode, "removed_incomplete_locks": remove_incomplete_locks(cache_dir)}), flush=True)
                 fallback_requested = True
                 break
             time.sleep(5)
@@ -164,6 +177,7 @@ def run_download(args: argparse.Namespace) -> Path:
             return downloaded
         if mode == "xet":
             print(json.dumps({"stage": "hf_download", "mode": mode, "fallback": "ordinary_http", "reason": f"worker_exit_{process.returncode}"}), flush=True)
+            print(json.dumps({"stage": "hf_download", "mode": mode, "removed_incomplete_locks": remove_incomplete_locks(cache_dir)}), flush=True)
             continue
         raise RuntimeError(f"hf_http_download_failed:{process.returncode}")
     raise RuntimeError("hf_download_failed")

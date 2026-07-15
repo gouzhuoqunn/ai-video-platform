@@ -59,7 +59,7 @@ export function createS3Client(creds: R2Credentials) {
     region: creds.region || "auto",
     endpoint: creds.endpoint,
     forcePathStyle: true,
-    maxAttempts: 3,
+    maxAttempts: 4,
     requestHandler: new NodeHttpHandler({ connectionTimeout: 15_000, socketTimeout: HTTP_TIMEOUT_MS }),
     credentials: { accessKeyId: creds.accessKeyId, secretAccessKey: creds.secretAccessKey },
   });
