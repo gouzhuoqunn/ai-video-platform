@@ -1,5 +1,16 @@
 # Project Context
 
+## 2026-07-16 Stage 3M Clore-only bootstrap, bounded attempts, and Wan cache dispatch
+
+- Automatic rental now resolves to Clore only. RunPod has a separate ignored deployment hold and remains read-only for inventory/cleanup checks. Clore candidates accept CUDA capability 8.0+ image GPUs (including RTX 4090/5090, A40, A6000, and RTX 3090-class hosts) with at least 20GB VRAM, 32GB RAM, 120GB disk, on-demand pricing, effective hourly price at most 0.70 USD, and a 3.5-hour projection at most 2.50 USD.
+- The lightweight order profile uses the official public `cloreai/jupyter:ubuntu24.04-v2` image, verified as linux/amd64 at manifest digest `sha256:0586bbd2c26a8bcfd194d9d022ce4966ede23b3a743471032069c1f2ed2abc27`. Orders expose only `22/tcp`; Runtime code/config are delivered as a small overlay after SSH rather than by rebuilding the permanent Runtime image.
+- The Ampere overlay recognizes compute capability 8.0+ with at least 20GB VRAM, uses FP16 below capability 8.9, enables CPU offload below 24GB, and preserves the existing RTX 4090/5090 paths. It can bootstrap either the fixed Runtime Docker image or a native pinned ComfyUI checkout.
+- Exactly three Clore hosts were attempted with a 10-minute SSH publication limit: `105175`/order `1955984`, `105181`/order `1956022`, and independent host `29169`/order `1956054`. Each order remained outside `running`, never published SSH, and was canceled after 611/606/606 seconds. No host reached hardware inspection, overlay installation, Runtime boot, R2 restore, inference, or result sync.
+- Stage 3M Clore spend was 0.48 USD; wallet balance changed from 14.23 to 13.75 USD. Final Clore active orders, RunPod Pods, and RunPod network volumes are all zero. Both deployment holds are enabled, the remote Watchdog is disarmed, and the local scheduled Watchdog is disabled.
+- The FLUX R2 revision and its 12,451,817,860 verified bytes were preserved without download or mutation. No PNG was generated, so `gpu_inference_verified`, `flux_first_image_verified`, and `production_ready` remain false.
+- Wan cache workflow run `29446260840` was triggered once and failed workflow parsing before any job because job-level `runner.temp` is invalid. The workflow now exports isolated `HF_HOME` values from `$RUNNER_TEMP` in a step, but Stage 3M deliberately did not retry. Zero Wan objects were uploaded and no multipart upload began; the existing FLUX cache was unchanged.
+- The local studio now has a persistent Chinese `图片`/`视频` switch. Image mode shows first-image state and local archived PNGs; video mode keeps the existing task/video flow. `立即生成` may arm Clore only when a compliant host exists, while normal batch auto-rent waits for the configurable threshold (default 3).
+
 ## 2026-07-16 Stage 3L RunPod deterministic pricing and bounded first-image attempt
 
 - RunPod budgeting is now split into `computeHourly`, `storageHourly`, `totalHourly`, and `projectedSessionTotal`. Caps are 0.70 compute, 0.75 total hourly, and 2.50 projected/session hard limit. The legacy hourly variable is compute-only. Official running Pod storage is estimated at 0.10 USD/GB/month for both 50GB container and 30GB volume disk, about 0.0109589 USD/hour total storage.

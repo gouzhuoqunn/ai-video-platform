@@ -184,3 +184,9 @@ Stage 3K kept this cache unchanged. Two budget-gated RunPod creates were deleted
 The existing Comfy API workflow requires exactly three files from `Comfy-Org/Wan_2.2_ComfyUI_Repackaged` at revision `fb1388adc906ab39ffc26ee40e96b22886b56bc4`: the TI2V-5B UNet, FP8 UMT5 encoder, and Wan2.2 VAE. Their locked total is 18,144,966,705 bytes. Exact paths, sizes, SHA256 values, R2 additional capacity, a three-job workflow-dispatch-only cache plan, 4090/A40/A6000 inference plans, required nodes, and Phase 3M status are stored in `benchmark/wan-first-video/stage3m-plan.json` and `stage3m-status.json`.
 
 `npm run wan:first-video:preflight` prints `wan_cache_plan_valid=true` and `wan_workflow_plan_valid=true`. It does not download Wan files, upload to R2, or trigger GitHub Actions.
+
+## 2026-07-16 Stage 3M Wan cache attempt
+
+The manual-only workflow `.github/workflows/wan-stage3m-model-cache.yml` separates the locked UNet, text encoder, and VAE into three parallel jobs. Each job downloads with the official Hugging Face/Xet client, verifies exact size and SHA256, and would use AWS SDK multipart upload. The publish job verifies revision objects before writing the revision manifest and publishes `current.json` last. Model files are excluded from Actions artifacts.
+
+Run `29446260840` was dispatched exactly once on `stage-two-five-comfy-runtime`. GitHub rejected the workflow before jobs because `runner.temp` was referenced in job-level `env`. The definition is corrected to write `HF_HOME=$RUNNER_TEMP/...` to `$GITHUB_ENV` inside a step, matching the proven FLUX workflow pattern. Stage 3M did not issue a second dispatch: no Runner downloaded a Wan file, no multipart upload was created, no R2 object or pointer changed, and the existing FLUX revision remains intact.

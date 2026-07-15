@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "status": "ready_for_stage3m_no_cache_run",
-  "cacheRunTriggered": false,
+  "status": "stage3m_attempted_parse_failure_no_retry",
+  "cacheRunTriggered": true,
   "officialModel": {
     "repository": "Wan-AI/Wan2.2-TI2V-5B",
     "revision": "921dbaf3f1674a56f47e83fb80a34bac8a8f203e",
@@ -23,7 +23,10 @@
     "parallelJobs": ["cache-wan-unet", "cache-wan-text-encoder", "cache-wan-vae"],
     "publishAfterAllShaVerified": true,
     "publishOrder": ["revision-files", "revision-manifest", "current-pointer"],
-    "runNow": false
+    "runNow": false,
+    "stage3mRunId": 29446260840,
+    "stage3mRunResult": "workflow_parse_failure_before_jobs",
+    "retryAllowedThisStage": false
   },
   "workflow": {
     "asset": "comfy-runtime/workflows/official/wan22-ti2v-5b-api.json",

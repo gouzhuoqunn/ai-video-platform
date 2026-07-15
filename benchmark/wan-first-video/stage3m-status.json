@@ -3,6 +3,10 @@
   "phase": "3M",
   "wanCachePlanValid": true,
   "wanWorkflowPlanValid": true,
-  "cacheRunTriggered": false,
-  "nextAction": "Create workflow_dispatch-only parallel cache implementation, then run a real RTX 4090 smoke with the fixed Comfy API workflow."
+  "cacheRunTriggered": true,
+  "cacheRunId": 29446260840,
+  "cacheRunResult": "workflow_parse_failure_before_jobs",
+  "objectsUploaded": 0,
+  "retryAllowedThisStage": false,
+  "nextAction": "Use the corrected workflow in a later explicitly authorized stage; Stage 3M does not launch a second run."
 }

@@ -9,6 +9,12 @@ npm run gpu:candidates -- --provider=runpod
 npm run first-image:resume
 ```
 
+Stage 3M automatic creation is Clore-only and fails closed while `.secrets/clore-deployment-hold.json` is enabled. A deliberately controlled session must release that hold only inside the orchestrator process, arm the local and remote Watchdogs before create, use at most three actual host orders, and restore the hold in `finally`. The SSH publication window is 10 minutes per host; HTTP 429 recovery does not count as another host attempt.
+
+The Clore lightweight profile uses `cloreai/jupyter:ubuntu24.04-v2` at verified linux/amd64 manifest digest `sha256:0586bbd2c26a8bcfd194d9d022ce4966ede23b3a743471032069c1f2ed2abc27`, exposes only `22/tcp`, and carries no application secrets. After SSH, `scripts/clore/clore-light-bootstrap.sh` installs the small Stage 3M overlay and either starts the pinned Runtime container or creates a native pinned ComfyUI environment. The overlay requires CUDA compute capability 8.0+ and at least 20GB VRAM; FP16 is used below 8.9 and CPU offload below 24GB.
+
+Stage 3M exhausted its three permitted hosts (`105175`, `105181`, `29169`). All remained outside `running` for the full readiness window, so no SSH/hardware evidence, Runtime boot, R2 restore, or image exists. Do not resume the ignored checkpoint as if `ssh_ready` were complete; the latest checkpoint contains only `candidate_selected` and `order_created`. Any later live attempt requires a fresh explicit stage budget and a newly selected, non-excluded host.
+
 `manual_ssh` reads `.secrets/manual-gpu-target.json`. It may inspect hardware, pull the pinned Runtime, restore models, generate the first image, sync results, and stop Runtime. It never rents or cancels a provider order.
 
 `runpod` reads `RUNPOD_API_KEY`, `RUNPOD_MAX_GPU_HOURLY_USD`, `RUNPOD_MAX_TOTAL_HOURLY_USD`, and `RUNPOD_MAX_SESSION_USD` only from process environment or ignored `.secrets/runpod.env`. The legacy `RUNPOD_MAX_HOURLY_USD` remains a compute-only fallback. Without a key, commands stay dry-run and do not create a Pod. Real execution uses the private `ai-video-first-image-direct-v1` template with the immutable Comfy Runtime digest. The template overrides the Runtime entrypoint with a root-only OpenSSH bootstrap, exposes only `22/tcp` and `8080/http`, mounts `/workspace`, and waits for the local executor to start Runtime over SSH.

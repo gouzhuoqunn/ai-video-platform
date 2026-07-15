@@ -34,13 +34,14 @@ jobs:
       matrix:
         alias: [unet, text, vae]
     env:
-      HF_HOME: ${{ runner.temp }}/hf-wan-${{ matrix.alias }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
     steps:
       - uses: actions/checkout@v4
+      - name: Set isolated Hugging Face cache
+        run: echo "HF_HOME=$RUNNER_TEMP/hf-wan-${{ matrix.alias }}" >> "$GITHUB_ENV"
       - name: Reclaim runner disk
         run: |
           sudo rm -rf /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/share/dotnet /opt/ghc
