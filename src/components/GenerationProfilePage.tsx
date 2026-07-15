@@ -1,3 +1,4 @@
+
 import Link from "next/link";
 import type { GpuProfileKey } from "@/lib/generation/gpu-profiles";
 import { MODEL_CACHE_REGISTRY } from "@/lib/generation/model-registry";
@@ -143,7 +144,10 @@ export function GenerationProfilePage({ profile }: GenerationProfilePageProps) {
                   ))}
                 </div>
               ) : (
-                <p className="mt-3 text-sm text-stone-500">No local FLUX first-image result has been archived yet.</p>
+                <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-950">
+                  <p className="font-semibold">Stage 3L ended safely without a generated image.</p>
+                  <p>A40 passed price, SSH, hardware, and R2 restore, but the fixed Runtime correctly rejected the unsupported bootstrap profile. Secure and Community RTX 4090 capacity requests then failed at provider create. All Pods were terminated; refresh and service restart preserve this status in the application build.</p>
+                </div>
               )}
             </section>
           ) : null}
@@ -207,3 +211,4 @@ export function GenerationProfilePage({ profile }: GenerationProfilePageProps) {
     </main>
   );
 }
+

@@ -1,3 +1,4 @@
+
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { assertGpuTarget, FIXED_RUNTIME_DIGEST, sshCommand } from "./common";
@@ -28,7 +29,7 @@ export class ManualSshProvider implements GpuProvider {
   async recoverExistingSession() { return existsSync(TARGET_PATH) ? this.getSession("manual-ssh") : null; }
   async getSession(_sessionId: string): Promise<GpuSession | null> {
     if (!existsSync(TARGET_PATH)) return null;
-    return { provider: this.id, id: "manual-ssh", name: "manual-ssh", status: "EXTERNAL", createdAt: null, lastStatusChange: null, hourlyUsd: null, target: loadManualTarget() };
+    return { provider: this.id, id: "manual-ssh", name: "manual-ssh", status: "EXTERNAL", createdAt: null, lastStatusChange: null, hourlyUsd: null, price: null, costPerHr: null, adjustedCostPerHr: null, containerDiskInGb: null, volumeInGb: null, cloudType: null, gpuType: null, target: loadManualTarget() };
   }
   async waitForSsh(session: GpuSession) {
     const target = session.target ?? loadManualTarget();
@@ -37,5 +38,6 @@ export class ManualSshProvider implements GpuProvider {
   }
   async stopSession() { /* External lifecycle stays user-managed. */ }
   async terminateSession() { /* External lifecycle stays user-managed. */ }
-  async getBilling() { return { hourlyUsd: null, elapsedSeconds: null, estimatedSpendUsd: null }; }
+  async getBilling() { return { hourlyUsd: null, computeHourly: null, storageHourly: null, totalHourly: null, projectedSessionTotal: null, elapsedSeconds: null, estimatedSpendUsd: null }; }
 }
+

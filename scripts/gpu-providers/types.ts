@@ -1,3 +1,4 @@
+
 export type GpuProviderId = "clore" | "runpod" | "manual_ssh";
 
 export type GpuProfile = "rtx4090" | "rtx5090" | "bootstrap_image_gpu";
@@ -29,7 +30,16 @@ export type GpuCandidate = {
   containerDiskGb: number;
   volumeGb: number;
   hourlyUsd: number | null;
+  cloudType?: "SECURE" | "COMMUNITY";
+  availability?: "High" | "Medium" | "Low" | "None" | "Unknown";
   interruptible: false;
+};
+
+export type ProviderPriceBreakdown = {
+  computeHourly: number;
+  storageHourly: number;
+  totalHourly: number;
+  projectedSessionTotal: number;
 };
 
 export type GpuSession = {
@@ -40,6 +50,13 @@ export type GpuSession = {
   createdAt: string | null;
   lastStatusChange: string | null;
   hourlyUsd: number | null;
+  price: ProviderPriceBreakdown | null;
+  costPerHr: number | null;
+  adjustedCostPerHr: number | null;
+  containerDiskInGb: number | null;
+  volumeInGb: number | null;
+  cloudType: "SECURE" | "COMMUNITY" | null;
+  gpuType: string | null;
   target: GpuTarget | null;
 };
 
@@ -53,6 +70,10 @@ export type CreateSessionInput = {
 
 export type BillingSummary = {
   hourlyUsd: number | null;
+  computeHourly: number | null;
+  storageHourly: number | null;
+  totalHourly: number | null;
+  projectedSessionTotal: number | null;
   elapsedSeconds: number | null;
   estimatedSpendUsd: number | null;
 };
@@ -70,3 +91,4 @@ export interface GpuProvider {
   getBilling(session: GpuSession): Promise<BillingSummary>;
   recoverExistingSession(sessionId?: string): Promise<GpuSession | null>;
 }
+

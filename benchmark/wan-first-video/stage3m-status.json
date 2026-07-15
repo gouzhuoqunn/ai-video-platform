@@ -1,0 +1,10 @@
+
+{
+  "schemaVersion": 1,
+  "phase": "3M",
+  "wanCachePlanValid": true,
+  "wanWorkflowPlanValid": true,
+  "cacheRunTriggered": false,
+  "nextAction": "Create workflow_dispatch-only parallel cache implementation, then run a real RTX 4090 smoke with the fixed Comfy API workflow."
+}
+

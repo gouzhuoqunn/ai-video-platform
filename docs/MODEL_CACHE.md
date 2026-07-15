@@ -1,3 +1,4 @@
+
 # Model Cache
 
 Status: private Cloudflare R2 bucket created, connected to dry-run planning, and permission-tested with separate admin and GPU read-only S3 credentials. No Wan2.2 weights were uploaded or downloaded.
@@ -178,3 +179,10 @@ Published revision: `flux2-klein-4b-5b4408e59397-a9e4ca87c16d`.
 The revision manifest and `production/rtx4090/image/current.json` are published. Read-only GPU credentials can read both indexes, HEAD all three objects, and read their first and last 1024-byte ranges; Put, overwrite, and Delete probes are denied. `gpu_restore_ready=true`, while `gpu_inference_verified=false` and `production_ready=false`.
 
 Stage 3K kept this cache unchanged. Two budget-gated RunPod creates were deleted before SSH because their reported total hourly price exceeded 0.70 USD, so no R2 object was downloaded and no Hugging Face fallback was attempted. The next accepted SSH GPU still restores this published revision first with concurrency two, `.part` resume, full size/SHA256 verification, and atomic rename.
+
+## 2026-07-16 Stage 3L Wan first-video preflight
+
+The existing Comfy API workflow requires exactly three files from `Comfy-Org/Wan_2.2_ComfyUI_Repackaged` at revision `fb1388adc906ab39ffc26ee40e96b22886b56bc4`: the TI2V-5B UNet, FP8 UMT5 encoder, and Wan2.2 VAE. Their locked total is 18,144,966,705 bytes. Exact paths, sizes, SHA256 values, R2 additional capacity, a three-job workflow-dispatch-only cache plan, 4090/A40/A6000 inference plans, required nodes, and Phase 3M status are stored in `benchmark/wan-first-video/stage3m-plan.json` and `stage3m-status.json`.
+
+`npm run wan:first-video:preflight` prints `wan_cache_plan_valid=true` and `wan_workflow_plan_valid=true`. It does not download Wan files, upload to R2, or trigger GitHub Actions.
+

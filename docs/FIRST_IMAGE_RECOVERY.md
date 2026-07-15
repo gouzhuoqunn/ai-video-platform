@@ -1,3 +1,4 @@
+
 # First-image Recovery
 
 ```powershell
@@ -11,9 +12,13 @@ npm run first-image:resume
 
 `manual_ssh` reads `.secrets/manual-gpu-target.json`. It may inspect hardware, pull the pinned Runtime, restore models, generate the first image, sync results, and stop Runtime. It never rents or cancels a provider order.
 
-`runpod` reads `RUNPOD_API_KEY`, `RUNPOD_MAX_HOURLY_USD`, and `RUNPOD_MAX_SESSION_USD` only from process environment or ignored `.secrets/runpod.env`. Without a key, all commands stay dry-run and do not create a Pod. Real execution uses the private `ai-video-first-image-direct-v1` template with the immutable Comfy Runtime digest. The template overrides the Runtime entrypoint with a root-only OpenSSH bootstrap, exposes only `22/tcp` and `8080/http`, mounts `/workspace`, and waits for the local executor to start Runtime over SSH. The separate bootstrap image remains only a fallback and is not required for this path. Guards enforce one active Pod maximum, SSH public-key authentication, a 0.70 USD hourly cap, and a 2.50 USD session cap.
+`runpod` reads `RUNPOD_API_KEY`, `RUNPOD_MAX_GPU_HOURLY_USD`, `RUNPOD_MAX_TOTAL_HOURLY_USD`, and `RUNPOD_MAX_SESSION_USD` only from process environment or ignored `.secrets/runpod.env`. The legacy `RUNPOD_MAX_HOURLY_USD` remains a compute-only fallback. Without a key, commands stay dry-run and do not create a Pod. Real execution uses the private `ai-video-first-image-direct-v1` template with the immutable Comfy Runtime digest. The template overrides the Runtime entrypoint with a root-only OpenSSH bootstrap, exposes only `22/tcp` and `8080/http`, mounts `/workspace`, and waits for the local executor to start Runtime over SSH.
 
-RunPod may omit `isPublic=false`, `isServerless=false`, and the price fields from create/list responses. Template validation rejects either boolean only when it is explicitly `true`. A newly created Pod must report a concrete `adjustedCostPerHr` or `costPerHr` within 60 seconds and remain at or below the configured cap; otherwise it is deleted before SSH or model restoration.
+RunPod pricing is recorded as `computeHourly`, `storageHourly`, `totalHourly`, and `projectedSessionTotal`. Running container and volume disks use the official `0.10 USD/GB/month` estimate. Compute must be at most `0.70`, total hourly at most `0.75`, and the 3.5-hour projection at most `2.50`; the Watchdog keeps `2.50` as the final spend cap and 150 minutes as the time cap. `adjustedCostPerHr` takes precedence when present. Missing, NaN, or negative price components fail closed.
+
+Creation requests use `gpuTypePriority=custom` with exactly one `gpuTypeId`. Read-only stock checks run in this order: A40, A6000, RTX 3090, L4, RTX 4090, A5000, RTX 3090 Ti. Secure candidates are listed first; Community candidates are an explicit fallback and still require `supportPublicIp=true`. Use `npm run runpod:candidate:watch` for a read-only 2-minute/20-minute watch, or add `-- --execute` only in a fresh authorized attempt budget.
+
+RunPod may omit `isPublic=false`, `isServerless=false`, and price fields from create responses. Template validation rejects either boolean only when explicitly `true`. A newly created Pod must report compute price plus container and volume sizes within 10 seconds and pass all three budget gates; otherwise it is deleted before SSH or model restoration.
 
 The ignored checkpoint state advances in this order:
 
@@ -49,3 +54,4 @@ The ignored bundle is written to `.secrets/flux-first-image-colab-bundle.json`. 
 The three locked FLUX first-image files are published under revision `flux2-klein-4b-5b4408e59397-a9e4ca87c16d`. GitHub Actions run `29431562820` verified all object sizes and SHA256 values, the publish-last pointer, read-only first/last ranges, and denied write operations.
 
 `npm run first-image:preflight` returns `r2_restore_plan_valid=true` with a total of 12,451,817,860 bytes. A future SSH GPU can restore all three files from R2 first and use the pinned Hugging Face URLs only after an R2 failure. This is restore readiness only; no GPU inference or first image has been verified.
+

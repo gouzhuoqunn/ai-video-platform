@@ -1,0 +1,40 @@
+
+{
+  "schemaVersion": 1,
+  "status": "ready_for_stage3m_no_cache_run",
+  "cacheRunTriggered": false,
+  "officialModel": {
+    "repository": "Wan-AI/Wan2.2-TI2V-5B",
+    "revision": "921dbaf3f1674a56f47e83fb80a34bac8a8f203e",
+    "registryStatus": "eligible_for_benchmark"
+  },
+  "comfyCacheSource": {
+    "repository": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+    "revision": "fb1388adc906ab39ffc26ee40e96b22886b56bc4",
+    "totalSizeBytes": 18144966705,
+    "r2AdditionalCapacityBytes": 18144966705,
+    "files": [
+      { "sourcePath": "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", "targetPath": "diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", "sizeBytes": 9999658848, "sha256": "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e" },
+      { "sourcePath": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", "targetPath": "text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", "sizeBytes": 6735906897, "sha256": "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68" },
+      { "sourcePath": "split_files/vae/wan2.2_vae.safetensors", "targetPath": "vae/wan2.2_vae.safetensors", "sizeBytes": 1409400960, "sha256": "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156" }
+    ]
+  },
+  "githubActionsCachePlan": {
+    "trigger": "workflow_dispatch_only",
+    "parallelJobs": ["cache-wan-unet", "cache-wan-text-encoder", "cache-wan-vae"],
+    "publishAfterAllShaVerified": true,
+    "publishOrder": ["revision-files", "revision-manifest", "current-pointer"],
+    "runNow": false
+  },
+  "workflow": {
+    "asset": "comfy-runtime/workflows/official/wan22-ti2v-5b-api.json",
+    "executionStatus": "api_executable_when_models_present",
+    "requiredNodeClasses": ["UNETLoader", "CLIPLoader", "VAELoader", "CLIPTextEncode", "ModelSamplingSD3", "Wan22ImageToVideoLatent", "KSampler", "VAEDecode", "SaveWEBM", "SaveAnimatedWEBP"]
+  },
+  "inferencePlans": [
+    { "gpu": "NVIDIA GeForce RTX 4090", "profile": "rtx4090", "minimumVramGb": 24, "minimumRamGb": 64, "minimumDiskGb": 120, "width": 1280, "height": 704, "frames": 41, "steps": 30, "offload": "balanced", "runtimeCompatible": true },
+    { "gpu": "NVIDIA A40", "profile": "bootstrap_image_gpu", "minimumVramGb": 48, "minimumRamGb": 64, "minimumDiskGb": 120, "width": 1280, "height": 704, "frames": 41, "steps": 30, "offload": "balanced", "runtimeCompatible": false, "blocker": "fixed runtime digest does not accept bootstrap_image_gpu" },
+    { "gpu": "NVIDIA RTX A6000", "profile": "bootstrap_image_gpu", "minimumVramGb": 48, "minimumRamGb": 64, "minimumDiskGb": 120, "width": 1280, "height": 704, "frames": 41, "steps": 30, "offload": "balanced", "runtimeCompatible": false, "blocker": "fixed runtime digest does not accept bootstrap_image_gpu" }
+  ]
+}
+

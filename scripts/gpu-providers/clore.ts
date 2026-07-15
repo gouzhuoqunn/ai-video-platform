@@ -1,3 +1,4 @@
+
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { getCloreDeploymentHold } from "../clore/deployment-hold";
@@ -27,10 +28,11 @@ export class CloreProvider implements GpuProvider {
   async getSession(_sessionId: string): Promise<GpuSession | null> {
     const active = readActiveOrder();
     if (!active) return null;
-    return { provider: this.id, id: active.order_id, name: `clore-${active.server_id}`, status: active.status, createdAt: active.created_at, lastStatusChange: null, hourlyUsd: active.usd_per_hour, target: existsSync(TARGET_PATH) ? loadTarget() : null };
+    return { provider: this.id, id: active.order_id, name: `clore-${active.server_id}`, status: active.status, createdAt: active.created_at, lastStatusChange: null, hourlyUsd: active.usd_per_hour, price: active.usd_per_hour === null ? null : { computeHourly: active.usd_per_hour, storageHourly: 0, totalHourly: active.usd_per_hour, projectedSessionTotal: active.usd_per_hour * 3.5 }, costPerHr: active.usd_per_hour, adjustedCostPerHr: null, containerDiskInGb: null, volumeInGb: null, cloudType: null, gpuType: null, target: existsSync(TARGET_PATH) ? loadTarget() : null };
   }
   async waitForSsh(session: GpuSession) { const target = session.target ?? loadTarget(); if (sshCommand(target, "true").status !== 0) throw new Error("clore_ssh_failed"); return target; }
   async stopSession() { /* Guarded legacy cancel remains authoritative. */ }
   async terminateSession() { /* Guarded legacy cancel remains authoritative. */ }
-  async getBilling() { return { hourlyUsd: null, elapsedSeconds: null, estimatedSpendUsd: null }; }
+  async getBilling() { return { hourlyUsd: null, computeHourly: null, storageHourly: null, totalHourly: null, projectedSessionTotal: null, elapsedSeconds: null, estimatedSpendUsd: null }; }
 }
+

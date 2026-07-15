@@ -1,3 +1,4 @@
+
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import net from "node:net";
@@ -28,10 +29,11 @@ function readPublicKey(filePath: string) {
   return value;
 }
 
-export async function buildProviderDryRun(providerId: GpuProviderId) {
+export async function buildProviderDryRun(providerId: GpuProviderId, requestedGpuType?: string, requestedCloudType?: string) {
   const provider = getGpuProvider(providerId);
   const credentials = await provider.inspectCredentials();
-  const candidates = await provider.listCandidates();
+  const allCandidates = await provider.listCandidates();
+  const candidates = allCandidates.filter((candidate) => (!requestedGpuType || candidate.id === requestedGpuType) && (!requestedCloudType || candidate.cloudType === requestedCloudType));
   const candidate = candidates[0];
   const directTemplate = providerId === "runpod" ? buildRunPodDirectTemplatePayload({ sshPublicKey: dryRunPublicKey() }) : null;
   const runpodPayload = providerId === "runpod" && candidate
@@ -104,10 +106,14 @@ async function runRemoteFirstImage(target: GpuTarget, providerId: GpuProviderId,
 
 async function main() {
   const providerId = parseProviderArg();
+  const requestedGpuType = argument("gpu-type");
+  const requestedCloudType = argument("cloud-type")?.toUpperCase();
+  if (requestedCloudType && requestedCloudType !== "SECURE" && requestedCloudType !== "COMMUNITY") throw new Error("Use --cloud-type=SECURE or --cloud-type=COMMUNITY.");
   if (!process.argv.includes("--execute")) {
-    console.log(JSON.stringify(await buildProviderDryRun(providerId), null, 2));
+    console.log(JSON.stringify(await buildProviderDryRun(providerId, requestedGpuType, requestedCloudType), null, 2));
     return;
   }
+  if (providerId === "runpod" && !requestedGpuType) throw new Error("Real RunPod execution requires an explicit --gpu-type; the fixed Runtime currently supports RTX 4090/5090 only.");
 
   const provider = getGpuProvider(providerId);
   const sessionId = argument("session-id") ?? `first-image-${Date.now()}`;
@@ -117,7 +123,9 @@ async function main() {
   let session: GpuSession | null = null;
   try {
   let state = beginFirstImageState(providerId, sessionId);
-  const candidates = await provider.listCandidates();
+  const allCandidates = await provider.listCandidates();
+  const candidates = allCandidates.filter((candidate) => (!requestedGpuType || candidate.id === requestedGpuType) && (!requestedCloudType || candidate.cloudType === requestedCloudType));
+  if (requestedGpuType && candidates.length === 0) throw new Error(`Requested GPU is not currently available and budget-compliant: ${requestedGpuType}`);
   session = await provider.recoverExistingSession(sessionId);
   if (nextFirstImageStage(state) === "candidate_selected") {
     state = completeFirstImageStage(state, "candidate_selected", { provider: providerId, candidate: candidates[0]?.id ?? "external" });
@@ -133,7 +141,7 @@ async function main() {
     }
     if (!session) throw new Error(`${providerId}_session_unavailable`);
     watchdog?.recordPod(session.id, session.hourlyUsd);
-    state = completeFirstImageStage(state, "order_created", { provider_session_id: session.id, lifecycle_managed: providerId === "runpod" });
+    state = completeFirstImageStage(state, "order_created", { provider_session_id: session.id, lifecycle_managed: providerId === "runpod", gpu_type: session.gpuType, cloud_type: session.cloudType, costPerHr: session.costPerHr, adjustedCostPerHr: session.adjustedCostPerHr, containerDiskInGb: session.containerDiskInGb, volumeInGb: session.volumeInGb, ...(session.price ?? { computeHourly: null, storageHourly: null, totalHourly: null, projectedSessionTotal: null }) });
   }
   session ??= await provider.recoverExistingSession(sessionId);
   if (!session) throw new Error(`${providerId}_session_recovery_failed`);
@@ -149,7 +157,7 @@ async function main() {
       const hardware = sshCommand(target, "set -e; nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader; free -b; df -B1 /workspace; python3.11 -c 'import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"no-cuda\")'", 120_000);
       if (hardware.status !== 0) throw new Error("gpu_hardware_verification_failed");
       gpuModel = String(hardware.stdout).split(/\r?\n/)[0]?.split(",")[0]?.trim() || "unknown";
-      state = completeFirstImageStage(state, "hardware_verified", { verified: true, gpu_model: gpuModel, output_sha256_recorded_separately: true });
+      state = completeFirstImageStage(state, "hardware_verified", { verified: true, gpu_model: gpuModel, inspection_output: String(hardware.stdout), output_sha256_recorded_separately: true });
     }
     if (["runtime_ready", "models_restored"].includes(String(nextFirstImageStage(state)))) {
       const result = await runRemoteFirstImage(target, providerId, sessionId, gpuModel);
@@ -188,3 +196,4 @@ async function main() {
 if (process.argv[1]?.endsWith("gpu-first-image.ts")) {
   void main().catch((error) => { console.error(error instanceof Error ? error.message : "first image orchestration failed"); process.exitCode = 1; });
 }
+

@@ -1,9 +1,13 @@
+
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import path from "node:path";
 import {
   buildRunPodDirectPodPayload,
   buildRunPodDirectTemplatePayload,
+  buildRunPodPriceBreakdown,
+  candidatesFromAvailability,
+  evaluateRunPodBudget,
   RUNPOD_DIRECT_LAUNCH_MODE,
   RUNPOD_DIRECT_SSH_COMMAND,
   RUNPOD_GPU_PRIORITY,
@@ -23,7 +27,8 @@ function config(overrides: Partial<RunPodConfig> = {}): RunPodConfig {
   return {
     apiKey: "test-only-token",
     keySource: "environment",
-    maxHourlyUsd: 0.7,
+    maxGpuHourlyUsd: 0.7,
+    maxTotalHourlyUsd: 0.75,
     maxSessionUsd: 2.5,
     sshPublicKeyPath: "test.pub",
     sshPrivateKeyPath: "test",
@@ -56,14 +61,33 @@ async function main() {
   assert.equal(pod.gpuCount, 1);
   assert.equal(pod.interruptible, false);
   assert.equal(pod.cloudType, "SECURE");
-  assert.deepEqual(pod.gpuTypeIds, RUNPOD_GPU_PRIORITY.map(([name]) => name));
+  assert.equal(pod.gpuTypePriority, "custom");
+  assert.deepEqual(pod.gpuTypeIds, [candidate.id]);
   assert.deepEqual(runPodCandidates().map((item) => item.gpuType), RUNPOD_GPU_PRIORITY.map(([name]) => name));
   assert.throws(() => buildRunPodDirectTemplatePayload({ sshPublicKey: PUBLIC_KEY, runtimeImage: "ghcr.io/example/runtime:latest" }), /digest/);
   assert.throws(() => buildRunPodDirectTemplatePayload({ sshPublicKey: "-----BEGIN OPENSSH PRIVATE KEY-----" }), /public_key/);
   assert.throws(() => buildRunPodDirectPodPayload({ ...input, candidate: { ...candidate, interruptible: true as false } }, "template-1"), /spot/);
   assert.throws(() => buildRunPodDirectPodPayload({ ...input, candidate: { ...candidate, vramGb: 12 } }, "template-1"), /hardware/);
   assert.deepEqual(runPodWatchdogPlan("pod-1"), { provider: "runpod", session_id: "pod-1", action: "terminate", deadline_minutes: 15, terminate_priority: true });
-  await assert.rejects(() => new RunPodProvider({ config: config({ maxHourlyUsd: 0.5 }) }).createSession(input), /hourly_budget/);
+  const price069 = buildRunPodPriceBreakdown({ costPerHr: 0.69, containerDiskInGb: 50, volumeInGb: 30 });
+  assert.ok(Math.abs(price069.storageHourly - (8 / 730)) < 1e-12);
+  assert.equal(evaluateRunPodBudget(price069, config()).accepted, true, "0.69 compute plus 80GB storage must pass");
+  assert.equal(evaluateRunPodBudget(buildRunPodPriceBreakdown({ costPerHr: 0.70, containerDiskInGb: 50, volumeInGb: 30 }), config()).accepted, true, "0.70 compute plus reasonable storage must pass");
+  assert.deepEqual(evaluateRunPodBudget({ computeHourly: 0.70, storageHourly: 0.06, totalHourly: 0.76, projectedSessionTotal: 2.49 }, config()), { accepted: false, reason: "totalHourly" });
+  assert.deepEqual(evaluateRunPodBudget({ computeHourly: 0.71, storageHourly: 0, totalHourly: 0.71, projectedSessionTotal: 2.485 }, config()), { accepted: false, reason: "computeHourly" });
+  assert.deepEqual(evaluateRunPodBudget({ computeHourly: 0.70, storageHourly: 0.02, totalHourly: 0.72, projectedSessionTotal: 2.52 }, config()), { accepted: false, reason: "projectedSessionTotal" });
+  assert.equal(buildRunPodPriceBreakdown({ costPerHr: 0.99, adjustedCostPerHr: 0.69, containerDiskInGb: 50, volumeInGb: 30 }).computeHourly, 0.69);
+  assert.throws(() => buildRunPodPriceBreakdown({ costPerHr: Number.NaN, containerDiskInGb: 50, volumeInGb: 30 }), /compute_price/);
+  assert.throws(() => buildRunPodPriceBreakdown({ costPerHr: -1, containerDiskInGb: 50, volumeInGb: 30 }), /compute_price/);
+  assert.throws(() => buildRunPodPriceBreakdown({ costPerHr: 0.69, containerDiskInGb: 50 }), /storage_fields/);
+  await assert.rejects(() => new RunPodProvider({ config: config({ maxGpuHourlyUsd: 0.5 }) }).createSession(input), /estimated_budget.*computeHourly/);
+
+  const availability = RUNPOD_GPU_PRIORITY.map(([id, memoryInGb]) => ({ id, memoryInGb, secureCloud: id === "NVIDIA A40", communityCloud: true, secure: id === "NVIDIA A40" ? { stockStatus: "High" as const, uninterruptablePrice: 0.69, availableGpuCounts: [1] } : { stockStatus: "None" as const, uninterruptablePrice: null, availableGpuCounts: [] }, community: { stockStatus: "High" as const, uninterruptablePrice: 0.5, availableGpuCounts: [1] } }));
+  const availableCandidates = candidatesFromAvailability(availability);
+  assert.deepEqual(availableCandidates[0] && [availableCandidates[0].gpuType, availableCandidates[0].cloudType], ["NVIDIA A40", "SECURE"], "Secure candidates must be ordered before Community fallback");
+  assert.ok(availableCandidates.some((item) => item.cloudType === "COMMUNITY"), "Community fallback must remain selectable after Secure create failures");
+  const communityOnly = availability.map((item) => ({ ...item, secureCloud: false, secure: { stockStatus: "None" as const, uninterruptablePrice: null, availableGpuCounts: [] } }));
+  assert.equal(candidatesFromAvailability(communityOnly)[0]?.cloudType, "COMMUNITY");
   process.env.CLORE_DEPLOYMENT_HOLD = "true";
   await assert.rejects(() => new CloreProvider().createSession(input), /HOLD/);
   assert.equal((await new RunPodProvider({ config: config({ apiKey: "" }) }).inspectCredentials()).credentials_present, false);
@@ -88,7 +112,7 @@ async function main() {
     if (pathname.endsWith("/pods") && method === "POST") {
       podCreates += 1;
       await new Promise((resolve) => setTimeout(resolve, 20));
-      return Response.json({ id: "pod-1", name: "ai-video-first-image-stage3k-test", desiredStatus: "RUNNING", adjustedCostPerHr: 0.69 });
+      return Response.json({ id: "pod-1", name: "ai-video-first-image-stage3k-test", desiredStatus: "RUNNING", adjustedCostPerHr: 0.69, costPerHr: 0.70, containerDiskInGb: 50, volumeInGb: 30, machine: { secureCloud: true, gpuTypeId: candidate.id } });
     }
     return Response.json([]);
   };
@@ -96,6 +120,8 @@ async function main() {
   const provider = new RunPodProvider({ config: config(), fetchImpl: fetchMock });
   const [first, second] = await Promise.all([provider.createSession(input), provider.createSession(input)]);
   assert.equal(first.id, "pod-1");
+  assert.equal(first.gpuType, candidate.id);
+  assert.equal(first.cloudType, "SECURE");
   assert.equal(second.id, "pod-1");
   assert.equal(templateCreates, 1);
   assert.equal(podCreates, 1);
@@ -110,12 +136,13 @@ async function main() {
     }
     if (pathname.endsWith("/pods/pod-delayed-price")) {
       priceReads += 1;
-      return Response.json({ id: "pod-delayed-price", name: "ai-video-first-image-stage3k-test", desiredStatus: "RUNNING", adjustedCostPerHr: 0.69 });
+      return Response.json({ id: "pod-delayed-price", name: "ai-video-first-image-stage3k-test", desiredStatus: "RUNNING", adjustedCostPerHr: 0.69, costPerHr: 0.70, containerDiskInGb: 50, volumeInGb: 30, cloudType: "SECURE", gpuTypeId: candidate.id });
     }
     return Response.json([]);
   };
   const delayedPrice = await new RunPodProvider({ config: config(), fetchImpl: delayedPriceFetch }).createSession(input);
-  assert.equal(delayedPrice.hourlyUsd, 0.69);
+  assert.equal(delayedPrice.price?.computeHourly, 0.69);
+  assert.equal(delayedPrice.hourlyUsd, delayedPrice.price?.totalHourly);
   assert.equal(priceReads, 1, "missing create-response price must be resolved through GET Pod");
 
   const reused = { id: "template-2", ...template };
@@ -134,7 +161,7 @@ async function main() {
     if (pathname.endsWith("/pods") && method === "POST") throw new DOMException("timeout", "AbortError");
     if (pathname.endsWith("/pods")) {
       podLists += 1;
-      return Response.json(podLists >= 3 ? [{ id: "pod-recovered", name: "ai-video-first-image-stage3k-test", desiredStatus: "RUNNING", adjustedCostPerHr: 0.69 }] : []);
+      return Response.json(podLists >= 3 ? [{ id: "pod-recovered", name: "ai-video-first-image-stage3k-test", desiredStatus: "RUNNING", adjustedCostPerHr: 0.69, containerDiskInGb: 50, volumeInGb: 30, cloudType: "SECURE", gpuTypeId: candidate.id }] : []);
     }
     return Response.json({});
   };
@@ -144,3 +171,4 @@ async function main() {
   console.log("RunPod direct template, API, payload, budget, retry, timeout recovery, idempotency, hold isolation, and watchdog tests passed.");
 }
 void main();
+
