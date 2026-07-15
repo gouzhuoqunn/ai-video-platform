@@ -1,4 +1,3 @@
-
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { getCloreDeploymentHold } from "../clore/deployment-hold";
@@ -35,4 +34,3 @@ export class CloreProvider implements GpuProvider {
   async terminateSession() { /* Guarded legacy cancel remains authoritative. */ }
   async getBilling() { return { hourlyUsd: null, computeHourly: null, storageHourly: null, totalHourly: null, projectedSessionTotal: null, elapsedSeconds: null, estimatedSpendUsd: null }; }
 }
-

@@ -1,4 +1,3 @@
-
 import { closeSync, mkdirSync, openSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { getPrivateKeyPath } from "../clore/ssh-client";
@@ -517,4 +516,3 @@ export class RunPodProvider implements GpuProvider {
 export function runPodWatchdogPlan(sessionId: string, deadlineMinutes = 15) {
   return { provider: "runpod", session_id: sessionId, action: "terminate", deadline_minutes: deadlineMinutes, terminate_priority: true };
 }
-

@@ -1,4 +1,3 @@
-
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import net from "node:net";
@@ -196,4 +195,3 @@ async function main() {
 if (process.argv[1]?.endsWith("gpu-first-image.ts")) {
   void main().catch((error) => { console.error(error instanceof Error ? error.message : "first image orchestration failed"); process.exitCode = 1; });
 }
-

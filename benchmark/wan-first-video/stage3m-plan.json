@@ -1,4 +1,3 @@
-
 {
   "schemaVersion": 1,
   "status": "ready_for_stage3m_no_cache_run",
@@ -37,4 +36,3 @@
     { "gpu": "NVIDIA RTX A6000", "profile": "bootstrap_image_gpu", "minimumVramGb": 48, "minimumRamGb": 64, "minimumDiskGb": 120, "width": 1280, "height": 704, "frames": 41, "steps": 30, "offload": "balanced", "runtimeCompatible": false, "blocker": "fixed runtime digest does not accept bootstrap_image_gpu" }
   ]
 }
-

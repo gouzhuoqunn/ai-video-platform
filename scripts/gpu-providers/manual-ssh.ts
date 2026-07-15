@@ -1,4 +1,3 @@
-
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { assertGpuTarget, FIXED_RUNTIME_DIGEST, sshCommand } from "./common";
@@ -40,4 +39,3 @@ export class ManualSshProvider implements GpuProvider {
   async terminateSession() { /* External lifecycle stays user-managed. */ }
   async getBilling() { return { hourlyUsd: null, computeHourly: null, storageHourly: null, totalHourly: null, projectedSessionTotal: null, elapsedSeconds: null, estimatedSpendUsd: null }; }
 }
-

@@ -1,4 +1,3 @@
-
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
@@ -39,4 +38,3 @@ assert.ok(plan.inferencePlans.some((item) => item.gpu.includes("4090") && item.r
 for (const item of plan.inferencePlans.filter((entry) => !entry.runtimeCompatible)) assert.ok(item.blocker);
 console.log("wan_cache_plan_valid=true");
 console.log("wan_workflow_plan_valid=true");
-

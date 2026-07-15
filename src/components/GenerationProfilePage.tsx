@@ -1,4 +1,3 @@
-
 import Link from "next/link";
 import type { GpuProfileKey } from "@/lib/generation/gpu-profiles";
 import { MODEL_CACHE_REGISTRY } from "@/lib/generation/model-registry";
@@ -211,4 +210,3 @@ export function GenerationProfilePage({ profile }: GenerationProfilePageProps) {
     </main>
   );
 }
-

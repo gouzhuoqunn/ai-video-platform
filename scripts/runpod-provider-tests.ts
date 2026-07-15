@@ -1,4 +1,3 @@
-
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import path from "node:path";
@@ -171,4 +170,3 @@ async function main() {
   console.log("RunPod direct template, API, payload, budget, retry, timeout recovery, idempotency, hold isolation, and watchdog tests passed.");
 }
 void main();
-

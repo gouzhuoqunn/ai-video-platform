@@ -1,4 +1,3 @@
-
 {
   "name": "ai-video-platform",
   "private": true,
@@ -174,4 +173,3 @@
     "yaml": "^2.9.0"
   }
 }
-

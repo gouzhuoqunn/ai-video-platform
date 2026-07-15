@@ -1,4 +1,3 @@
-
 export type GpuProviderId = "clore" | "runpod" | "manual_ssh";
 
 export type GpuProfile = "rtx4090" | "rtx5090" | "bootstrap_image_gpu";
@@ -91,4 +90,3 @@ export interface GpuProvider {
   getBilling(session: GpuSession): Promise<BillingSummary>;
   recoverExistingSession(sessionId?: string): Promise<GpuSession | null>;
 }
-

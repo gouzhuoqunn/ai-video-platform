@@ -1,4 +1,3 @@
-
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { RunPodProvider } from "./gpu-providers/runpod";
@@ -35,4 +34,3 @@ async function main() {
 }
 
 void main().catch((error) => { console.error(error instanceof Error ? error.message : "RunPod candidate watch failed"); process.exitCode = 1; });
-
