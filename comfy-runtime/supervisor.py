@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -12,6 +13,8 @@ from pathlib import Path
 
 WORKSPACE = Path("/workspace")
 LOG_DIR = WORKSPACE / "logs"
+COMFY_USER_DIR = WORKSPACE / "comfy-user"
+COMFY_DATABASE_PATH = COMFY_USER_DIR / "comfyui.db"
 COMFY_DIR = Path("/opt/ComfyUI")
 RUNTIME_DIR = Path("/opt/comfy-runtime")
 SMOKE_IMPORT_BLOCKER = RUNTIME_DIR / "smoke_import_blocker"
@@ -21,7 +24,7 @@ REQUIRED_DIRS = [
     WORKSPACE / "comfy-input",
     WORKSPACE / "comfy-output",
     WORKSPACE / "comfy-temp",
-    WORKSPACE / "comfy-user",
+    COMFY_USER_DIR,
     LOG_DIR,
     WORKSPACE / "r2-cache",
     WORKSPACE / "workflows",
@@ -42,6 +45,46 @@ def ensure_directories() -> None:
         probe = directory / ".write-test"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
+
+
+def ensure_database_preflight() -> None:
+    """Fail before ComfyUI import when its canonical SQLite location is unusable."""
+    try:
+        COMFY_USER_DIR.mkdir(parents=True, exist_ok=True)
+        probe = COMFY_USER_DIR / ".database-preflight"
+        with probe.open("w", encoding="utf-8") as handle:
+            handle.write("ok")
+            handle.flush()
+            os.fsync(handle.fileno())
+        probe.unlink()
+
+        connection = sqlite3.connect(COMFY_DATABASE_PATH)
+        try:
+            connection.execute("CREATE TABLE IF NOT EXISTS runtime_preflight (id INTEGER PRIMARY KEY)")
+            connection.execute("INSERT INTO runtime_preflight DEFAULT VALUES")
+            connection.execute("SELECT COUNT(*) FROM runtime_preflight").fetchone()
+            connection.rollback()
+        finally:
+            connection.close()
+
+        stat_result = COMFY_USER_DIR.stat()
+        database_stat = COMFY_DATABASE_PATH.stat()
+        log(
+            "database_preflight_ok "
+            f"user_directory={COMFY_USER_DIR} database_url={database_url()} "
+            f"runtime_uid_gid={os.getuid()}:{os.getgid()} "
+            f"user_owner={stat_result.st_uid}:{stat_result.st_gid} "
+            f"user_mode={stat_result.st_mode & 0o777:o} "
+            f"database_owner={database_stat.st_uid}:{database_stat.st_gid} "
+            f"database_mode={database_stat.st_mode & 0o777:o}"
+        )
+    except Exception as error:
+        log(f"database_preflight_failed: {error}")
+        raise SystemExit(43)
+
+
+def database_url() -> str:
+    return f"sqlite:///{COMFY_DATABASE_PATH}"
 
 
 def stream_output(name: str, process: subprocess.Popen[str], log_path: Path) -> None:
@@ -116,7 +159,9 @@ def comfy_args(mode: str) -> list[str]:
         "--output-directory",
         str(WORKSPACE / "comfy-output"),
         "--user-directory",
-        str(WORKSPACE / "comfy-user"),
+        str(COMFY_USER_DIR),
+        "--database-url",
+        database_url(),
         "--models-directory",
         str(WORKSPACE / "models"),
         "--disable-auto-launch",
@@ -189,6 +234,7 @@ def main() -> int:
         return 2
 
     ensure_directories()
+    ensure_database_preflight()
     signal.signal(signal.SIGTERM, stop_children)
     signal.signal(signal.SIGINT, stop_children)
 

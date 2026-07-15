@@ -36,6 +36,11 @@ COPY workflows/ /opt/comfy-runtime/workflows/
 RUN chmod +x /opt/comfy-runtime/entrypoint.sh \
     && python3.11 -m compileall -q /opt/comfy-runtime
 
+# The inherited Wan runtime may carry this retired entrypoint. Whiteout it explicitly.
+RUN set -eux; \
+    rm -f /app/worker.py; \
+    test ! -e /app/worker.py
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD python3.11 /opt/comfy-runtime/healthcheck.py
 
 ENTRYPOINT ["/opt/comfy-runtime/entrypoint.sh"]
