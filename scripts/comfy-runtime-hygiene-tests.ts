@@ -34,8 +34,8 @@ for (const source of [entrypoint, supervisor, controller, launcher]) {
 assert.ok(existsSync(inventory));
 assert.match(workflow, /test ! -e \/app\/worker\.py/);
 assert.match(workflow, /runtime-hygiene-gate/);
-assert.match(workflow, /build-runtime-hygiene/);
-assert.match(workflow, /verify-runtime-hygiene/);
+assert.match(workflow, /build-and-push/);
+assert.match(workflow, /verify-public-digest/);
 assert.match(workflow, /v0\.1\.4-runtime-hygiene-/);
 assert.match(workflow, /CPU_NO_MODEL_SMOKE_COMPLETE=true/);
 assert.match(workflow, /GPU_FAIL_CLOSED_COMPLETE=true/);

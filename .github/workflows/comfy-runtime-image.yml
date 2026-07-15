@@ -7,30 +7,16 @@ on:
     paths:
       - ".github/workflows/comfy-runtime-image.yml"
       - "comfy-runtime/**"
-      - "scripts/comfy-runtime-contract-tests.ts"
-      - "scripts/comfy-node-profile-tests.ts"
-      - "scripts/comfy-d4-acceptance-tests.ts"
       - "scripts/comfy-runtime-hygiene-tests.ts"
+      - "scripts/comfy-runtime-workflow-dag-tests.ts"
       - "scripts/legacy-worker-inventory.py"
       - "scripts/verify-comfy-object-info.py"
-      - "scripts/workflow-asset-tests.ts"
-      - "src/lib/generation/**"
+      - "scripts/comfy-d4-acceptance-tests.ts"
+      - "scripts/comfy-runtime-contract-tests.ts"
+      - "scripts/comfy-runtime-mode-tests.ts"
+      - "scripts/comfy-node-profile-tests.ts"
       - "package.json"
       - "package-lock.json"
-  workflow_dispatch:
-    inputs:
-      version_tag:
-        description: "Immutable ComfyUI runtime tag"
-        required: false
-        default: ""
-      verify_existing_digest:
-        description: "Existing sha256 digest to verify without rebuilding"
-        required: false
-        default: ""
-  pull_request:
-    types: [opened, synchronize, reopened]
-    branches:
-      - ci/comfy-runtime-smoke-base
 
 permissions:
   contents: read
@@ -40,1700 +26,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  disk-safe-ab-diagnose:
-    name: Disk-safe A/B diagnose fixed digest
-    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && github.event_name == 'push' && contains(github.event.head_commit.message, '[ab-diagnose]') && contains(github.event.head_commit.message, '[skip build]') }}
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      COMFY_RUNTIME_IMAGE_NAME: ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime
-      COMFY_RUNTIME_DIGEST: sha256:1cfb4740fb8b310a8095500e8fe55160176c619306068d553092182f4888efd1
-      COMFY_RUNTIME_IMAGE: ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:1cfb4740fb8b310a8095500e8fe55160176c619306068d553092182f4888efd1
-    steps:
-      - name: Confirm zero-build diagnostic mode
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "build=skipped"
-          echo "push=skipped"
-          echo "permissions=contents:read"
-          echo "repository_secrets_used=false"
-          echo "classification_previous_run=ci_runner_disk_exhausted_before_ab"
-
-      - name: Disk preflight before pull
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "runner_os=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2- | tr -d '\"')"
-          echo "runner_kernel=$(uname -a)"
-          echo "===== df -h"
-          df -h
-          echo "===== df -B1 /"
-          df -B1 /
-          echo "initial_free_bytes=$(df -B1 / | awk 'NR==2 {print $4}')" | tee -a "$GITHUB_ENV"
-          echo "===== docker info storage driver"
-          docker info --format 'storage_driver={{.Driver}}'
-          echo "===== docker system df -v"
-          docker system df -v || true
-          echo "===== selected directory sizes"
-          sudo du -sh /var/lib/docker /opt /usr/local /usr/share "${RUNNER_TOOL_CACHE:-/opt/hostedtoolcache}" 2>/dev/null || true
-          echo "===== largest selected directories max-depth=2"
-          sudo du -x -B1 --max-depth=2 /var/lib/docker /opt /usr/local /usr/share 2>/dev/null | sort -nr | head -30 || true
-
-      - name: Compute anonymous manifest layer sizes
-        id: manifest_size
-        shell: bash
-        run: |
-          set -euo pipefail
-          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config-manifest"
-          mkdir -p "${DOCKER_CONFIG}"
-          printf '{}\n' > "${DOCKER_CONFIG}/config.json"
-          set +e
-          docker buildx imagetools inspect --raw "${COMFY_RUNTIME_IMAGE}" >/tmp/index.json
-          raw_status=$?
-          set -e
-          if [ "${raw_status}" -ne 0 ]; then
-            fallback_reason="index_inspect_failed"
-            compressed_layer_bytes=0
-            required_free_bytes=$((45 * 1024 * 1024 * 1024))
-            amd64_manifest_digest=""
-          else
-            python3 - <<'PY' >/tmp/manifest-env
-          import json
-          import os
-          import subprocess
-          import sys
-
-          image_name = os.environ["COMFY_RUNTIME_IMAGE_NAME"]
-          expected_digest = os.environ["COMFY_RUNTIME_DIGEST"]
-          index = json.load(open("/tmp/index.json", "r", encoding="utf-8"))
-          manifests = index.get("manifests", [])
-          selected = None
-          for manifest in manifests:
-              platform = manifest.get("platform", {})
-              if platform.get("os") == "linux" and platform.get("architecture") == "amd64":
-                  selected = manifest
-                  break
-          if selected is None:
-              print("fallback_reason=linux_amd64_manifest_not_found")
-              print("compressed_layer_bytes=0")
-              print("required_free_bytes=" + str(45 * 1024 * 1024 * 1024))
-              print("amd64_manifest_digest=")
-              sys.exit(0)
-
-          amd64_digest = selected["digest"]
-          raw = subprocess.check_output(
-              ["docker", "buildx", "imagetools", "inspect", "--raw", f"{image_name}@{amd64_digest}"],
-              text=True,
-          )
-          manifest = json.loads(raw)
-          layers = manifest.get("layers", [])
-          compressed = sum(int(layer.get("size", 0)) for layer in layers)
-          config_size = int(manifest.get("config", {}).get("size", 0))
-          max_layer = max((int(layer.get("size", 0)) for layer in layers), default=0)
-          required = max(35 * 1024 * 1024 * 1024, compressed * 3 + 8 * 1024 * 1024 * 1024)
-          exact_match = str(index.get("mediaType", "")).endswith("image.index.v1+json") and expected_digest.startswith("sha256:")
-          print("fallback_reason=")
-          print(f"layer_count={len(layers)}")
-          print(f"compressed_layer_bytes={compressed}")
-          print(f"config_size_bytes={config_size}")
-          print(f"max_layer_bytes={max_layer}")
-          print(f"required_free_bytes={required}")
-          print(f"amd64_manifest_digest={amd64_digest}")
-          print(f"input_digest_exact={str(exact_match).lower()}")
-          PY
-            set -a
-            # shellcheck disable=SC1091
-            . /tmp/manifest-env
-            set +a
-          fi
-          cat /tmp/manifest-env 2>/dev/null || {
-            echo "fallback_reason=${fallback_reason}"
-            echo "compressed_layer_bytes=${compressed_layer_bytes}"
-            echo "required_free_bytes=${required_free_bytes}"
-            echo "amd64_manifest_digest=${amd64_manifest_digest}"
-          }
-          {
-            echo "compressed_layer_bytes=${compressed_layer_bytes}"
-            echo "required_free_bytes=${required_free_bytes}"
-            echo "amd64_manifest_digest=${amd64_manifest_digest}"
-            echo "manifest_fallback_reason=${fallback_reason}"
-          } >> "$GITHUB_ENV"
-          {
-            echo "compressed_layer_bytes=${compressed_layer_bytes}"
-            echo "required_free_bytes=${required_free_bytes}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Allowlisted runner disk cleanup
-        shell: bash
-        run: |
-          set -euo pipefail
-          before_free="$(df -B1 / | awk 'NR==2 {print $4}')"
-          echo "cleanup_before_free_bytes=${before_free}"
-
-          docker system prune -af --volumes || true
-          docker builder prune -af || true
-          docker buildx prune -af || true
-          sudo apt-get clean
-
-          echo "===== allowlisted directory sizes before deletion"
-          for path in /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /usr/share/dotnet /opt/hostedtoolcache/CodeQL /opt/google/chrome /opt/microsoft/msedge; do
-            if [ -d "${path}" ]; then
-              sudo du -sh "${path}"
-            else
-              echo "missing ${path}"
-            fi
-          done
-
-          if [ -d /usr/local/lib/android ]; then sudo rm -rf /usr/local/lib/android; fi
-          if [ -d /opt/ghc ]; then sudo rm -rf /opt/ghc; fi
-          if [ -d /usr/local/.ghcup ]; then sudo rm -rf /usr/local/.ghcup; fi
-          if [ -d /usr/share/swift ]; then sudo rm -rf /usr/share/swift; fi
-          if [ -d /usr/share/dotnet ]; then sudo rm -rf /usr/share/dotnet; fi
-          if [ -d /opt/hostedtoolcache/CodeQL ]; then sudo rm -rf /opt/hostedtoolcache/CodeQL; fi
-          if [ -d /opt/google/chrome ]; then sudo rm -rf /opt/google/chrome; fi
-          if [ -d /opt/microsoft/msedge ]; then sudo rm -rf /opt/microsoft/msedge; fi
-
-          after_free="$(df -B1 / | awk 'NR==2 {print $4}')"
-          reclaimed="$(( after_free - before_free ))"
-          echo "cleanup_after_free_bytes=${after_free}"
-          echo "cleanup_reclaimed_bytes=${reclaimed}" | tee -a "$GITHUB_ENV"
-          echo "===== df after cleanup"
-          df -h
-          df -B1 /
-          echo "===== docker system df after cleanup"
-          docker system df -v || true
-          echo "===== largest selected directories after cleanup"
-          sudo du -x -B1 --max-depth=2 /var/lib/docker /opt /usr/local /usr/share 2>/dev/null | sort -nr | head -30 || true
-
-      - name: Disk gate before fixed digest pull
-        shell: bash
-        run: |
-          set -euo pipefail
-          actual_free="$(df -B1 / | awk 'NR==2 {print $4}')"
-          echo "compressed_layer_bytes=${compressed_layer_bytes}"
-          echo "required_free_bytes=${required_free_bytes}"
-          echo "actual_free_bytes=${actual_free}"
-          echo "cleanup_reclaimed_bytes=${cleanup_reclaimed_bytes}"
-          if [ "${actual_free}" -lt "${required_free_bytes}" ]; then
-            echo "classification=insufficient_runner_disk_after_allowlisted_cleanup"
-            echo "===== largest selected directories"
-            sudo du -x -B1 --max-depth=2 /var/lib/docker /opt /usr/local /usr/share 2>/dev/null | sort -nr | head -30 || true
-            exit 1
-          fi
-          echo "disk_gate=passed"
-
-      - name: Pull fixed digest once anonymously
-        shell: bash
-        run: |
-          set -euo pipefail
-          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config-pull"
-          mkdir -p "${DOCKER_CONFIG}"
-          printf '{}\n' > "${DOCKER_CONFIG}/config.json"
-          python3 - <<'PY'
-          import json
-          import os
-          config = json.load(open(os.environ["DOCKER_CONFIG"] + "/config.json", "r", encoding="utf-8"))
-          if config.get("auths"):
-              raise SystemExit("docker auths unexpectedly present")
-          PY
-          before_pull_free="$(df -B1 / | awk 'NR==2 {print $4}')"
-          echo "before_pull_free_bytes=${before_pull_free}"
-          docker pull --platform linux/amd64 "${COMFY_RUNTIME_IMAGE}"
-          after_pull_free="$(df -B1 / | awk 'NR==2 {print $4}')"
-          echo "after_pull_free_bytes=${after_pull_free}" | tee -a "$GITHUB_ENV"
-          docker image inspect "${COMFY_RUNTIME_IMAGE}" >/tmp/image-inspect.json
-          python3 - <<'PY'
-          import json
-          import os
-          data = json.load(open("/tmp/image-inspect.json", "r", encoding="utf-8"))[0]
-          expected = os.environ["COMFY_RUNTIME_IMAGE"]
-          repo_digests = data.get("RepoDigests", [])
-          print("repo_digests=" + ",".join(repo_digests))
-          if expected not in repo_digests:
-              raise SystemExit("RepoDigest did not exactly match fixed digest")
-          PY
-
-      - name: Verify dependency and import order evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          container="comfy-runtime-ab-evidence-${GITHUB_RUN_ID}"
-          docker run -d --name "${container}" --entrypoint /bin/bash "${COMFY_RUNTIME_IMAGE}" -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
-          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-
-          docker exec "${container}" sh -lc 'grep -Fx "comfy-kitchen==0.2.18" /opt/ComfyUI/requirements.txt'
-          docker exec "${container}" python3.11 - <<'PY'
-          import importlib.metadata as metadata
-          import pathlib
-          import re
-          import sys
-
-          import torch
-
-          print("python=" + sys.version.split()[0])
-          print("comfy-kitchen=" + metadata.version("comfy-kitchen"))
-          print("triton=" + metadata.version("triton"))
-          print("torch=" + torch.__version__)
-          print("torch_cuda=" + str(torch.version.cuda))
-
-          init = pathlib.Path("/usr/local/lib/python3.11/dist-packages/comfy_kitchen/__init__.py").read_text(encoding="utf-8")
-          triton_init = pathlib.Path("/usr/local/lib/python3.11/dist-packages/comfy_kitchen/backends/triton/__init__.py").read_text(encoding="utf-8")
-          quantization = pathlib.Path("/usr/local/lib/python3.11/dist-packages/comfy_kitchen/backends/triton/quantization.py").read_text(encoding="utf-8")
-          main = pathlib.Path("/opt/ComfyUI/main.py").read_text(encoding="utf-8")
-          quant_ops = pathlib.Path("/opt/ComfyUI/comfy/quant_ops.py").read_text(encoding="utf-8")
-
-          assert "from .backends import triton as _triton_backend" in init
-          assert re.search(r"except\s+ImportError", triton_init)
-          assert "@triton.autotune" in quantization
-          assert "import comfy_kitchen as ck" in quant_ops
-          assert main.find("import comfy.utils") < main.find("args.disable_triton_backend")
-          print("classification=comfy_kitchen_eager_triton_import_on_cpu")
-          print("comfy_kitchen_init_imports_triton_backend=true")
-          print("triton_backend_catches_import_error_only=true")
-          print("disable_triton_backend_after_comfy_kitchen_import=true")
-          PY
-
-      - name: Test A original CPU behavior
-        shell: bash
-        run: |
-          set -euo pipefail
-          container="comfy-runtime-ab-a-${GITHUB_RUN_ID}"
-          docker run -d --name "${container}" --entrypoint /bin/bash "${COMFY_RUNTIME_IMAGE}" -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
-          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-
-          started_at="$(date +%s)"
-          set +e
-          docker exec "${container}" sh -lc 'cd /opt/ComfyUI && timeout 60s python3.11 main.py --cpu --disable-triton-backend --disable-all-custom-nodes --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout --verbose DEBUG >/tmp/test-a.log 2>&1'
-          code=$?
-          set -e
-          seconds="$(( $(date +%s) - started_at ))"
-          tail -n 200 < <(docker exec "${container}" tail -n 200 /tmp/test-a.log)
-          test "${code}" -ne 0
-          docker exec "${container}" grep -F "comfy_kitchen" /tmp/test-a.log
-          docker exec "${container}" grep -F "backends/triton" /tmp/test-a.log
-          docker exec "${container}" grep -F "RuntimeError" /tmp/test-a.log
-          docker exec "${container}" grep -F "0 active drivers" /tmp/test-a.log
-          echo "test_a_exit_code=${code}"
-          echo "test_a_start_seconds=${seconds}"
-          echo "test_a_crash_phase=comfy_kitchen_eager_triton_import"
-          echo "test_a_health_before_exit=false"
-
-      - name: Test B temporary Triton import blocker
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p smoke-import-blocker/triton
-          cat > smoke-import-blocker/triton/__init__.py <<'PY'
-          raise ImportError(
-              "Triton intentionally unavailable in COMFY_RUNTIME_MODE=smoke_cpu"
-          )
-          PY
-
-          container="comfy-runtime-ab-b-${GITHUB_RUN_ID}"
-          docker run -d --name "${container}" \
-            --entrypoint /bin/bash \
-            -v "${PWD}/smoke-import-blocker:/run/smoke-import-blocker:ro" \
-            "${COMFY_RUNTIME_IMAGE}" \
-            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
-          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-
-          docker exec -e PYTHONPATH=/run/smoke-import-blocker "${container}" python3.11 - <<'PY'
-          try:
-              import triton  # noqa: F401
-          except ImportError as exc:
-              print(str(exc))
-          else:
-              raise SystemExit("temporary triton blocker was not first on sys.path")
-
-          import comfy_kitchen as ck
-          print("comfy_kitchen_import=ok")
-          print("comfy_kitchen_eager_backend_available=true")
-          print("comfy_kitchen_triton_marked_unavailable=true")
-          PY
-
-          started_at="$(date +%s)"
-          docker exec -e PYTHONPATH=/run/smoke-import-blocker "${container}" sh -lc 'cd /opt/ComfyUI && python3.11 main.py --cpu --disable-triton-backend --disable-all-custom-nodes --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout --verbose DEBUG >/tmp/test-b.log 2>&1 & echo $! >/tmp/test-b.pid'
-          ready=false
-          for attempt in $(seq 1 60); do
-            if ! docker exec "${container}" sh -lc 'kill -0 "$(cat /tmp/test-b.pid)" 2>/dev/null'; then
-              echo "::error::Test B ComfyUI exited"
-              docker exec "${container}" tail -n 200 /tmp/test-b.log || true
-              exit 1
-            fi
-            if docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/dev/null; then
-              ready=true
-              break
-            fi
-            sleep 3
-          done
-          if [ "${ready}" != "true" ]; then
-            echo "::error::Test B did not become healthy"
-            docker exec "${container}" tail -n 200 /tmp/test-b.log || true
-            exit 1
-          fi
-          seconds="$(( $(date +%s) - started_at ))"
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >/dev/null
-          docker exec "${container}" sh -lc '! grep -F "0 active drivers" /tmp/test-b.log'
-          docker exec "${container}" sh -lc '! find /workspace/models -type f | grep .'
-          docker exec "${container}" sh -lc '! find /workspace/comfy-output -type f | grep .'
-          docker exec "${container}" sh -lc 'kill -TERM "$(cat /tmp/test-b.pid)"'
-          for attempt in $(seq 1 10); do
-            if ! docker exec "${container}" sh -lc 'kill -0 "$(cat /tmp/test-b.pid)" 2>/dev/null'; then
-              break
-            fi
-            sleep 3
-          done
-          docker exec "${container}" sh -lc '! kill -0 "$(cat /tmp/test-b.pid)" 2>/dev/null'
-          docker exec "${container}" sh -lc '! pgrep -af "python3.11 main.py"'
-          echo "test_b_start_seconds=${seconds}"
-          echo "test_b_system_stats=passed"
-          echo "test_b_object_info=passed"
-          echo "test_b_no_inference=passed"
-          echo "test_b_sigterm=passed"
-          echo "classification=comfy_kitchen_triton_import_blocker_ab_proven"
-
-  diagnose-node-profile-fixed-digest:
-    name: Diagnose Kornia gate and production node profile
-    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && github.event_name == 'push' && contains(github.event.head_commit.message, '[node-profile]') && contains(github.event.head_commit.message, '[skip build]') }}
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    outputs:
-      gate_passed: ${{ steps.d4.outputs.gate_passed }}
-      kornia_version: ${{ steps.versions.outputs.kornia_version }}
-    env:
-      COMFY_RUNTIME_IMAGE_NAME: ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime
-      COMFY_RUNTIME_DIGEST: sha256:1cfb4740fb8b310a8095500e8fe55160176c619306068d553092182f4888efd1
-      COMFY_RUNTIME_IMAGE: ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:1cfb4740fb8b310a8095500e8fe55160176c619306068d553092182f4888efd1
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Confirm diagnose gate mode
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "build=skipped_until_diagnosis_gate"
-          echo "push=skipped_until_diagnosis_gate"
-          echo "permissions=contents:read"
-          echo "repository_secrets_used=false"
-          echo "diagnosis_target=${COMFY_RUNTIME_IMAGE}"
-
-      - name: Disk cleanup and anonymous pull fixed digest
-        shell: bash
-        run: |
-          set -euo pipefail
-          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config-node-profile"
-          mkdir -p "${DOCKER_CONFIG}"
-          printf '{}\n' > "${DOCKER_CONFIG}/config.json"
-          docker system prune -af --volumes || true
-          docker builder prune -af || true
-          sudo apt-get clean
-          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /usr/share/dotnet /opt/hostedtoolcache/CodeQL || true
-          df -h
-          docker buildx imagetools inspect "${COMFY_RUNTIME_IMAGE}" >/tmp/node-profile-inspect.txt
-          grep -F "linux/amd64" /tmp/node-profile-inspect.txt
-          docker pull --platform linux/amd64 "${COMFY_RUNTIME_IMAGE}"
-          docker image inspect "${COMFY_RUNTIME_IMAGE}" >/tmp/node-profile-image-inspect.json
-          python3 - <<'PY'
-          import json
-          import os
-
-          data = json.load(open("/tmp/node-profile-image-inspect.json", "r", encoding="utf-8"))[0]
-          expected = os.environ["COMFY_RUNTIME_IMAGE"]
-          repo_digests = data.get("RepoDigests", [])
-          print("repo_digests=" + ",".join(repo_digests))
-          if expected not in repo_digests:
-              raise SystemExit("fixed digest did not match RepoDigests exactly")
-          PY
-
-      - name: Record dependency versions and Comfy source facts
-        id: versions
-        shell: bash
-        run: |
-          set -euo pipefail
-          container="comfy-runtime-facts-${GITHUB_RUN_ID}"
-          docker run -d --name "${container}" --entrypoint /bin/bash "${COMFY_RUNTIME_IMAGE}" -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
-          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-
-          docker exec -i "${container}" python3.11 - <<'PY' >/tmp/runtime-facts.txt
-          import importlib.metadata as metadata
-          import pathlib
-          import platform
-          import re
-          import sys
-          import sysconfig
-
-          allow = [
-              "torch",
-              "torchvision",
-              "torchaudio",
-              "triton",
-              "comfy-kitchen",
-              "kornia",
-              "numpy",
-              "scipy",
-          ]
-
-          print("python_version=" + platform.python_version())
-          print("python_abi=" + sysconfig.get_config_var("SOABI"))
-          print("glibc=" + ",".join(platform.libc_ver()))
-          print("machine=" + platform.machine())
-          cpuinfo = pathlib.Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
-          flags = ""
-          for line in cpuinfo.splitlines():
-              if line.startswith("flags"):
-                  flags = line.split(":", 1)[1].strip()
-                  break
-          print("cpu_flags=" + flags)
-
-          for name in allow:
-              try:
-                  dist = metadata.distribution(name)
-              except metadata.PackageNotFoundError:
-                  print(f"{name}=not_installed")
-                  continue
-              print(f"{name}={dist.version}")
-              print(f"{name}_site_packages={dist.locate_file('')}")
-              installer = dist.read_text("INSTALLER") or ""
-              print(f"{name}_installer={installer.strip() or 'unknown'}")
-              wheel = dist.read_text("WHEEL") or ""
-              wheel_tag = next((line.split(":", 1)[1].strip() for line in wheel.splitlines() if line.startswith("Tag:")), "unknown")
-              print(f"{name}_wheel_tag={wheel_tag}")
-
-          requirements = pathlib.Path("/opt/ComfyUI/requirements.txt").read_text(encoding="utf-8")
-          for line in requirements.splitlines():
-              if "kornia" in line.lower():
-                  print("comfyui_requirements_kornia_line=" + line.strip())
-
-          nodes = pathlib.Path("/opt/ComfyUI/nodes.py").read_text(encoding="utf-8")
-          main = pathlib.Path("/opt/ComfyUI/main.py").read_text(encoding="utf-8")
-          post = pathlib.Path("/opt/ComfyUI/comfy_extras/nodes_post_processing.py").read_text(encoding="utf-8")
-          assert "def init_builtin_extra_nodes" in nodes
-          assert "nodes_post_processing.py" in nodes
-          assert re.search(r"import\s+kornia|from\s+kornia", post)
-          assert "disable_all_custom_nodes" in main
-          assert "init_extra_nodes" in main
-          print("builtin_extra_nodes_not_controlled_by_disable_all_custom_nodes=true")
-          print("nodes_post_processing_imports_kornia=true")
-          print("init_extra_nodes_before_health_server=true")
-
-          search_roots = [
-              pathlib.Path("/opt/ComfyUI/comfy_extras"),
-              pathlib.Path("/opt/ComfyUI/nodes.py"),
-              pathlib.Path("/opt/ComfyUI/comfy_api_nodes"),
-          ]
-          workflow_used_files = {
-              "comfy_extras/nodes_flux.py",
-              "comfy_extras/nodes_images.py",
-              "comfy_extras/nodes_model_advanced.py",
-              "comfy_extras/nodes_video.py",
-              "comfy_extras/nodes_wan.py",
-          }
-          patterns = [
-              "import kornia",
-              "from kornia",
-              "torch.jit.script",
-              "@torch.jit.script",
-          ]
-          print("kornia_import_sources_begin")
-          for root in search_roots:
-              files = [root] if root.is_file() else sorted(root.rglob("*.py"))
-              for path in files:
-                  text = path.read_text(encoding="utf-8", errors="replace")
-                  rel = str(path.relative_to("/opt/ComfyUI"))
-                  used = str(rel in workflow_used_files).lower()
-                  for lineno, line in enumerate(text.splitlines(), start=1):
-                      if any(pattern in line for pattern in patterns):
-                          print(f"{rel}:{lineno}:workflow_used={used}:{line.strip()}")
-          print("kornia_import_sources_end")
-          PY
-          cat /tmp/runtime-facts.txt
-          kornia_version="$(awk -F= '$1=="kornia" {print $2; exit}' /tmp/runtime-facts.txt)"
-          if [ -z "${kornia_version}" ] || [ "${kornia_version}" = "not_installed" ]; then
-            echo "::error::Unable to record exact Kornia version from fixed digest"
-            exit 1
-          fi
-          echo "kornia_version=${kornia_version}" >> "$GITHUB_OUTPUT"
-
-      - name: Reuse prior D1 D2 D3 evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "D1_D2_D3_REUSED=true"
-          echo "d1_previous_run=29343137485"
-          echo "d1=import torch; import kornia segmentation fault under Triton blocker"
-          echo "d1_exit_code=139"
-          echo "d1_classification=kornia_import_jit_segmentation_confirmed"
-          echo "d2_previous_run=29343137485"
-          echo "d2=torch.jit.script identity monkeypatch allowed Kornia import"
-          echo "d2_classification=kornia_import_segmentation_avoided_by_jit_identity"
-          echo "d3_previous_run=29352022219"
-          echo "d3_first_unfinished_builtin_extra=nodes_latent.py"
-          echo "d3_exit_code=139"
-          echo "d3_extras_file_count=124"
-          echo "d3_extras_list_sha256=7029b35b7b3fbac76d2919b5cc14f42e8363f5d2d0ab6e3f6e8cea379a11a565"
-          echo "transitive_failure_path=nodes_latent.py->nodes_post_processing.py->kornia->torch.jit.script->segmentation_fault"
-          echo "classification=prior_d1_d2_d3_evidence_reused_without_rerun"
-
-      - name: Generate production minimal profile diagnostics
-        shell: bash
-        run: |
-          set -euo pipefail
-          container="comfy-runtime-profile-audit-${GITHUB_RUN_ID}"
-          docker run -d --name "${container}" \
-            --entrypoint /bin/bash \
-            -v "${PWD}/comfy-runtime:/run/comfy-runtime:ro" \
-            "${COMFY_RUNTIME_IMAGE}" \
-            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
-          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-
-          docker exec \
-            -e PYTHONPATH=/run/comfy-runtime \
-            "${container}" \
-            python3.11 /run/comfy-runtime/profile_audit.py \
-              --comfy-dir /opt/ComfyUI \
-              --runtime-dir /run/comfy-runtime \
-              --profile /run/comfy-runtime/node-profiles/production-minimal.json \
-              --write-diagnostics /tmp/production-minimal-profile-diagnostics.json \
-              | tee /tmp/production-minimal-profile-audit.log
-          docker cp "${container}:/tmp/production-minimal-profile-diagnostics.json" /tmp/production-minimal-profile-diagnostics.json
-          grep -F "missingRequiredNodeClasses=0" /tmp/production-minimal-profile-audit.log
-          grep -F "dependency_audit_has_risk=false" /tmp/production-minimal-profile-audit.log
-          grep -F "profile_builtin_extra_files=comfy_extras/nodes_flux.py,comfy_extras/nodes_images.py,comfy_extras/nodes_model_advanced.py,comfy_extras/nodes_video.py,comfy_extras/nodes_wan.py" /tmp/production-minimal-profile-audit.log
-          python3 - <<'PY'
-          import json
-
-          with open("/tmp/production-minimal-profile-diagnostics.json", "r", encoding="utf-8") as handle:
-              diagnostics = json.load(handle)
-          audit = diagnostics["dependencyAudit"]
-          assert audit["hasRisk"] is False, audit
-          expected = [
-              "comfy_extras/nodes_flux.py",
-              "comfy_extras/nodes_images.py",
-              "comfy_extras/nodes_model_advanced.py",
-              "comfy_extras/nodes_video.py",
-              "comfy_extras/nodes_wan.py",
-          ]
-          assert audit["profileBuiltinExtraFiles"] == expected, audit["profileBuiltinExtraFiles"]
-          for file_name in expected:
-              assert file_name in audit["files"], file_name
-              assert isinstance(audit["files"][file_name]["directImports"], list)
-              assert isinstance(audit["files"][file_name]["dynamicImports"], list)
-              assert audit["files"][file_name]["transitiveRisks"] == []
-          PY
-
-      - name: Upload production minimal profile diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: production-minimal-profile-diagnostics
-          path: |
-            /tmp/production-minimal-profile-audit.log
-            /tmp/production-minimal-profile-diagnostics.json
-          if-no-files-found: ignore
-
-      - name: D4 Production minimal node profile smoke on fixed digest
-        id: d4
-        shell: bash
-        run: |
-          set -euo pipefail
-          container="comfy-runtime-d4-${GITHUB_RUN_ID}"
-          HOST_D4_OBJECT_INFO="${RUNNER_TEMP}/d4-object-info-${GITHUB_RUN_ID}.json"
-          HOST_D4_OBJECT_INFO_TMP="${HOST_D4_OBJECT_INFO}.tmp"
-          CONTAINER_D4_PROFILE_LOG="/workspace/logs/d4-profile-${GITHUB_RUN_ID}.log"
-          CONTAINER_D4_PROFILE_PID="/workspace/runtime/d4-profile-${GITHUB_RUN_ID}.pid"
-          for host_path in "${HOST_D4_OBJECT_INFO}" "${HOST_D4_OBJECT_INFO_TMP}"; do
-            case "${host_path}" in
-              "${RUNNER_TEMP}"/*) ;;
-              *) echo "host path escapes RUNNER_TEMP: ${host_path}" >&2; exit 1 ;;
-            esac
-          done
-          rm -f -- "${HOST_D4_OBJECT_INFO}" "${HOST_D4_OBJECT_INFO_TMP}"
-          docker run -d --name "${container}" \
-            --entrypoint /bin/bash \
-            -v "${PWD}/comfy-runtime:/run/comfy-runtime:ro" \
-            "${COMFY_RUNTIME_IMAGE}" \
-            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
-          cleanup() {
-            docker exec "${container}" sh -lc "tail -n 200 '${CONTAINER_D4_PROFILE_LOG}' 2>/dev/null || true" || true
-            rm -f -- "${HOST_D4_OBJECT_INFO}" "${HOST_D4_OBJECT_INFO_TMP}"
-            docker rm -f "${container}" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-          docker exec "${container}" mkdir -p /workspace/logs /workspace/runtime
-
-          docker exec \
-            -e COMFY_RUNTIME_DIR=/run/comfy-runtime \
-            -e COMFY_RUNTIME_MODE=smoke_cpu \
-            -e COMFY_NODE_PROFILE=production_minimal \
-            -e PYTHONPATH=/run/comfy-runtime/smoke_import_blocker \
-            -e PYTHONUNBUFFERED=1 \
-            "${container}" \
-            sh -lc 'cd /opt/ComfyUI && sha256sum /run/comfy-runtime/launch_comfy.py && python3.11 - <<'"'"'PY'"'"'
-          import json
-          import hashlib
-          import os
-          import pathlib
-          import sys
-
-          profile_path = pathlib.Path("/run/comfy-runtime/node-profiles/production-minimal.json")
-          manifest_path = pathlib.Path("/run/comfy-runtime/workflows/official/manifest.json")
-          profile = json.loads(profile_path.read_text(encoding="utf-8"))
-          print("d4_launcher_sha256=" + hashlib.sha256(pathlib.Path("/run/comfy-runtime/launch_comfy.py").read_bytes()).hexdigest(), flush=True)
-          print("d4_profile_sha256=" + profile["profileSha256"], flush=True)
-          print("d4_workflow_manifest_sha256=" + profile["workflowManifestSha256"], flush=True)
-          print("d4_workflow_manifest_bytes=" + str(manifest_path.stat().st_size), flush=True)
-          print("d4_builtin_extra_files=" + ",".join(profile["builtinExtraFiles"]), flush=True)
-          print("d4_required_node_count=" + str(len(profile["requiredNodeClasses"])), flush=True)
-
-          sys.path.insert(0, "/opt/ComfyUI")
-          os.chdir("/opt/ComfyUI")
-          sys.argv = [
-              "main.py",
-              "--cpu",
-              "--disable-triton-backend",
-              "--disable-all-custom-nodes",
-              "--listen",
-              "127.0.0.1",
-              "--port",
-              "8188",
-              "--input-directory",
-              "/workspace/comfy-input",
-              "--output-directory",
-              "/workspace/comfy-output",
-              "--user-directory",
-              "/workspace/comfy-user",
-              "--models-directory",
-              "/workspace/models",
-          ]
-          import comfy.options
-
-          comfy.options.enable_args_parsing()
-          from comfy.cli_args import args
-          import comfy.model_management as model_management
-
-          print(f"d4_args_cpu={args.cpu}", flush=True)
-          print("d4_cpu_state=" + str(model_management.cpu_state), flush=True)
-          print("d4_torch_device=" + str(model_management.get_torch_device()), flush=True)
-          PY'
-
-          docker exec \
-            -e COMFY_RUNTIME_DIR=/run/comfy-runtime \
-            -e COMFY_RUNTIME_MODE=smoke_cpu \
-            -e COMFY_NODE_PROFILE=production_minimal \
-            -e PYTHONPATH=/run/comfy-runtime/smoke_import_blocker \
-            -e PYTHONUNBUFFERED=1 \
-            -e PYTHONFAULTHANDLER=1 \
-            -e OMP_NUM_THREADS=1 \
-            -e MKL_NUM_THREADS=1 \
-            "${container}" \
-            sh -lc "cd /opt/ComfyUI && python3.11 -X faulthandler /run/comfy-runtime/launch_comfy.py --node-profile production_minimal --cpu --disable-triton-backend --disable-all-custom-nodes --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout --verbose DEBUG >'${CONTAINER_D4_PROFILE_LOG}' 2>&1 & echo \$! >'${CONTAINER_D4_PROFILE_PID}'"
-
-          ready=false
-          started_at="$(date +%s)"
-          for attempt in $(seq 1 60); do
-            if ! docker exec "${container}" sh -lc "kill -0 \"\$(cat '${CONTAINER_D4_PROFILE_PID}')\" 2>/dev/null"; then
-              echo "::error::D4 production minimal profile process exited"
-              docker exec "${container}" sh -lc "tail -n 200 '${CONTAINER_D4_PROFILE_LOG}' || true"
-              exit 1
-            fi
-            if docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/dev/null; then
-              ready=true
-              break
-            fi
-            sleep 3
-          done
-          if [ "${ready}" != "true" ]; then
-            echo "::error::D4 production minimal profile did not become healthy"
-            docker exec "${container}" sh -lc "tail -n 200 '${CONTAINER_D4_PROFILE_LOG}' || true"
-            exit 1
-          fi
-          seconds="$(( $(date +%s) - started_at ))"
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >"${HOST_D4_OBJECT_INFO_TMP}"
-          test -s "${HOST_D4_OBJECT_INFO_TMP}"
-          object_info_size="$(wc -c <"${HOST_D4_OBJECT_INFO_TMP}")"
-          test "${object_info_size}" -le $((128 * 1024 * 1024))
-          python3 - "${HOST_D4_OBJECT_INFO_TMP}" <<'PY'
-          import json
-          import pathlib
-          import sys
-
-          path = pathlib.Path(sys.argv[1])
-          try:
-              payload = json.loads(path.read_text(encoding="utf-8"))
-          except json.JSONDecodeError as exc:
-              raise SystemExit(f"object_info_json_parse_error={exc.msg}")
-          if not isinstance(payload, dict):
-              raise SystemExit("object_info_top_level_is_not_object")
-          print("object_info_top_level_key_count=" + str(len(payload)))
-          PY
-          mv -f -- "${HOST_D4_OBJECT_INFO_TMP}" "${HOST_D4_OBJECT_INFO}"
-          python3 scripts/verify-comfy-object-info.py --input "${HOST_D4_OBJECT_INFO}" --profile comfy-runtime/node-profiles/production-minimal.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/dev/null
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/dev/null
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/dev/null
-          docker exec "${container}" sh -lc "grep -F 'node_profile=production_minimal' '${CONTAINER_D4_PROFILE_LOG}'"
-          docker exec "${container}" sh -lc "grep -F 'profile_sha256=36c5279aaa81b23e73b2a6c6f8f198006ba3402d148ffae57927f6f246c5649c' '${CONTAINER_D4_PROFILE_LOG}'"
-          docker exec "${container}" sh -lc "grep -F 'comfy_args_ready cpu=True listen=127.0.0.1 port=8188' '${CONTAINER_D4_PROFILE_LOG}'"
-          docker exec "${container}" sh -lc "grep -F 'comfy_cpu_state=CPU torch_device=cpu' '${CONTAINER_D4_PROFILE_LOG}'"
-          for extra in \
-            comfy_extras/nodes_flux.py \
-            comfy_extras/nodes_images.py \
-            comfy_extras/nodes_model_advanced.py \
-            comfy_extras/nodes_video.py \
-            comfy_extras/nodes_wan.py; do
-            docker exec "${container}" sh -lc "grep -F 'AWAITING_PROFILE_EXTRA=${extra}' '${CONTAINER_D4_PROFILE_LOG}'"
-            docker exec "${container}" sh -lc "grep -F 'AWAITED_PROFILE_EXTRA=${extra} result=true' '${CONTAINER_D4_PROFILE_LOG}'"
-          done
-          docker exec "${container}" sh -lc "grep -F 'PROFILE_BUILTIN_EXTRA_FAILURES=0' '${CONTAINER_D4_PROFILE_LOG}'"
-          docker exec "${container}" sh -lc "grep -F 'PROFILE_REQUIRED_NODE_CLASSES_OK' '${CONTAINER_D4_PROFILE_LOG}'"
-          docker exec "${container}" sh -lc "grep -F 'Triton intentionally unavailable in COMFY_RUNTIME_MODE=smoke_cpu' '${CONTAINER_D4_PROFILE_LOG}' || true"
-          docker exec "${container}" sh -lc "! grep -F 'coroutine was never awaited' '${CONTAINER_D4_PROFILE_LOG}'"
-          docker exec "${container}" sh -lc "! grep -F 'nodes_latent.py' '${CONTAINER_D4_PROFILE_LOG}'"
-          docker exec "${container}" sh -lc "! grep -F 'nodes_post_processing.py' '${CONTAINER_D4_PROFILE_LOG}'"
-          docker exec "${container}" sh -lc "! grep -F 'nodes_canny.py' '${CONTAINER_D4_PROFILE_LOG}'"
-          docker exec "${container}" sh -lc "! grep -F 'nodes_morphology.py' '${CONTAINER_D4_PROFILE_LOG}'"
-          docker exec "${container}" sh -lc "! grep -F 'Fatal Python error' '${CONTAINER_D4_PROFILE_LOG}'"
-          docker exec "${container}" sh -lc '! find /workspace/models -type f | grep .'
-          docker exec "${container}" sh -lc '! find /workspace/comfy-output -type f | grep .'
-          docker exec "${container}" sh -lc "kill -TERM \"\$(cat '${CONTAINER_D4_PROFILE_PID}')\""
-          for attempt in $(seq 1 10); do
-            if ! docker exec "${container}" sh -lc "kill -0 \"\$(cat '${CONTAINER_D4_PROFILE_PID}')\" 2>/dev/null"; then
-              break
-            fi
-            sleep 3
-          done
-          docker exec "${container}" sh -lc "! kill -0 \"\$(cat '${CONTAINER_D4_PROFILE_PID}')\" 2>/dev/null"
-          echo "d4_start_seconds=${seconds}"
-          echo "checked_endpoints=system_stats,object_info,queue,history,interrupt,free,websocket"
-          echo "host_files=HOST_D4_OBJECT_INFO"
-          echo "container_files=CONTAINER_D4_PROFILE_LOG,CONTAINER_D4_PROFILE_PID"
-          echo "namespace_conflicts=0"
-          echo "classification=production_minimal_async_loader_cpu_boot_proven"
-          echo "gate_passed=true" >> "$GITHUB_OUTPUT"
-
-  build-node-profile-runtime:
-    name: Build production node profile runtime
-    needs: diagnose-node-profile-fixed-digest
-    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && needs.diagnose-node-profile-fixed-digest.outputs.gate_passed == 'true' }}
-    permissions:
-      contents: read
-      packages: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    outputs:
-      image: ${{ steps.image.outputs.image }}
-      version_tag: ${{ steps.image.outputs.version_tag }}
-      sha_tag: ${{ steps.image.outputs.sha_tag }}
-      digest: ${{ steps.build.outputs.digest }}
-      kornia_version: ${{ steps.locks.outputs.kornia_version }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Static verification
-        run: |
-          npm run secret:scan
-          npm run generation:d4-acceptance:test
-          npm run generation:async-loader:test
-          npm run generation:node-profile:test
-
-      - name: Confirm exact Kornia lock from diagnosis
-        id: locks
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "${{ needs.diagnose-node-profile-fixed-digest.outputs.kornia_version }}"
-          echo "kornia_version=${{ needs.diagnose-node-profile-fixed-digest.outputs.kornia_version }}"
-          echo "kornia_version=${{ needs.diagnose-node-profile-fixed-digest.outputs.kornia_version }}" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Free runner disk space
-        shell: bash
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          docker system prune -af || true
-          df -h
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Prepare image metadata
-        id: image
-        shell: bash
-        run: |
-          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          image="ghcr.io/${owner}/ai-creative-comfy-runtime"
-          version_tag="v0.1.3-production-minimal-async-${GITHUB_SHA::7}"
-          sha_tag="sha-${GITHUB_SHA}"
-          {
-            echo "image=${image}"
-            echo "version_tag=${version_tag}"
-            echo "sha_tag=${sha_tag}"
-            echo "tags=${image}:${version_tag},${image}:${sha_tag}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build and push Comfy runtime image
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: ./comfy-runtime
-          file: ./comfy-runtime/Dockerfile
-          platforms: linux/amd64
-          tags: ${{ steps.image.outputs.tags }}
-          build-args: |
-            KORNIA_VERSION=${{ needs.diagnose-node-profile-fixed-digest.outputs.kornia_version }}
-          push: true
-          provenance: true
-          sbom: true
-          cache-from: type=gha,scope=comfy-runtime
-          cache-to: type=gha,mode=max,scope=comfy-runtime
-
-      - name: Static image safety scan
-        shell: bash
-        run: |
-          set -euo pipefail
-          image="${{ steps.image.outputs.image }}@${{ steps.build.outputs.digest }}"
-          docker pull --platform linux/amd64 "${image}"
-          container="comfy-runtime-node-profile-scan-${GITHUB_RUN_ID}"
-          docker run -d --name "${container}" --entrypoint /bin/bash "${image}" -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
-          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" -o -name "*.gguf" \) | grep .'
-          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f -path "*/models/*" -name "*.bin" -size +50M | grep .'
-          docker exec "${container}" sh -lc 'test ! -e /.env && test ! -e /.env.local && test ! -e /.secrets'
-          docker exec "${container}" sh -lc '! find /opt/comfy-runtime -type f | grep -E "CLORE_API_KEY|SUPABASE_SERVICE_ROLE|SUPABASE_SECRET|R2_ACCESS_KEY|SSH_PRIVATE"'
-
-      - name: Summarize image
-        shell: bash
-        run: |
-          {
-            echo "### Production node profile Comfy Runtime image"
-            echo ""
-            echo "- Image: \`${{ steps.image.outputs.image }}\`"
-            echo "- Version tag: \`${{ steps.image.outputs.version_tag }}\`"
-            echo "- Commit tag: \`${{ steps.image.outputs.sha_tag }}\`"
-            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
-            echo "- Platform: \`linux/amd64\`"
-            echo "- ComfyUI commit: \`da2608926eaf68fd532bba4e1ace3402c5d21399\`"
-            echo "- Node profile: \`production_minimal\`"
-            echo "- Model weights in image: \`false\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  verify-node-profile-runtime:
-    name: Verify production node profile runtime
-    needs: build-node-profile-runtime
-    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && needs.build-node-profile-runtime.outputs.digest != '' }}
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Free runner disk space
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          docker system prune -af || true
-          df -h
-
-      - name: Pull public digest anonymously
-        shell: bash
-        run: |
-          set -euo pipefail
-          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config-node-profile-verify"
-          mkdir -p "${DOCKER_CONFIG}"
-          printf '{}\n' > "${DOCKER_CONFIG}/config.json"
-          image="${{ needs.build-node-profile-runtime.outputs.image }}@${{ needs.build-node-profile-runtime.outputs.digest }}"
-          docker buildx imagetools inspect "${image}" >/tmp/node-profile-runtime-inspect.txt
-          grep -F "linux/amd64" /tmp/node-profile-runtime-inspect.txt
-          docker pull --platform linux/amd64 "${image}"
-
-      - name: Smoke CPU production node profile runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          image="${{ needs.build-node-profile-runtime.outputs.image }}@${{ needs.build-node-profile-runtime.outputs.digest }}"
-          container="comfy-runtime-node-profile-smoke-${GITHUB_RUN_ID}"
-          HOST_NODE_PROFILE_OBJECT_INFO="${RUNNER_TEMP}/node-profile-object-info-${GITHUB_RUN_ID}.json"
-          HOST_NODE_PROFILE_OBJECT_INFO_TMP="${HOST_NODE_PROFILE_OBJECT_INFO}.tmp"
-          for host_path in "${HOST_NODE_PROFILE_OBJECT_INFO}" "${HOST_NODE_PROFILE_OBJECT_INFO_TMP}"; do
-            case "${host_path}" in
-              "${RUNNER_TEMP}"/*) ;;
-              *) echo "host path escapes RUNNER_TEMP: ${host_path}" >&2; exit 1 ;;
-            esac
-          done
-          rm -f -- "${HOST_NODE_PROFILE_OBJECT_INFO}" "${HOST_NODE_PROFILE_OBJECT_INFO_TMP}"
-          started_at="$(date +%s)"
-          docker run -d --name "${container}" \
-            -e START_GPU_WORKER=false \
-            -e COMFY_RUNTIME_MODE=smoke_cpu \
-            -e COMFY_NODE_PROFILE=production_minimal \
-            -p 127.0.0.1:8080:8080 \
-            "${image}"
-          cleanup() {
-            docker exec "${container}" sh -lc 'for file in /workspace/logs/*.log; do case "${file}" in *environment-redacted.log) continue ;; esac; echo "===== ${file}"; tail -n 200 "${file}" || true; done' || true
-            docker logs --tail 200 "${container}" || true
-            rm -f -- "${HOST_NODE_PROFILE_OBJECT_INFO}" "${HOST_NODE_PROFILE_OBJECT_INFO_TMP}"
-            docker rm -f "${container}" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-
-          ready=false
-          for attempt in $(seq 1 60); do
-            if docker ps --format '{{.Names}}' | grep -Fx "${container}" >/dev/null \
-              && curl -fsS http://127.0.0.1:8080/healthz | grep -F "\"ok\": true"; then
-              ready=true
-              break
-            fi
-            sleep 5
-          done
-          if [ "${ready}" != "true" ]; then
-            echo "::error::Production node profile runtime did not become healthy in time"
-            exit 1
-          fi
-          seconds="$(( $(date +%s) - started_at ))"
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >"${HOST_NODE_PROFILE_OBJECT_INFO_TMP}"
-          test -s "${HOST_NODE_PROFILE_OBJECT_INFO_TMP}"
-          test "$(wc -c <"${HOST_NODE_PROFILE_OBJECT_INFO_TMP}")" -le $((128 * 1024 * 1024))
-          mv -f -- "${HOST_NODE_PROFILE_OBJECT_INFO_TMP}" "${HOST_NODE_PROFILE_OBJECT_INFO}"
-          python3 scripts/verify-comfy-object-info.py --input "${HOST_NODE_PROFILE_OBJECT_INFO}" --profile comfy-runtime/node-profiles/production-minimal.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/dev/null
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/dev/null
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/dev/null
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/dev/null
-          docker exec "${container}" sh -lc 'grep -F "node_profile=production_minimal" /workspace/logs/comfyui.log'
-          docker exec "${container}" sh -lc 'grep -F "workflow_manifest_sha256=acb0a624f433a174366bc2820ab835c34273f0c102acc0651b09f75e800ca5d5" /workspace/logs/comfyui.log'
-          for extra in \
-            comfy_extras/nodes_flux.py \
-            comfy_extras/nodes_images.py \
-            comfy_extras/nodes_model_advanced.py \
-            comfy_extras/nodes_video.py \
-            comfy_extras/nodes_wan.py; do
-            docker exec "${container}" sh -lc "grep -F 'AWAITING_PROFILE_EXTRA=${extra}' /workspace/logs/comfyui.log"
-            docker exec "${container}" sh -lc "grep -F 'AWAITED_PROFILE_EXTRA=${extra} result=true' /workspace/logs/comfyui.log"
-          done
-          docker exec "${container}" sh -lc 'grep -F "PROFILE_BUILTIN_EXTRA_FAILURES=0" /workspace/logs/comfyui.log'
-          docker exec "${container}" sh -lc 'grep -F "PROFILE_REQUIRED_NODE_CLASSES_OK" /workspace/logs/comfyui.log'
-          docker exec "${container}" python3.11 -c 'import importlib.metadata as m; assert m.version("kornia") == "${{ needs.build-node-profile-runtime.outputs.kornia_version }}"'
-          docker exec "${container}" sh -lc '! grep -F "coroutine was never awaited" /workspace/logs/comfyui.log'
-          docker exec "${container}" sh -lc '! grep -F "nodes_latent.py" /workspace/logs/comfyui.log'
-          docker exec "${container}" sh -lc '! grep -F "nodes_post_processing.py" /workspace/logs/comfyui.log'
-          docker exec "${container}" sh -lc '! grep -F "nodes_canny.py" /workspace/logs/comfyui.log'
-          docker exec "${container}" sh -lc '! grep -F "nodes_morphology.py" /workspace/logs/comfyui.log'
-          docker exec "${container}" sh -lc '! grep -F "Fatal Python error" /workspace/logs/comfyui.log'
-          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
-          import base64
-          import os
-          import socket
-
-          key = base64.b64encode(os.urandom(16)).decode()
-          request = (
-              "GET /ws?clientId=ci-node-profile-smoke HTTP/1.1\r\n"
-              "Host: 127.0.0.1:8188\r\n"
-              "Upgrade: websocket\r\n"
-              "Connection: Upgrade\r\n"
-              f"Sec-WebSocket-Key: {key}\r\n"
-              "Sec-WebSocket-Version: 13\r\n\r\n"
-          )
-          with socket.create_connection(("127.0.0.1", 8188), timeout=10) as sock:
-              sock.sendall(request.encode())
-              response = sock.recv(512).decode(errors="replace")
-          if " 101 " not in response.split("\r\n", 1)[0]:
-              raise SystemExit(response)
-          PY'
-          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
-          import json
-          import urllib.error
-          import urllib.request
-
-          body = json.dumps({"prompt": {"bad": {"class_type": "MissingNodeForSmoke", "inputs": {}}}}).encode()
-          request = urllib.request.Request(
-              "http://127.0.0.1:8188/prompt",
-              data=body,
-              headers={"Content-Type": "application/json"},
-              method="POST",
-          )
-          try:
-              urllib.request.urlopen(request, timeout=10).read()
-          except urllib.error.HTTPError as exc:
-              payload = exc.read().decode(errors="replace")
-              if exc.code != 400 or "MissingNodeForSmoke" not in payload:
-                  raise
-          else:
-              raise SystemExit("invalid prompt unexpectedly accepted")
-          PY'
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/dev/null
-          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" -o -name "*.gguf" \) | grep .'
-          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f -path "*/models/*" -name "*.bin" -size +50M | grep .'
-          docker exec "${container}" sh -lc '! printenv | grep -E "SUPABASE_SERVICE_ROLE|SUPABASE_SECRET|CLORE_API_KEY|R2_ADMIN|SSH_PRIVATE"'
-          docker exec "${container}" sh -lc 'test ! -e /app/worker.py'
-          docker stop --time 15 "${container}" >/dev/null
-          echo "node_profile_smoke_start_seconds=${seconds}"
-          echo "checked_endpoints=system_stats,object_info,queue,history,interrupt,free,websocket"
-          echo "host_files=HOST_NODE_PROFILE_OBJECT_INFO"
-          echo "container_files=/workspace/logs/*"
-          echo "namespace_conflicts=0"
-
-      - name: GPU mode fail-closed without smoke blocker
-        shell: bash
-        run: |
-          set -euo pipefail
-          image="${{ needs.build-node-profile-runtime.outputs.image }}@${{ needs.build-node-profile-runtime.outputs.digest }}"
-          set +e
-          docker run --rm -e COMFY_RUNTIME_MODE=gpu -e COMFY_NODE_PROFILE=production_minimal -e COMFY_GPU_PROFILE=rtx4090 "${image}" >/tmp/gpu-negative.log 2>&1
-          code=$?
-          set -e
-          cat /tmp/gpu-negative.log
-          test "${code}" -ne 0
-          test "${code}" -eq 42
-          grep -F "gpu_preflight_failed" /tmp/gpu-negative.log
-          ! grep -F "Triton intentionally unavailable in COMFY_RUNTIME_MODE=smoke_cpu" /tmp/gpu-negative.log
-          ! grep -F "starting ComfyUI runtime" /tmp/gpu-negative.log
-
-      - name: Summarize production node profile verification
-        shell: bash
-        run: |
-          {
-            echo "### Production node profile runtime verification"
-            echo ""
-            echo "- Image: \`${{ needs.build-node-profile-runtime.outputs.image }}\`"
-            echo "- Version tag: \`${{ needs.build-node-profile-runtime.outputs.version_tag }}\`"
-            echo "- Digest: \`${{ needs.build-node-profile-runtime.outputs.digest }}\`"
-            echo "- Kornia lock: \`${{ needs.build-node-profile-runtime.outputs.kornia_version }}\`"
-            echo "- Anonymous pull: \`true\`"
-            echo "- Node profile: \`production_minimal\`"
-            echo "- CPU no-model smoke: \`true\`"
-            echo "- GPU no-device fail-closed: \`true\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  build-and-push:
-    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip build]')) }}
-    permissions:
-      contents: read
-      packages: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    outputs:
-      image: ${{ steps.image.outputs.image }}
-      version_tag: ${{ steps.image.outputs.version_tag }}
-      sha_tag: ${{ steps.image.outputs.sha_tag }}
-      digest: ${{ steps.build.outputs.digest }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Secret scan
-        run: npm run secret:scan
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Free runner disk space
-        shell: bash
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          docker system prune -af || true
-          df -h
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Prepare image metadata
-        id: image
-        shell: bash
-        run: |
-          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          image="ghcr.io/${owner}/ai-creative-comfy-runtime"
-          version_tag="${{ inputs.version_tag }}"
-          if [ -z "${version_tag}" ]; then
-            version_tag="v0.1.2-no-model-runtime-${GITHUB_SHA::7}"
-          fi
-          sha_tag="sha-${GITHUB_SHA}"
-          {
-            echo "image=${image}"
-            echo "version_tag=${version_tag}"
-            echo "sha_tag=${sha_tag}"
-            echo "tags=${image}:${version_tag},${image}:${sha_tag}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build and push Comfy runtime image
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: ./comfy-runtime
-          file: ./comfy-runtime/Dockerfile
-          platforms: linux/amd64
-          tags: ${{ steps.image.outputs.tags }}
-          push: true
-          provenance: true
-          sbom: true
-          cache-from: type=gha,scope=comfy-runtime
-          cache-to: type=gha,mode=max,scope=comfy-runtime
-
-      - name: Static image safety scan
-        shell: bash
-        run: |
-          set -euo pipefail
-          image="${{ steps.image.outputs.image }}@${{ steps.build.outputs.digest }}"
-          docker pull --platform linux/amd64 "${image}"
-          container="comfy-runtime-scan-${GITHUB_RUN_ID}"
-          docker run -d --name "${container}" --entrypoint /bin/bash "${image}" -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
-          cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" -o -name "*.gguf" \) | grep .'
-          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f -path "*/models/*" -name "*.bin" -size +50M | grep .'
-          docker exec "${container}" sh -lc 'test ! -e /.env && test ! -e /.env.local && test ! -e /.secrets'
-          docker rm -f "${container}" >/dev/null
-
-      - name: Summarize image
-        shell: bash
-        run: |
-          {
-            echo "### Comfy Runtime image"
-            echo ""
-            echo "- Image: \`${{ steps.image.outputs.image }}\`"
-            echo "- Version tag: \`${{ steps.image.outputs.version_tag }}\`"
-            echo "- Commit tag: \`${{ steps.image.outputs.sha_tag }}\`"
-            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
-            echo "- Platform: \`linux/amd64\`"
-            echo "- ComfyUI commit: \`da2608926eaf68fd532bba4e1ace3402c5d21399\`"
-            echo "- Model weights in image: \`false\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  verify-public-digest:
-    needs: build-and-push
-    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip build]')) }}
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Free runner disk space
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          docker system prune -af || true
-          df -h
-
-      - name: Pull public digest anonymously
-        shell: bash
-        run: |
-          set -euo pipefail
-          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config"
-          mkdir -p "${DOCKER_CONFIG}"
-          image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
-          docker buildx imagetools inspect "${image}" >/tmp/comfy-runtime-inspect.txt
-          grep -F "linux/amd64" /tmp/comfy-runtime-inspect.txt >/dev/null
-          docker pull --platform linux/amd64 "${image}"
-
-      - name: Smoke CPU runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config"
-          image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
-          container="comfy-runtime-smoke-${GITHUB_RUN_ID}"
-          HOST_PUBLIC_OBJECT_INFO="${RUNNER_TEMP}/public-object-info-${GITHUB_RUN_ID}.json"
-          HOST_PUBLIC_OBJECT_INFO_TMP="${HOST_PUBLIC_OBJECT_INFO}.tmp"
-          rm -f -- "${HOST_PUBLIC_OBJECT_INFO}" "${HOST_PUBLIC_OBJECT_INFO_TMP}"
-          docker run -d --name "${container}" \
-            -e START_GPU_WORKER=false \
-            -e COMFY_RUNTIME_MODE=smoke_cpu \
-            -p 127.0.0.1:8080:8080 \
-            "${image}"
-          cleanup() {
-            docker exec "${container}" sh -lc 'for file in /workspace/logs/*.log; do case "${file}" in *environment-redacted.log) continue ;; esac; echo "===== ${file}"; tail -n 200 "${file}" || true; done' || true
-            docker logs --tail 200 "${container}" || true
-            rm -f -- "${HOST_PUBLIC_OBJECT_INFO}" "${HOST_PUBLIC_OBJECT_INFO_TMP}"
-            docker rm -f "${container}" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-
-          ready=false
-          for attempt in $(seq 1 60); do
-            if docker ps --format '{{.Names}}' | grep -Fx "${container}" >/dev/null \
-              && curl -fsS http://127.0.0.1:8080/healthz | grep -F "\"ok\": true"; then
-              ready=true
-              break
-            fi
-            sleep 5
-          done
-          if [ "${ready}" != "true" ]; then
-            echo "::error::Comfy runtime did not become healthy in time"
-            exit 1
-          fi
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >"${HOST_PUBLIC_OBJECT_INFO_TMP}"
-          test -s "${HOST_PUBLIC_OBJECT_INFO_TMP}"
-          test "$(wc -c <"${HOST_PUBLIC_OBJECT_INFO_TMP}")" -le $((128 * 1024 * 1024))
-          mv -f -- "${HOST_PUBLIC_OBJECT_INFO_TMP}" "${HOST_PUBLIC_OBJECT_INFO}"
-          python3 scripts/verify-comfy-object-info.py --input "${HOST_PUBLIC_OBJECT_INFO}" --profile comfy-runtime/node-profiles/production-minimal.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/dev/null
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/dev/null
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/dev/null
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/dev/null
-          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
-          import base64
-          import os
-          import socket
-
-          key = base64.b64encode(os.urandom(16)).decode()
-          request = (
-              "GET /ws?clientId=ci-smoke HTTP/1.1\r\n"
-              "Host: 127.0.0.1:8188\r\n"
-              "Upgrade: websocket\r\n"
-              "Connection: Upgrade\r\n"
-              f"Sec-WebSocket-Key: {key}\r\n"
-              "Sec-WebSocket-Version: 13\r\n\r\n"
-          )
-          with socket.create_connection(("127.0.0.1", 8188), timeout=10) as sock:
-              sock.sendall(request.encode())
-              response = sock.recv(512).decode(errors="replace")
-          if " 101 " not in response.split("\r\n", 1)[0]:
-              raise SystemExit(response)
-          PY'
-          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
-          import json
-          import urllib.error
-          import urllib.request
-
-          body = json.dumps({"prompt": {"bad": {"class_type": "MissingNodeForSmoke", "inputs": {}}}}).encode()
-          request = urllib.request.Request(
-              "http://127.0.0.1:8188/prompt",
-              data=body,
-              headers={"Content-Type": "application/json"},
-              method="POST",
-          )
-          try:
-              urllib.request.urlopen(request, timeout=10).read()
-          except urllib.error.HTTPError as exc:
-              payload = exc.read().decode(errors="replace")
-              if exc.code != 400 or "MissingNodeForSmoke" not in payload:
-                  raise
-          else:
-              raise SystemExit("invalid prompt unexpectedly accepted")
-          PY'
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/dev/null
-          docker inspect "${container}" > /tmp/inspect.json
-          python3 - <<'PY'
-          import json
-          data = json.load(open("/tmp/inspect.json", "r", encoding="utf-8"))[0]
-          ports = data["HostConfig"]["PortBindings"]
-          if "8188/tcp" in ports:
-              raise SystemExit("8188 must not be published")
-          binding = ports.get("8080/tcp", [])
-          if not binding or binding[0].get("HostIp") != "127.0.0.1":
-              raise SystemExit("8080 must bind only to host 127.0.0.1")
-          PY
-          docker exec "${container}" sh -lc 'test "$(printenv COMFYUI_COMMIT)" = "da2608926eaf68fd532bba4e1ace3402c5d21399"'
-          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" -o -name "*.gguf" \) | grep .'
-          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f -path "*/models/*" -name "*.bin" -size +50M | grep .'
-          docker exec "${container}" sh -lc '! printenv | grep -E "SUPABASE_SERVICE_ROLE|SUPABASE_SECRET|CLORE_API_KEY|R2_ADMIN|SSH_PRIVATE"'
-          docker exec "${container}" sh -lc 'test ! -e /app/worker.py'
-          docker exec "${container}" python3.11 -c 'import pathlib,sys; forbidden=False
-          for path in ("/proc/net/tcp","/proc/net/tcp6"):
-            for line in pathlib.Path(path).read_text().splitlines()[1:]:
-              local=line.split()[1]; host_hex,port_hex=local.rsplit(":",1)
-              forbidden = forbidden or (int(port_hex,16)==8188 and set(host_hex) <= {"0"})
-          sys.exit(1 if forbidden else 0)'
-          top_output="$(docker top "${container}")"
-          if printf '%s\n' "${top_output}" | grep -Eq 'python(3)?[[:space:]]+/app/worker[.]py'; then
-            echo "::error::legacy Wan worker unexpectedly started"
-            exit 1
-          fi
-
-          docker stop --time 15 "${container}" >/dev/null
-          if docker ps -a --format '{{.Names}}' | grep -Fx "${container}" >/dev/null; then
-            state="$(docker inspect --format '{{.State.Status}}' "${container}")"
-            test "${state}" = "exited"
-          fi
-
-      - name: GPU mode fail-closed
-        shell: bash
-        run: |
-          set -euo pipefail
-          image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
-          set +e
-          docker run --rm -e COMFY_RUNTIME_MODE=gpu "${image}" >/tmp/gpu-negative.log 2>&1
-          code=$?
-          set -e
-          cat /tmp/gpu-negative.log
-          test "${code}" -ne 0
-          grep -F "gpu_preflight_failed" /tmp/gpu-negative.log
-
-      - name: Summarize verification
-        shell: bash
-        run: |
-          {
-            echo "### Public digest verification"
-            echo ""
-            echo "- Image: \`${{ needs.build-and-push.outputs.image }}\`"
-            echo "- Version tag: \`${{ needs.build-and-push.outputs.version_tag }}\`"
-            echo "- Digest: \`${{ needs.build-and-push.outputs.digest }}\`"
-            echo "- Anonymous pull: \`true\`"
-            echo "- CPU no-model smoke: \`true\`"
-            echo "- GPU no-device fail-closed: \`true\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  verify-existing-digest-smoke:
-    name: Verify existing digest smoke
-    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'gouzhuoqunn/ai-video-platform' && github.head_ref == 'stage-two-five-comfy-runtime' && github.base_ref == 'ci/comfy-runtime-smoke-base' && !contains(github.event.pull_request.title, '[diagnose-only]') }}
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      COMFY_RUNTIME_IMAGE: ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:d88dd518253f27ac8a7841d07b2e02c79a8cda0a940c85b9c579446f105c26bc
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Verify PR event guard
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "${{ github.event.pull_request.head.repo.full_name }}" = "gouzhuoqunn/ai-video-platform"
-          test "${{ github.head_ref }}" = "stage-two-five-comfy-runtime"
-          test "${{ github.base_ref }}" = "ci/comfy-runtime-smoke-base"
-
-      - name: Confirm verify-only mode
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "build=skipped"
-          echo "push=skipped"
-          echo "image=${COMFY_RUNTIME_IMAGE}"
-
-      - name: Free runner disk space
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          docker system prune -af || true
-          df -h
-
-      - name: Pull fixed digest
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker pull --platform linux/amd64 "${COMFY_RUNTIME_IMAGE}"
-
-      - name: Smoke fixed digest
-        shell: bash
-        run: |
-          set -euo pipefail
-          container="comfy-runtime-pr-smoke-${GITHUB_RUN_ID}"
-          HOST_PR_OBJECT_INFO="${RUNNER_TEMP}/pr-object-info-${GITHUB_RUN_ID}.json"
-          HOST_PR_OBJECT_INFO_TMP="${HOST_PR_OBJECT_INFO}.tmp"
-          rm -f -- "${HOST_PR_OBJECT_INFO}" "${HOST_PR_OBJECT_INFO_TMP}"
-          started_at="$(date +%s)"
-
-          diagnose() {
-            echo "===== docker inspect state"
-            docker inspect --format '{{json .State}}' "${container}" 2>/dev/null || true
-            echo "===== container logs"
-            docker logs --tail 200 "${container}" 2>/dev/null || true
-            if docker ps --format '{{.Names}}' | grep -Fx "${container}" >/dev/null 2>&1; then
-              docker exec "${container}" sh -lc 'for file in /workspace/logs/*.log; do case "${file}" in *environment-redacted.log) continue ;; esac; echo "===== ${file}"; tail -n 200 "${file}" || true; done' || true
-            fi
-          }
-
-          cleanup() {
-            rm -f -- "${HOST_PR_OBJECT_INFO}" "${HOST_PR_OBJECT_INFO_TMP}"
-            docker rm -f "${container}" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-
-          docker run -d --name "${container}" \
-            -e START_GPU_WORKER=false \
-            -e COMFYUI_EXTRA_ARGS=--cpu \
-            "${COMFY_RUNTIME_IMAGE}"
-
-          ready=false
-          for attempt in $(seq 1 60); do
-            if ! docker ps --format '{{.Names}}' | grep -Fx "${container}" >/dev/null; then
-              echo "::error::Comfy runtime container exited before health check"
-              diagnose
-              exit 1
-            fi
-            if docker exec "${container}" sh -lc 'curl -fsS http://127.0.0.1:8080/healthz | grep -F "\"ok\": true"'; then
-              ready=true
-              break
-            fi
-            sleep 5
-          done
-
-          if [ "${ready}" != "true" ]; then
-            echo "::error::Comfy runtime did not become healthy in 300 seconds"
-            diagnose
-            exit 1
-          fi
-
-          startup_seconds="$(( $(date +%s) - started_at ))"
-          echo "startup_seconds=${startup_seconds}"
-
-          docker exec "${container}" curl -fsS http://127.0.0.1:8080/healthz >/dev/null
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >"${HOST_PR_OBJECT_INFO_TMP}"
-          test -s "${HOST_PR_OBJECT_INFO_TMP}"
-          test "$(wc -c <"${HOST_PR_OBJECT_INFO_TMP}")" -le $((128 * 1024 * 1024))
-          mv -f -- "${HOST_PR_OBJECT_INFO_TMP}" "${HOST_PR_OBJECT_INFO}"
-          python3 scripts/verify-comfy-object-info.py --input "${HOST_PR_OBJECT_INFO}" --profile comfy-runtime/node-profiles/production-minimal.json
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/dev/null
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/dev/null
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/dev/null
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/dev/null
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/dev/null
-
-          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
-          import base64
-          import os
-          import socket
-
-          key = base64.b64encode(os.urandom(16)).decode()
-          request = (
-              "GET /ws?clientId=ci-smoke HTTP/1.1\r\n"
-              "Host: 127.0.0.1:8188\r\n"
-              "Upgrade: websocket\r\n"
-              "Connection: Upgrade\r\n"
-              f"Sec-WebSocket-Key: {key}\r\n"
-              "Sec-WebSocket-Version: 13\r\n\r\n"
-          )
-          with socket.create_connection(("127.0.0.1", 8188), timeout=10) as sock:
-              sock.sendall(request.encode())
-              response = sock.recv(512).decode(errors="replace")
-          if " 101 " not in response.split("\r\n", 1)[0]:
-              raise SystemExit(response)
-          PY'
-
-          docker exec "${container}" sh -lc 'python3.11 - <<'"'"'PY'"'"'
-          import json
-          import urllib.error
-          import urllib.request
-
-          body = json.dumps({"prompt": {"bad": {"class_type": "MissingNodeForSmoke", "inputs": {}}}}).encode()
-          request = urllib.request.Request(
-              "http://127.0.0.1:8188/prompt",
-              data=body,
-              headers={"Content-Type": "application/json"},
-              method="POST",
-          )
-          try:
-              urllib.request.urlopen(request, timeout=10).read()
-          except urllib.error.HTTPError as exc:
-              payload = exc.read().decode(errors="replace")
-              if exc.code != 400 or "MissingNodeForSmoke" not in payload:
-                  raise
-          else:
-              raise SystemExit("invalid prompt unexpectedly accepted")
-          PY'
-
-          docker exec "${container}" sh -lc 'test "$(printenv COMFYUI_COMMIT)" = "da2608926eaf68fd532bba4e1ace3402c5d21399"'
-          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" -o -name "*.gguf" \) | grep .'
-          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f -name "*.bin" -size +50M | grep .'
-          docker exec "${container}" sh -lc '! printenv | grep -E "SUPABASE_SERVICE_ROLE|SUPABASE_SECRET|CLORE_API_KEY|R2_ADMIN|SSH_PRIVATE"'
-          docker exec "${container}" sh -lc 'test ! -e /app/worker.py'
-          top_output="$(docker top "${container}")"
-          if printf '%s\n' "${top_output}" | grep -Eq 'python(3)?[[:space:]]+/app/worker[.]py'; then
-            echo "::error::legacy Wan worker unexpectedly started"
-            exit 1
-          fi
-
-          docker stop --time 15 "${container}" >/dev/null
-          state="$(docker inspect --format '{{.State.Status}}' "${container}")"
-          test "${state}" = "exited"
-
-          {
-            echo "### Fixed digest smoke"
-            echo ""
-            echo "- Image: \`${COMFY_RUNTIME_IMAGE}\`"
-            echo "- Build: \`skipped\`"
-            echo "- Push: \`skipped\`"
-            echo "- Startup seconds: \`${startup_seconds}\`"
-            echo "- API/WebSocket/nodes: \`passed\`"
-            echo "- Model weights in image: \`false\`"
-            echo "- Repository secrets used: \`false\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  diagnose-existing-digest:
-    name: Diagnose existing digest
-    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'gouzhuoqunn/ai-video-platform' && github.head_ref == 'stage-two-five-comfy-runtime' && github.base_ref == 'ci/comfy-runtime-smoke-base' && contains(github.event.pull_request.title, '[diagnose-only]') }}
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      COMFY_RUNTIME_IMAGE: ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:d88dd518253f27ac8a7841d07b2e02c79a8cda0a940c85b9c579446f105c26bc
-    steps:
-      - name: Free runner disk space
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          docker system prune -af || true
-          df -h
-
-      - name: Pull fixed digest anonymously
-        shell: bash
-        run: |
-          set -euo pipefail
-          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config"
-          mkdir -p "${DOCKER_CONFIG}"
-          docker pull --platform linux/amd64 "${COMFY_RUNTIME_IMAGE}"
-
-      - name: Diagnose no-model startup
-        shell: bash
-        run: |
-          set -euo pipefail
-          export DOCKER_CONFIG="${RUNNER_TEMP}/empty-docker-config"
-          container="comfy-runtime-diagnostic-${GITHUB_RUN_ID}"
-          docker run -d --name "${container}" \
-            --entrypoint /bin/bash \
-            "${COMFY_RUNTIME_IMAGE}" \
-            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
-          cleanup() {
-            docker rm -f "${container}" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-
-          dexec() {
-            docker exec "${container}" "$@"
-          }
-
-          echo "===== runtime basics"
-          dexec python3.11 - <<'PY'
-          import importlib.metadata as metadata
-          import os
-          import pathlib
-          import shutil
-          import stat
-          import subprocess
-          import sys
-
-          print("python=" + sys.version.split()[0])
-          try:
-              import torch
-              print("torch=" + torch.__version__)
-              print("torch_cuda=" + str(torch.version.cuda))
-              print("torch_cuda_available=" + str(torch.cuda.is_available()))
-          except Exception as exc:
-              print("torch_error=" + repr(exc))
-          print("nvidia_smi_exists=" + str(shutil.which("nvidia-smi") is not None))
-          commit = os.environ.get("COMFYUI_COMMIT", "")
-          marker = subprocess.check_output(["git", "-C", "/opt/ComfyUI", "rev-parse", "HEAD"], text=True).strip() if pathlib.Path("/opt/ComfyUI").exists() else ""
-          print("comfyui_env_commit=" + commit)
-          print("comfyui_git_commit=" + marker)
-          for package in ["comfyui-frontend-package", "requests", "torch", "numpy", "aiohttp"]:
-              try:
-                  print(f"package:{package}={metadata.version(package)}")
-              except metadata.PackageNotFoundError:
-                  print(f"package:{package}=missing")
-          for directory in ["/workspace/models", "/workspace/comfy-input", "/workspace/comfy-output", "/workspace/comfy-user", "/workspace/logs", "/tmp"]:
-              path = pathlib.Path(directory)
-              exists = path.exists()
-              writable = os.access(path, os.R_OK | os.W_OK) if exists else False
-              mode = oct(stat.S_IMODE(path.stat().st_mode)) if exists else "missing"
-              owner = f"{path.stat().st_uid}:{path.stat().st_gid}" if exists else "missing"
-              print(f"dir:{directory}:exists={exists}:owner={owner}:mode={mode}:rw={writable}")
-          for script in ["/opt/comfy-runtime/entrypoint.sh", "/opt/comfy-runtime/controller.py", "/opt/comfy-runtime/healthcheck.py"]:
-              path = pathlib.Path(script)
-              print(f"script:{script}:exists={path.exists()}:exec={os.access(path, os.X_OK) if path.exists() else False}")
-          PY
-
-          echo "===== syntax checks"
-          dexec bash -n /opt/comfy-runtime/entrypoint.sh
-          dexec python3.11 -m compileall -q /opt/comfy-runtime
-
-          echo "===== manual ComfyUI CPU startup"
-          dexec bash -lc 'cd /opt/ComfyUI && rm -f /workspace/logs/comfyui-diagnostic.log && (python3.11 main.py --cpu --listen 127.0.0.1 --port 8188 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout --verbose DEBUG > >(tee /workspace/logs/comfyui-diagnostic.log) 2>&1) & echo $! >/tmp/comfyui-diagnostic.pid'
-          cpu_ready=false
-          for attempt in $(seq 1 36); do
-            if ! dexec bash -lc 'kill -0 "$(cat /tmp/comfyui-diagnostic.pid)" 2>/dev/null'; then
-              echo "::error::manual ComfyUI CPU process exited"
-              dexec bash -lc 'wait "$(cat /tmp/comfyui-diagnostic.pid)"; echo "exit_code=$?"' || true
-              dexec bash -lc 'tail -n 200 /workspace/logs/comfyui-diagnostic.log || true'
-              exit 1
-            fi
-            if dexec curl -fsS http://127.0.0.1:8188/system_stats >/tmp/system_stats.json; then
-              cpu_ready=true
-              break
-            fi
-            sleep 5
-          done
-          if [ "${cpu_ready}" != "true" ]; then
-            echo "::error::manual ComfyUI CPU startup timed out"
-            dexec bash -lc 'tail -n 200 /workspace/logs/comfyui-diagnostic.log || true'
-            exit 1
-          fi
-          echo "manual_cpu_start_seconds=$(( attempt * 5 ))"
-          dexec curl -fsS http://127.0.0.1:8188/object_info >/tmp/object_info.json
-
-          echo "===== standalone controller"
-          dexec bash -lc 'rm -f /workspace/logs/controller-diagnostic.log && (python3.11 /opt/comfy-runtime/controller.py --host 127.0.0.1 --port 8080 --comfy-host 127.0.0.1 --comfy-port 8188 > >(tee /workspace/logs/controller-diagnostic.log) 2>&1) & echo $! >/tmp/controller-diagnostic.pid'
-          controller_ready=false
-          for attempt in $(seq 1 24); do
-            if ! dexec bash -lc 'kill -0 "$(cat /tmp/controller-diagnostic.pid)" 2>/dev/null'; then
-              echo "::error::controller process exited"
-              dexec bash -lc 'wait "$(cat /tmp/controller-diagnostic.pid)"; echo "exit_code=$?"' || true
-              dexec bash -lc 'tail -n 200 /workspace/logs/controller-diagnostic.log || true'
-              exit 1
-            fi
-            if dexec curl -fsS http://127.0.0.1:8080/healthz >/tmp/controller_health.json; then
-              controller_ready=true
-              break
-            fi
-            sleep 5
-          done
-          if [ "${controller_ready}" != "true" ]; then
-            echo "::error::controller health timed out"
-            dexec bash -lc 'tail -n 200 /workspace/logs/controller-diagnostic.log || true'
-            exit 1
-          fi
-
-          echo "===== manual GPU negative startup"
-          dexec bash -lc 'cd /opt/ComfyUI && rm -f /workspace/logs/comfyui-gpu-negative.log && timeout 40s python3.11 main.py --listen 127.0.0.1 --port 8190 --input-directory /workspace/comfy-input --output-directory /workspace/comfy-output --user-directory /workspace/comfy-user --models-directory /workspace/models --disable-auto-launch --preview-method none --log-stdout --verbose DEBUG > >(tee /workspace/logs/comfyui-gpu-negative.log) 2>&1; echo "gpu_negative_exit=$?"'
-          dexec bash -lc 'tail -n 120 /workspace/logs/comfyui-gpu-negative.log || true'
-
-          echo "===== default entrypoint reproduction"
-          dexec bash -lc 'rm -f /workspace/logs/comfyui.log /workspace/logs/controller.log /workspace/logs/comfy-runtime.log; COMFYUI_EXTRA_ARGS=--cpu timeout 30s /opt/comfy-runtime/entrypoint.sh; echo "entrypoint_exit=$?"; echo "===== comfy-runtime.log"; tail -n 200 /workspace/logs/comfy-runtime.log || true; echo "===== comfyui.log"; tail -n 200 /workspace/logs/comfyui.log || true; echo "===== controller.log"; tail -n 200 /workspace/logs/controller.log || true'
-
   runtime-hygiene-gate:
     name: Runtime hygiene gate
-    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && github.event_name == 'push' && contains(github.event.head_commit.message, '[runtime-hygiene]') }}
+    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && contains(github.event.head_commit.message, '[runtime-hygiene]') }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -1746,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare anonymous old digest verification
+      - name: Pull old digest anonymously once
         shell: bash
         run: |
           set -euo pipefail
@@ -1755,13 +50,11 @@ jobs:
           printf '{}\n' > "${DOCKER_CONFIG}/config.json"
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
           docker system prune -af || true
-          df -h
-          docker buildx imagetools inspect "${OLD_RUNTIME_IMAGE}" >/tmp/runtime-hygiene-old-manifest.txt
-          grep -F "linux/amd64" /tmp/runtime-hygiene-old-manifest.txt
+          docker buildx imagetools inspect "${OLD_RUNTIME_IMAGE}" >/tmp/old-runtime-manifest.txt
+          grep -F "linux/amd64" /tmp/old-runtime-manifest.txt
           docker pull --platform linux/amd64 "${OLD_RUNTIME_IMAGE}"
 
-      - name: Inventory inherited legacy Worker without reading file bodies
-        id: inventory
+      - name: Inventory inherited legacy Worker metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -1769,27 +62,23 @@ jobs:
           entrypoint="$(docker image inspect "${OLD_RUNTIME_IMAGE}" --format '{{json .Config.Entrypoint}}')"
           command="$(docker image inspect "${OLD_RUNTIME_IMAGE}" --format '{{json .Config.Cmd}}')"
           healthcheck="$(docker image inspect "${OLD_RUNTIME_IMAGE}" --format '{{json .Config.Healthcheck}}')"
-          docker run -d --name "${container}" \
-            --entrypoint /bin/bash \
+          docker run -d --name "${container}" --entrypoint /bin/bash \
             -v "${GITHUB_WORKSPACE}/comfy-runtime:/opt/comfy-runtime:ro" \
             -v "${GITHUB_WORKSPACE}/scripts/legacy-worker-inventory.py:/runtime-hygiene/legacy-worker-inventory.py:ro" \
-            "${OLD_RUNTIME_IMAGE}" \
-            -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
+            "${OLD_RUNTIME_IMAGE}" -lc 'trap "exit 0" TERM INT; while true; do sleep 30; done'
           cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
           trap cleanup EXIT
           docker exec "${container}" python3.11 /runtime-hygiene/legacy-worker-inventory.py \
             --output /tmp/legacy-worker-inventory.json \
-            --entrypoint "${entrypoint}" \
-            --cmd "${command}" \
-            --healthcheck "${healthcheck}"
+            --entrypoint "${entrypoint}" --cmd "${command}" --healthcheck "${healthcheck}"
           docker cp "${container}:/tmp/legacy-worker-inventory.json" "${RUNNER_TEMP}/legacy-worker-inventory.json"
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
 
-          inventory = json.loads((Path(os.environ["RUNNER_TEMP"]) / "legacy-worker-inventory.json").read_text())
-          worker = next(item for item in inventory["files"] if item["path"] == "/app/worker.py")
+          payload = json.loads((Path(os.environ["RUNNER_TEMP"]) / "legacy-worker-inventory.json").read_text())
+          worker = next(entry for entry in payload["files"] if entry["path"] == "/app/worker.py")
           assert worker["exists"] is True
           assert worker["type"] == "regular"
           assert worker["sha256"]
@@ -1797,49 +86,45 @@ jobs:
           assert not worker["referencedByCmd"]
           assert not worker["referencedByHealthcheck"]
           assert not worker["referencedByCurrentRuntime"]
-          assert inventory["legacyWorkerProcessRunning"] is False
-          assert inventory["approvedRemovalPaths"] == ["/app/worker.py"]
-          print("legacy_worker_path_present_in_final_rootfs=true")
+          assert payload["legacyWorkerProcessRunning"] is False
+          assert payload["approvedRemovalPaths"] == ["/app/worker.py"]
+          print("legacy_worker_path_present=true")
           print("legacy_worker_type=" + worker["type"])
           print("legacy_worker_size=" + str(worker["size"]))
           print("legacy_worker_sha256=" + worker["sha256"])
-          print("legacy_worker_provenance=inherited_from_parent_runtime")
           PY
 
-      - name: Validate SQLite repair on old digest with mounted Runtime files
+      - name: Validate SQLite repair and D4 surface without a build
         id: gate
         shell: bash
         run: |
           set -euo pipefail
-          image="${OLD_RUNTIME_IMAGE}"
           container="runtime-hygiene-gate-${GITHUB_RUN_ID}"
-          host_object_info="${RUNNER_TEMP}/runtime-hygiene-object-info-${GITHUB_RUN_ID}.json"
-          rm -f -- "${host_object_info}"
+          object_info="${RUNNER_TEMP}/runtime-hygiene-gate-object-info-${GITHUB_RUN_ID}.json"
+          rm -f -- "${object_info}"
           docker run -d --name "${container}" \
             -e START_GPU_WORKER=false \
             -e COMFY_RUNTIME_MODE=smoke_cpu \
             -e COMFY_NODE_PROFILE=production_minimal \
             -p 127.0.0.1:8080:8080 \
             -v "${GITHUB_WORKSPACE}/comfy-runtime:/opt/comfy-runtime:ro" \
-            "${image}"
+            "${OLD_RUNTIME_IMAGE}"
           cleanup() {
             docker logs --tail 200 "${container}" || true
             docker rm -f "${container}" >/dev/null 2>&1 || true
-            rm -f -- "${host_object_info}"
+            rm -f -- "${object_info}"
           }
           trap cleanup EXIT
           for attempt in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8080/healthz | grep -F '"ok": true'; then break; fi
+            test "${attempt}" -lt 60
             sleep 5
-            if [ "${attempt}" = 60 ]; then exit 1; fi
           done
-          docker exec "${container}" id -u
-          docker exec "${container}" id -g
           docker exec "${container}" sh -lc 'test -d /workspace/comfy-user && test -f /workspace/comfy-user/comfyui.db'
           docker exec -i "${container}" python3.11 - <<'PY'
           import sqlite3
-          path = "/workspace/comfy-user/comfyui.db"
-          connection = sqlite3.connect(path)
+          database = "/workspace/comfy-user/comfyui.db"
+          connection = sqlite3.connect(database)
           connection.execute("CREATE TABLE IF NOT EXISTS ci_database_probe (id INTEGER PRIMARY KEY)")
           connection.execute("SELECT COUNT(*) FROM ci_database_probe").fetchone()
           connection.rollback()
@@ -1848,35 +133,23 @@ jobs:
           PY
           docker logs "${container}" | grep -F 'database_preflight_ok user_directory=/workspace/comfy-user database_url=sqlite:////workspace/comfy-user/comfyui.db'
           ! docker logs "${container}" | grep -F 'unable to open database file'
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >"${host_object_info}"
-          python3 scripts/verify-comfy-object-info.py --input "${host_object_info}" --profile comfy-runtime/node-profiles/production-minimal.json
+          docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >"${object_info}"
+          python3 scripts/verify-comfy-object-info.py --input "${object_info}" --profile comfy-runtime/node-profiles/production-minimal.json
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/dev/null
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/dev/null
-          docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/dev/null
           top_output="$(docker top "${container}")"
           ! printf '%s\n' "${top_output}" | grep -Eq 'python(3(\.11)?)?[[:space:]]+/app/worker\.py|wan_runner\.py|gpu-worker'
           docker restart "${container}" >/dev/null
           for attempt in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8080/healthz | grep -F '"ok": true'; then break; fi
+            test "${attempt}" -lt 60
             sleep 5
-            if [ "${attempt}" = 60 ]; then exit 1; fi
           done
           docker exec "${container}" python3.11 -c 'import sqlite3; connection=sqlite3.connect("/workspace/comfy-user/comfyui.db"); connection.execute("SELECT 1"); connection.close()'
           echo "gate_passed=true" >> "$GITHUB_OUTPUT"
           echo "confirmed_removal_paths=/app/worker.py" >> "$GITHUB_OUTPUT"
-          echo "gate_passed=true"
-          echo "confirmed_removal_paths=/app/worker.py"
-          echo "legacy_worker_provenance=inherited_from_parent_runtime"
 
-      - name: Upload legacy Worker inventory
-        uses: actions/upload-artifact@v4
-        with:
-          name: legacy-worker-inventory-${{ github.run_id }}
-          path: ${{ runner.temp }}/legacy-worker-inventory.json
-          if-no-files-found: error
-
-  build-runtime-hygiene:
-    name: Build Runtime hygiene image
+  build-and-push:
+    name: Build and push Runtime hygiene image
     needs: runtime-hygiene-gate
     if: ${{ needs.runtime-hygiene-gate.outputs.gate_passed == 'true' }}
     permissions:
@@ -1894,14 +167,15 @@ jobs:
         with:
           node-version: "22"
           cache: "npm"
-      - name: Install and run Runtime hygiene static checks
+      - name: Run Runtime static checks
         shell: bash
         run: |
           set -euo pipefail
           npm ci
           npm run generation:runtime-hygiene:test
           npm run generation:d4-acceptance:test
-          npm run generation:async-loader:test
+          npm run generation:runtime:test
+          npm run generation:runtime-mode:test
           npm run generation:node-profile:test
           npm run secret:scan
       - uses: docker/setup-buildx-action@v3
@@ -1911,7 +185,6 @@ jobs:
           set -euo pipefail
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
           docker system prune -af || true
-          df -h
       - name: Log in to GHCR for the sole image push
         uses: docker/login-action@v3
         with:
@@ -1930,7 +203,7 @@ jobs:
             echo "version_tag=${version_tag}"
             echo "tags=${image}:${version_tag},${image}:sha-${GITHUB_SHA}"
           } >> "$GITHUB_OUTPUT"
-      - name: Build and push one linux amd64 Runtime image
+      - name: Build and push one linux amd64 image
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -1959,17 +232,17 @@ jobs:
           docker exec "${container}" sh -lc 'test ! -e /.env && test ! -e /.env.local && test ! -e /.secrets'
           docker exec "${container}" sh -lc '! printenv | grep -E "SUPABASE_SERVICE_ROLE|SUPABASE_SECRET|CLORE_API_KEY|R2_ACCESS_KEY|R2_SECRET|SSH_PRIVATE"'
 
-  verify-runtime-hygiene:
+  verify-public-digest:
     name: Verify Runtime hygiene public digest
-    needs: build-runtime-hygiene
-    if: ${{ needs.build-runtime-hygiene.outputs.digest != '' }}
+    needs: build-and-push
+    if: ${{ needs.build-and-push.outputs.digest != '' }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Anonymous manifest and pull
+      - name: Pull new digest anonymously
         shell: bash
         run: |
           set -euo pipefail
@@ -1978,16 +251,16 @@ jobs:
           printf '{}\n' > "${DOCKER_CONFIG}/config.json"
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
           docker system prune -af || true
-          image="${{ needs.build-runtime-hygiene.outputs.image }}@${{ needs.build-runtime-hygiene.outputs.digest }}"
+          image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
           docker buildx imagetools inspect "${image}" >/tmp/runtime-hygiene-manifest.txt
           grep -F "linux/amd64" /tmp/runtime-hygiene-manifest.txt
           docker pull --platform linux/amd64 "${image}"
-          docker image inspect "${image}" --format '{{join .RepoDigests ","}}' | grep -F "${{ needs.build-runtime-hygiene.outputs.digest }}"
-      - name: Full anonymous CPU no-model Smoke
+          docker image inspect "${image}" --format '{{join .RepoDigests ","}}' | grep -F "${{ needs.build-and-push.outputs.digest }}"
+      - name: Complete CPU no-model Smoke
         shell: bash
         run: |
           set -euo pipefail
-          image="${{ needs.build-runtime-hygiene.outputs.image }}@${{ needs.build-runtime-hygiene.outputs.digest }}"
+          image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
           container="runtime-hygiene-smoke-${GITHUB_RUN_ID}"
           object_info="${RUNNER_TEMP}/runtime-hygiene-object-info-${GITHUB_RUN_ID}.json"
           rm -f -- "${object_info}"
@@ -1995,8 +268,7 @@ jobs:
             -e START_GPU_WORKER=false \
             -e COMFY_RUNTIME_MODE=smoke_cpu \
             -e COMFY_NODE_PROFILE=production_minimal \
-            -p 127.0.0.1:8080:8080 \
-            "${image}"
+            -p 127.0.0.1:8080:8080 "${image}"
           cleanup() {
             docker logs --tail 200 "${container}" || true
             docker rm -f "${container}" >/dev/null 2>&1 || true
@@ -2005,8 +277,8 @@ jobs:
           trap cleanup EXIT
           for attempt in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8080/healthz | grep -F '"ok": true'; then break; fi
+            test "${attempt}" -lt 60
             sleep 5
-            if [ "${attempt}" = 60 ]; then exit 1; fi
           done
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >"${object_info}"
           python3 scripts/verify-comfy-object-info.py --input "${object_info}" --profile comfy-runtime/node-profiles/production-minimal.json
@@ -2042,8 +314,8 @@ jobs:
           docker restart "${container}" >/dev/null
           for attempt in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8080/healthz | grep -F '"ok": true'; then break; fi
+            test "${attempt}" -lt 60
             sleep 5
-            if [ "${attempt}" = 60 ]; then exit 1; fi
           done
           docker exec "${container}" python3.11 -c 'import sqlite3; connection=sqlite3.connect("/workspace/comfy-user/comfyui.db"); connection.execute("SELECT 1"); connection.close()'
           docker stop --time 15 "${container}" >/dev/null
@@ -2053,7 +325,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image="${{ needs.build-runtime-hygiene.outputs.image }}@${{ needs.build-runtime-hygiene.outputs.digest }}"
+          image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
           set +e
           docker run --rm -e START_GPU_WORKER=false -e COMFY_RUNTIME_MODE=gpu -e COMFY_GPU_PROFILE=rtx4090 -e COMFY_NODE_PROFILE=production_minimal "${image}" >/tmp/runtime-hygiene-gpu.log 2>&1
           code=$?

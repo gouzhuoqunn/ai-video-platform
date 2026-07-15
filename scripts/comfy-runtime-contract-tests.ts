@@ -90,8 +90,8 @@ function main() {
   assert.match(workflow, /linux\/amd64/);
   assert.match(workflow, /COMFY_RUNTIME_MODE=smoke_cpu/);
   assert.match(workflow, /COMFY_NODE_PROFILE=production_minimal/);
-  assert.match(workflow, /D1_D2_D3_REUSED=true/);
-  assert.match(workflow, /AWAITED_PROFILE_EXTRA/);
+  assert.match(workflow, /runtime-hygiene-gate/);
+  assert.match(workflow, /database_preflight_ok/);
   assert.match(workflow, /gpu_preflight_failed/);
   assert.match(workflow, /object_info/);
   assert.match(workflow, /\/interrupt/);

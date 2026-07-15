@@ -16,7 +16,7 @@ assert.match(supervisor, /gpu_preflight_failed: nvidia-smi unavailable/);
 assert.match(supervisor, /gpu_preflight_failed: torch cuda unavailable/);
 assert.match(supervisor, /supervisor_process_failure/);
 assert.match(workflow, /verify-public-digest/);
-assert.match(workflow, /verify-node-profile-runtime/);
+assert.match(workflow, /runtime-hygiene-gate/);
 assert.match(workflow, /DOCKER_CONFIG/);
 assert.match(workflow, /COMFY_RUNTIME_MODE=smoke_cpu/);
 assert.match(workflow, /COMFY_RUNTIME_MODE=gpu/);

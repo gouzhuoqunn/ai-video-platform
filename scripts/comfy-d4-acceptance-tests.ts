@@ -75,8 +75,8 @@ try {
   expectFailure(oversized);
 
   const workflow = readFileSync(workflowPath, "utf8");
-  const d4Start = workflow.indexOf("D4 Production minimal node profile smoke on fixed digest");
-  const d4End = workflow.indexOf("  build-node-profile-runtime:", d4Start);
+  const d4Start = workflow.indexOf("Validate SQLite repair and D4 surface without a build");
+  const d4End = workflow.indexOf("  build-and-push:", d4Start);
   assert.notEqual(d4Start, -1);
   assert.notEqual(d4End, -1);
   const d4 = workflow.slice(d4Start, d4End);
@@ -87,13 +87,11 @@ try {
     workflow,
     /docker exec "\$\{container\}" curl -fsS http:\/\/127\.0\.0\.1:8188\/(object_info|system_stats|queue|history)[^\n]*>\/tmp\//,
   );
-  assert.match(d4, /HOST_D4_OBJECT_INFO="\$\{RUNNER_TEMP\}\/d4-object-info-\$\{GITHUB_RUN_ID\}\.json"/);
-  assert.match(d4, /docker exec "\$\{container\}" curl -fsS http:\/\/127\.0\.0\.1:8188\/object_info >"\$\{HOST_D4_OBJECT_INFO_TMP\}"/);
-  assert.match(d4, /python3 scripts\/verify-comfy-object-info\.py --input "\$\{HOST_D4_OBJECT_INFO\}" --profile comfy-runtime\/node-profiles\/production-minimal\.json/);
-  assert.ok(!d4.includes('docker exec -i "${container}" python3.11'));
+  assert.match(d4, /object_info="\$\{RUNNER_TEMP\}\/runtime-hygiene-gate-object-info-\$\{GITHUB_RUN_ID\}\.json"/);
+  assert.match(d4, /docker exec "\$\{container\}" curl -fsS http:\/\/127\.0\.0\.1:8188\/object_info >"\$\{object_info\}"/);
+  assert.match(d4, /python3 scripts\/verify-comfy-object-info\.py --input "\$\{object_info\}" --profile comfy-runtime\/node-profiles\/production-minimal\.json/);
   assert.match(d4, /set -euo pipefail/);
-  assert.match(d4, /CONTAINER_D4_PROFILE_LOG="\/workspace\/logs\/d4-profile-\$\{GITHUB_RUN_ID\}\.log"/);
-  assert.match(d4, /namespace_conflicts=0/);
+  assert.match(d4, /COMFY_RUNTIME_MODE=smoke_cpu/);
   const verifierSource = readFileSync(verifier, "utf8");
   assert.ok(!verifierSource.includes("/tmp/"));
   assert.ok(!/import\s+(torch|ComfyUI|docker)/.test(verifierSource));
