@@ -136,7 +136,7 @@ export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) 
   const { matches } = evaluateMarketplace(input.marketplace, input.config);
   const selected = applyWalletBalance(matches, input.availableUsdBalance).find((candidate) => candidate.serverId === input.serverId);
   if (!selected) {
-    throw new Error("Selected server is no longer a compliant RTX 5090 candidate.");
+    throw new Error(`Selected server is no longer a compliant ${input.config.targetGpu} candidate.`);
   }
   if (selected.orderType !== "on-demand") {
     throw new Error("Spot or non-on-demand orders are refused.");

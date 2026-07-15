@@ -248,7 +248,7 @@ async function main() {
     first_run_notes: [
       "Model download must happen only on the rented GPU/model volume after an intentional rental.",
       "Plan expires quickly; re-query before any future real rental.",
-      "Stop if no reliable RTX 5090 is available. Do not auto-fallback to spot or 4090.",
+      `Stop if no reliable ${config.targetGpu} is available. Do not auto-fallback to spot or a different GPU target.`,
       "After order creation, run npm run clore:status and keep the cancel command ready: npm run clore:cancel -- --execute --order-id=<id>.",
     ],
     plan_created_at: plan.createdAt,

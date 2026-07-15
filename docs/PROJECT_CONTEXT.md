@@ -1,5 +1,14 @@
 # Project Context
 
+## 2026-07-15 Stage 3A RTX 4090 First-Run Attempt
+
+- A real Clore on-demand order `1954329` was created only after a live wallet/candidate check, successful SSH image/key preflight, and local plus remote Watchdog arming. It used server `91005`, an exact RTX 4090 candidate whose API reports `23 display_gb`; the code accepts that value only as the documented rounded display for an exact 24GB RTX 4090.
+- The candidate met the configured requirements at selection time: 64.01GB RAM, 2TB disk, 501.99/466.93Mbps network, reliability 0.9994, rating 4.98 from 63 ratings, and base price 15.59 USD/day (0.649583 USD/hour). The projected 380-minute total including fees was 4.4197 USD under the 4.50 USD hard cap.
+- Clore did not publish SSH information within the twelve-minute readiness window. The order was canceled as `ssh_unavailable`; active orders returned to 0, the Watchdog was disarmed, and wallet balance changed from 15.03 USD to 14.78 USD (0.25 USD actual charge).
+- The only compliant candidate was temporarily excluded after this failure. A single live backup query found no remaining compliant RTX 4090 host, so the session stopped without weakening RAM, disk, network, reliability, price, or GPU identity filters.
+- No real GPU hardware could be inspected, no Runtime GPU boot occurred, no FLUX files were downloaded, no inference or image was generated, no R2 cache upload happened, and no website result was added. Runtime Registry therefore records `gpuBootVerified=false`, `gpuInferenceVerified=false`, and `fluxFirstImageVerified=false`.
+- The marketplace guard now supports an explicit `CLORE_TARGET_GPU` and `CLORE_MIN_GPU_VRAM_GB` configuration. Defaults remain RTX 5090/32GB; Stage 3A used RTX 4090/24GB and permits only exact RTX 4090 API display values of at least 23GB when the field is non-precise/rounded.
+
 ## 2026-07-15 Stage 2.8J Runtime Hygiene CI Verification
 
 - GitHub Actions run `29388852207` completed the only permitted chain in order: `runtime-hygiene-gate` -> `build-and-push` -> `verify-public-digest`. There was one `packages: write` job and one linux/amd64 build/push action.

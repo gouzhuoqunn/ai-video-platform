@@ -20,6 +20,12 @@ This checkpoint is a preparation and mock-validation layer. It does not create C
 - `/app/worker.py` was present only in the inherited old digest, was neither started nor referenced, and is precisely deleted from the new final rootfs. This whiteout does not erase the inherited parent layer, so a clean base rebase remains required before production.
 - This Runtime is ready for a separate RTX 4090 no-model hardware startup validation only. It is not production-ready and does not verify model download, image/video generation, VRAM/RAM/speed metrics, R2 model cache, or any production model choice.
 
+## 2026-07-15 Stage 3A Real RTX 4090 Attempt
+
+- The first real Clore order (`1954329`, server `91005`) was intentionally limited by a 4.50 USD Watchdog budget and canceled after no SSH information was published within twelve minutes. It incurred 0.25 USD; the account had no active order after cancellation and the Watchdog was disarmed.
+- No hardware or Runtime GPU evidence was collected because the SSH connection never became available. Consequently `gpu_boot_verified`, `gpu_inference_verified`, and `flux_first_image_verified` remain false.
+- No FLUX model download, image generation, Wan download, video generation, R2 cache write, or local/web result occurred. The next real attempt must use a newly live, separately qualified RTX 4090 host; it must not retry server `91005` until its temporary exclusion is reviewed.
+
 ## Mock Completion
 
 - `src/lib/generation/gpu-profiles.ts` defines shared `rtx4090` and `rtx5090` hardware profiles.

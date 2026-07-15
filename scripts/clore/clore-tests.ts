@@ -17,7 +17,7 @@ function readMockMarketplace() {
 }
 
 function main() {
-  const config = loadCloreConfig();
+  const config = { ...loadCloreConfig(), excludedServerIds: [] };
   const headers = createCloreHeaders("test-key");
   assert(headers.auth === "test-key", "Clore auth header must be named auth.");
   assert(!("Authorization" in headers), "Clore client must not use Authorization Bearer.");
@@ -90,11 +90,20 @@ function main() {
 
   const bad4090 = normalizeCloreServer({ ...readMockMarketplace()[0], gpu_name: "NVIDIA GeForce RTX 4090", gpu_memory_gb: 24, price_usd_per_hour: 0.1 }, config);
   assert(bad4090.rejectionReasons.includes("GPU is not exact RTX 5090"), "RTX 4090 must not pass as 5090.");
-  assert(bad4090.rejectionReasons.includes("GPU memory below RTX 5090 accepted threshold"), "24GB card must fail memory rule.");
+  assert(bad4090.rejectionReasons.includes("GPU memory below 32GB accepted threshold"), "24GB card must fail memory rule.");
 
   const unknown31 = normalizeCloreServer({ ...readMockMarketplace()[0], gpu_name: "Unknown RTX", gpu_memory_gb: 31, price_usd_per_hour: 0.1 }, config);
   assert(unknown31.rejectionReasons.includes("GPU is not exact RTX 5090"), "unknown GPU must not impersonate RTX 5090.");
-  assert(unknown31.rejectionReasons.includes("GPU memory below RTX 5090 accepted threshold"), "unknown 31GB GPU must not use RTX 5090 tolerance.");
+  assert(unknown31.rejectionReasons.includes("GPU memory below 32GB accepted threshold"), "unknown 31GB GPU must not use RTX 5090 tolerance.");
+
+  const config4090 = { ...config, targetGpu: "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: 24 };
+  const valid4090 = normalizeCloreServer({ ...readMockMarketplace()[0], gpu_name: "NVIDIA GeForce RTX 4090", gpu_memory_gb: 24, price_usd_per_hour: 0.1 }, config4090);
+  assert(valid4090.rejectionReasons.length === 0, "exact 24GB RTX 4090 must pass when it is the explicitly configured target.");
+  const rounded4090 = normalizeCloreServer({ ...readMockMarketplace()[0], gpu_name: "NVIDIA GeForce RTX 4090", specs: { gpuram: 23 }, gpu_memory_gb: undefined, price_usd_per_hour: 0.1 }, config4090);
+  assert(rounded4090.gpuMemoryAccepted && rounded4090.rejectionReasons.length === 0, "exact RTX 4090 with API display 23GB must pass the model-specific rounded VRAM rule.");
+  const unknownRounded4090 = normalizeCloreServer({ ...readMockMarketplace()[0], gpu_name: "Unknown RTX", specs: { gpuram: 23 }, gpu_memory_gb: undefined, price_usd_per_hour: 0.1 }, config4090);
+  assert(unknownRounded4090.rejectionReasons.includes("GPU is not exact RTX 4090"), "unknown GPU must not use the RTX 4090 rounded VRAM rule.");
+  assert(unknownRounded4090.rejectionReasons.includes("GPU memory below 24GB accepted threshold"), "unknown 23GB GPU must not use the RTX 4090 rounded VRAM rule.");
 
   const altered = normalizeCloreServer({ ...readMockMarketplace()[0], price_usd_per_hour: config.maxGpuPricePerHour + 0.01 }, config);
   assert(altered.rejectionReasons.includes("price above maximum"), "old candidate with increased price must be rejected.");

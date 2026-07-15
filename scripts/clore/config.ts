@@ -54,6 +54,14 @@ function readAllowedCountries(fileValues: Map<string, string>) {
     .filter(Boolean);
 }
 
+function readTargetGpu(fileValues: Map<string, string>) {
+  const target = readString("CLORE_TARGET_GPU", "NVIDIA GeForce RTX 5090", fileValues);
+  if (target === "NVIDIA GeForce RTX 4090" || target === "NVIDIA GeForce RTX 5090") {
+    return target;
+  }
+  throw new Error("CLORE_TARGET_GPU must be NVIDIA GeForce RTX 4090 or NVIDIA GeForce RTX 5090.");
+}
+
 function readExcludedServerIds(fileValues: Map<string, string>) {
   const fromEnv = readString("CLORE_EXCLUDED_SERVER_IDS", "", fileValues)
     .split(",")
@@ -81,11 +89,14 @@ function readExcludedServerIds(fileValues: Map<string, string>) {
 export function loadCloreConfig(): CloreConfig {
   const fileValues = parseEnvFile(CLORE_ENV_PATH);
   const apiKey = readOptionalString("CLORE_API_KEY", fileValues);
+  const targetGpu = readTargetGpu(fileValues);
 
   return {
     apiBaseUrl: "https://api.clore.ai/v1",
     apiKey,
     apiKeySource: apiKey ? ".secrets/clore.env" : undefined,
+    targetGpu,
+    minGpuVramGb: readNumber("CLORE_MIN_GPU_VRAM_GB", targetGpu === "NVIDIA GeForce RTX 4090" ? 24 : 32, fileValues),
     maxGpuPricePerHour: readNumber("CLORE_MAX_GPU_PRICE_PER_HOUR", 0.7, fileValues),
     minReliability: readNumber("CLORE_MIN_RELIABILITY", 0.99, fileValues),
     minRating: readNumber("CLORE_MIN_RATING", 4.7, fileValues),

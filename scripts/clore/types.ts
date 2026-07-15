@@ -2,6 +2,8 @@ export type CloreConfig = {
   apiBaseUrl: string;
   apiKey?: string;
   apiKeySource?: string;
+  targetGpu: "NVIDIA GeForce RTX 4090" | "NVIDIA GeForce RTX 5090";
+  minGpuVramGb: number;
   maxGpuPricePerHour: number;
   minReliability: number;
   minRating: number;

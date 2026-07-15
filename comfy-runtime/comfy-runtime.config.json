@@ -24,6 +24,19 @@
       "sqliteDatabaseUrl": "sqlite:////workspace/comfy-user/comfyui.db",
       "legacyWorkerFinalRootfs": "absent",
       "legacyWorkerParentLayerDebt": true,
+      "gpuBootVerified": false,
+      "gpuInferenceVerified": false,
+      "fluxFirstImageVerified": false,
+      "lastGpuAttempt": {
+        "provider": "Clore",
+        "orderId": "1954329",
+        "serverId": "91005",
+        "targetGpu": "NVIDIA GeForce RTX 4090",
+        "result": "ssh_unavailable_before_hardware_validation",
+        "chargedUsd": 0.25,
+        "activeOrderAfterCleanup": 0,
+        "attemptedAt": "2026-07-15"
+      },
       "productionReady": false,
       "cleanBaseRebaseRequiredBeforeProduction": true,
       "verifiedAt": "2026-07-15T04:54:57Z"

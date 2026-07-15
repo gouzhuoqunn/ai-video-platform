@@ -12,8 +12,10 @@ function readMockMarketplace() {
 }
 
 function closestRejected(candidates: ReturnType<typeof applyWalletBalance>) {
+  const config = loadCloreConfig();
+  const target = config.targetGpu.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return candidates
-    .filter((candidate) => /rtx\s+5090/i.test(candidate.gpu))
+    .filter((candidate) => new RegExp(target, "i").test(candidate.gpuNormalizedName))
     .sort((left, right) => left.rejectionReasons.length - right.rejectionReasons.length)
     .slice(0, 5)
     .map((candidate) => ({
@@ -37,7 +39,8 @@ async function main() {
     mode: mock ? "mock-marketplace" : "live-marketplace-read-only",
     api_key_loaded: mock ? false : Boolean(config.apiKey),
     filters: {
-      gpu: "exact RTX 5090",
+      gpu: `exact ${config.targetGpu.replace("NVIDIA GeForce ", "")}`,
+      min_gpu_vram_gb: config.minGpuVramGb,
       gpu_count: 1,
       order_type: "on-demand",
       max_usd_per_hour: config.maxGpuPricePerHour,
@@ -56,16 +59,16 @@ async function main() {
       source: mock ? "mock mode, wallet not queried" : "live wallet read-only",
     },
     matches: matches.slice(0, 5).map(summarizeCandidate),
-    closest_rejected_5090: matches.length === 0 ? closestRejected(candidates) : undefined,
+    closest_rejected_target_gpu: matches.length === 0 ? closestRejected(candidates) : undefined,
     rejected_summary:
       matches.length === 0
         ? {
             total_servers_checked: candidates.length,
-            rtx5090_like_rejected: candidates.filter((candidate) => /rtx\s+5090/i.test(candidate.gpu)).length,
-            note: "Only closest rejected RTX 5090-like candidates are shown; full raw marketplace response is not printed.",
+            target_gpu_like_rejected: candidates.filter((candidate) => candidate.gpuNormalizedName === config.targetGpu).length,
+            note: "Only closest rejected target-GPU candidates are shown; full raw marketplace response is not printed.",
           }
         : undefined,
-    note: "No order was created. Spot, 4090 fallback, and relaxed privacy filters are not used.",
+    note: "No order was created. Spot and relaxed privacy filters are not used.",
   };
   const output = JSON.stringify(payload, null, 2);
   assertNoSecretOutput(output);

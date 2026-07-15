@@ -231,7 +231,7 @@ function getOnDemandUsdPrice(raw: RawCloreServer) {
   };
 }
 
-function getGpuMemory(raw: RawCloreServer, gpuNormalizedName: string) {
+function getGpuMemory(raw: RawCloreServer, gpuNormalizedName: string, config: CloreConfig) {
   const nestedGpu = nestedRecord(raw, ["gpu", "gpus"]);
   const specs = nestedRecord(raw, ["specs"]) ?? {};
   const gpuArray = asArray(raw.gpu_array);
@@ -280,16 +280,21 @@ function getGpuMemory(raw: RawCloreServer, gpuNormalizedName: string) {
               : rawValue * 1024;
 
   const exactRtx5090 = gpuNormalizedName === "NVIDIA GeForce RTX 5090";
+  const exactRtx4090 = gpuNormalizedName === "NVIDIA GeForce RTX 4090";
   const preciseUnit = rawUnit === "bytes" || rawUnit === "MB" || rawUnit === "MiB";
+  const acceptsRoundedTargetVram =
+    !preciseUnit &&
+    rawValue !== null &&
+    ((config.targetGpu === "NVIDIA GeForce RTX 5090" && exactRtx5090 && rawValue >= 30.5) ||
+      (config.targetGpu === "NVIDIA GeForce RTX 4090" && exactRtx4090 && rawValue >= 23));
   const accepted =
     memoryMiB !== null &&
-    (memoryMiB >= 32 * 1024 ||
-      (exactRtx5090 && !preciseUnit && rawValue !== null && rawValue >= 30.5));
+    (memoryMiB >= config.minGpuVramGb * 1024 || acceptsRoundedTargetVram);
   const note =
     memoryMiB === null
       ? "GPU memory missing"
-      : exactRtx5090 && !preciseUnit && rawValue !== null && rawValue < 32 && rawValue >= 30.5
-        ? `API rounded/usable VRAM display (${rawValue} ${rawUnit}); accepted by exact RTX 5090 model rule`
+      : acceptsRoundedTargetVram && rawValue !== null && rawValue < config.minGpuVramGb
+        ? `API rounded/usable VRAM display (${rawValue} ${rawUnit}); accepted by exact ${config.targetGpu.replace("NVIDIA GeForce ", "")} model rule`
         : "GPU memory evaluated from API field";
 
   return {
@@ -362,7 +367,7 @@ export function normalizeCloreServer(raw: RawCloreServer, config: CloreConfig): 
   const rawCurrency = price.originalCurrency ? [price.originalCurrency] : [];
   const gpu = getGpuName(raw);
   const gpuNormalizedName = normalizeGpuName(gpu);
-  const gpuMemory = getGpuMemory(raw, gpuNormalizedName);
+  const gpuMemory = getGpuMemory(raw, gpuNormalizedName, config);
   const base = {
     serverId: firstString(raw, ["id", "server_id", "machine_id", "renting_server"]) ?? "unknown",
     gpu,
@@ -431,8 +436,8 @@ export function normalizeCloreServer(raw: RawCloreServer, config: CloreConfig): 
 
 function getRejectionReasons(candidate: Omit<CloreCandidate, "missingFields" | "rejectionReasons" | "riskTier" | "riskNotes">, config: CloreConfig) {
   const reasons: string[] = [];
-  if (candidate.gpuNormalizedName !== "NVIDIA GeForce RTX 5090") {
-    reasons.push("GPU is not exact RTX 5090");
+  if (candidate.gpuNormalizedName !== config.targetGpu) {
+    reasons.push(`GPU is not exact ${config.targetGpu.replace("NVIDIA GeForce ", "")}`);
   }
   if (candidate.gpuCount !== 1) reasons.push("GPU count is not 1");
   if (!candidate.rentable) reasons.push("server is not currently rentable");
@@ -440,7 +445,7 @@ function getRejectionReasons(candidate: Omit<CloreCandidate, "missingFields" | "
   if ((candidate.ramGb ?? 0) < config.minRamGb) reasons.push("RAM below minimum");
   if ((candidate.cpuCores ?? 0) < config.minCpuCores) reasons.push("CPU cores below minimum");
   if ((candidate.diskGb ?? 0) < config.minDiskGb) reasons.push("disk below minimum");
-  if (!candidate.gpuMemoryAccepted) reasons.push("GPU memory below RTX 5090 accepted threshold");
+  if (!candidate.gpuMemoryAccepted) reasons.push(`GPU memory below ${config.minGpuVramGb}GB accepted threshold`);
   if (candidate.reliability === null || candidate.reliability < config.minReliability) reasons.push("reliability below minimum or missing");
   if (candidate.rating === null || candidate.rating < config.minRating) reasons.push("rating below minimum or missing");
   if (candidate.ratingCount === null || candidate.ratingCount < config.minRatingCount) reasons.push("rating count below minimum or missing");
