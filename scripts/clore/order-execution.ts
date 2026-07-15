@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import crypto from "node:crypto";
 import { cloreRequest, sleep } from "./client";
-import { DEFAULT_DOCKER_IMAGE, PROJECT_TAG } from "./config";
+import { COMFY_RUNTIME_IMAGE, DEFAULT_DOCKER_IMAGE, PROJECT_TAG } from "./config";
 import type { loadCloreConfig } from "./config";
 import { verifyDockerImage } from "./docker-image";
 import { readLiveOrdersSummary, readWalletSummary } from "./live";
@@ -12,7 +12,6 @@ import { acquireOrderCreateLock, readActiveOrder, writeActiveOrder } from "./ord
 import type { CloreExecutionConfig } from "./execution-config";
 import { loadModelCacheConfig } from "../model-cache/config";
 import { assertWatchdogsReadyForCreate } from "./watchdog-preflight";
-import { WAN_CODE_REVISION, WAN_MODEL_REVISION } from "../model-cache/model-version";
 
 export type LoadedCloreConfig = ReturnType<typeof loadCloreConfig>;
 
@@ -21,7 +20,7 @@ export type CreateOrderRequest = {
   image: string;
   renting_server: number;
   type: "on-demand";
-  ports: Record<string, "tcp">;
+  ports: Record<string, "tcp" | "http">;
   env: Record<string, string>;
   ssh_key: string;
   command: string;
@@ -72,19 +71,20 @@ export function buildCreateOrderBody(input: {
   maxPriceUsdPerHour: number;
   requiredPriceForApi?: number;
 }): CreateOrderRequest {
+  if (input.image && input.image !== COMFY_RUNTIME_IMAGE) {
+    throw new Error("Clore Runtime image must use the fixed Comfy Runtime digest.");
+  }
   return {
     currency: input.currency,
-    image: input.image || DEFAULT_DOCKER_IMAGE,
+    image: COMFY_RUNTIME_IMAGE,
     renting_server: Number(input.serverId),
     type: "on-demand",
-    ports: { "22": "tcp" },
+    ports: { "22": "tcp", "8080": "http" },
     env: {
       PROJECT_TAG,
-      WAN_RUNNER: "real",
-      WAN_MODEL_DIR: "/workspace/models/Wan2.2-TI2V-5B",
-      WAN_MODEL_REVISION,
-      WAN_CODE_REVISION,
-      FIRST_SESSION_MAX_CLAIMS: "1",
+      COMFY_RUNTIME_MODE: "gpu",
+      COMFY_GPU_PROFILE: "rtx4090",
+      COMFY_NODE_PROFILE: "production_minimal",
       START_GPU_WORKER: "false",
       HF_HUB_DISABLE_TELEMETRY: "1",
       DO_NOT_TRACK: "1",
@@ -107,8 +107,17 @@ export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
   if (body.currency !== "USD-Blockchain") {
     throw new Error("Clore order currency must be USD-Blockchain.");
   }
-  if (Object.keys(body.ports).length !== 1 || body.ports["22"] !== "tcp") {
-    throw new Error("Only SSH port 22/tcp may be opened.");
+  if (body.image !== COMFY_RUNTIME_IMAGE || !/@sha256:[a-f0-9]{64}$/.test(body.image)) {
+    throw new Error("Clore order must use the fixed Comfy Runtime digest, never a mutable tag.");
+  }
+  if (body.ports["22"] !== "tcp" || body.ports["8080"] !== "http" || body.ports["8188"] !== undefined || Object.keys(body.ports).length !== 2) {
+    throw new Error("Order must expose only 22/tcp and 8080/http; ComfyUI 8188 is forbidden.");
+  }
+  if (!/^ssh-ed25519\s+[A-Za-z0-9+/=]+(?:\s+.*)?$/.test(body.ssh_key) || /private key|-----begin/i.test(body.ssh_key)) {
+    throw new Error("Order must contain a non-empty SSH public key only.");
+  }
+  if (!Number.isFinite(body.required_price) || body.required_price <= 0) {
+    throw new Error("Order required_price must be a positive locked candidate price.");
   }
 }
 
@@ -124,6 +133,9 @@ export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) 
   }
   if (input.config.dockerImage === DEFAULT_DOCKER_IMAGE) {
     throw new Error("Runtime image is not published/configured; refusing real create_order.");
+  }
+  if (input.config.dockerImage !== COMFY_RUNTIME_IMAGE) {
+    throw new Error("CLORE_DOCKER_IMAGE must equal the fixed Comfy Runtime digest for this session.");
   }
   if (input.config.rentalCurrency !== "USD-Blockchain") {
     throw new Error("CLORE_RENTAL_CURRENCY must be USD-Blockchain for real create_order.");
@@ -242,7 +254,7 @@ export async function createCloreOrder(input: {
       usd_per_hour: input.candidate.priceUsdPerHour ?? input.requestBody.required_price,
       max_price_usd_per_hour: input.candidate.priceUsdPerHour ?? input.requestBody.required_price,
       order_type: "on-demand",
-      open_ports: ["ssh/tcp"],
+      open_ports: ["ssh/tcp", "controller/http:8080"],
     });
     return {
       order_created: true,

@@ -39,6 +39,7 @@
     "clore:create:dry": "tsx scripts/clore/create-order.ts",
     "clore:create": "tsx scripts/clore/create-order.ts",
     "clore:status": "tsx scripts/clore/order-status.ts",
+    "clore:readiness": "tsx scripts/clore/order-readiness.ts",
     "clore:cancel": "tsx scripts/clore/cancel-order.ts",
     "clore:cancel:dry": "tsx scripts/clore/cancel-order.ts",
     "clore:test": "tsx scripts/clore/clore-tests.ts",

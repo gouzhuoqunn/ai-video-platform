@@ -15,7 +15,7 @@ export type ActiveCloreOrder = {
   usd_per_hour: number;
   max_price_usd_per_hour: number;
   order_type: "on-demand";
-  open_ports: ["ssh/tcp"];
+  open_ports: ["ssh/tcp", "controller/http:8080"];
 };
 
 export function readActiveOrder() {

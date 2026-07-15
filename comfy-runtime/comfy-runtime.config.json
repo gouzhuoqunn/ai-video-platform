@@ -37,6 +37,17 @@
         "activeOrderAfterCleanup": 0,
         "attemptedAt": "2026-07-15"
       },
+      "lastClorePayloadAudit": {
+        "orderId": "1954329",
+        "autosshEntrypoint": true,
+        "sshPort": "22/tcp",
+        "controllerPort": "8080/http",
+        "comfyUiPort8188Exposed": false,
+        "sshPublicKeyOnly": true,
+        "image": "ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:187a7eb304075863dbd3f7a1b527530a06783ad8ea0fec5e51e2b9725d1bf137",
+        "requiredPriceLocked": true,
+        "correctedAt": "2026-07-15"
+      },
       "productionReady": false,
       "cleanBaseRebaseRequiredBeforeProduction": true,
       "verifiedAt": "2026-07-15T04:54:57Z"

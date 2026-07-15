@@ -6,6 +6,8 @@ const CLORE_ENV_PATH = path.join(process.cwd(), ".secrets", "clore.env");
 const CLORE_TEMP_EXCLUDED_SERVERS_PATH = path.join(process.cwd(), ".secrets", "clore-temp-excluded-servers.json");
 export const PROJECT_TAG = "ai-video-platform-wan22";
 export const DEFAULT_DOCKER_IMAGE = "nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04";
+export const COMFY_RUNTIME_IMAGE =
+  "ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:187a7eb304075863dbd3f7a1b527530a06783ad8ea0fec5e51e2b9725d1bf137";
 
 function parseEnvFile(filePath: string) {
   if (!existsSync(filePath)) {

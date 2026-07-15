@@ -26,6 +26,12 @@ This checkpoint is a preparation and mock-validation layer. It does not create C
 - No hardware or Runtime GPU evidence was collected because the SSH connection never became available. Consequently `gpu_boot_verified`, `gpu_inference_verified`, and `flux_first_image_verified` remain false.
 - No FLUX model download, image generation, Wan download, video generation, R2 cache write, or local/web result occurred. The next real attempt must use a newly live, separately qualified RTX 4090 host; it must not retry server `91005` until its temporary exclusion is reviewed.
 
+## 2026-07-15 Stage 3B Connection Publication Guard
+
+- New orders are bound to the verified immutable Comfy Runtime digest and expose only `22/tcp` for SSH plus `8080/http` for the controller proxy. Direct ComfyUI `8188` remains forbidden. The payload contains only the local SSH public key and rejects private-key material.
+- Order readiness is now a layered fifteen-minute check: platform running state, SSH endpoint publication, TCP connection, then authenticated `ssh true`. A published HTTP proxy is tracked separately and does not substitute for Runtime health.
+- No new qualified RTX 4090 was available during this live query, so no Stage 3B GPU order or image workflow ran. This is a marketplace-capacity stop, not a GPU Runtime pass or failure.
+
 ## Mock Completion
 
 - `src/lib/generation/gpu-profiles.ts` defines shared `rtx4090` and `rtx5090` hardware profiles.

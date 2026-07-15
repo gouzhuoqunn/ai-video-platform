@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadCloreConfig } from "./config";
+import { COMFY_RUNTIME_IMAGE, loadCloreConfig } from "./config";
 import { loadCloreExecutionConfig } from "./execution-config";
 import { buildCreateOrderBody, createCloreOrder, runCreateOrderPreflight, validateCreatedOrderPricing } from "./order-execution";
 import { cancelCloreOrder } from "./cancel-execution";
@@ -48,7 +48,7 @@ async function main() {
     const pubKeyPath = path.join(sshDir, "clore_ai_video_worker_ed25519.pub");
     writeFileSync(pubKeyPath, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockPublicKeyForTestsOnly000000000000 test\n", "utf8");
     process.env.CLORE_SSH_PUBLIC_KEY_PATH = pubKeyPath;
-    process.env.CLORE_DOCKER_IMAGE = "nvidia/cuda:12.8.0-devel-ubuntu22.04";
+    process.env.CLORE_DOCKER_IMAGE = COMFY_RUNTIME_IMAGE;
     process.env.CLORE_ORDER_EXECUTION_ENABLED = "true";
     process.env.MODEL_CACHE_BUCKET = "mock-wan22-cache";
     process.env.MODEL_CACHE_ENDPOINT = "https://mock-r2.example.test";
@@ -147,9 +147,13 @@ async function main() {
     assert(body.type === "on-demand", "create body must be on-demand.");
     assert(body.required_price === 14.99, "create body should preserve Clore USD/day required_price when provided.");
     assert(body.autossh_entrypoint === true, "create body must request Clore autossh entrypoint.");
-    assert(body.ports["22"] === "tcp" && Object.keys(body.ports).length === 1, "create body must expose SSH only.");
+    assert(body.image === COMFY_RUNTIME_IMAGE, "create body must use the fixed Comfy Runtime digest.");
+    assert(body.ports["22"] === "tcp" && body.ports["8080"] === "http" && Object.keys(body.ports).length === 2, "create body must expose SSH and controller HTTP only.");
+    assert(body.ports["8188"] === undefined, "create body must not expose ComfyUI 8188.");
+    assert(/^ssh-ed25519\s+/.test(body.ssh_key) && !/private key/i.test(body.ssh_key), "create body must contain only a non-empty SSH public key.");
     assert(body.env.START_GPU_WORKER === "false", "create body must keep the Worker disabled until SSH bootstrap starts it explicitly.");
     assert(!JSON.stringify(body).includes("CLORE_API_KEY"), "Clore API key must not enter create body.");
+    assert(!JSON.stringify(body).includes("BEGIN OPENSSH PRIVATE KEY"), "SSH private keys must not enter create body.");
     validateCreatedOrderPricing({
       order: { price: 14.99, fee: 0.05, creationFee: 0.1, currency: "USD-Blockchain" },
       expectedBaseDailyPrice: 14.99,

@@ -1,5 +1,12 @@
 # Project Context
 
+## 2026-07-15 Stage 3B Clore SSH Publication Repair
+
+- Local evidence for failed order `1954329` confirmed `autossh_entrypoint=true`, `22/tcp`, a non-empty Ed25519 public key, `on-demand`, `USD-Blockchain`, and candidate daily price locking. It did not expose `8080/http`, and it used the old `wan22-runtime` digest rather than the verified Comfy Runtime digest.
+- The real-order payload now requires the fixed `ai-creative-comfy-runtime@sha256:187a7eb304075863dbd3f7a1b527530a06783ad8ea0fec5e51e2b9725d1bf137`, `22/tcp`, and `8080/http`; it rejects `8188`, mutable image references, empty/invalid public keys, private-key material, and unlocked prices. The payload test covers each condition.
+- Added `clore:readiness`, which waits up to fifteen minutes in ten-second intervals for running state, published SSH proxy endpoint, TCP reachability, and an authenticated `ssh true`; it classifies timeout as `order_never_running`, `image_pull_or_container_start_timeout`, `ssh_endpoint_not_published`, `ssh_tcp_unreachable`, `ssh_auth_failed`, or `runtime_start_failure`. HTTP proxy publication is recorded but is not a Runtime health verdict.
+- The Stage 3B live RTX 4090 query found no new compliant candidate after the required historical exclusions. Closest candidates failed disk, RAM, or rating requirements. No Stage 3B order was created, so GPU boot, FLUX download, inference, R2 cache, and website result states remain unchanged and false.
+
 ## 2026-07-15 Stage 3A RTX 4090 First-Run Attempt
 
 - A real Clore on-demand order `1954329` was created only after a live wallet/candidate check, successful SSH image/key preflight, and local plus remote Watchdog arming. It used server `91005`, an exact RTX 4090 candidate whose API reports `23 display_gb`; the code accepts that value only as the documented rounded display for an exact 24GB RTX 4090.
