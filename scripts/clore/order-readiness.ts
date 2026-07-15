@@ -20,6 +20,8 @@ type Connection = {
 };
 
 function getArg(name: string) {
+  const inline = process.argv.find((value) => value.startsWith(`--${name}=`));
+  if (inline) return inline.slice(name.length + 3);
   const index = process.argv.indexOf(`--${name}`);
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
@@ -102,7 +104,11 @@ function failureFor(input: { running: boolean; status: string; sshPublished: boo
 async function main() {
   const orderId = getArg("order-id");
   if (!orderId) throw new Error("clore:readiness requires --order-id=<id>.");
-  const timeoutMs = 15 * 60 * 1000;
+  const requestedTimeout = Number(getArg("timeout-minutes") ?? 15);
+  if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0 || requestedTimeout > 15) {
+    throw new Error("clore:readiness --timeout-minutes must be between 1 and 15.");
+  }
+  const timeoutMs = requestedTimeout * 60 * 1000;
   const startedAt = Date.now();
   const config = loadCloreConfig();
   let running = false;

@@ -45,11 +45,12 @@ async function arm() {
     throw new Error("Local Windows watchdog scheduled task is not installed.");
   }
 
-  const liveOrders = await readLiveOrdersSummary(config);
+  const forceRefresh = { forceRefresh: true };
+  const liveOrders = await readLiveOrdersSummary(config, forceRefresh);
   if (liveOrders.some((order) => order.active)) {
     throw new Error("Refusing to arm watchdog while a live active Clore order already exists.");
   }
-  const wallet = await readWalletSummary(config);
+  const wallet = await readWalletSummary(config, forceRefresh);
   if (wallet.availableUsdBalance === null) {
     throw new Error("Could not read USD-like wallet balance for watchdog arm.");
   }

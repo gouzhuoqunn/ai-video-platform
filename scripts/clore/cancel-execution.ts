@@ -35,7 +35,7 @@ export function assertCancelAllowed(input: {
   if (input.uploading) {
     throw new Error("Refusing to cancel while a video upload is in progress.");
   }
-  const failureCleanup = /ssh_unavailable|hardware_check_failed|bootstrap_failed|model_download_failed|worker_failed|budget_stop/i.test(input.issue ?? "");
+  const failureCleanup = /ssh_unavailable|order_never_running|image_pull_or_container_start_timeout|ssh_endpoint_not_published|ssh_tcp_unreachable|ssh_auth_failed|runtime_start_failure|hardware_check_failed|bootstrap_failed|model_download_failed|worker_failed|budget_stop/i.test(input.issue ?? "");
   if (!input.finalVideoUploaded && !failureCleanup) {
     throw new Error("Refusing to cancel before final video upload is verified.");
   }

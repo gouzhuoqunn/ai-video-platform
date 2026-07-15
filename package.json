@@ -47,6 +47,7 @@
     "clore:cancel:dry": "tsx scripts/clore/cancel-order.ts",
     "clore:test": "tsx scripts/clore/clore-tests.ts",
     "clore:execution:test": "tsx scripts/clore/execution-tests.ts",
+    "clore:request-scheduler:test": "tsx scripts/clore/request-scheduler-tests.ts",
     "clore:watchdog:test": "tsx scripts/clore/watchdog-tests.ts",
     "clore:watchdog:remote:arm": "tsx scripts/clore/watchdog-remote.ts arm",
     "clore:watchdog:remote:status": "tsx scripts/clore/watchdog-remote.ts status",

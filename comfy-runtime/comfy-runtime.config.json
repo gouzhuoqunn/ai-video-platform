@@ -47,6 +47,19 @@
         "activeOrderAfterCleanup": 0,
         "attemptedAt": "2026-07-15"
       },
+      "lastCloreRateLimitRecovery": {
+        "observed": ["HTTP 429", "Clore code=5"],
+        "recoveredCreateOrder": true,
+        "scheduler": "global request scheduler with cache, spacing, Retry-After/backoff, and create de-duplication",
+        "verifiedAt": "2026-07-15"
+      },
+      "stage3DConnectionAttempts": [
+        { "orderId": "1954464", "serverId": "105176", "gpu": "RTX 4090", "result": "order_never_running", "sshPublished": false, "chargedUsd": 0.18 },
+        { "orderId": "1954484", "serverId": "105173", "gpu": "RTX 4090", "result": "order_never_running", "sshPublished": false, "chargedUsd": 0.18 },
+        { "orderId": "1954507", "serverId": "104878", "gpu": "RTX 5090", "result": "order_never_running", "sshPublished": false, "chargedUsd": 0.19 }
+      ],
+      "stage3DTotalChargedUsd": 0.55,
+      "stage3DActiveOrderAfterCleanup": 0,
       "lastGpuAttempt": {
         "provider": "Clore",
         "orderId": "1954329",

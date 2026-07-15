@@ -1,10 +1,10 @@
-import { cloreRequest } from "./client";
+import { cloreRequest, type CloreRequestOptions } from "./client";
 import type { CloreConfig, RawCloreServer, WalletSummary } from "./types";
 
 export type MarketplacePayload = RawCloreServer[] | { servers?: RawCloreServer[]; marketplace?: RawCloreServer[]; data?: RawCloreServer[] };
 
-export async function readLiveMarketplace(config: CloreConfig) {
-  const data = await cloreRequest<MarketplacePayload>(config, "/marketplace");
+export async function readLiveMarketplace(config: CloreConfig, options: CloreRequestOptions = {}) {
+  const data = await cloreRequest<MarketplacePayload>(config, "/marketplace", {}, options);
   if (Array.isArray(data)) {
     return data;
   }
@@ -59,8 +59,8 @@ export function summarizeWalletPayload(data: unknown): WalletSummary {
   };
 }
 
-export async function readWalletSummary(config: CloreConfig) {
-  const data = await cloreRequest<unknown>(config, "/wallets");
+export async function readWalletSummary(config: CloreConfig, options: CloreRequestOptions = {}) {
+  const data = await cloreRequest<unknown>(config, "/wallets", {}, options);
   return summarizeWalletPayload(data);
 }
 
@@ -102,7 +102,7 @@ export function summarizeOrdersPayload(data: unknown): CloreOrderSummary[] {
   });
 }
 
-export async function readLiveOrdersSummary(config: CloreConfig) {
-  const data = await cloreRequest<unknown>(config, "/my_orders");
+export async function readLiveOrdersSummary(config: CloreConfig, options: CloreRequestOptions = {}) {
+  const data = await cloreRequest<unknown>(config, "/my_orders", {}, options);
   return summarizeOrdersPayload(data);
 }

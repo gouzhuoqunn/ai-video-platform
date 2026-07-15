@@ -3,14 +3,19 @@ import { assertNoSecretOutput, sleep } from "./client";
 import { readLiveMarketplace, readLiveOrdersSummary, readWalletSummary } from "./live";
 import { findBootstrapImageCandidates, summarizeBootstrapImageCandidate } from "./bootstrap-image-profile";
 
-const WATCH_INTERVAL_MS = 5 * 60 * 1000;
-const WATCH_TIMEOUT_MS = 60 * 60 * 1000;
+const WATCH_INTERVAL_MS = 60 * 1000;
+const WATCH_TIMEOUT_MS = 90 * 60 * 1000;
 
 async function main() {
   const config = loadCloreConfig();
   const startedAt = Date.now();
   while (Date.now() - startedAt < WATCH_TIMEOUT_MS) {
-    const [wallet, orders, marketplace] = await Promise.all([readWalletSummary(config), readLiveOrdersSummary(config), readLiveMarketplace(config)]);
+    const forceRefresh = { forceRefresh: true };
+    const [wallet, orders, marketplace] = await Promise.all([
+      readWalletSummary(config, forceRefresh),
+      readLiveOrdersSummary(config, forceRefresh),
+      readLiveMarketplace(config, forceRefresh),
+    ]);
     const active = orders.find((order) => order.active);
     const candidates = active ? [] : findBootstrapImageCandidates(marketplace, config);
     const output = JSON.stringify({
@@ -28,7 +33,7 @@ async function main() {
     if (candidates.length > 0) return;
     await sleep(WATCH_INTERVAL_MS);
   }
-  console.log(JSON.stringify({ mode: "read_only_first_image_candidate_watch", candidate_available: false, timed_out_minutes: 60, creates_order: false }, null, 2));
+  console.log(JSON.stringify({ mode: "read_only_first_image_candidate_watch", candidate_available: false, timed_out_minutes: 90, creates_order: false }, null, 2));
 }
 
 void main().catch((error) => {

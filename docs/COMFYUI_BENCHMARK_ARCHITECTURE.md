@@ -22,6 +22,12 @@ This checkpoint is a preparation and mock-validation layer. It does not create C
 - The fixed Runtime digest only accepts `COMFY_GPU_PROFILE=rtx4090|rtx5090`. Therefore `bootstrap_image_gpu` candidates cannot boot this digest and remain fail-closed until a separately authorized image change; they cannot establish `rtx4090_benchmark_verified` or `production_ready`.
 - The only Stage 3C order creation call was rate limited by Clore before an order existed. No GPU hardware, Runtime, model download, image, WebSocket, or image archive result was verified. Active order is zero and the Watchdog is disarmed.
 
+## 2026-07-15 Stage 3D Clore Start Failure Evidence
+
+- The Clore client now serializes requests centrally and recovers bounded HTTP 429/`code=5` rate limits without duplicate create calls. Three real orders were created only after live candidate, wallet, order, digest, SSH-key, and Watchdog checks.
+- Orders `1954464` (RTX 4090), `1954484` (RTX 4090), and `1954507` (RTX 5090) each remained outside `running` for twelve minutes. No SSH endpoint, TCP connection, controller proxy, or Runtime process became available. Each was canceled as `order_never_running`; total charge was 0.55 USD.
+- Therefore `gpu_pipeline_boot_verified`, `flux_first_image_verified`, `rtx4090_benchmark_verified`, and `production_ready` remain false. This is a marketplace/container-start failure, not a Runtime, FLUX workflow, model, WebSocket, or benchmark result. Wan and R2 remain unattempted.
+
 ## 2026-07-15 Stage 2.8J Verified Runtime Hygiene
 
 - CI run `29388852207` completed the required `runtime-hygiene-gate` -> `build-and-push` -> `verify-public-digest` DAG and published one linux/amd64 Runtime: `ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime:v0.1.4-runtime-hygiene-1eae628@sha256:187a7eb304075863dbd3f7a1b527530a06783ad8ea0fec5e51e2b9725d1bf137`.

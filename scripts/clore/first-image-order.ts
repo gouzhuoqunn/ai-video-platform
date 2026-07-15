@@ -25,7 +25,12 @@ async function main() {
   const config = loadCloreConfig();
   const execution = loadCloreExecutionConfig();
   if (!execution.enabled) throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false.");
-  const [orders, wallet, marketplace] = await Promise.all([readLiveOrdersSummary(config), readWalletSummary(config), readLiveMarketplace(config)]);
+  const forceRefresh = { forceRefresh: true };
+  const [orders, wallet, marketplace] = await Promise.all([
+    readLiveOrdersSummary(config, forceRefresh),
+    readWalletSummary(config, forceRefresh),
+    readLiveMarketplace(config, forceRefresh),
+  ]);
   if (orders.some((order) => order.active)) throw new Error("An active Clore order already exists.");
   const candidate = findBootstrapImageCandidates(marketplace, config).find((value) => value.serverId === serverId);
   if (!candidate) throw new Error("Selected server is no longer an eligible bootstrap first-image candidate.");

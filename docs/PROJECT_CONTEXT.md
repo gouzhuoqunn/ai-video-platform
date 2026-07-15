@@ -1,5 +1,12 @@
 # Project Context
 
+## 2026-07-15 Stage 3D Clore Rate-Limit Recovery and Connection Attempts
+
+- All project Clore API calls now use one central scheduler: at least 1100ms between requests, at least 6000ms between creates, 60-second marketplace cache, 10-second wallet/order cache, create de-duplication, cancel priority, Retry-After handling, and bounded `2/4/8/15` second jittered recovery for HTTP 429 or Clore `code=5`. Network failures are bounded and create recovery has an active-order verification hook; deterministic non-rate errors are not retried.
+- Live verification observed both HTTP 429 and Clore `code=5`; the scheduler recovered three guarded `create_order` calls without duplicate orders. It also exposed a platform-level limitation: each created order remained outside the platform `running` state for the full twelve-minute SSH window, so no SSH proxy, TCP connection, or authenticated command became available.
+- Stage 3D attempted exactly three hosts: `105176` RTX 4090/order `1954464`, `105173` RTX 4090/order `1954484`, and `104878` RTX 5090/order `1954507`. All were canceled as `order_never_running`. `111125` returned deterministic Clore `code=6` before an order was created and did not incur cost or count as a connection attempt.
+- Total Stage 3D charge was 0.55 USD, below the 0.80 USD failed-connection cap. Active order returned to zero, the Watchdog was disarmed, and wallet balance is 14.23 USD. No SSH, GPU inspection, Runtime boot, FLUX/Wan download, image/video generation, R2 cache, or local result occurred.
+
 ## 2026-07-15 Stage 3C FLUX First-Image Preparation
 
 - Added a direct ComfyUI `/prompt` API workflow for FLUX.2 Klein 4B Distilled. It uses `UNETLoader`, `CLIPLoader(type=flux2)`, `CLIPTextEncode`, `FluxGuidance`, `EmptyFlux2LatentImage`, `KSampler`, `VAELoader`, `VAEDecode`, and `SaveImage`. The fixed ComfyUI commit shows that FLUX.2 Qwen uses `CLIPLoader(type=flux2)`; using `DualCLIPLoader` would be incompatible with the three locked model files.
