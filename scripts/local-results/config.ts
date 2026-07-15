@@ -1,6 +1,7 @@
 import path from "node:path";
 
 export const DEFAULT_LOCAL_VIDEO_LIBRARY_DIR = "D:\\AI-Video-Library";
+export const DEFAULT_LOCAL_IMAGE_LIBRARY_DIR = "D:\\AI-Creative-Library";
 
 export type LocalResultsConfig = {
   libraryDir: string;
@@ -22,5 +23,22 @@ export function buildLocalJobPaths(libraryDir: string, date: string, jobId: stri
     partialVideoPath: path.join(jobDir, "output.mp4.part"),
     metadataPath: path.join(jobDir, "metadata.json"),
     thumbnailPath: path.join(jobDir, "thumbnail.jpg"),
+  };
+}
+
+export function buildLocalImagePaths(libraryDir: string, date: string, sessionId: string) {
+  const sessionDir = path.join(libraryDir, date, sessionId);
+  return {
+    sessionDir,
+    imagePath: path.join(sessionDir, "output.png"),
+    metadataPath: path.join(sessionDir, "metadata.json"),
+    workflowPath: path.join(sessionDir, "workflow-api.json"),
+    evidencePath: path.join(sessionDir, "runtime-evidence.json"),
+  };
+}
+
+export function loadLocalImageResultsConfig() {
+  return {
+    libraryDir: process.env.LOCAL_IMAGE_LIBRARY_DIR?.trim() || DEFAULT_LOCAL_IMAGE_LIBRARY_DIR,
   };
 }

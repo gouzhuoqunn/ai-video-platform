@@ -2,7 +2,7 @@ import "server-only";
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { buildLocalJobPaths, loadLocalResultsConfig } from "../../../scripts/local-results/config";
+import { buildLocalImagePaths, buildLocalJobPaths, loadLocalImageResultsConfig, loadLocalResultsConfig } from "../../../scripts/local-results/config";
 export { deleteLocalResultFiles } from "../../../scripts/local-results/delete";
 
 const JOB_ID_PATTERN = /^[A-Za-z0-9_-]{6,120}$/;
@@ -16,6 +16,13 @@ export type LocalResultSummary = {
   metadata: Record<string, unknown> | null;
   videoUrl: string | null;
   thumbnailUrl: string | null;
+};
+
+export type LocalImageResultSummary = {
+  sessionId: string;
+  date: string;
+  metadata: Record<string, unknown> | null;
+  imageUrl: string;
 };
 
 function assertSafeJobId(jobId: string) {
@@ -93,5 +100,38 @@ export function findLocalResultFile(jobId: string, kind: "video" | "thumbnail") 
     }
   }
 
+  return null;
+}
+
+export function listLocalImageResults(): LocalImageResultSummary[] {
+  const config = loadLocalImageResultsConfig();
+  if (!existsSync(config.libraryDir)) return [];
+  const results: LocalImageResultSummary[] = [];
+  for (const date of readdirSync(config.libraryDir)) {
+    if (!DATE_PATTERN.test(date)) continue;
+    const dateDir = path.join(config.libraryDir, date);
+    if (!statSync(dateDir).isDirectory()) continue;
+    for (const sessionId of readdirSync(dateDir)) {
+      if (!JOB_ID_PATTERN.test(sessionId)) continue;
+      const paths = buildLocalImagePaths(config.libraryDir, date, sessionId);
+      assertInsideLibrary(config.libraryDir, paths.sessionDir);
+      if (existsSync(paths.imagePath)) {
+        results.push({ sessionId, date, metadata: readMetadata(paths.metadataPath), imageUrl: `/api/local-lab/image-results/${encodeURIComponent(sessionId)}` });
+      }
+    }
+  }
+  return results.sort((left, right) => right.date.localeCompare(left.date));
+}
+
+export function findLocalImageResultFile(sessionId: string) {
+  assertSafeJobId(sessionId);
+  const config = loadLocalImageResultsConfig();
+  if (!existsSync(config.libraryDir)) return null;
+  for (const date of readdirSync(config.libraryDir)) {
+    if (!DATE_PATTERN.test(date)) continue;
+    const paths = buildLocalImagePaths(config.libraryDir, date, sessionId);
+    assertInsideLibrary(config.libraryDir, paths.imagePath);
+    if (existsSync(paths.imagePath)) return { filePath: paths.imagePath, stat: statSync(paths.imagePath) };
+  }
   return null;
 }

@@ -27,6 +27,26 @@
       "gpuBootVerified": false,
       "gpuInferenceVerified": false,
       "fluxFirstImageVerified": false,
+      "gpuPipelineBootVerified": false,
+      "bootstrapImageGpuProfile": {
+        "status": "orchestration-ready-runtime-not-yet-compatible",
+        "minimumVramGb": 16,
+        "minimumRamGb": 32,
+        "minimumDiskGb": 120,
+        "maxEffectiveHourlyUsd": 0.7,
+        "productionReady": false,
+        "rtx4090BenchmarkVerified": false,
+        "note": "The fixed Runtime digest accepts only rtx4090 and rtx5090. Lower-tier bootstrap candidates remain fail-closed until a separately authorized Runtime image adds that profile."
+      },
+      "lastFirstImageAttempt": {
+        "provider": "Clore",
+        "serverId": "105176",
+        "targetGpu": "NVIDIA GeForce RTX 4090",
+        "result": "create_order_rate_limited_before_order_creation",
+        "chargedUsd": 0,
+        "activeOrderAfterCleanup": 0,
+        "attemptedAt": "2026-07-15"
+      },
       "lastGpuAttempt": {
         "provider": "Clore",
         "orderId": "1954329",

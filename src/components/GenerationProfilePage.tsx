@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { GpuProfileKey } from "@/lib/generation/gpu-profiles";
 import { getGenerationProfilePageData } from "@/lib/generation/profile-page-data";
+import { listLocalImageResults } from "@/lib/local-lab/local-results";
 
 type GenerationProfilePageProps = {
   profile: GpuProfileKey;
@@ -12,6 +13,7 @@ function formatGb(value: number) {
 
 export function GenerationProfilePage({ profile }: GenerationProfilePageProps) {
   const data = getGenerationProfilePageData(profile);
+  const localImages = profile === "rtx4090" ? listLocalImageResults().slice(0, 4) : [];
   const allCandidates = [...data.imageCandidates, ...data.videoCandidates].sort(
     (left, right) => Number(right.benchmark_round === "first") - Number(left.benchmark_round === "first"),
   );
@@ -104,6 +106,30 @@ export function GenerationProfilePage({ profile }: GenerationProfilePageProps) {
               ))}
             </div>
           </section>
+
+          {profile === "rtx4090" ? (
+            <section className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-lg font-bold">Local first-image results</h2>
+                <span className="text-sm text-stone-500">{localImages.length ? "completed" : "waiting"}</span>
+              </div>
+              {localImages.length ? (
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  {localImages.map((image) => (
+                    <a className="block overflow-hidden rounded-md border border-stone-200 bg-[#faf8f4]" href={image.imageUrl} key={image.sessionId} target="_blank" rel="noreferrer">
+                      <img className="aspect-square w-full object-cover" src={image.imageUrl} alt={`Generated image ${image.sessionId}`} />
+                      <div className="p-3 text-sm">
+                        <p className="font-semibold">{image.date}</p>
+                        <p className="mt-1 break-all text-xs text-stone-500">{image.sessionId}</p>
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-3 text-sm text-stone-500">No local FLUX first-image result has been archived yet.</p>
+              )}
+            </section>
+          ) : null}
         </section>
 
         <aside className="space-y-4 lg:sticky lg:top-6 lg:self-start">

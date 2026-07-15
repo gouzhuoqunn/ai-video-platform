@@ -1,5 +1,13 @@
 # Project Context
 
+## 2026-07-15 Stage 3C FLUX First-Image Preparation
+
+- Added a direct ComfyUI `/prompt` API workflow for FLUX.2 Klein 4B Distilled. It uses `UNETLoader`, `CLIPLoader(type=flux2)`, `CLIPTextEncode`, `FluxGuidance`, `EmptyFlux2LatentImage`, `KSampler`, `VAELoader`, `VAEDecode`, and `SaveImage`. The fixed ComfyUI commit shows that FLUX.2 Qwen uses `CLIPLoader(type=flux2)`; using `DualCLIPLoader` would be incompatible with the three locked model files.
+- The first-image downloader now locks exactly three public model files by repository, immutable revision, byte size, and SHA256. It resumes through `.part`, retries each file at most once, verifies before an atomic rename, and is idempotent. No model was downloaded in this checkpoint.
+- Bootstrap candidate filtering now admits CUDA-compatible NVIDIA GPUs with at least 16GB VRAM, 32GB RAM, and 120GB disk for first-image pipeline validation only. It preserves RTX 4090/5090 as the only profiles accepted by the current fixed Runtime digest; lower-tier bootstrap candidates fail closed pending a separately authorized Runtime build. No bootstrap result can set RTX 4090 benchmark or production-ready state.
+- Local FLUX image archiving is prepared at `D:\\AI-Creative-Library\\YYYY-MM-DD\\<session-id>\\` with `output.png`, `workflow-api.json`, `metadata.json`, and `runtime-evidence.json`. `/generate/4090` now renders archived local PNG thumbnails through a loopback-protected route. No image exists yet.
+- A live candidate query found server `105176` (RTX 4090, 64.23GB RAM, 1TB disk, effective 0.343 USD/hour, five-hour estimate 1.815 USD) as the first eligible non-excluded choice. The single guarded create request was blocked by a Clore API rate limit before any order existed. The Watchdog was disarmed, active order returned 0, and wallet balance remained 14.78 USD. No SSH, GPU validation, model download, inference, R2 upload, Wan work, or result archive occurred.
+
 ## 2026-07-15 Stage 3B Clore SSH Publication Repair
 
 - Local evidence for failed order `1954329` confirmed `autossh_entrypoint=true`, `22/tcp`, a non-empty Ed25519 public key, `on-demand`, `USD-Blockchain`, and candidate daily price locking. It did not expose `8080/http`, and it used the old `wan22-runtime` digest rather than the verified Comfy Runtime digest.
@@ -145,7 +153,7 @@ This file is the short working context for future development. New tasks should 
 - The page shows a main video area, prompt queue, history cards, local archive markers, and a right-side hover/pin panel for Clore host and deployment status.
 - Added loopback-only local APIs for Clore candidates, wallet, session status, order plan, order confirmation, session stop dry-run, jobs, and local results.
 - Clore candidate and wallet APIs return sanitized summaries only. They do not return `CLORE_API_KEY`, full raw marketplace responses, wallet deposit data, signed URLs, or secrets.
-- Order planning uses a short-lived one-time nonce stored under ignored `.secrets`. Confirmation requires the text `???? <server_id>` and a risk checkbox.
+- Order planning uses a short-lived one-time nonce stored under ignored `.secrets`. Confirmation requires the text `确认租用 <server_id>` and a risk checkbox.
 - `CLORE_ORDER_EXECUTION_ENABLED=false` remains the default, and the current confirm route still does not call real `create_order`, even if the future environment flag is changed.
 - Local result serving is loopback-only, validates `job_id`, prevents directory traversal, supports video Range requests, and does not return absolute local paths.
 - No Clore order was created, no balance was spent, no SSH connection was opened, no GPU was rented, and no Wan2.2 weights were downloaded.
@@ -202,7 +210,7 @@ This file is the short working context for future development. New tasks should 
 - The verified Clore wallet summary shows `USD-Blockchain: 10.99`. The current real RTX 5090 marketplace has no compliant candidate under the configured `CLORE_MAX_GPU_PRICE_PER_HOUR=0.70` and assumed 6 hour minimum rental window.
 - Closest observed strong rejected RTX 5090 candidate: server `95538`, Canada, RTX 5090, API-reported GPU memory 31GB, 128.7GB RAM, 24 CPU cores, 970GB disk, 2070/881 Mbps network, reliability 0.9997, rating 5.0 from 10 ratings, 9.90 USD/hour, 59.40 USD for 6 hours. It was rejected because GPU memory is reported below 32GB and price exceeds the configured cap/balance.
 - RunPod Secure Cloud is retained only as a last-resort fallback.
-- `local_lab` mode is now the temporary priority for running the app only on the user's laptop. It keeps the commercial site code but hides commercial UI, auto-signs in a dedicated `app_metadata.role=local_tester` account, displays credits as `?`, and submits only `standard-video` mapped to Wan2.2 TI2V-5B.
+- `local_lab` mode is now the temporary priority for running the app only on the user's laptop. It keeps the commercial site code but hides commercial UI, auto-signs in a dedicated `app_metadata.role=local_tester` account, displays credits as `∞`, and submits only `standard-video` mapped to Wan2.2 TI2V-5B.
 
 ## Database Tables And Functions
 
@@ -545,7 +553,7 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - Remote read checks confirmed the new `video_jobs` fields, including `thumbnail_path`, are selectable, and `gpu_autorent_requests` is readable through the authenticated local_tester path.
 - Remote RPC checks confirmed the batch functions are present: `confirm_video_jobs`, `mark_video_jobs_urgent`, `soft_delete_video_jobs`, `create_gpu_autorent_request`, `cancel_gpu_autorent_request`, and `regenerate_video_job`. Anonymous access to `confirm_video_jobs` is denied.
 - Existing local_tester queued jobs had already migrated to `pending_confirmation`; no visible queued or processing test task needed stale recovery.
-- A real browser session created a new local_tester task with prompt prefix `visual pending real page`. It was created as `pending_confirmation`, charged 10 credits once, appeared immediately in the Studio as `???`, and the selected checkbox displayed the batch action bar.
+- A real browser session created a new local_tester task with prompt prefix `visual pending real page`. It was created as `pending_confirmation`, charged 10 credits once, appeared immediately in the Studio as `未生成`, and the selected checkbox displayed the batch action bar.
 - The test task was cleaned through the normal authenticated `soft_delete_video_jobs` RPC. The first delete refunded 10 credits and set `deleted_at`; a second delete attempt returned `deleted_count=0` and did not change the balance, verifying single refund behavior.
 - The Studio visual entry has been simplified so all modes render `LocalCreationStudio`; `NEXT_PUBLIC_APP_MODE` no longer switches to the old neon commercial page. Global CSS uses the confirmed light beige baseline.
 - Screenshot artifacts were regenerated under ignored `artifacts/visual-check/`: `01-home.png`, `02-pending-selected.png`, and `03-host-detail.png`. The host detail screenshot uses the explicit local-only `?visual_mock=1` fixture and never calls `create_order`.
