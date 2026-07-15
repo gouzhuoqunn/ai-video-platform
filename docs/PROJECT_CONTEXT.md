@@ -1,5 +1,14 @@
 # Project Context
 
+## 2026-07-15 Stage 2.8J Runtime Hygiene CI Verification
+
+- GitHub Actions run `29388852207` completed the only permitted chain in order: `runtime-hygiene-gate` -> `build-and-push` -> `verify-public-digest`. There was one `packages: write` job and one linux/amd64 build/push action.
+- The verified public Runtime is `ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime:v0.1.4-runtime-hygiene-1eae628@sha256:187a7eb304075863dbd3f7a1b527530a06783ad8ea0fec5e51e2b9725d1bf137`. Anonymous digest pull, manifest platform validation, and no-model CPU smoke passed.
+- The Runtime uses the canonical SQLite path `sqlite:////workspace/comfy-user/comfyui.db`. Its preflight creates and fsyncs the directory, checks a SQLite transaction, and fails closed as `database_preflight_failed`; CI verified creation, read/write, and restart reopening with no `unable to open database file` log.
+- The inherited old digest contained `/app/worker.py` but did not run or reference it. The new image precisely removes that path; it is absent from the final rootfs. The inherited parent layer history can still contain the file, so `clean_base_rebase_required_before_production=true` remains recorded.
+- The final anonymous verification passed controller/API/WebSocket checks, 347 node classes, required 17/17 with missing 0, empty-task `queue`/`history`/`interrupt`/`free`, structured missing-model rejection, loopback-only exposure, SIGTERM shutdown, static model/secret scan, and GPU no-device fail-closed (`gpu_preflight_failed`) without CPU fallback.
+- `comfy-runtime/comfy-runtime.config.json` now fixes this digest in the Runtime Registry. The prior `sha256:2cb82ccfa722065b65649d34bca0deda11860e10be9169aeb60cb4d78f8af49a` is `partial-rejected`. `production_ready=false`: real RTX 4090 hardware startup is now permitted only as a separate no-model verification, while model download, inference, measurements, R2 cache, and production selection remain uncompleted.
+
 ## 2026-07-14 Stage 2.8B Production Minimal Node Profile Gate
 
 - Added a `production_minimal` ComfyUI node profile generated from `comfy-runtime/workflows/official/manifest.json` and `comfy-runtime/comfyui-source-audit.json`. It keeps the base `nodes.py` classes plus only `comfy_extras/nodes_flux.py`, `nodes_images.py`, `nodes_model_advanced.py`, `nodes_video.py`, and `nodes_wan.py`.
@@ -120,7 +129,7 @@ This file is the short working context for future development. New tasks should 
 - The page shows a main video area, prompt queue, history cards, local archive markers, and a right-side hover/pin panel for Clore host and deployment status.
 - Added loopback-only local APIs for Clore candidates, wallet, session status, order plan, order confirmation, session stop dry-run, jobs, and local results.
 - Clore candidate and wallet APIs return sanitized summaries only. They do not return `CLORE_API_KEY`, full raw marketplace responses, wallet deposit data, signed URLs, or secrets.
-- Order planning uses a short-lived one-time nonce stored under ignored `.secrets`. Confirmation requires the text `确认租用 <server_id>` and a risk checkbox.
+- Order planning uses a short-lived one-time nonce stored under ignored `.secrets`. Confirmation requires the text `???? <server_id>` and a risk checkbox.
 - `CLORE_ORDER_EXECUTION_ENABLED=false` remains the default, and the current confirm route still does not call real `create_order`, even if the future environment flag is changed.
 - Local result serving is loopback-only, validates `job_id`, prevents directory traversal, supports video Range requests, and does not return absolute local paths.
 - No Clore order was created, no balance was spent, no SSH connection was opened, no GPU was rented, and no Wan2.2 weights were downloaded.
@@ -177,7 +186,7 @@ This file is the short working context for future development. New tasks should 
 - The verified Clore wallet summary shows `USD-Blockchain: 10.99`. The current real RTX 5090 marketplace has no compliant candidate under the configured `CLORE_MAX_GPU_PRICE_PER_HOUR=0.70` and assumed 6 hour minimum rental window.
 - Closest observed strong rejected RTX 5090 candidate: server `95538`, Canada, RTX 5090, API-reported GPU memory 31GB, 128.7GB RAM, 24 CPU cores, 970GB disk, 2070/881 Mbps network, reliability 0.9997, rating 5.0 from 10 ratings, 9.90 USD/hour, 59.40 USD for 6 hours. It was rejected because GPU memory is reported below 32GB and price exceeds the configured cap/balance.
 - RunPod Secure Cloud is retained only as a last-resort fallback.
-- `local_lab` mode is now the temporary priority for running the app only on the user's laptop. It keeps the commercial site code but hides commercial UI, auto-signs in a dedicated `app_metadata.role=local_tester` account, displays credits as `∞`, and submits only `standard-video` mapped to Wan2.2 TI2V-5B.
+- `local_lab` mode is now the temporary priority for running the app only on the user's laptop. It keeps the commercial site code but hides commercial UI, auto-signs in a dedicated `app_metadata.role=local_tester` account, displays credits as `?`, and submits only `standard-video` mapped to Wan2.2 TI2V-5B.
 
 ## Database Tables And Functions
 
@@ -520,7 +529,7 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - Remote read checks confirmed the new `video_jobs` fields, including `thumbnail_path`, are selectable, and `gpu_autorent_requests` is readable through the authenticated local_tester path.
 - Remote RPC checks confirmed the batch functions are present: `confirm_video_jobs`, `mark_video_jobs_urgent`, `soft_delete_video_jobs`, `create_gpu_autorent_request`, `cancel_gpu_autorent_request`, and `regenerate_video_job`. Anonymous access to `confirm_video_jobs` is denied.
 - Existing local_tester queued jobs had already migrated to `pending_confirmation`; no visible queued or processing test task needed stale recovery.
-- A real browser session created a new local_tester task with prompt prefix `visual pending real page`. It was created as `pending_confirmation`, charged 10 credits once, appeared immediately in the Studio as `未生成`, and the selected checkbox displayed the batch action bar.
+- A real browser session created a new local_tester task with prompt prefix `visual pending real page`. It was created as `pending_confirmation`, charged 10 credits once, appeared immediately in the Studio as `???`, and the selected checkbox displayed the batch action bar.
 - The test task was cleaned through the normal authenticated `soft_delete_video_jobs` RPC. The first delete refunded 10 credits and set `deleted_at`; a second delete attempt returned `deleted_count=0` and did not change the balance, verifying single refund behavior.
 - The Studio visual entry has been simplified so all modes render `LocalCreationStudio`; `NEXT_PUBLIC_APP_MODE` no longer switches to the old neon commercial page. Global CSS uses the confirmed light beige baseline.
 - Screenshot artifacts were regenerated under ignored `artifacts/visual-check/`: `01-home.png`, `02-pending-selected.png`, and `03-host-detail.png`. The host detail screenshot uses the explicit local-only `?visual_mock=1` fixture and never calls `create_order`.

@@ -11,7 +11,30 @@
     "baseImage": "ghcr.io/gouzhuoqunn/wan22-runtime@sha256:4e3dd6d2610c33ab2b260e970e4a9288043dc2c762cb1b8902b6712cfdfaa96c",
     "includes": ["ComfyUI", "python-dependencies-lock", "ffmpeg", "api-controller", "healthcheck", "bootstrap-entry", "workflow-fixtures", "custom-node-lock-manifest"],
     "excludes": ["model-weights", "user-files", "prompts", "generated-results", "secrets", "ssh-private-keys", "signed-urls", "r2-admin-credentials"],
-    "buildStatus": "ci-workflow-defined-not-published"
+    "buildStatus": "ci-verified-no-model",
+    "registry": {
+      "tag": "v0.1.4-runtime-hygiene-1eae628",
+      "digest": "sha256:187a7eb304075863dbd3f7a1b527530a06783ad8ea0fec5e51e2b9725d1bf137",
+      "buildRunId": 29388852207,
+      "smokeRunId": 29388852207,
+      "platform": "linux/amd64",
+      "packageVisibility": "public",
+      "anonymousPullVerified": true,
+      "modelFreeSmokeVerified": true,
+      "sqliteDatabaseUrl": "sqlite:////workspace/comfy-user/comfyui.db",
+      "legacyWorkerFinalRootfs": "absent",
+      "legacyWorkerParentLayerDebt": true,
+      "productionReady": false,
+      "cleanBaseRebaseRequiredBeforeProduction": true,
+      "verifiedAt": "2026-07-15T04:54:57Z"
+    },
+    "rejectedDigests": [
+      {
+        "digest": "sha256:2cb82ccfa722065b65649d34bca0deda11860e10be9169aeb60cb4d78f8af49a",
+        "status": "partial-rejected",
+        "reason": "SQLite database path smoke failure before runtime hygiene repair"
+      }
+    ]
   },
   "customNodes": {
     "baseRuntimeIncludesCustomNodes": false,

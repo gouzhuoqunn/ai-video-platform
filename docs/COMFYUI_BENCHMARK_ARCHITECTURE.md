@@ -12,6 +12,14 @@ This checkpoint is a preparation and mock-validation layer. It does not create C
 - The homepage links to both profile pages without changing data source or Clore execution behavior.
 - ComfyUI is pinned for future runtime work at commit `da2608926eaf68fd532bba4e1ace3402c5d21399`.
 
+## 2026-07-15 Stage 2.8J Verified Runtime Hygiene
+
+- CI run `29388852207` completed the required `runtime-hygiene-gate` -> `build-and-push` -> `verify-public-digest` DAG and published one linux/amd64 Runtime: `ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime:v0.1.4-runtime-hygiene-1eae628@sha256:187a7eb304075863dbd3f7a1b527530a06783ad8ea0fec5e51e2b9725d1bf137`.
+- The public package passed anonymous fixed-digest pull and a complete CPU no-model API, controller, WebSocket, node-profile, model/secret absence, loopback bind, graceful SIGTERM, and GPU fail-closed smoke. The node profile reports 347 classes with required 17/17 and missing 0.
+- The durable user/data directory is `/workspace/comfy-user`; ComfyUI receives `--user-directory /workspace/comfy-user` and `--database-url sqlite:////workspace/comfy-user/comfyui.db`. Preflight validates directory ownership/write/fsync and SQLite read/write before ComfyUI starts; the verified container reopens the database after restart.
+- `/app/worker.py` was present only in the inherited old digest, was neither started nor referenced, and is precisely deleted from the new final rootfs. This whiteout does not erase the inherited parent layer, so a clean base rebase remains required before production.
+- This Runtime is ready for a separate RTX 4090 no-model hardware startup validation only. It is not production-ready and does not verify model download, image/video generation, VRAM/RAM/speed metrics, R2 model cache, or any production model choice.
+
 ## Mock Completion
 
 - `src/lib/generation/gpu-profiles.ts` defines shared `rtx4090` and `rtx5090` hardware profiles.
@@ -24,7 +32,7 @@ This checkpoint is a preparation and mock-validation layer. It does not create C
 
 ## Not Yet GPU Verified
 
-- An independent ComfyUI runtime Docker scaffold and GitHub Actions workflow now exist. A production-minimal node-profile gate has been added, but no new Stage 2.8B image digest has been recorded as verified yet.
+- An independent ComfyUI runtime Docker scaffold and GitHub Actions workflow now exist. The Stage 2.8J no-model digest is CI-verified; this does not substitute for a real GPU or model benchmark.
 - No custom ComfyUI node has been installed or verified.
 - No FLUX.2 or Wan A14B metadata has been verified beyond the existing Wan2.2 TI2V-5B pin.
 - No benchmark has been run on RTX 4090 or RTX 5090 hardware.
