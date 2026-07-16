@@ -31,6 +31,18 @@ function buildNpmCommand(args: string[]) {
   return process.platform === "win32" ? { command: "cmd.exe", args: ["/c", "npm", ...args] } : { command: "npm", args };
 }
 
+async function waitForRemoteHeartbeat(serverId: string, armedAt: string, timeoutMs = 90_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const heartbeat = readRemoteWatchdogHeartbeat();
+      if (heartbeat.server_id === serverId && Date.parse(heartbeat.checked_at) >= Date.parse(armedAt) && heartbeat.reason !== "api_unavailable") return heartbeat;
+    } catch { /* The scheduled remote watchdog may not have published its first heartbeat yet. */ }
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+  }
+  throw new Error("Remote watchdog did not publish a fresh healthy heartbeat for the selected server within 90 seconds.");
+}
+
 async function arm() {
   const config = loadCloreConfig();
   const execution = loadCloreExecutionConfig();
@@ -88,6 +100,7 @@ async function arm() {
   if (tick.status !== 0) {
     throw new Error("Remote watchdog armed, but local watchdog tick failed. Disarm before retrying.");
   }
+  await waitForRemoteHeartbeat(state.serverId, state.armedAt);
   const output = JSON.stringify(
     {
       armed: true,

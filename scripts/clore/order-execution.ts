@@ -191,7 +191,7 @@ export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) 
 function summarizeCreatedOrder(payload: unknown) {
   const record = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
   return {
-    order_id: String(record.id ?? record.order_id ?? crypto.randomUUID()),
+    order_id: record.id === undefined && record.order_id === undefined ? null : String(record.id ?? record.order_id),
     raw_status: record.status ?? record.state ?? "created",
   };
 }
@@ -205,6 +205,8 @@ export async function createCloreOrder(input: {
   request?: (body: CreateOrderRequest) => Promise<unknown>;
   readOrders?: typeof readLiveOrdersSummary;
   sessionMetadata?: { gpuType: string; gpuProfile: GpuProfile; bootstrapImage: string };
+  beforeCreateRequest?: () => Promise<void> | void;
+  afterCreateRequestAttempt?: () => Promise<void> | void;
 }) {
   assertCloreDeploymentAllowed();
   if (!input.execution.enabled) {
@@ -217,19 +219,31 @@ export async function createCloreOrder(input: {
       throw new Error("A project active Clore order already exists.");
     }
     await sleep(5000);
-    const response = input.request
-      ? await input.request(input.requestBody)
-      : await cloreRequest<unknown>(input.config, "/create_order", {
-          method: "POST",
-          body: JSON.stringify(input.requestBody),
-        });
+    await input.beforeCreateRequest?.();
+    let response: unknown;
+    try {
+      response = input.request
+        ? await input.request(input.requestBody)
+        : await cloreRequest<unknown>(input.config, "/create_order", {
+            method: "POST",
+            body: JSON.stringify(input.requestBody),
+          });
+    } finally {
+      await input.afterCreateRequestAttempt?.();
+    }
     const created = summarizeCreatedOrder(response);
-    const liveOrders = await (input.readOrders ?? readLiveOrdersSummary)(input.config);
-    const activeLiveOrders = liveOrders.filter((order) => order.active);
+    let liveOrders = await (input.readOrders ?? readLiveOrdersSummary)(input.config);
+    let activeLiveOrders = liveOrders.filter((order) => order.active);
+    for (let visibilityAttempt = 0; !created.order_id && activeLiveOrders.length === 0 && !input.readOrders && visibilityAttempt < 5; visibilityAttempt += 1) {
+      await sleep(5000);
+      liveOrders = await readLiveOrdersSummary(input.config, { forceRefresh: true });
+      activeLiveOrders = liveOrders.filter((order) => order.active);
+    }
     const matchingLiveOrder =
       activeLiveOrders.find((order) => order.serverId === input.candidate.serverId && order.orderId) ??
       (activeLiveOrders.length === 1 && activeLiveOrders[0].orderId ? activeLiveOrders[0] : null);
     const orderId = matchingLiveOrder?.orderId ?? created.order_id;
+    if (!orderId || !/^\d+$/.test(orderId)) throw new Error("create_order_id_unresolved_after_request");
     if (matchingLiveOrder) {
       try {
         validateCreatedOrderPricing({

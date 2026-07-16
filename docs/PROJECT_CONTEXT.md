@@ -1,5 +1,15 @@
 # Project Context
 
+## 2026-07-16 Stage 3P one-use operator retry and single Clore outcome
+
+- Stage 3P adds a separate `clore:deployment:operator-retry` command. Its ignored record contains only creation/expiration times, the exact one-attempt/0.20 USD failed-deployment/2.50 USD session limits, a random nonce, and SHA256 integrity. It does not claim Clore support recovery. A valid support acknowledgement remains preferred; the operator record is a one-use fallback.
+- The operator record is renamed atomically from available to consuming inside the existing create lock, after a fresh active-order/marketplace/wallet/price/budget recheck and immediately before the real `create_order` request. It is renamed consumed after that one request whether the request succeeds or fails. Pre-request API scheduling failures do not consume the record or host attempt.
+- Stage 3P permits one Clore host attempt, excludes every known failed server ID, requires on-demand >=20GB VRAM, >=32GB RAM, >=150GB disk, <=0.70 USD/hour and <=2.50 USD projected total, and ranks GPU class followed by reliability/rating/network before price. SSH readiness is capped at 12 minutes and shortened when necessary to preserve the 0.20 USD failed-deployment budget.
+- The selected host was RTX 4090 server `101767`, reliability `1`, rating `4.94`, 93.27/97.74 Mbps, at 0.170833 USD/hour. The real order was `1957188`. The create response initially omitted the numeric order ID; the local mapping was corrected from its legacy random fallback, and code now polls the live order list and refuses unresolved/non-numeric IDs instead of inventing one.
+- Order `1957188` never reported Running or a usable SSH endpoint and was canceled after the single bounded wait. The exact failure is `order_never_running`. No SSH/hardware inspection, Runtime/overlay start, FLUX restore, image inference, Wan restore, video inference, or local media sync occurred.
+- The USD-like wallet moved from 13.75 to 13.60 USD, so the Stage 3P failed-deployment spend was 0.15 USD. Final Clore orders, RunPod Pods/volumes, watchdogs/watchers and create locks are all zero; both provider holds are enabled. The operator override is consumed, R2 caches remain intact, and both Stage 3O tasks persist as separate failed records (image `order_never_running`, video `image_prerequisite_failed`).
+- A resume-only gate now permits the already consumed override solely when the same locally recorded active order has attempt count 1 and the watchdog/billing state matches. It cannot call `create_order` again. Remote watchdog arming also waits for a fresh heartbeat for the selected server before creation.
+
 ## 2026-07-16 Stage 3O guarded image-plus-video session preparation
 
 - Stage 3O has a fixed, idempotent real task-pool fixture named `stage3o`: one immediate FLUX image task (`1024x1024`, 4 steps, seed `20260715`) followed by one immediate Wan task (`1280x704`, 41 frames at 16fps, about 2.56 seconds, seed `20260715`). Re-running preparation reuses the fixed task IDs and does not debit credits or duplicate work.

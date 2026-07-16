@@ -31,6 +31,10 @@ export type GpuCandidate = {
   hourlyUsd: number | null;
   cloudType?: "SECURE" | "COMMUNITY";
   availability?: "High" | "Medium" | "Low" | "None" | "Unknown";
+  reliability?: number | null;
+  rating?: number | null;
+  downloadMbps?: number | null;
+  uploadMbps?: number | null;
   interruptible: false;
 };
 
@@ -65,6 +69,8 @@ export type CreateSessionInput = {
   sshPublicKey: string;
   bootstrapImage: string;
   dryRun: boolean;
+  beforeCreateRequest?: () => Promise<void> | void;
+  afterCreateRequestAttempt?: () => Promise<void> | void;
 };
 
 export type BillingSummary = {

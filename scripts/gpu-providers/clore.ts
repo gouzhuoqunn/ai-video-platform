@@ -37,6 +37,10 @@ function mapCandidate(candidate: ReturnType<typeof findBootstrapImageCandidates>
     volumeGb: 0,
     hourlyUsd: candidate.effectivePriceUsdPerHour,
     availability: candidate.rentable ? "High" : "None",
+    reliability: candidate.reliability,
+    rating: candidate.rating,
+    downloadMbps: candidate.downloadMbps,
+    uploadMbps: candidate.uploadMbps,
     interruptible: false,
   };
 }
@@ -92,6 +96,20 @@ export class CloreProvider implements GpuProvider {
       candidate,
       requestBody: request,
       sessionMetadata: { gpuType: candidate.gpu, gpuProfile: candidate.runtimeGpuProfile, bootstrapImage: `${manifest.image}@${manifest.digest}` },
+      beforeCreateRequest: async () => {
+        const [latestOrders, latestWallet, latestMarketplace] = await Promise.all([
+          readLiveOrdersSummary(config, { forceRefresh: true }),
+          readWalletSummary(config, { forceRefresh: true }),
+          readLiveMarketplace(config, { forceRefresh: true }),
+        ]);
+        if (latestOrders.some((order) => order.active)) throw new Error("An active Clore order appeared before create_order.");
+        const latest = findBootstrapImageCandidates(latestMarketplace, config).find((value) => value.serverId === candidate.serverId);
+        if (!latest || latest.effectivePriceUsdPerHour === null || latest.effectivePriceUsdPerHour > 0.7) throw new Error("Selected Clore host price or compliance changed before create_order.");
+        if ((latest.projectedFirstImageCostUsd ?? Infinity) > 2.5) throw new Error("Projected Clore session changed above 2.50 USD before create_order.");
+        if (latestWallet.availableUsdBalance === null || latestWallet.availableUsdBalance - (latest.projectedFirstImageCostUsd ?? 0) < 1) throw new Error("Clore wallet reserve changed before create_order.");
+        await input.beforeCreateRequest?.();
+      },
+      afterCreateRequestAttempt: input.afterCreateRequestAttempt,
     });
     const session = await this.getSession(created.order_id);
     if (!session) throw new Error("clore_session_state_missing_after_create");
@@ -112,10 +130,14 @@ export class CloreProvider implements GpuProvider {
 
   async waitForSsh(session: GpuSession, timeoutMs = 10 * 60_000) {
     if (session.target && sshCommand(session.target, "true").status === 0) return session.target;
-    const timeoutMinutes = Math.min(10, Math.max(1, Math.ceil(timeoutMs / 60_000)));
+    const timeoutMinutes = Math.min(12, Math.max(1, Math.ceil(timeoutMs / 60_000)));
     const tsxCli = path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
     const readiness = spawnSync(process.execPath, [tsxCli, "scripts/clore/order-readiness.ts", `--order-id=${session.id}`, `--timeout-minutes=${timeoutMinutes}`], { cwd: process.cwd(), encoding: "utf8", timeout: timeoutMinutes * 60_000 + 30_000 });
-    if (readiness.status !== 0 || !existsSync(TARGET_PATH)) throw new Error(`clore_ssh_readiness_failed:${String(readiness.stdout).trim().slice(-500)}`);
+    if (readiness.status !== 0 || !existsSync(TARGET_PATH)) {
+      const output = `${String(readiness.stdout ?? "")}\n${String(readiness.stderr ?? "")}`;
+      const issues = [...output.matchAll(/"issue"\s*:\s*"([^"]+)"/g)];
+      throw new Error(issues.at(-1)?.[1] ?? `clore_ssh_readiness_failed:${output.trim().slice(-500)}`);
+    }
     const target = loadTarget();
     if (sshCommand(target, "true").status !== 0) throw new Error("clore_ssh_failed");
     return target;

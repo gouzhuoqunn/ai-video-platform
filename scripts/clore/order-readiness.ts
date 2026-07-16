@@ -107,8 +107,8 @@ async function main() {
   const orderId = getArg("order-id");
   if (!orderId) throw new Error("clore:readiness requires --order-id=<id>.");
   const requestedTimeout = Number(getArg("timeout-minutes") ?? 10);
-  if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0 || requestedTimeout > 10) {
-    throw new Error("clore:readiness --timeout-minutes must be between 1 and 10.");
+  if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0 || requestedTimeout > 12) {
+    throw new Error("clore:readiness --timeout-minutes must be between 1 and 12.");
   }
   const timeoutMs = requestedTimeout * 60 * 1000;
   const startedAt = Date.now();
