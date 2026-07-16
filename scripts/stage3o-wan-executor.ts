@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -12,6 +12,7 @@ type JsonRecord = Record<string, unknown>;
 type WorkflowNode = { class_type: string; inputs: Record<string, unknown> };
 const require = createRequire(import.meta.url);
 const FFMPEG_PATH = (require("@ffmpeg-installer/ffmpeg") as { path: string }).path;
+const FFPROBE_PATH = (require("@ffprobe-installer/ffprobe") as { path: string }).path;
 
 function argument(name: string) {
   const prefix = `--${name}=`;
@@ -58,7 +59,54 @@ function savedVideo(history: unknown) {
   return null;
 }
 
-function command(result: ReturnType<typeof spawnSync>, error: string) { if (result.status !== 0) throw new Error(`${error}:${String(result.error?.message ?? result.stderr ?? result.stdout ?? `exit_${result.status}`).slice(-500)}`); }
+function command(result: ReturnType<typeof spawnSync>, error: string) { if (result.status !== 0) throw new Error(`${error}:${String(result.error?.message ?? result.stderr ?? result.stdout ?? `exit_${result.status}`).slice(-2000)}`); }
+
+export function bundledMediaTools() {
+  return { ffmpegPath: FFMPEG_PATH, ffprobePath: FFPROBE_PATH };
+}
+
+export type MediaProbe = {
+  format: { format_name?: string; duration?: string; size?: string; bit_rate?: string };
+  streams: Array<{ codec_type?: string; codec_name?: string; pix_fmt?: string; width?: number; height?: number; avg_frame_rate?: string; r_frame_rate?: string }>;
+};
+
+export function probeMedia(filePath: string): MediaProbe {
+  const result = spawnSync(FFPROBE_PATH, ["-v", "error", "-show_streams", "-show_format", "-of", "json", filePath], { encoding: "utf8", timeout: 2 * 60_000 });
+  command(result, "wan_ffprobe_failed");
+  try { return JSON.parse(String(result.stdout)) as MediaProbe; }
+  catch { throw new Error("wan_ffprobe_json_invalid"); }
+}
+
+function fileEvidence(filePath: string) {
+  const bytes = readFileSync(filePath);
+  return { path: filePath, size_bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+}
+
+function assertMp4(filePath: string) {
+  if (!existsSync(filePath) || statSync(filePath).size < 1024) throw new Error("wan_mp4_invalid");
+  const probe = probeMedia(filePath);
+  const video = probe.streams.find((stream) => stream.codec_type === "video");
+  if (!video || !["h264", "avc1"].includes(String(video.codec_name)) || video.pix_fmt !== "yuv420p") throw new Error("wan_mp4_browser_codec_invalid");
+  const header = readFileSync(filePath).subarray(0, Math.min(statSync(filePath).size, 4 * 1024 * 1024));
+  const moov = header.indexOf(Buffer.from("moov")); const mdat = header.indexOf(Buffer.from("mdat"));
+  if (moov < 0 || mdat < 0 || moov > mdat) throw new Error("wan_mp4_faststart_invalid");
+  return probe;
+}
+
+function assertJpeg(filePath: string) {
+  if (!existsSync(filePath) || statSync(filePath).size < 256) throw new Error("wan_thumbnail_invalid");
+  const bytes = readFileSync(filePath);
+  if (bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes.at(-2) !== 0xff || bytes.at(-1) !== 0xd9) throw new Error("wan_thumbnail_jpeg_invalid");
+  const probe = probeMedia(filePath);
+  const image = probe.streams.find((stream) => stream.codec_type === "video");
+  if (!image || Number(image.width) > 640 || Number(image.height) > 360) throw new Error("wan_thumbnail_dimensions_invalid");
+  return probe;
+}
+
+export function deterministicThumbnailSecond(seed: number, durationSeconds: number) {
+  const normalized = ((Math.imul(seed | 0, 1664525) + 1013904223) >>> 0) / 0x1_0000_0000;
+  return Number((durationSeconds * (0.1 + normalized * 0.8)).toFixed(3));
+}
 
 export function archiveStage3OWanVideo(input: {
   sourceWebm: string;
@@ -68,20 +116,40 @@ export function archiveStage3OWanVideo(input: {
   oomFallbackUsed: boolean;
   runtimeEvidence?: Record<string, unknown>;
   libraryDir?: string;
+  preconvertedMp4?: string;
 }) {
-  if (!existsSync(input.sourceWebm) || readFileSync(input.sourceWebm).length < 1024) throw new Error("wan_webm_invalid");
+  if (!existsSync(input.sourceWebm) || statSync(input.sourceWebm).size < 1024) throw new Error("wan_webm_invalid");
   const date = new Date().toISOString().slice(0, 10); const paths = buildLocalJobPaths(input.libraryDir ?? loadLocalResultsConfig().libraryDir, date, STAGE3O_VIDEO_TASK_ID); mkdirSync(paths.jobDir, { recursive: true });
-  const preservedWebm = path.join(paths.jobDir, "source.webm"); const partialWebm = `${preservedWebm}.part`; copyFileSync(input.sourceWebm, partialWebm); renameSync(partialWebm, preservedWebm);
-  const partialMp4 = `${paths.videoPath}.part`; command(spawnSync(FFMPEG_PATH, ["-y", "-i", preservedWebm, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4", partialMp4], { encoding: "utf8", timeout: 10 * 60_000 }), "wan_mp4_conversion_failed"); renameSync(partialMp4, paths.videoPath);
-  const thumbnailSecond = Number((input.validation.durationSeconds / 2).toFixed(3));
-  command(spawnSync(FFMPEG_PATH, ["-y", "-ss", String(thumbnailSecond), "-i", paths.videoPath, "-vf", "scale=-2:360", "-frames:v", "1", paths.thumbnailPath], { encoding: "utf8", timeout: 2 * 60_000 }), "wan_thumbnail_failed");
+  const preservedWebm = path.join(paths.jobDir, "source.webm"); const partialWebm = `${preservedWebm}.part`;
+  if (path.resolve(input.sourceWebm) !== path.resolve(preservedWebm) && !existsSync(preservedWebm)) {
+    rmSync(partialWebm, { force: true }); copyFileSync(input.sourceWebm, partialWebm);
+    if (statSync(partialWebm).size < 1024) throw new Error("wan_webm_partial_invalid");
+    renameSync(partialWebm, preservedWebm);
+  }
+  const sourceProbe = probeMedia(preservedWebm);
+  if (!sourceProbe.streams.some((stream) => stream.codec_type === "video")) throw new Error("wan_webm_video_stream_missing");
+  const partialMp4 = `${paths.videoPath}.part`; rmSync(partialMp4, { force: true });
+  if (input.preconvertedMp4) copyFileSync(input.preconvertedMp4, partialMp4);
+  else {
+    const conversion = spawnSync(FFMPEG_PATH, ["-y", "-i", preservedWebm, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4", partialMp4], { encoding: "utf8", timeout: 10 * 60_000 });
+    if (conversion.status !== 0) {
+      writeFileSync(path.join(paths.jobDir, "local-ffmpeg.stderr.txt"), String(conversion.error?.message ?? conversion.stderr ?? conversion.stdout ?? `exit_${conversion.status}`), "utf8");
+      command(conversion, "wan_mp4_conversion_failed");
+    }
+  }
+  const videoProbe = assertMp4(partialMp4); rmSync(paths.videoPath, { force: true }); renameSync(partialMp4, paths.videoPath);
+  const duration = Number(videoProbe.format.duration ?? input.validation.durationSeconds);
+  const thumbnailSecond = deterministicThumbnailSecond(20260715, Number.isFinite(duration) && duration > 0 ? duration : input.validation.durationSeconds);
+  const partialThumbnail = `${paths.thumbnailPath}.part`; rmSync(partialThumbnail, { force: true });
+  command(spawnSync(FFMPEG_PATH, ["-y", "-ss", String(thumbnailSecond), "-i", paths.videoPath, "-vf", "scale=min(640\\,iw):min(360\\,ih):force_original_aspect_ratio=decrease", "-frames:v", "1", "-f", "image2", partialThumbnail], { encoding: "utf8", timeout: 2 * 60_000 }), "wan_thumbnail_failed");
+  const thumbnailProbe = assertJpeg(partialThumbnail); rmSync(paths.thumbnailPath, { force: true }); renameSync(partialThumbnail, paths.thumbnailPath);
   if (!existsSync(paths.videoPath) || !existsSync(paths.thumbnailPath)) throw new Error("wan_local_sync_missing");
-  const videoBytes = readFileSync(paths.videoPath); const sha256 = createHash("sha256").update(videoBytes).digest("hex");
-  writeFileSync(paths.metadataPath, `${JSON.stringify({ job_id: STAGE3O_VIDEO_TASK_ID, prompt_id: input.promptId, width: input.validation.width, height: input.validation.height, frames: 33, fps: 16, duration_seconds: input.validation.durationSeconds, seed: 20260715, audio: false, upscale: false, post_processing: false, oom_fallback_used: input.oomFallbackUsed, output_sha256: sha256, output_size_bytes: videoBytes.length, thumbnail_360p: true, thumbnail_second: thumbnailSecond }, null, 2)}\n`, "utf8");
+  const sourceEvidence = fileEvidence(preservedWebm); const videoEvidence = fileEvidence(paths.videoPath); const thumbnailEvidence = fileEvidence(paths.thumbnailPath);
   writeFileSync(path.join(paths.jobDir, "workflow-api.json"), `${JSON.stringify(input.workflow, null, 2)}\n`, "utf8");
-  if (input.runtimeEvidence) writeFileSync(path.join(paths.jobDir, "runtime-evidence.json"), `${JSON.stringify(input.runtimeEvidence, null, 2)}\n`, "utf8");
-  rmSync(preservedWebm, { force: true });
-  return { wan_video_verified: true, promptId: input.promptId, outputPath: paths.videoPath, thumbnailPath: paths.thumbnailPath, sha256, outputSizeBytes: videoBytes.length, durationSeconds: input.validation.durationSeconds, width: input.validation.width, height: input.validation.height, oomFallbackUsed: input.oomFallbackUsed };
+  const metadata = { job_id: STAGE3O_VIDEO_TASK_ID, prompt_id: input.promptId, width: input.validation.width, height: input.validation.height, frames: 33, fps: 16, duration_seconds: duration, seed: 20260715, audio: false, upscale: false, post_processing: false, oom_fallback_used: input.oomFallbackUsed, source_webm: sourceEvidence, output_mp4: videoEvidence, thumbnail_jpeg: thumbnailEvidence, source_probe: sourceProbe, output_probe: videoProbe, thumbnail_probe: thumbnailProbe, browser_codec: "h264", pixel_format: "yuv420p", faststart: true, thumbnail_360p: true, thumbnail_second: thumbnailSecond, thumbnail_seed_range: "10%-90%", local_conversion: !input.preconvertedMp4, source_preserved: true };
+  writeFileSync(paths.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  if (input.runtimeEvidence) writeFileSync(path.join(paths.jobDir, "runtime-evidence.json"), `${JSON.stringify({ ...input.runtimeEvidence, local_media: metadata }, null, 2)}\n`, "utf8");
+  return { wan_video_verified: true, promptId: input.promptId, sourcePath: preservedWebm, outputPath: paths.videoPath, thumbnailPath: paths.thumbnailPath, sha256: videoEvidence.sha256, outputSizeBytes: videoEvidence.size_bytes, sourceSha256: sourceEvidence.sha256, sourceSizeBytes: sourceEvidence.size_bytes, thumbnailSha256: thumbnailEvidence.sha256, thumbnailSizeBytes: thumbnailEvidence.size_bytes, durationSeconds: duration, width: input.validation.width, height: input.validation.height, oomFallbackUsed: input.oomFallbackUsed, sourcePreserved: true, localConversion: !input.preconvertedMp4, videoProbe, thumbnailProbe };
 }
 
 async function generateVideo(baseUrl: string, workflow: Record<string, WorkflowNode>, clientId: string) {

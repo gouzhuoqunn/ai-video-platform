@@ -1,5 +1,5 @@
-import crypto from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import crypto, { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { scpFile, scpFromRemote, sshCommand } from "./gpu-providers/common";
@@ -95,6 +95,33 @@ export function downloadRemoteRunnerOutput(target: GpuTarget, result: RemoteRunn
   } finally {
     sshCommand(target, `rm -f ${remotePath}`, 30_000);
   }
+}
+
+function validatedRemotePath(result: RemoteRunnerResult) {
+  const remotePath = result.staged_path;
+  if (typeof remotePath !== "string" || !/^\/workspace\/runtime-tools\/results\/[a-f0-9-]+\.[a-z0-9]+$/i.test(remotePath)) throw new Error("remote_runner_staged_path_invalid");
+  return remotePath;
+}
+
+export function downloadRemoteRunnerOutputPersistent(target: GpuTarget, result: RemoteRunnerResult, jobDir: string) {
+  const remotePath = validatedRemotePath(result);
+  mkdirSync(jobDir, { recursive: true });
+  const sourcePath = path.join(jobDir, "source.webm"); const partialPath = `${sourcePath}.part`;
+  if (existsSync(sourcePath)) {
+    const bytes = readFileSync(sourcePath); const sha256 = createHash("sha256").update(bytes).digest("hex");
+    if (bytes.length === result.output_size_bytes && sha256 === result.output_sha256) return { sourcePath, reused: true, sizeBytes: bytes.length, sha256, remotePath };
+    throw new Error("persistent_source_conflicts_with_remote_output");
+  }
+  rmSync(partialPath, { force: true });
+  requireSuccess(scpFromRemote(target, remotePath, partialPath, 30 * 60_000), "remote_output_download_failed");
+  const sizeBytes = statSync(partialPath).size; const sha256 = createHash("sha256").update(readFileSync(partialPath)).digest("hex");
+  if (sizeBytes < 1024 || sizeBytes !== result.output_size_bytes || sha256 !== result.output_sha256) throw new Error("remote_output_download_verification_failed");
+  renameSync(partialPath, sourcePath);
+  return { sourcePath, reused: false, sizeBytes, sha256, remotePath };
+}
+
+export function removeRemoteRunnerOutput(target: GpuTarget, result: RemoteRunnerResult) {
+  return sshCommand(target, `rm -f ${validatedRemotePath(result)}`, 30_000);
 }
 
 export function websocketCapabilityEvidence(remoteLocal: unknown, tunneled: unknown) {

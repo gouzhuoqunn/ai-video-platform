@@ -19,8 +19,8 @@ try {
   const archived = archiveStage3OWanVideo({ sourceWebm: source, workflow, validation, promptId: "stage3v-local-test", oomFallbackUsed: false, libraryDir: root });
   assert.ok(existsSync(archived.outputPath)); assert.ok(existsSync(archived.thumbnailPath));
   const paths = buildLocalJobPaths(root, new Date().toISOString().slice(0, 10), STAGE3O_VIDEO_TASK_ID);
-  assert.equal(existsSync(path.join(paths.jobDir, "source.webm")), false, "successful conversion must remove the preserved WebM");
-  console.log("Bundled ffmpeg MP4 conversion, thumbnail, and successful-source cleanup passed.");
+  assert.equal(existsSync(path.join(paths.jobDir, "source.webm")), true, "successful conversion must preserve the source WebM");
+  console.log("Bundled ffmpeg MP4 conversion, thumbnail, and successful-source preservation passed.");
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
