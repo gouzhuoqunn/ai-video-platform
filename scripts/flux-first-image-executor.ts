@@ -58,7 +58,7 @@ function outputImage(history: unknown) {
   return null;
 }
 
-function validatePngPixels(bytes: Buffer) {
+export function validatePngPixels(bytes: Buffer) {
   if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error("Runtime output is not a PNG.");
   let offset = 8;
   let width = 0;
@@ -162,7 +162,9 @@ async function main() {
   console.log(JSON.stringify({ flux_first_image_verified: true, prompt_id: promptId, elapsed_ms: Date.now() - startedAt, archive: archived }, null, 2));
 }
 
-void main().catch((error) => {
-  console.error(error instanceof Error ? error.message : "Flux first-image executor failed");
-  process.exitCode = 1;
-});
+if (process.argv[1]?.endsWith("flux-first-image-executor.ts")) {
+  void main().catch((error) => {
+    console.error(error instanceof Error ? error.message : "Flux first-image executor failed");
+    process.exitCode = 1;
+  });
+}

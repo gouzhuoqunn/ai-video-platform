@@ -1,5 +1,5 @@
-import { spawn, spawnSync } from "node:child_process";
-import net from "node:net";
+import { spawnSync } from "node:child_process";
+import { rmSync } from "node:fs";
 import path from "node:path";
 import { getGpuProvider } from "./gpu-providers";
 import { FIXED_RUNTIME_DIGEST, sanitizeGpuTarget, scpFile, sleep, sshCommand } from "./gpu-providers/common";
@@ -19,7 +19,8 @@ import { fluxCacheStatus } from "./model-cache/flux4090-cache";
 import { verify as verifyWanCache } from "./model-cache/wan-stage3m-cache";
 import { buildFluxFirstImageWorkflow, validateFluxFirstImageWorkflow } from "./flux-first-image";
 import { runRemoteFirstImage } from "./gpu-first-image";
-import { buildStage3OWanWorkflow, validateStage3OWanWorkflow } from "./stage3o-wan-executor";
+import { archiveStage3OWanVideo, buildStage3OWanWorkflow, validateStage3OWanWorkflow } from "./stage3o-wan-executor";
+import { downloadRemoteRunnerOutput, runRemoteComfyWorkflow, websocketCapabilityEvidence } from "./comfy-remote-runner";
 import { writeStage3OWanBundle } from "./stage3o-wan-bundle";
 import { STAGE3O_BATCH_ID, STAGE3O_IMAGE_TASK_ID, STAGE3O_TASK_IDS, STAGE3O_VIDEO_TASK_ID } from "./stage3o-batch";
 import { readGenerationPool, setGenerationTaskStatus, writeGenerationPool } from "../src/lib/generation/task-pool";
@@ -66,14 +67,6 @@ function armRemoteWatchdogWithTransientRetry(serverId: string) {
     if (result.status !== 0) { try { assertWatchdogsReadyForCreate(serverId); return { status: 0, stdout: "watchdog_became_healthy_after_transient_error", stderr: "" }; } catch { /* Preserve the failed result. */ } }
   }
   return result;
-}
-
-async function loopbackPort(start = 18240) {
-  for (let port = start; port < start + 32; port += 1) {
-    const free = await new Promise<boolean>((resolve) => { const server = net.createServer(); server.once("error", () => resolve(false)); server.listen(port, "127.0.0.1", () => server.close(() => resolve(true))); });
-    if (free) return port;
-  }
-  throw new Error("stage3o_tunnel_port_unavailable");
 }
 
 function checkpointThroughFailure(state: Stage3OLiveState, error: unknown) {
@@ -139,7 +132,12 @@ export async function validateStage3OPreflight() {
   } else {
     const blockers = billingSafetyBlockers(billing); if (blockers.length) throw new Error(blockers.join("；"));
   }
-  const pool = readGenerationPool(); const tasks = STAGE3O_TASK_IDS.map((id) => pool.tasks.find((task) => task.id === id));
+  const pool = readGenerationPool(); const tasks = STAGE3O_TASK_IDS.map((id) => {
+    const task = pool.tasks.find((item) => item.id === id);
+    const resuming = authorization.method === "operator_retry_resume" || authorization.method === "operator_retry_continue";
+    const resumableStatus = task && (task.status === "completed" && id === STAGE3O_IMAGE_TASK_ID && liveState.completed.includes("image_synced") || ["deploying", "restoring_models", "generating", "syncing"].includes(task.status));
+    return resuming && resumableStatus ? { ...task, status: "deploying" as const } : task;
+  });
   const expectedTaskStatus = authorization.method === "operator_retry_resume" || authorization.method === "operator_retry_continue" ? "deploying" : "armed";
   if (pool.scheduler.selectedBatchId !== STAGE3O_BATCH_ID || pool.scheduler.selectedTaskIds.length !== 2 || tasks.some((task) => !task || task.batchId !== STAGE3O_BATCH_ID || task.status !== expectedTaskStatus)) throw new Error("Stage 3O 图片与视频批次状态与当前会话阶段不一致。");
   const flux = await fluxCacheStatus(); if (!flux.ready || flux.total_size_bytes !== 12_451_817_860) throw new Error("FLUX current.json 或对象校验未就绪。");
@@ -249,13 +247,20 @@ async function runWan(target: GpuTarget) {
   requireSuccess(scpFile(target, bundle.filePath, "/workspace/stage3o-wan-r2-bundle.json", 5 * 60_000), "wan_bundle_copy_failed");
   requireSuccess(scpFile(target, restoreScript, "/workspace/restore-stage3o-r2.py", 2 * 60_000), "wan_restore_script_copy_failed");
   const restore = requireSuccess(sshCommand(target, "set -e; test $(df --output=avail -B1 /workspace | tail -1) -ge 50000000000; STAGE3O_R2_RESTORE_MANIFEST=/workspace/stage3o-wan-r2-bundle.json python3 /workspace/restore-stage3o-r2.py", 90 * 60_000), "wan_restore_failed");
-  const port = await loopbackPort(); const tunnel = spawn("ssh", ["-N", "-i", target.sshKeyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "PasswordAuthentication=no", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-p", String(target.port), "-L", `127.0.0.1:${port}:127.0.0.1:8188`, `${target.username}@${target.host}`], { stdio: "ignore" });
+  let workflow = buildStage3OWanWorkflow(); let validation = validateStage3OWanWorkflow(workflow); let oomFallbackUsed = false;
+  let remoteResult;
+  try { remoteResult = runRemoteComfyWorkflow({ target, workflow: workflow as unknown as Record<string, unknown>, clientId: STAGE3O_VIDEO_TASK_ID, kind: "video", timeoutSeconds: 90 * 60 }); }
+  catch (error) {
+    if (!/out of memory|cuda.*memory|oom/i.test(error instanceof Error ? error.message : String(error))) throw error;
+    requireSuccess(sshCommand(target, "curl -fsS -X POST -H 'Content-Type: application/json' -d '{\"unload_models\":false,\"free_memory\":true}' http://127.0.0.1:8188/free >/dev/null", 60_000), "wan_oom_memory_clear_failed");
+    workflow = buildStage3OWanWorkflow({ width: 640, height: 368 }); validation = validateStage3OWanWorkflow(workflow); oomFallbackUsed = true;
+    remoteResult = runRemoteComfyWorkflow({ target, workflow: workflow as unknown as Record<string, unknown>, clientId: `${STAGE3O_VIDEO_TASK_ID}-low`, kind: "video", timeoutSeconds: 90 * 60 });
+  }
+  const localWebm = downloadRemoteRunnerOutput(target, remoteResult, ".webm");
   try {
-    await sleep(1500); if (tunnel.exitCode !== null) throw new Error("wan_tunnel_failed");
-    const tsx = path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
-    const generated = spawnSync(process.execPath, [tsx, "scripts/stage3o-wan-executor.ts", `--base-url=http://127.0.0.1:${port}`], { cwd: process.cwd(), encoding: "utf8", timeout: 100 * 60_000 });
-    return { restore: JSON.parse(restore), generated: JSON.parse(requireSuccess(generated, "wan_generation_failed")) as Record<string, unknown> };
-  } finally { tunnel.kill(); }
+    const generated = archiveStage3OWanVideo({ sourceWebm: localWebm, workflow, promptId: String(remoteResult.prompt_id ?? ""), validation, oomFallbackUsed, runtimeEvidence: { system_stats: remoteResult.system_stats, required_nodes_verified: remoteResult.required_nodes_verified, history_verified: remoteResult.history_verified, ...websocketCapabilityEvidence(remoteResult.websocket_remote_local, { attempted: false, connected: false, reason: "image_session_diagnostic_already_recorded" }) } });
+    return { restore: JSON.parse(restore), generated };
+  } finally { rmSync(localWebm, { force: true }); }
 }
 
 async function cleanup(session: GpuSession | null, target: GpuTarget | null, provider: ReturnType<typeof getGpuProvider>, state: Stage3OLiveState) {

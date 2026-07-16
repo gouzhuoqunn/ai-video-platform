@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import workflowTemplate from "../comfy-runtime/workflows/official/wan22-ti2v-5b-api.json";
@@ -9,6 +10,8 @@ import { STAGE3O_VIDEO_TASK_ID } from "./stage3o-batch";
 
 type JsonRecord = Record<string, unknown>;
 type WorkflowNode = { class_type: string; inputs: Record<string, unknown> };
+const require = createRequire(import.meta.url);
+const FFMPEG_PATH = (require("@ffmpeg-installer/ffmpeg") as { path: string }).path;
 
 function argument(name: string) {
   const prefix = `--${name}=`;
@@ -55,7 +58,31 @@ function savedVideo(history: unknown) {
   return null;
 }
 
-function command(result: ReturnType<typeof spawnSync>, error: string) { if (result.status !== 0) throw new Error(`${error}:${String(result.stderr ?? result.stdout ?? "").slice(-500)}`); }
+function command(result: ReturnType<typeof spawnSync>, error: string) { if (result.status !== 0) throw new Error(`${error}:${String(result.error?.message ?? result.stderr ?? result.stdout ?? `exit_${result.status}`).slice(-500)}`); }
+
+export function archiveStage3OWanVideo(input: {
+  sourceWebm: string;
+  workflow: Record<string, WorkflowNode>;
+  promptId: string;
+  validation: ReturnType<typeof validateStage3OWanWorkflow>;
+  oomFallbackUsed: boolean;
+  runtimeEvidence?: Record<string, unknown>;
+  libraryDir?: string;
+}) {
+  if (!existsSync(input.sourceWebm) || readFileSync(input.sourceWebm).length < 1024) throw new Error("wan_webm_invalid");
+  const date = new Date().toISOString().slice(0, 10); const paths = buildLocalJobPaths(input.libraryDir ?? loadLocalResultsConfig().libraryDir, date, STAGE3O_VIDEO_TASK_ID); mkdirSync(paths.jobDir, { recursive: true });
+  const preservedWebm = path.join(paths.jobDir, "source.webm"); const partialWebm = `${preservedWebm}.part`; copyFileSync(input.sourceWebm, partialWebm); renameSync(partialWebm, preservedWebm);
+  const partialMp4 = `${paths.videoPath}.part`; command(spawnSync(FFMPEG_PATH, ["-y", "-i", preservedWebm, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4", partialMp4], { encoding: "utf8", timeout: 10 * 60_000 }), "wan_mp4_conversion_failed"); renameSync(partialMp4, paths.videoPath);
+  const thumbnailSecond = Number((input.validation.durationSeconds / 2).toFixed(3));
+  command(spawnSync(FFMPEG_PATH, ["-y", "-ss", String(thumbnailSecond), "-i", paths.videoPath, "-vf", "scale=-2:360", "-frames:v", "1", paths.thumbnailPath], { encoding: "utf8", timeout: 2 * 60_000 }), "wan_thumbnail_failed");
+  if (!existsSync(paths.videoPath) || !existsSync(paths.thumbnailPath)) throw new Error("wan_local_sync_missing");
+  const videoBytes = readFileSync(paths.videoPath); const sha256 = createHash("sha256").update(videoBytes).digest("hex");
+  writeFileSync(paths.metadataPath, `${JSON.stringify({ job_id: STAGE3O_VIDEO_TASK_ID, prompt_id: input.promptId, width: input.validation.width, height: input.validation.height, frames: 33, fps: 16, duration_seconds: input.validation.durationSeconds, seed: 20260715, audio: false, upscale: false, post_processing: false, oom_fallback_used: input.oomFallbackUsed, output_sha256: sha256, output_size_bytes: videoBytes.length, thumbnail_360p: true, thumbnail_second: thumbnailSecond }, null, 2)}\n`, "utf8");
+  writeFileSync(path.join(paths.jobDir, "workflow-api.json"), `${JSON.stringify(input.workflow, null, 2)}\n`, "utf8");
+  if (input.runtimeEvidence) writeFileSync(path.join(paths.jobDir, "runtime-evidence.json"), `${JSON.stringify(input.runtimeEvidence, null, 2)}\n`, "utf8");
+  rmSync(preservedWebm, { force: true });
+  return { wan_video_verified: true, promptId: input.promptId, outputPath: paths.videoPath, thumbnailPath: paths.thumbnailPath, sha256, outputSizeBytes: videoBytes.length, durationSeconds: input.validation.durationSeconds, width: input.validation.width, height: input.validation.height, oomFallbackUsed: input.oomFallbackUsed };
+}
 
 async function generateVideo(baseUrl: string, workflow: Record<string, WorkflowNode>, clientId: string) {
   const submitted = record(await json(`${baseUrl}/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: workflow, client_id: clientId }) }));
@@ -91,15 +118,7 @@ async function main() {
   const response = await fetch(`${baseUrl}/view?${new URLSearchParams(video)}`); const bytes = Buffer.from(await response.arrayBuffer());
   if (!response.ok || bytes.length < 1024) throw new Error("wan_webm_invalid");
   const tempWebm = path.join(os.tmpdir(), `${STAGE3O_VIDEO_TASK_ID}.webm`); writeFileSync(tempWebm, bytes);
-  const date = new Date().toISOString().slice(0, 10); const paths = buildLocalJobPaths(loadLocalResultsConfig().libraryDir, date, STAGE3O_VIDEO_TASK_ID); mkdirSync(paths.jobDir, { recursive: true });
-  const partialMp4 = `${paths.videoPath}.part`; command(spawnSync("ffmpeg", ["-y", "-i", tempWebm, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4", partialMp4], { encoding: "utf8", timeout: 10 * 60_000 }), "wan_mp4_conversion_failed"); renameSync(partialMp4, paths.videoPath);
-  const thumbnailSecond = Number((Math.random() * validation.durationSeconds).toFixed(3));
-  command(spawnSync("ffmpeg", ["-y", "-ss", String(thumbnailSecond), "-i", paths.videoPath, "-vf", "scale=-2:360", "-frames:v", "1", paths.thumbnailPath], { encoding: "utf8", timeout: 2 * 60_000 }), "wan_thumbnail_failed");
-  if (!existsSync(paths.videoPath) || !existsSync(paths.thumbnailPath)) throw new Error("wan_local_sync_missing");
-  const sha256 = createHash("sha256").update(readFileSync(paths.videoPath)).digest("hex");
-  writeFileSync(paths.metadataPath, `${JSON.stringify({ job_id: STAGE3O_VIDEO_TASK_ID, prompt_id: promptId, width: validation.width, height: validation.height, frames: 33, fps: 16, duration_seconds: validation.durationSeconds, seed: 20260715, audio: false, upscale: false, post_processing: false, oom_fallback_used: oomFallbackUsed, output_sha256: sha256, output_size_bytes: readFileSync(paths.videoPath).length, thumbnail_360p: true, thumbnail_second: thumbnailSecond }, null, 2)}\n`, "utf8");
-  writeFileSync(path.join(paths.jobDir, "workflow-api.json"), `${JSON.stringify(workflow, null, 2)}\n`, "utf8");
-  console.log(JSON.stringify({ wan_video_verified: true, promptId, outputPath: paths.videoPath, thumbnailPath: paths.thumbnailPath, sha256, durationSeconds: validation.durationSeconds, width: validation.width, height: validation.height, oomFallbackUsed }));
+  console.log(JSON.stringify(archiveStage3OWanVideo({ sourceWebm: tempWebm, workflow, promptId, validation, oomFallbackUsed })));
 }
 
 if (process.argv[1]?.endsWith("stage3o-wan-executor.ts")) void main().catch((error) => { console.error(error instanceof Error ? error.message : "wan_stage3o_failed"); process.exitCode = 1; });

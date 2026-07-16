@@ -12,6 +12,9 @@ import { armRunPodWatchdog } from "./runpod-watchdog";
 import { buildRuntimeOverlay } from "./runtime-overlay";
 import { getCloreDeploymentHold, setCloreDeploymentHold } from "./clore/deployment-hold";
 import { classifyHostProbeFailure, HOST_TOOLCHAIN_PACKAGES, hostProbeCorrectionCommand, parseTritonProbeOutput, stage3UHostCompilerProbes } from "./clore/host-compiler-probes";
+import { archiveFluxFirstImage, buildFluxFirstImageWorkflow } from "./flux-first-image";
+import { validatePngPixels } from "./flux-first-image-executor";
+import { downloadRemoteRunnerOutput, installRemoteComfyRunner, runRemoteComfyProbe, runRemoteComfyWorkflow, websocketCapabilityEvidence } from "./comfy-remote-runner";
 
 function argument(name: string) {
   const inline = process.argv.find((item) => item.startsWith(`--${name}=`));
@@ -166,7 +169,25 @@ async function verifyRuntimeTunnel(baseUrl: string, clientId: string) {
   throw lastError instanceof Error ? lastError : new Error("runtime_tunnel_verification_failed");
 }
 
+async function probeOptionalRuntimeTunnel(target: GpuTarget, clientId: string) {
+  const port = await availableLoopbackPort();
+  const tunnel = spawn("ssh", ["-N", "-i", target.sshKeyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "PasswordAuthentication=no", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-p", String(target.port), "-L", `127.0.0.1:${port}:127.0.0.1:8188`, `${target.username}@${target.host}`], { stdio: "ignore" });
+  try {
+    await sleep(1500);
+    if (tunnel.exitCode !== null) return { attempted: true, connected: false, error: "ssh_tunnel_exited", port };
+    try {
+      const verified = await verifyRuntimeTunnel(`http://127.0.0.1:${port}`, clientId);
+      return { attempted: true, connected: true, attempts: verified.attempts, port };
+    } catch (error) {
+      return { attempted: true, connected: false, error: error instanceof Error ? error.message : "tunnel_probe_failed", port };
+    }
+  } finally {
+    tunnel.kill();
+  }
+}
+
 export async function runRemoteFirstImage(target: GpuTarget, providerId: GpuProviderId, sessionId: string, gpuModel: string, options: { warmRun?: boolean } = {}) {
+  void options;
   const { outputPath: bundlePath } = writeColabBundle();
   const restorePath = path.join(process.cwd(), "scripts", "clore", "restore-flux-r2.py");
   const cloreBootstrapPath = path.join(process.cwd(), "scripts", "clore", "clore-light-bootstrap.sh");
@@ -208,26 +229,41 @@ export async function runRemoteFirstImage(target: GpuTarget, providerId: GpuProv
       if (health.status !== 0) recordedCommand(evidence, "runtime_startup_logs_after_fix", logsCommand, () => sshCommand(target, logsCommand, 120_000));
     }
     if (health.status !== 0) throw new Error("runtime_health_failed_after_in_place_fix");
-    const port = await availableLoopbackPort();
-    const tunnel = spawn("ssh", ["-N", "-i", target.sshKeyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "PasswordAuthentication=no", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-p", String(target.port), "-L", `127.0.0.1:${port}:127.0.0.1:8188`, `${target.username}@${target.host}`], { stdio: "ignore" });
+    installRemoteComfyRunner(target);
+    const probe = runRemoteComfyProbe(target);
+    recordEvidence(evidence, "remote_runner_structure_probe", "python3 /workspace/runtime-tools/comfy_remote_runner.py --probe", 0, JSON.stringify(probe));
+    const tunneled = await probeOptionalRuntimeTunnel(target, sessionId);
+    recordEvidence(evidence, "runtime_websocket_optional", "optional local SSH tunnel HTTP/WebSocket probe", tunneled.connected ? 0 : 1, JSON.stringify(tunneled), tunneled.connected ? "" : String(tunneled.error ?? "optional_tunnel_unavailable"));
+    requireSuccess(recordedCommand(evidence, "flux_manifest_copy", "scp flux-r2-manifest.json /workspace/flux-r2-manifest.json", () => scpFile(target, bundlePath, "/workspace/flux-r2-manifest.json", 5 * 60_000)), "r2_bundle_copy_failed");
+    requireSuccess(recordedCommand(evidence, "flux_restore_script_copy", "scp restore-flux-r2.py /workspace/restore-flux-r2.py", () => scpFile(target, restorePath, "/workspace/restore-flux-r2.py", 2 * 60_000)), "r2_restore_script_copy_failed");
+    const restoreStarted = Date.now(); const restoreCommand = "set -e; FLUX_R2_RESTORE_MANIFEST=/workspace/flux-r2-manifest.json python3 /workspace/restore-flux-r2.py";
+    requireSuccess(recordedCommand(evidence, "flux_r2_restore", restoreCommand, () => sshCommand(target, restoreCommand, 90 * 60_000)), "r2_model_restore_failed");
+    const restoreElapsedMs = Date.now() - restoreStarted;
+    const executeImage = (id: string, width: number, height: number) => runRemoteComfyWorkflow({ target, workflow: buildFluxFirstImageWorkflow({ width, height, seed: 20260715, steps: 4 }) as unknown as Record<string, unknown>, clientId: id, kind: "image", timeoutSeconds: 20 * 60 });
+    let remoteResult;
+    let width = 1024; let height = 1024; let oomFallbackUsed = false;
+    try { remoteResult = executeImage(sessionId, width, height); }
+    catch (error) {
+      if (!/out of memory|cuda.*memory|oom/i.test(error instanceof Error ? error.message : String(error))) throw error;
+      width = 768; height = 768; oomFallbackUsed = true;
+      remoteResult = executeImage(sessionId, width, height);
+    }
+    const temporaryPng = downloadRemoteRunnerOutput(target, remoteResult, ".png");
     try {
-      await sleep(1500); if (tunnel.exitCode !== null) throw new Error("ssh_tunnel_failed");
-      const websocketStartedAt = new Date().toISOString();
-      try { const verified = await verifyRuntimeTunnel(`http://127.0.0.1:${port}`, sessionId); evidence.push({ label: "runtime_websocket", command: `HTTP /system_stats then WebSocket ws://127.0.0.1:${port}/ws?clientId=<session-id>`, startedAt: websocketStartedAt, completedAt: new Date().toISOString(), exitCode: 0, stdout: `websocket_verified=true attempts=${verified.attempts}`, stderr: "" }); writeCommandEvidence(evidence); }
-      catch (error) { evidence.push({ label: "runtime_websocket", command: `HTTP /system_stats then WebSocket ws://127.0.0.1:${port}/ws?clientId=<session-id>`, startedAt: websocketStartedAt, completedAt: new Date().toISOString(), exitCode: 1, stdout: "", stderr: error instanceof Error ? error.message : "websocket_failed" }); writeCommandEvidence(evidence); throw error; }
-      requireSuccess(recordedCommand(evidence, "flux_manifest_copy", "scp flux-r2-manifest.json /workspace/flux-r2-manifest.json", () => scpFile(target, bundlePath, "/workspace/flux-r2-manifest.json", 5 * 60_000)), "r2_bundle_copy_failed");
-      requireSuccess(recordedCommand(evidence, "flux_restore_script_copy", "scp restore-flux-r2.py /workspace/restore-flux-r2.py", () => scpFile(target, restorePath, "/workspace/restore-flux-r2.py", 2 * 60_000)), "r2_restore_script_copy_failed");
-      const restoreStarted = Date.now(); const restoreCommand = "set -e; FLUX_R2_RESTORE_MANIFEST=/workspace/flux-r2-manifest.json python3 /workspace/restore-flux-r2.py";
-      requireSuccess(recordedCommand(evidence, "flux_r2_restore", restoreCommand, () => sshCommand(target, restoreCommand, 90 * 60_000)), "r2_model_restore_failed");
-      const restoreElapsedMs = Date.now() - restoreStarted;
-      const tsxCli = path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
-      const executeImage = (id: string, width: number, height: number, seed: number) => spawnSync(process.execPath, [tsxCli, "scripts/flux-first-image-executor.ts", `--base-url=http://127.0.0.1:${port}`, `--session-id=${id}`, `--provider=${providerId}`, `--gpu-model=${gpuModel}`, `--restore-elapsed-ms=${restoreElapsedMs}`, `--width=${width}`, `--height=${height}`, `--seed=${seed}`], { cwd: process.cwd(), encoding: "utf8", timeout: 40 * 60_000 });
-      let generated = executeImage(sessionId, 1024, 1024, 20260715);
-      if (generated.status !== 0 && /out of memory|cuda.*memory|oom/i.test(String(generated.stderr ?? generated.stdout ?? ""))) generated = executeImage(sessionId, 768, 768, 20260715);
-      const output = requireSuccess(generated, "flux_first_image_generation_failed");
-      const warm = options.warmRun === false ? null : executeImage(`${sessionId}-warm`, 768, 768, 20260716);
-      return { restoreElapsedMs, generated: JSON.parse(output) as Record<string, unknown>, warm: warm === null ? { attempted: false } : warm.status === 0 ? JSON.parse(String(warm.stdout)) as Record<string, unknown> : { attempted: true, succeeded: false }, commandEvidencePath: STAGE3T_COMMAND_EVIDENCE_PATH, bootstrapMode: evidence.find((item) => item.label === "runtime_prepare" || item.label === "runtime_prepare_in_place_fix")?.stdout.trim() ?? "unknown", postBootstrapTorchCuda: evidence.find((item) => item.label === "post_bootstrap_torch_cuda")?.stdout ?? "" };
-    } finally { tunnel.kill(); }
+      const bytes = readFileSync(temporaryPng); const png = validatePngPixels(bytes);
+      const workflow = buildFluxFirstImageWorkflow({ width, height, seed: 20260715, steps: 4 });
+      const capabilityEvidence = websocketCapabilityEvidence(remoteResult.websocket_remote_local, tunneled);
+      const archived = archiveFluxFirstImage({
+        sourcePng: temporaryPng,
+        sessionId,
+        workflow,
+        metadata: { provider: providerId, gpu_model: gpuModel, prompt_id: remoteResult.prompt_id, width: png.width, height: png.height, steps: 4, seed: 20260715, elapsed_ms: remoteResult.elapsed_ms, r2_restore_elapsed_ms: restoreElapsedMs, png_size_bytes: bytes.length, pixel_range: png.pixel_range, oom_fallback_used: oomFallbackUsed },
+        evidence: { system_stats: remoteResult.system_stats, required_nodes_verified: remoteResult.required_nodes_verified, history_verified: remoteResult.history_verified, runner_structure_probe: probe, ...capabilityEvidence },
+      });
+      writeFileSync(path.join(archived.archiveDir, "provider-session.json"), `${JSON.stringify({ provider: providerId, gpu_model: gpuModel, session_id: sessionId, runtime_digest_pinned: true, ...capabilityEvidence }, null, 2)}\n`, "utf8");
+      const generated = { flux_first_image_verified: true, prompt_id: remoteResult.prompt_id, elapsed_ms: remoteResult.elapsed_ms, archive: archived, width, height, oomFallbackUsed, ...capabilityEvidence };
+      return { restoreElapsedMs, generated, warm: { attempted: false }, commandEvidencePath: STAGE3T_COMMAND_EVIDENCE_PATH, bootstrapMode: evidence.find((item) => item.label === "runtime_prepare" || item.label === "runtime_prepare_in_place_fix")?.stdout.trim() ?? "unknown", postBootstrapTorchCuda: evidence.find((item) => item.label === "post_bootstrap_torch_cuda")?.stdout ?? "" };
+    } finally { rmSync(temporaryPng, { force: true }); }
   } finally { rmSync(bundlePath, { force: true }); }
 }
 

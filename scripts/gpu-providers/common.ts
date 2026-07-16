@@ -60,6 +60,20 @@ export function scpFile(target: GpuTarget, localPath: string, remotePath: string
   ], { encoding: "utf8", timeout: timeoutMs });
 }
 
+export function scpFromRemote(target: GpuTarget, remotePath: string, localPath: string, timeoutMs = 120_000) {
+  if (!remotePath.startsWith("/workspace/") || /[\r\n]/.test(remotePath)) throw new Error("Refusing unsafe remote download path.");
+  return spawnSync("scp", [
+    "-i", target.sshKeyPath,
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "PasswordAuthentication=no",
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=15",
+    "-P", String(target.port),
+    `${target.username}@${target.host}:${remotePath}`,
+    localPath,
+  ], { encoding: "utf8", timeout: timeoutMs });
+}
+
 export async function tcpReachable(host: string, port: number, timeoutMs = 10_000) {
   return new Promise<boolean>((resolve) => {
     const socket = net.createConnection({ host, port });
