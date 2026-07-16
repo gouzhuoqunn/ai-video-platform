@@ -52,7 +52,7 @@ export function buildColabBundle(creds: R2Credentials, now = new Date(), expires
 }
 
 export function writeColabBundle() {
-  const creds = loadR2Credentials("model-cache-admin.env");
+  const creds = loadR2Credentials("model-cache-readonly.env");
   const bundle = buildColabBundle(creds);
   mkdirSync(path.dirname(OUTPUT_PATH), { recursive: true });
   writeFileSync(OUTPUT_PATH, `${JSON.stringify(bundle, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });

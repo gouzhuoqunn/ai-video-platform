@@ -209,13 +209,17 @@ export function LocalCreationStudio() {
 
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
   const localResultForSelected = selectedJob ? localResults.find((result) => result.jobId === selectedJob.id) : null;
-  const mainVideoUrl = localResultForSelected?.videoUrl ?? (selectedJob ? signedVideos[selectedJob.id]?.signedUrl : null);
   const visibleJobs = filter === "all" ? jobs : jobs.filter((job) => job.status === filter);
   const pendingJobs = visibleJobs.filter((job) => job.status === "pending_confirmation");
   const selectedPendingCount = selectedJobIds.filter((id) => jobs.find((job) => job.id === id)?.status === "pending_confirmation").length;
   const activeAutorent = autorentRequests.find((request) => !["assigned", "failed", "cancelled"].includes(request.status));
   const selectedImage = imageResults.find((result) => result.sessionId === selectedImageId) ?? imageResults[0] ?? null;
   const modePoolTasks = pool?.tasks.filter((task) => task.generationType === mode) ?? [];
+  const poolVideoResult = localResults.find((result) => pool?.tasks.some((task) => task.generationType === "video" && task.id === result.jobId)) ?? null;
+  const poolVideoTask = poolVideoResult ? pool?.tasks.find((task) => task.id === poolVideoResult.jobId) ?? null : null;
+  const previewVideoResult = localResultForSelected ?? poolVideoResult;
+  const showingPoolVideo = Boolean(poolVideoResult && previewVideoResult?.jobId === poolVideoResult.jobId && !localResultForSelected);
+  const mainVideoUrl = previewVideoResult?.videoUrl ?? (selectedJob ? signedVideos[selectedJob.id]?.signedUrl : null);
 
   const priceGate = useMemo(() => {
     const min = parsePrice(minPrice);
@@ -536,7 +540,7 @@ export function LocalCreationStudio() {
               {mode === "image" && selectedImage ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img alt="生成图片预览" className="h-full w-full bg-black object-contain" src={selectedImage.imageUrl} />
-              ) : mode === "video" && selectedJob?.status === "succeeded" && mainVideoUrl ? (
+              ) : mode === "video" && mainVideoUrl ? (
                 <video className="h-full w-full bg-black object-contain" controls playsInline src={mainVideoUrl} />
               ) : (
                 <div className="flex h-full flex-col items-center justify-center px-6 text-center text-stone-100">
@@ -561,8 +565,8 @@ export function LocalCreationStudio() {
             </div>
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-stone-200 bg-[#faf8f4] px-4 py-3 text-sm">
               <div>
-                <p className="font-semibold">{mode === "image" ? (selectedImage?.sessionId ?? pendingImage?.sessionId ?? "首张FLUX图片") : selectedJob ? safePromptPreview(selectedJob.prompt) : "选择任务后会在这里显示"}</p>
-                <p className="text-stone-500">{mode === "image" ? (selectedImage ? "图片已完成并保存到本地" : "图片任务等待受控Clore调度") : selectedJob ? `${videoJobStatusLabels[selectedJob.status]} · ${etaText(selectedJob, jobs)}` : "未生成任务需要确认或立即生成后才会进入队列"}</p>
+                <p className="font-semibold">{mode === "image" ? (selectedImage?.sessionId ?? pendingImage?.sessionId ?? "首张FLUX图片") : showingPoolVideo && poolVideoTask ? safePromptPreview(poolVideoTask.prompt) : selectedJob ? safePromptPreview(selectedJob.prompt) : "选择任务后会在这里显示"}</p>
+                <p className="text-stone-500">{mode === "image" ? (selectedImage ? "图片已完成并保存到本地" : "图片任务等待受控Clore调度") : showingPoolVideo ? "任务池视频已完成并保存到本地" : selectedJob ? `${videoJobStatusLabels[selectedJob.status]} · ${etaText(selectedJob, jobs)}` : "未生成任务需要确认或立即生成后才会进入队列"}</p>
               </div>
               <span className="rounded-md border border-stone-200 bg-white px-3 py-2 text-xs text-stone-600">短期签名播放 · 本地结果优先</span>
             </div>
@@ -611,7 +615,7 @@ export function LocalCreationStudio() {
               <span className="rounded-md bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">{pool?.deploymentHold ? "Clore 部署已暂停" : "Clore 可由操作员恢复"}</span>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
-              {(["pending_confirmation", "waiting_for_batch", "waiting_for_gpu", "deploying", "generating", "completed", "failed"] as PoolTaskStatus[]).map((status) => (
+              {(["pending_confirmation", "waiting_for_batch", "waiting_for_gpu", "deploying", "restoring_models", "generating", "syncing", "completed", "failed"] as PoolTaskStatus[]).map((status) => (
                 <div className="rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2" key={status}><span className="text-stone-500">{poolStatusLabels[status]}</span><strong className="ml-2">{modePoolTasks.filter((task) => task.status === status || (status === "waiting_for_gpu" && task.status === "armed")).length}</strong></div>
               ))}
             </div>
@@ -622,6 +626,13 @@ export function LocalCreationStudio() {
               <p>调度状态：{schedulerStateLabels[pool?.schedulerState ?? "idle"] ?? "未知状态"}</p>
             </div>
             <p className="mt-2 rounded-md bg-stone-50 px-3 py-2 text-sm text-stone-700">{pool?.orderBlockingReason ?? "正在读取调度门禁。"}</p>
+            {mode === "video" && poolVideoResult?.thumbnailUrl && poolVideoResult.videoUrl ? (
+              <div className="mt-3 flex items-center gap-3 rounded-md border border-stone-200 bg-[#faf8f4] p-2">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img alt="任务池视频缩略图" className="h-16 w-28 rounded object-cover" src={poolVideoResult.thumbnailUrl} />
+                <div><p className="text-sm font-semibold">任务池视频已同步</p><p className="text-xs text-stone-500">刷新页面或重启应用后仍可播放本地 MP4。</p></div>
+              </div>
+            ) : null}
             {mode === "image" ? <div className="mt-3 flex flex-wrap gap-2">
               <button className="rounded-md bg-stone-900 px-3 py-2 text-sm font-bold text-white" onClick={() => void runPoolAction("confirm")} type="button">确认生成</button>
               <button className="rounded-md bg-emerald-700 px-3 py-2 text-sm font-bold text-white" onClick={() => void runPoolAction("immediate")} type="button">立即生成</button>

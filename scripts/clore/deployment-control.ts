@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { generationPoolSummary, readGenerationPool, writeGenerationPool } from "../../src/lib/generation/task-pool";
 import { modelAvailabilityGate } from "../../src/lib/generation/model-availability";
@@ -6,15 +6,12 @@ import { assertNoSecretOutput } from "./client";
 import { loadCloreConfig } from "./config";
 import { getCloreDeploymentHold, setCloreDeploymentHold } from "./deployment-hold";
 import { readLiveOrdersSummary } from "./live";
+import { readSupportAcknowledgement } from "./support-acknowledgement";
 
-const ACK_PATH = path.join(process.cwd(), ".secrets", "clore-support-incident-ack.json");
 const LOCK_PATHS = ["clore-order-create.lock", "clore-create.lock"].map((name) => path.join(process.cwd(), ".secrets", name));
 
 function acknowledged() {
-  try {
-    const value = JSON.parse(readFileSync(ACK_PATH, "utf8")) as { acknowledged?: boolean; incident?: string };
-    return value.acknowledged === true && value.incident === "clore-order-never-running";
-  } catch { return false; }
+  return readSupportAcknowledgement().valid;
 }
 
 function localConditions() {

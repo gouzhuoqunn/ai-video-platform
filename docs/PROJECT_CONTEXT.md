@@ -1,5 +1,15 @@
 # Project Context
 
+## 2026-07-16 Stage 3O guarded image-plus-video session preparation
+
+- Stage 3O has a fixed, idempotent real task-pool fixture named `stage3o`: one immediate FLUX image task (`1024x1024`, 4 steps, seed `20260715`) followed by one immediate Wan task (`1280x704`, 41 frames at 16fps, about 2.56 seconds, seed `20260715`). Re-running preparation reuses the fixed task IDs and does not debit credits or duplicate work.
+- `clore:support:acknowledge` writes only a ticket/reference ID, acknowledgement time, optional numeric recommended server IDs, and SHA256 of locally sanitized support response text to ignored `.secrets/clore-support-incident-ack.json`. It rejects missing confirmation, missing ticket/response file, unsafe billing state, active resources/locks, malformed records, and records older than seven days; it never stores the response text or personal contact details.
+- The single remaining manual action is `npm run clore:support:acknowledge -- --ticket=<id> --response-file=<local-text-file> --confirm-platform-recovered` (optionally add `--recommended-server-ids=<id,id>`). The response file is read locally only and is not copied into the repository or acknowledgement record.
+- `generation:live-session -- --provider=clore --batch=stage3o` fails closed before any resource operation unless the support acknowledgement is valid. Its preflight then verifies zero billing, both holds, the exact armed batch, FLUX/Wan readonly current pointers and object totals, and executable workflows.
+- The live plan permits at most two Clore on-demand host attempts, ten minutes to SSH per host, at least 20GB VRAM/32GB RAM/150GB disk, at most 0.70 USD/hour, 0.40 USD failed-deployment spend, 2.50 USD total spend, and 150 minutes. Support-recommended server IDs rank first; the existing light bootstrap, Ampere overlay, request limiter, and watchdog remain authoritative.
+- The ignored live checkpoint records the exact image -> image sync -> FLUX unload -> Wan restore -> video -> output sync -> Runtime stop -> order cancel sequence. FLUX and Wan use temporary read-only GET URLs, two parallel resumable `.part` transfers, size/SHA verification, and atomic rename. A Wan failure preserves the successful image and records a separate video failure.
+- No valid support acknowledgement currently exists. Stage 3O preparation therefore keeps Clore and RunPod holds enabled and must not create an order or SSH session until the user records the single support response action.
+
 ## 2026-07-16 Stage 3N shared generation pool and verified Wan cache
 
 - Image and video requests now share one persistent local task pool. Normal image work arms at 3 queued tasks and normal video work arms at 2; an explicit immediate action may arm a smaller homogeneous batch. A single planned GPU session processes image work, unloads image models, processes video work, and then stops. Mixed-model inference is never concurrent.

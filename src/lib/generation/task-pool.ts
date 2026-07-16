@@ -149,6 +149,32 @@ export function updateGenerationTasks(taskIds: string[], action: "confirm" | "im
   return writeGenerationPool(state, filePath);
 }
 
+export function setGenerationTaskStatus(taskIds: string[], status: GenerationTaskStatus, outputMetadata: GenerationTask["outputMetadata"] = {}, filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  const selected = new Set(taskIds);
+  state.tasks = state.tasks.map((task) => selected.has(task.id) ? { ...task, status, outputMetadata: { ...task.outputMetadata, ...outputMetadata } } : task);
+  return writeGenerationPool(state, filePath);
+}
+
+export function armSpecificGenerationBatch(taskIds: string[], batchId: string, filePath = GENERATION_POOL_PATH) {
+  if (!/^[A-Za-z0-9_-]{3,120}$/.test(batchId)) throw new Error("固定批次编号格式无效。");
+  const state = readGenerationPool(filePath);
+  const uniqueIds = [...new Set(taskIds)];
+  const tasks = uniqueIds.map((id) => state.tasks.find((task) => task.id === id)).filter(Boolean) as GenerationTask[];
+  if (tasks.length !== uniqueIds.length || tasks.length === 0) throw new Error("固定批次任务不存在或为空。");
+  for (const task of tasks) {
+    const gate = modelAvailabilityGate(task.modelProfile);
+    if (!gate.allowed || !gate.model?.restoreReady) throw new Error(gate.reason);
+    if (["completed", "failed", "cancelled"].includes(task.status)) throw new Error(`任务 ${task.id} 已结束，不能重新武装。`);
+  }
+  const compatible = tasks.map((task) => new Set(task.gpuPreference.length ? task.gpuPreference : acceptableGpuClasses(task.generationType, task.modelProfile))).reduce((left, right) => new Set([...left].filter((gpu) => right.has(gpu))));
+  if (compatible.size === 0) throw new Error("固定批次没有共同兼容的显卡类别。");
+  const ids = new Set(uniqueIds);
+  state.tasks = state.tasks.map((task) => ids.has(task.id) ? { ...task, priority: "immediate", status: "armed", confirmedAt: task.confirmedAt ?? now(), batchId } : task);
+  state.scheduler = { ...state.scheduler, state: "batch_ready", selectedBatchId: batchId, selectedTaskIds: uniqueIds, watchStartedAt: state.scheduler.watchStartedAt ?? now(), selectedServerId: null, orderCreationAttempted: false, drainingRequested: false };
+  return writeGenerationPool(state, filePath);
+}
+
 function eligibleGroups(state: GenerationPoolState, type: GenerationType) {
   const tasks = state.tasks.filter((task) => task.generationType === type && ["waiting_for_batch", "armed", "waiting_for_gpu"].includes(task.status));
   const groups = new Map<string, GenerationTask[]>();
@@ -163,7 +189,8 @@ export function selectNextSession(state: GenerationPoolState) {
     if (!ready) continue;
     const gate = modelAvailabilityGate(ready[0].modelProfile);
     if (!gate.allowed) return { ready: false, reason: gate.reason, batches: [], tasks: [] as GenerationTask[] };
-    batches.push({ generationType: type, modelProfile: ready[0].modelProfile, tasks: ready, acceptableGpuClasses: acceptableGpuClasses(type, ready[0].modelProfile), estimatedVram: Math.max(...ready.map((task) => task.estimatedVram)) });
+    const compatibleGpuClasses = ready.map((task) => new Set(task.gpuPreference.length ? task.gpuPreference : acceptableGpuClasses(type, task.modelProfile))).reduce((left, right) => new Set([...left].filter((gpu) => right.has(gpu))));
+    batches.push({ generationType: type, modelProfile: ready[0].modelProfile, tasks: ready, acceptableGpuClasses: [...compatibleGpuClasses], estimatedVram: Math.max(...ready.map((task) => task.estimatedVram)) });
   }
   if (batches.length === 0) return { ready: false, reason: "普通图片需满 3 个、普通视频需满 2 个；立即任务可直接触发。", batches, tasks: [] as GenerationTask[] };
   const compatible = batches.map((batch) => new Set(batch.acceptableGpuClasses)).reduce((left, right) => new Set([...left].filter((value) => right.has(value))));

@@ -1,0 +1,19 @@
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { completeStage3OCheckpoint, initialStage3OState, nextStage3OCheckpoint, readStage3OState, STAGE3O_CHECKPOINTS } from "./stage3o-live-state";
+import { rankStage3OCandidates } from "./generation-live-session";
+import type { GpuCandidate } from "./gpu-providers/types";
+import { buildStage3OWanWorkflow, validateStage3OWanWorkflow } from "./stage3o-wan-executor";
+import { readFileSync } from "node:fs";
+
+const file = path.join(mkdtempSync(path.join(os.tmpdir(), "stage3o-live-")), "state.json"); let state = initialStage3OState();
+for (const checkpoint of STAGE3O_CHECKPOINTS) state = completeStage3OCheckpoint(state, checkpoint, { tested: true }, file);
+assert.equal(nextStage3OCheckpoint(readStage3OState(file)), null); assert.deepEqual(state.completed, [...STAGE3O_CHECKPOINTS]);
+assert.ok(state.completed.indexOf("image_generated") < state.completed.indexOf("image_synced")); assert.ok(state.completed.indexOf("image_synced") < state.completed.indexOf("flux_unloaded")); assert.ok(state.completed.indexOf("flux_unloaded") < state.completed.indexOf("wan_restored")); assert.ok(state.completed.indexOf("outputs_synced") < state.completed.indexOf("runtime_stopped")); assert.ok(state.completed.indexOf("runtime_stopped") < state.completed.indexOf("order_cancelled"));
+const candidate = (id: string, disk: number, price: number): GpuCandidate => ({ id, gpuType: "RTX 4090", priority: 1, vramGb: 24, gpuCount: 1, minimumRamGb: 64, containerDiskGb: disk, volumeGb: 0, hourlyUsd: price, availability: "High", interruptible: false });
+assert.deepEqual(rankStage3OCandidates([candidate("2", 200, 0.4), candidate("1", 200, 0.5), candidate("bad", 120, 0.1)], ["1"]).map((item) => item.id), ["1", "2"]);
+assert.equal(validateStage3OWanWorkflow(buildStage3OWanWorkflow()).durationSeconds, 2.5625);
+const liveSource = readFileSync("scripts/generation-live-session.ts", "utf8"); assert.ok(liveSource.includes("clore:watchdog:local:install")); assert.ok(liveSource.includes("clore:watchdog:remote:arm")); assert.ok(liveSource.includes("clore:watchdog:remote:disarm")); assert.ok(liveSource.includes("/Disable"));
+console.log("Stage 3O checkpoint resume, sequential image-unload-video flow, candidate policy, and cleanup order passed.");

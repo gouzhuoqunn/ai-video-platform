@@ -8,7 +8,7 @@ import { readLiveOrdersSummary } from "./clore/live";
 import { getRunPodDeploymentHold } from "./runpod-deployment-hold";
 import { loadRunPodConfig, RUNPOD_API_BASE, RunPodRestClient } from "./gpu-providers/runpod";
 
-function watchdogSummary() {
+export function watchdogSummary() {
   const armPath = path.join(process.cwd(), ".secrets", "clore-watchdog-arm.json");
   let remoteArmed = false;
   try { remoteArmed = existsSync(armPath) && JSON.parse(readFileSync(armPath, "utf8")).armed === true; } catch { remoteArmed = true; }
@@ -20,7 +20,7 @@ function watchdogSummary() {
   } catch { return { remoteArmed, scheduledTaskActive: true, processCount: -1, deploymentWatcherProcessCount: -1 }; }
 }
 
-async function main() {
+export async function readGpuBillingStatus() {
   const cloreConfig = loadCloreConfig();
   const cloreOrders = cloreConfig.apiKey ? await readLiveOrdersSummary(cloreConfig, { forceRefresh: true }) : [];
   const runpodConfig = loadRunPodConfig();
@@ -33,7 +33,7 @@ async function main() {
     const payload = await response.json() as unknown[] | { items?: unknown[]; data?: unknown[] };
     runpodVolumes = Array.isArray(payload) ? payload : payload.items ?? payload.data ?? [];
   }
-  const output = {
+  return {
     mode: "read_only_billing_status",
     clore: { credentialsPresent: Boolean(cloreConfig.apiKey), activeOrders: cloreOrders.filter((order) => order.active).length, totalReturnedOrders: cloreOrders.length },
     runpod: { credentialsPresent: Boolean(runpodConfig.apiKey), activePods: runpodPods.length, networkVolumes: runpodVolumes.length },
@@ -43,9 +43,13 @@ async function main() {
     mutatingCallsMade: false,
     secretsPrinted: false,
   };
+}
+
+async function main() {
+  const output = await readGpuBillingStatus();
   const text = JSON.stringify(output, null, 2);
   assertNoSecretOutput(text);
   console.log(text);
 }
 
-void main().catch((error) => { console.error(error instanceof Error ? error.message : "billing status failed"); process.exitCode = 1; });
+if (process.argv[1]?.endsWith("gpu-billing-status.ts")) void main().catch((error) => { console.error(error instanceof Error ? error.message : "billing status failed"); process.exitCode = 1; });

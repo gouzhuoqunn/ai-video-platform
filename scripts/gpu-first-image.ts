@@ -70,7 +70,7 @@ function requireSuccess(result: ReturnType<typeof spawnSync>, classification: st
   return String(result.stdout ?? "");
 }
 
-async function runRemoteFirstImage(target: GpuTarget, providerId: GpuProviderId, sessionId: string, gpuModel: string) {
+export async function runRemoteFirstImage(target: GpuTarget, providerId: GpuProviderId, sessionId: string, gpuModel: string, options: { warmRun?: boolean } = {}) {
   const { outputPath: bundlePath } = writeColabBundle();
   const restorePath = path.join(process.cwd(), "scripts", "clore", "restore-flux-r2.py");
   const cloreBootstrapPath = path.join(process.cwd(), "scripts", "clore", "clore-light-bootstrap.sh");
@@ -108,8 +108,8 @@ async function runRemoteFirstImage(target: GpuTarget, providerId: GpuProviderId,
       let generated = executeImage(sessionId, 1024, 1024, 20260715);
       if (generated.status !== 0 && /out of memory|cuda.*memory|oom/i.test(String(generated.stderr ?? generated.stdout ?? ""))) generated = executeImage(sessionId, 768, 768, 20260715);
       const output = requireSuccess(generated, "flux_first_image_generation_failed");
-      const warm = executeImage(`${sessionId}-warm`, 768, 768, 20260716);
-      return { restoreElapsedMs, generated: JSON.parse(output) as Record<string, unknown>, warm: warm.status === 0 ? JSON.parse(String(warm.stdout)) as Record<string, unknown> : { attempted: true, succeeded: false } };
+      const warm = options.warmRun === false ? null : executeImage(`${sessionId}-warm`, 768, 768, 20260716);
+      return { restoreElapsedMs, generated: JSON.parse(output) as Record<string, unknown>, warm: warm === null ? { attempted: false } : warm.status === 0 ? JSON.parse(String(warm.stdout)) as Record<string, unknown> : { attempted: true, succeeded: false } };
     } finally {
       tunnel.kill();
     }

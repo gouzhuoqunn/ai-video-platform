@@ -55,6 +55,10 @@ async function arm() {
     throw new Error("Could not read USD-like wallet balance for watchdog arm.");
   }
 
+  const requestedDeadlineMinutes = Number(getArg("hard-deadline-minutes") ?? execution.hardSessionLimitMinutes);
+  const requestedHardBudgetUsd = Number(getArg("hard-budget-usd") ?? execution.firstSessionMaxBudgetUsd);
+  if (!Number.isFinite(requestedDeadlineMinutes) || requestedDeadlineMinutes <= 0 || requestedDeadlineMinutes > execution.hardSessionLimitMinutes) throw new Error("Watchdog hard deadline is invalid or exceeds the configured safety limit.");
+  if (!Number.isFinite(requestedHardBudgetUsd) || requestedHardBudgetUsd <= 0 || requestedHardBudgetUsd > execution.firstSessionMaxBudgetUsd) throw new Error("Watchdog hard budget is invalid or exceeds the configured safety limit.");
   const now = new Date();
   const state: WatchdogArmState = {
     schemaVersion: 1,
@@ -65,9 +69,9 @@ async function arm() {
     currency: "USD-Blockchain",
     startingBalanceUsd: wallet.availableUsdBalance,
     armedAt: now.toISOString(),
-    drainingAt: addMinutes(now, 350).toISOString(),
-    hardDeadlineAt: addMinutes(now, execution.hardSessionLimitMinutes).toISOString(),
-    hardBudgetUsd: execution.firstSessionMaxBudgetUsd,
+    drainingAt: addMinutes(now, Math.max(1, requestedDeadlineMinutes - 10)).toISOString(),
+    hardDeadlineAt: addMinutes(now, requestedDeadlineMinutes).toISOString(),
+    hardBudgetUsd: requestedHardBudgetUsd,
     budgetSafetyUsd: 0.25,
     emergencyStop: false,
   };
