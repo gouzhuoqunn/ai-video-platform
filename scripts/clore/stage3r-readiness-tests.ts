@@ -25,14 +25,19 @@ assert.deepEqual(parseSshCommand("ssh root@n1.msk.cloreai.ru -p 1584"), { host: 
 assert.deepEqual(parseSshCommand("ssh -p 1584 root@n1.msk.cloreai.ru"), { host: "n1.msk.cloreai.ru", port: 1584, user: "root" });
 assert.equal(parseSshCommand("ssh root@n1.msk.clore.ai -p nope"), null);
 
-const parityBody = buildManualParityCreateOrderBody({ serverId: "12345", currency: "USD-Blockchain", sshPassword: "S3r-0123456789abcdefAa7" });
+const parityBody = buildManualParityCreateOrderBody({ serverId: "12345", currency: "USD-Blockchain", sshPassword: "S3r-0123456789abcdefAa7", sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockPublicKeyForStage3SOnly0000000000 test" });
 assertCreateOrderBodySafe(parityBody);
-assert.deepEqual(Object.keys(parityBody).sort(), ["currency", "image", "ports", "renting_server", "ssh_password", "type"]);
+assert.deepEqual(Object.keys(parityBody).sort(), ["autossh_entrypoint", "currency", "image", "ports", "renting_server", "ssh_key", "ssh_password", "type"]);
 assert.equal(parityBody.image, "cloreai/jupyter:ubuntu24.04-v2");
 assert.equal(parityBody.env, undefined);
 assert.equal(parityBody.command, undefined);
-assert.equal(parityBody.ssh_key, undefined);
+assert.match(parityBody.ssh_key ?? "", /^ssh-ed25519 /);
 assert.equal(parityBody.required_price, undefined);
-assert.equal(parityBody.autossh_entrypoint, undefined);
+assert.equal(parityBody.autossh_entrypoint, true);
+
+const readinessSource = readFileSync(path.join(process.cwd(), "scripts", "clore", "order-readiness.ts"), "utf8");
+assert.ok(readinessSource.includes('ssh-keygen", ["-R", endpoint'), "a reused Clore proxy endpoint must refresh its scoped known-host entry");
+assert.ok(readinessSource.includes("const existingKey = keySsh"), "key auth must be accepted when autossh disables password auth");
+assert.ok(readinessSource.includes("ssh_auth: { passwordAuthSucceeded, keyInstalled, keyAuthSucceeded }"), "sanitized SSH authentication evidence must be persisted");
 
 console.log("Stage 3R real-order parsing, exact SSH endpoint extraction, readiness categories, and manual-parity payload passed.");

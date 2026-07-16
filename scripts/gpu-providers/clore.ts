@@ -20,6 +20,22 @@ import { ensureValidatedProjectSshKey } from "../clore/ssh-key-validation";
 const CLORE_ENV = path.join(process.cwd(), ".secrets", "clore.env");
 const TARGET_PATH = path.join(process.cwd(), ".secrets", "clore-ssh-target.json");
 
+export type CloreSshAuthEvidence = {
+  passwordAuthSucceeded: boolean;
+  keyInstalled: boolean;
+  keyAuthSucceeded: boolean;
+};
+
+export function readCloreSshAuthEvidence(): CloreSshAuthEvidence {
+  if (!existsSync(TARGET_PATH)) throw new Error("clore_ssh_auth_evidence_missing");
+  const input = JSON.parse(readFileSync(TARGET_PATH, "utf8")) as { ssh_auth?: Partial<CloreSshAuthEvidence> };
+  const evidence = input.ssh_auth;
+  if (!evidence || typeof evidence.passwordAuthSucceeded !== "boolean" || typeof evidence.keyInstalled !== "boolean" || evidence.keyAuthSucceeded !== true) {
+    throw new Error("clore_ssh_auth_evidence_invalid");
+  }
+  return { passwordAuthSucceeded: evidence.passwordAuthSucceeded, keyInstalled: evidence.keyInstalled, keyAuthSucceeded: evidence.keyAuthSucceeded };
+}
+
 function loadTarget(): GpuTarget {
   const input = JSON.parse(readFileSync(TARGET_PATH, "utf8")) as Partial<GpuTarget> & { user?: string };
   const active = readActiveOrder();
@@ -86,7 +102,7 @@ export class CloreProvider implements GpuProvider {
     const parity = input.cloreProfile === "clore_manual_parity" ? createManualParityState(candidate.serverId) : null;
     const key = readFileSync(keyValidation.publicKeyPath, "utf8").split(/\r?\n/)[0].trim();
     const request = parity
-      ? buildManualParityCreateOrderBody({ serverId: candidate.serverId, currency: config.rentalCurrency, sshPassword: parity.sshPassword })
+      ? buildManualParityCreateOrderBody({ serverId: candidate.serverId, currency: config.rentalCurrency, sshPassword: parity.sshPassword, sshPublicKey: key })
       : buildCreateOrderBody({ serverId: candidate.serverId, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, currency: config.rentalCurrency, sshPublicKey: key, maxPriceUsdPerHour: candidate.priceUsdPerHour ?? 0, requiredPriceForApi: candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null ? candidate.priceOriginalAmount : candidate.priceUsdPerHour ?? 0, bootstrapProfile: CLORE_LIGHT_BOOTSTRAP_PROFILE });
     const created = await createCloreOrder({
       config,

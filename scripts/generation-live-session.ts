@@ -12,6 +12,8 @@ import { consumeOperatorRetryOverride, markOperatorRetryConsumed, operatorRetryP
 import { readActiveOrder } from "./clore/order-state";
 import { failedCloreOrders } from "./clore/support-export";
 import { LOCAL_WATCHDOG_TASK_NAME } from "./clore/watchdog-io";
+import { assertWatchdogsReadyForCreate } from "./clore/watchdog-preflight";
+import { readCloreSshAuthEvidence } from "./gpu-providers/clore";
 import { readGpuBillingStatus } from "./gpu-billing-status";
 import { fluxCacheStatus } from "./model-cache/flux4090-cache";
 import { verify as verifyWanCache } from "./model-cache/wan-stage3m-cache";
@@ -26,17 +28,43 @@ import { completeStage3OCheckpoint, initialStage3OState, nextStage3OCheckpoint, 
 export const MAX_HOST_ATTEMPTS = 2;
 export const MAX_FAILED_DEPLOYMENT_SPEND_USD = 0.4;
 const MAX_TOTAL_SPEND_USD = 2.5;
-const MAX_RUNTIME_MINUTES = 150;
+const MAX_RUNTIME_MINUTES = 180;
 const MAX_SSH_WAIT_MINUTES = 10;
 const CLORE_CREATION_FEE_USD = 0.1;
 const FAILED_SERVER_IDS = new Set(failedCloreOrders.map((order) => order.server_id).filter((id): id is string => Boolean(id)));
 const MANUAL_GOLDEN_SERVER_IDS = new Set(["28726"]);
 
 function argument(name: string) { const prefix = `--${name}=`; return process.argv.find((value) => value.startsWith(prefix))?.slice(prefix.length); }
-function requireSuccess(result: ReturnType<typeof spawnSync>, code: string) { if (result.status !== 0) throw new Error(`${code}:${String(result.stderr ?? result.stdout ?? "").trim().slice(-800)}`); return String(result.stdout ?? ""); }
+function requireSuccess(result: { status: number | null; stderr?: string | Buffer | null; stdout?: string | Buffer | null }, code: string) { if (result.status !== 0) throw new Error(`${code}:${String(result.stderr ?? result.stdout ?? "").trim().slice(-800)}`); return String(result.stdout ?? ""); }
 function npmCommand(args: string[]) { return process.platform === "win32" ? { command: "cmd.exe", args: ["/c", "npm", ...args] } : { command: "npm", args }; }
 function runNpm(args: string[], timeoutMs = 120_000) { const value = npmCommand(args); return spawnSync(value.command, value.args, { cwd: process.cwd(), encoding: "utf8", timeout: timeoutMs }); }
 function disableLocalWatchdogTask() { return process.platform === "win32" ? spawnSync("schtasks.exe", ["/Change", "/TN", LOCAL_WATCHDOG_TASK_NAME, "/Disable"], { cwd: process.cwd(), encoding: "utf8", timeout: 30_000 }) : { status: 0 }; }
+
+async function readGpuBillingStatusWithTransientRetry() {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try { return await readGpuBillingStatus(); }
+    catch (error) {
+      lastError = error;
+      if (!/fetch failed|network|socket|TLS|ECONN|ETIMEDOUT/i.test(error instanceof Error ? error.message : String(error)) || attempt === 2) throw error;
+      await sleep(3_000);
+    }
+  }
+  throw lastError;
+}
+
+function armRemoteWatchdogWithTransientRetry(serverId: string) {
+  try { assertWatchdogsReadyForCreate(serverId); return { status: 0, stdout: "watchdog_already_healthy", stderr: "" }; } catch { /* A fresh arm is required. */ }
+  let result = runNpm(["run", "clore:watchdog:remote:arm", "--", `--server-id=${serverId}`, "--hard-deadline-minutes=180", "--hard-budget-usd=2.5"], 180_000);
+  for (let retry = 0; result.status !== 0 && retry < 2; retry += 1) {
+    const output = `${String(result.stderr ?? "")}\n${String(result.stdout ?? "")}`;
+    if (!/fetch failed|connectivity issue|network connection|ECONN|ETIMEDOUT/i.test(output)) return result;
+    runNpm(["run", "clore:watchdog:remote:disarm"]);
+    result = runNpm(["run", "clore:watchdog:remote:arm", "--", `--server-id=${serverId}`, "--hard-deadline-minutes=180", "--hard-budget-usd=2.5"], 180_000);
+    if (result.status !== 0) { try { assertWatchdogsReadyForCreate(serverId); return { status: 0, stdout: "watchdog_became_healthy_after_transient_error", stderr: "" }; } catch { /* Preserve the failed result. */ } }
+  }
+  return result;
+}
 
 async function loopbackPort(start = 18240) {
   for (let port = start; port < start + 32; port += 1) {
@@ -59,7 +87,7 @@ function checkpointThroughFailure(state: Stage3OLiveState, error: unknown) {
 export function rankStage3OCandidates(candidates: GpuCandidate[], recommendedServerIds: string[]) {
   const recommended = new Map(recommendedServerIds.map((id, index) => [id, index]));
   return candidates
-    .filter((candidate) => !FAILED_SERVER_IDS.has(candidate.id) && !MANUAL_GOLDEN_SERVER_IDS.has(candidate.id) && candidate.vramGb >= 20 && candidate.minimumRamGb >= 32 && candidate.containerDiskGb >= 150 && candidate.interruptible === false && candidate.hourlyUsd !== null && candidate.hourlyUsd <= 0.7 && candidate.hourlyUsd * (MAX_RUNTIME_MINUTES / 60) + CLORE_CREATION_FEE_USD <= MAX_TOTAL_SPEND_USD)
+    .filter((candidate) => !FAILED_SERVER_IDS.has(candidate.id) && !MANUAL_GOLDEN_SERVER_IDS.has(candidate.id) && /RTX\s*(4090|5090)/i.test(candidate.gpuType) && candidate.vramGb >= 23 && candidate.minimumRamGb >= 32 && candidate.containerDiskGb >= 180 && candidate.interruptible === false && candidate.hourlyUsd !== null && candidate.hourlyUsd <= 0.7 && candidate.hourlyUsd * (MAX_RUNTIME_MINUTES / 60) + CLORE_CREATION_FEE_USD <= MAX_TOTAL_SPEND_USD)
     .sort((left, right) =>
       (recommended.get(left.id) ?? 999) - (recommended.get(right.id) ?? 999) ||
       left.priority - right.priority ||
@@ -95,7 +123,7 @@ export async function validateStage3OPreflight() {
   } else if (!activeOrder && liveState.attemptCount > 0 && consumed.valid && consumed.override && liveState.attemptCount < consumed.override.limits.maxAttempts && liveState.failedDeploymentSpendUsd < consumed.override.limits.maxFailedSpendUsd) {
     authorization = { method: "operator_retry_continue", recommendedServerIds: [], nonce: consumed.override.nonce, expiresAt: consumed.override.expiresAt, paths, limits: consumed.override.limits };
   } else authorization = resolveStage3PAuthorization();
-  const billing = await readGpuBillingStatus();
+  const billing = await readGpuBillingStatusWithTransientRetry();
   if (authorization.method === "operator_retry_resume") {
     const blockers: string[] = [];
     if (billing.clore.activeOrders !== 1) blockers.push("stage3p_resume_requires_exactly_one_clore_order");
@@ -121,6 +149,14 @@ export function deploymentReadinessTimeoutMs(hourlyUsd: number | null, remaining
   if (hourlyUsd === null || !Number.isFinite(hourlyUsd) || hourlyUsd <= 0) return 60_000;
   const budgetMinutes = ((remainingFailedSpendUsd - CLORE_CREATION_FEE_USD) / hourlyUsd) * 60;
   return Math.max(60_000, Math.min(MAX_SSH_WAIT_MINUTES * 60_000, Math.floor(budgetMinutes * 60_000)));
+}
+
+export function stage3SHardwareInspectionCommand() {
+  return "set -e; mkdir -p /workspace; echo '=== gpu_summary ==='; nvidia-smi --query-gpu=name,memory.total,memory.used,driver_version --format=csv,noheader; echo '=== nvidia_smi ==='; nvidia-smi; echo '=== memory_bytes ==='; free -b; echo '=== vcpu ==='; nproc; echo '=== root_disk_bytes ==='; df -B1 /; echo '=== workspace_disk_bytes ==='; df -B1 /workspace; echo '=== python_torch_cuda ==='; python3 --version; python3 -c 'import importlib.util; spec=importlib.util.find_spec(\"torch\"); print(\"torch_present=\"+str(spec is not None).lower()); exec(\"import torch\\nprint(\\\"torch_version=\\\"+torch.__version__)\\nprint(\\\"torch_cuda_version=\\\"+str(torch.version.cuda))\\nprint(\\\"cuda_available=\\\"+str(torch.cuda.is_available()).lower())\\nprint(\\\"cuda_device=\\\"+(torch.cuda.get_device_name(0) if torch.cuda.is_available() else \\\"none\\\"))\\nprint(\\\"compute_capability=\\\"+(str(torch.cuda.get_device_capability(0)) if torch.cuda.is_available() else \\\"none\\\"))\") if spec else None'; echo '=== docker ==='; if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then echo docker_available=true; docker version; else echo docker_available=false; fi; echo '=== network_probe ==='; curl -L -sS --max-time 20 -o /dev/null -w 'download_bytes=%{size_download} speed_bytes_per_second=%{speed_download} http_code=%{http_code}\\n' 'https://speed.cloudflare.com/__down?bytes=1000000' || echo network_probe_failed";
+}
+
+export function stage3SVideoFailureMetadata(error: unknown) {
+  return { errorClass: error instanceof Error ? error.message.slice(0, 300) : "wan_failure", imagePreserved: true };
 }
 
 export function resetStage3PPreCreateFailure() {
@@ -182,9 +218,23 @@ async function cleanup(session: GpuSession | null, target: GpuTarget | null, pro
   const disarm = runNpm(["run", "clore:watchdog:remote:disarm"]); // Failure is checked by final billing status.
   const disableTask = disableLocalWatchdogTask();
   setCloreDeploymentHold(true, "stage3o_session_cleanup");
-  const finalBilling = await readGpuBillingStatus(); const blockers = billingSafetyBlockers(finalBilling);
+  const cleanupObservations: Array<{ activeCloreOrders: number; activeRunPodPods: number; runPodVolumes: number; balanceUsd: number | null }> = [];
+  let finalBilling = await readGpuBillingStatusWithTransientRetry(); let previousBalance: number | null = null; let balanceStable = false; let zeroResourceConfirmations = 0;
+  for (let index = 0; index < 3; index += 1) {
+    if (index > 0) finalBilling = await readGpuBillingStatusWithTransientRetry();
+    const balance = (await provider.getBalance()).availableUsd;
+    cleanupObservations.push({ activeCloreOrders: finalBilling.clore.activeOrders, activeRunPodPods: finalBilling.runpod.activePods, runPodVolumes: finalBilling.runpod.networkVolumes, balanceUsd: balance });
+    if (finalBilling.clore.activeOrders === 0 && finalBilling.runpod.activePods === 0 && finalBilling.runpod.networkVolumes === 0) zeroResourceConfirmations += 1;
+    if (previousBalance !== null && balance !== null && balance >= previousBalance - 0.0001) balanceStable = true;
+    previousBalance = balance;
+    if (zeroResourceConfirmations >= 2 && balanceStable) break;
+    await sleep(5_000);
+  }
+  const blockers = billingSafetyBlockers(finalBilling);
+  if (zeroResourceConfirmations < 2) blockers.push("stage3s_active_order_zero_not_confirmed_twice");
+  if (!balanceStable) blockers.push("stage3s_balance_still_decreasing_or_unavailable");
   if (blockers.length) throw new Error(`stage3o_cleanup_incomplete:${blockers.join("；")}`);
-  if (!next.completed.includes("cleanup_verified")) next = completeStage3OCheckpoint(next, "cleanup_verified", { activeOrders: 0, holdsRestored: true, watchdogDisarmExitCode: disarm.status, watchdogTaskDisableExitCode: disableTask.status });
+  if (!next.completed.includes("cleanup_verified")) next = completeStage3OCheckpoint(next, "cleanup_verified", { activeOrders: 0, activeOrderZeroConfirmations: zeroResourceConfirmations, balanceStable, cleanupObservations, holdsRestored: true, watchdogDisarmExitCode: disarm.status, watchdogTaskDisableExitCode: disableTask.status });
   const pool = readGenerationPool(); pool.scheduler.state = "completed"; writeGenerationPool(pool);
   clearManualParitySecrets();
   return next;
@@ -203,8 +253,8 @@ async function legacyMain() {
       const candidate = candidates[0]; if (!candidate) throw new Error("当前没有满足 Stage 3P 显存、内存、150GB 磁盘、历史排除项和预算的 Clore 主机。");
       state = writeStage3OState({ ...state, serverId: candidate.id });
       requireSuccess(runNpm(["run", "clore:watchdog:local:install"]), "watchdog_task_install_failed");
-      requireSuccess(runNpm(["run", "clore:watchdog:remote:arm", "--", `--server-id=${candidate.id}`, "--hard-deadline-minutes=150", "--hard-budget-usd=2.5"], 180_000), "watchdog_arm_failed");
-      if (!state.completed.includes("watchdog_armed")) state = completeStage3OCheckpoint(state, "watchdog_armed", { serverId: candidate.id, hardDeadlineMinutes: 150, hardBudgetUsd: 2.5 });
+      requireSuccess(armRemoteWatchdogWithTransientRetry(candidate.id), "watchdog_arm_failed");
+      if (!state.completed.includes("watchdog_armed")) state = completeStage3OCheckpoint(state, "watchdog_armed", { serverId: candidate.id, hardDeadlineMinutes: 180, hardBudgetUsd: 2.5 });
       setCloreDeploymentHold(false, preflight.authorization.method === "support_acknowledgement" ? "stage3p_valid_support_acknowledgement" : "stage3p_operator_accepted_platform_risk");
       try {
         setGenerationTaskStatus([...STAGE3O_TASK_IDS], "deploying");
@@ -305,8 +355,8 @@ async function main() {
         const attemptBeforeCreate = state.attemptCount;
         state = writeStage3OState({ ...state, serverId: candidate.id });
         requireSuccess(runNpm(["run", "clore:watchdog:local:install"]), "watchdog_task_install_failed");
-        requireSuccess(runNpm(["run", "clore:watchdog:remote:arm", "--", `--server-id=${candidate.id}`, "--hard-deadline-minutes=150", "--hard-budget-usd=2.5"], 180_000), "watchdog_arm_failed");
-        if (!state.completed.includes("watchdog_armed")) state = completeStage3OCheckpoint(state, "watchdog_armed", { serverId: candidate.id, hardDeadlineMinutes: 150, hardBudgetUsd: 2.5 });
+        requireSuccess(armRemoteWatchdogWithTransientRetry(candidate.id), "watchdog_arm_failed");
+        if (!state.completed.includes("watchdog_armed")) state = completeStage3OCheckpoint(state, "watchdog_armed", { serverId: candidate.id, hardDeadlineMinutes: 180, hardBudgetUsd: 2.5 });
         setCloreDeploymentHold(false, preflight.authorization.method === "support_acknowledgement" ? "stage3r_valid_support_acknowledgement" : "stage3r_operator_accepted_platform_risk");
         try {
           setGenerationTaskStatus([...STAGE3O_TASK_IDS], "deploying");
@@ -328,10 +378,10 @@ async function main() {
           });
           const readinessTimeoutMs = deploymentReadinessTimeoutMs(session.hourlyUsd, remainingFailedSpendUsd);
           state = writeStage3OState({ ...state, orderId: session.id });
-          if (!state.completed.includes("order_created")) state = completeStage3OCheckpoint(state, "order_created", { orderId: session.id, serverId: candidate.id, gpu: candidate.gpuType, hourlyUsd: session.hourlyUsd, reliability: candidate.reliability, rating: candidate.rating, downloadMbps: candidate.downloadMbps, uploadMbps: candidate.uploadMbps, readinessTimeoutSeconds: Math.floor(readinessTimeoutMs / 1000), parityProfile: "password_only_minimal" });
+          if (!state.completed.includes("order_created")) state = completeStage3OCheckpoint(state, "order_created", { orderId: session.id, serverId: candidate.id, gpu: candidate.gpuType, hourlyUsd: session.hourlyUsd, reliability: candidate.reliability, rating: candidate.rating, downloadMbps: candidate.downloadMbps, uploadMbps: candidate.uploadMbps, readinessTimeoutSeconds: Math.floor(readinessTimeoutMs / 1000), parityProfile: "password_key_autossh_minimal" });
           const waitStartedAt = Date.now();
           target = await provider.waitForSsh(session, readinessTimeoutMs);
-          if (!state.completed.includes("ssh_ready")) state = completeStage3OCheckpoint(state, "ssh_ready", { target: sanitizeGpuTarget(target), waitSeconds: Math.round((Date.now() - waitStartedAt) / 1000), passwordAuthSucceeded: true, keyInstalled: true, keyAuthSucceeded: true });
+          if (!state.completed.includes("ssh_ready")) state = completeStage3OCheckpoint(state, "ssh_ready", { target: sanitizeGpuTarget(target), waitSeconds: Math.round((Date.now() - waitStartedAt) / 1000), ...readCloreSshAuthEvidence() });
         } catch (error) {
           session ??= await provider.recoverExistingSession(STAGE3O_BATCH_ID);
           let attemptSpend = createRequestAttempted && state.attemptCount > attemptBeforeCreate ? CLORE_CREATION_FEE_USD : 0;
@@ -353,9 +403,9 @@ async function main() {
     }
     if (!session) throw new Error("stage3r_no_usable_clore_session");
     target ??= await provider.waitForSsh(session, deploymentReadinessTimeoutMs(session.hourlyUsd, preflight.authorization.limits.maxFailedSpendUsd - state.failedDeploymentSpendUsd));
-    if (!state.completed.includes("ssh_ready")) state = completeStage3OCheckpoint(state, "ssh_ready", { target: sanitizeGpuTarget(target), passwordAuthSucceeded: true, keyInstalled: true, keyAuthSucceeded: true });
+    if (!state.completed.includes("ssh_ready")) state = completeStage3OCheckpoint(state, "ssh_ready", { target: sanitizeGpuTarget(target), ...readCloreSshAuthEvidence() });
     if (!state.completed.includes("hardware_inspected")) {
-      const inspection = requireSuccess(sshCommand(target, "set -e; mkdir -p /workspace; nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader; nvidia-smi; free -b; nproc; df -B1 /workspace; python3 --version; python3 -c 'import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())'; (docker version || true)", 120_000), "hardware_inspection_failed");
+      const inspection = requireSuccess(sshCommand(target, stage3SHardwareInspectionCommand(), 180_000), "hardware_inspection_failed");
       state = completeStage3OCheckpoint(state, "hardware_inspected", { fullOutput: inspection });
     }
     if (!state.completed.includes("image_synced")) {
@@ -384,7 +434,7 @@ async function main() {
         setGenerationTaskStatus([STAGE3O_VIDEO_TASK_ID], "completed", { outputPath: String(wan.generated.outputPath ?? ""), thumbnailPath: String(wan.generated.thumbnailPath ?? "") });
       }
     } catch (error) {
-      setGenerationTaskStatus([STAGE3O_VIDEO_TASK_ID], "failed", { errorClass: error instanceof Error ? error.message.slice(0, 300) : "wan_failure", imagePreserved: true });
+      setGenerationTaskStatus([STAGE3O_VIDEO_TASK_ID], "failed", stage3SVideoFailureMetadata(error));
       state = checkpointThroughFailure(state, error);
     }
     state = await cleanup(session, target, provider, state);

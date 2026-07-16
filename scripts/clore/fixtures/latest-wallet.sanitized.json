@@ -16,11 +16,11 @@
     {
       "name": "USD-Blockchain",
       "currency": "USD-Blockchain",
-      "available": 13.6,
+      "available": 13.37,
       "usd_like": true
     }
   ],
-  "available_usd_balance": 13.6,
+  "available_usd_balance": 13.37,
   "balance_source": "direct USD-like wallet/API field",
   "planned_order_currency": "USD-Blockchain",
   "cheapest_compliant_5090": null,

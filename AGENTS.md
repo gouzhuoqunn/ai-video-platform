@@ -194,3 +194,6 @@ GPU Worker 相关规则：
 - For password-parity orders, prove password SSH first, install the validated project public key, then prove key SSH in the same order. Keep the temporary password only in ignored local state and delete it during cleanup.
 - Windows OpenSSH askpass must use an executable launcher such as `node.exe`; `.cmd` askpass files are not executable through its `CreateProcessW` path.
 - Public Jupyter bootstrap containers may not contain `/workspace`. Create it before filesystem inspection, restore, or runtime bootstrap. Docker must remain optional for this host-native path.
+- When `ssh_key` and `autossh_entrypoint=true` are sent together, Clore may install the key while disabling password authentication. Persist the observed password/key results and accept only a successful dedicated-key connection; never claim password success without evidence.
+- A Clore proxy may reuse the same exact host and mapped port with a different host key for a later order. Before first contact for a newly returned order endpoint, remove only that `[host]:port` entry from the dedicated project known-hosts file and then use `StrictHostKeyChecking=accept-new`.
+- Pre-bootstrap hardware inspection must report an absent PyTorch installation without failing. Runtime bootstrap owns installation of pinned Torch/ComfyUI packages.

@@ -41,7 +41,7 @@ export function writeManualParityState(state: ManualParitySessionState, filePath
 
 export function createManualParityState(serverId: string, filePath = MANUAL_PARITY_STATE_PATH) {
   const now = new Date();
-  return writeManualParityState({ schemaVersion: 1, serverId, orderId: null, createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 150 * 60_000).toISOString(), sshPassword: generateStrongSshPassword(), sshHost: null, sshPort: null, passwordAuthSucceeded: false, keyInstalled: false, keyAuthSucceeded: false }, filePath);
+  return writeManualParityState({ schemaVersion: 1, serverId, orderId: null, createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 180 * 60_000).toISOString(), sshPassword: generateStrongSshPassword(), sshHost: null, sshPort: null, passwordAuthSucceeded: false, keyInstalled: false, keyAuthSucceeded: false }, filePath);
 }
 
 export function updateManualParityState(update: Partial<Omit<ManualParitySessionState, "schemaVersion" | "sshPassword">>, filePath = MANUAL_PARITY_STATE_PATH) {
