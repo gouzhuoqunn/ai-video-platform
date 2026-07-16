@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "models": [
+    {
+      "generationType": "image",
+      "modelProfile": "flux2-klein-4b",
+      "cached": true,
+      "restoreReady": true,
+      "inferenceVerified": false,
+      "validatedFallback": true,
+      "executableWorkflow": true,
+      "currentKey": "production/rtx4090/image/current.json",
+      "revision": "flux2-klein-4b-5b4408e59397-a9e4ca87c16d",
+      "updatedAt": "2026-07-16T00:00:00.000Z"
+    },
+    {
+      "generationType": "video",
+      "modelProfile": "wan22-ti2v-5b",
+      "cached": true,
+      "restoreReady": true,
+      "inferenceVerified": false,
+      "validatedFallback": true,
+      "executableWorkflow": true,
+      "currentKey": "wan22-ti2v-5b/current.json",
+      "revision": "wan22-ti2v-5b-fb1388adc906",
+      "updatedAt": "2026-07-16T04:05:30.000Z"
+    }
+  ]
+}

@@ -1,5 +1,14 @@
 # Project Context
 
+## 2026-07-16 Stage 3N shared generation pool and verified Wan cache
+
+- Image and video requests now share one persistent local task pool. Normal image work arms at 3 queued tasks and normal video work arms at 2; an explicit immediate action may arm a smaller homogeneous batch. A single planned GPU session processes image work, unloads image models, processes video work, and then stops. Mixed-model inference is never concurrent.
+- The persistent scheduler records the selected batch and task IDs for restart idempotency. Its market watcher is read-only, polls no faster than once per minute, backs off after 30 minutes, filters GPU compatibility and VRAM before ranking reliability/rating and projected cost, and records rejection reasons. Both Clore and RunPod deployment holds remain enabled.
+- The local Chinese studio displays queued, armed, market-watching, provisioning, running, completed, failed, and canceled states; thresholds, remaining counts, hold state, market state, rejected-host reasons, and maximum projected cost are visible. Canceling an existing video task still uses the established refund RPC.
+- Wan cache run `29470206635` succeeded in 440 seconds. Three independently downloaded and SHA256-verified objects totaling 18,144,966,705 bytes were published only after all cache jobs succeeded. The immutable revision manifest, current pointer, and read-only HEAD/range checks passed. No GPU order, Pod, SSH connection, Runtime build, or inference was started.
+- `comfy-runtime/model-availability.json` is the single model gate. Wan restore is now ready but inference remains unverified; FLUX remains cached/restore-ready from its existing cache while real inference remains unverified. Scheduler selection fails closed for models without an executable workflow and verified restore path.
+- Deployment resume is guarded by the exact `--confirm-platform-recovered` flag plus zero active orders, no create lock, an armed model-ready batch, and a local incident acknowledgement. Pause enables the hold and drains an active session without bypassing the existing watchdog budget. The generated sanitized support package covers all 11 known failed orders without inventing unknown values.
+
 ## 2026-07-16 Stage 3M Clore-only bootstrap, bounded attempts, and Wan cache dispatch
 
 - Automatic rental now resolves to Clore only. RunPod has a separate ignored deployment hold and remains read-only for inventory/cleanup checks. Clore candidates accept CUDA capability 8.0+ image GPUs (including RTX 4090/5090, A40, A6000, and RTX 3090-class hosts) with at least 20GB VRAM, 32GB RAM, 120GB disk, on-demand pricing, effective hourly price at most 0.70 USD, and a 3.5-hour projection at most 2.50 USD.

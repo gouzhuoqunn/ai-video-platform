@@ -1,5 +1,30 @@
 # Clore.ai GPU Rental Prep
 
+## 2026-07-16 Stage 3N billing and guarded deployment controls
+
+Both Clore and RunPod deployment holds remain enabled. Stage 3N created no Clore order, RunPod Pod, SSH connection, or billable GPU resource.
+
+Read-only billing and safety status:
+
+```powershell
+npm run gpu:billing:status
+```
+
+Pause is safe during work: it enables the hold and marks an active pool session as draining, while the existing watchdog budget remains authoritative.
+
+```powershell
+npm run clore:deployment:pause
+```
+
+Resume is read-only unless the exact confirmation flag is present. Even with that flag, it fails closed unless there are zero active orders, no create lock, an armed model-ready batch, and `.secrets/clore-support-incident-ack.json` contains `{"acknowledged":true,"incident":"clore-order-never-running"}`.
+
+```powershell
+npm run clore:deployment:resume
+npm run clore:deployment:resume -- --confirm-platform-recovered
+```
+
+The sanitized support evidence is generated under `artifacts/clore-support/`. It covers all 11 known failed orders and uses `null` for unavailable facts rather than guessing.
+
 ## 2026-07-11 guarded real execution code
 
 - Added guarded create/cancel execution helpers and local_lab integration, but real execution remains off by default through `CLORE_ORDER_EXECUTION_ENABLED=false`.

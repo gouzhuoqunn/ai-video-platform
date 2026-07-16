@@ -5,7 +5,7 @@ type Plan = {
   cacheRunTriggered: boolean;
   officialModel: { repository: string; revision: string; registryStatus: string };
   comfyCacheSource: { repository: string; revision: string; totalSizeBytes: number; r2AdditionalCapacityBytes: number; files: Array<{ sourcePath: string; targetPath: string; sizeBytes: number; sha256: string }> };
-  githubActionsCachePlan: { trigger: string; parallelJobs: string[]; publishAfterAllShaVerified: boolean; runNow: boolean; stage3mRunId: number; stage3mRunResult: string; retryAllowedThisStage: boolean };
+  githubActionsCachePlan: { trigger: string; parallelJobs: string[]; publishAfterAllShaVerified: boolean; runNow: boolean; stage3mRunId: number; stage3mRunResult: string; retryAllowedThisStage: boolean; stage3nRunId: number; stage3nRunResult: string; stage3nDurationSeconds: number };
   workflow: { asset: string; executionStatus: string; requiredNodeClasses: string[] };
   inferencePlans: Array<{ gpu: string; runtimeCompatible: boolean; blocker?: string }>;
 };
@@ -37,6 +37,9 @@ assert.equal(plan.cacheRunTriggered, true);
 assert.equal(plan.githubActionsCachePlan.stage3mRunId, 29446260840);
 assert.equal(plan.githubActionsCachePlan.stage3mRunResult, "workflow_parse_failure_before_jobs");
 assert.equal(plan.githubActionsCachePlan.retryAllowedThisStage, false);
+assert.equal(plan.githubActionsCachePlan.stage3nRunId, 29470206635);
+assert.equal(plan.githubActionsCachePlan.stage3nRunResult, "success");
+assert.equal(plan.githubActionsCachePlan.stage3nDurationSeconds, 440);
 assert.ok(plan.inferencePlans.some((item) => item.gpu.includes("4090") && item.runtimeCompatible));
 for (const item of plan.inferencePlans.filter((entry) => !entry.runtimeCompatible)) assert.ok(item.blocker);
 console.log("wan_cache_plan_valid=true");

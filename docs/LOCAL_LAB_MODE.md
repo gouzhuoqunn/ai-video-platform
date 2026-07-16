@@ -168,3 +168,19 @@ npm run local-lab:reset -- --execute
 - Host selection and "准备租用" generate only an order plan and one-time nonce. The second confirmation dialog requires a checkbox plus `确认租用 <server_id>`.
 - Real order creation remains disabled by `CLORE_ORDER_EXECUTION_ENABLED=false`; this checkpoint still does not call `create_order`.
 - The local results API serves only loopback requests and never exposes absolute paths, raw Supabase object paths, signed URL text, or secrets.
+## 2026-07-16 图片/视频共享任务池
+
+本地实验台现在把图片和视频任务放进同一个持久任务池。普通图片累计 3 个、普通视频累计 2 个才会武装批次；“立即生成”可以武装较小的同类型批次。一次 GPU 会话按“图片 -> 卸载图片模型 -> 视频 -> 停机”的顺序执行，不会并行加载不同模型。
+
+页面会显示排队中、已武装、观察市场、准备实例、运行中、已完成、失败、已取消，以及还差几个任务、部署暂停状态、候选主机拒绝原因和最高预计费用。取消已有视频任务仍沿用原退款流程。
+
+只读/本地命令：
+
+```powershell
+npm run generation:pool:status
+npm run generation:pool:dry-run
+npm run generation:pool:arm
+npm run gpu:billing:status
+```
+
+任务池状态写入被 Git 忽略的 `.secrets/generation-pool-state.json`，进程重启后按批次 ID 和任务 ID 恢复，不重复选择或提交。市场观察至少间隔 60 秒，30 分钟后指数退避；部署 hold 开启时只读取市场，不创建订单。

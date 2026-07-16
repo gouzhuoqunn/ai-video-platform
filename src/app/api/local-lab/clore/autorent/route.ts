@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { advanceMockAutorentRequests, listAutorentRequests } from "@/lib/local-lab/autorent";
+import { listAutorentRequests } from "@/lib/local-lab/autorent";
+import { armGenerationPool, generationPoolSummary } from "@/lib/generation/task-pool";
 import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/route-guard";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -33,5 +34,12 @@ export async function POST(request: NextRequest) {
   const { userId, error } = await getUser();
   if (!userId) return NextResponse.json({ error }, { status: 401 });
 
-  return NextResponse.json(await advanceMockAutorentRequests(userId));
+  const armed = armGenerationPool();
+  return NextResponse.json({
+    note: armed.armed ? "调度批次已持久化；部署暂停期间只观察市场，不会创建订单。" : armed.reason,
+    scheduler_armed: armed.armed,
+    reused_persisted_batch: armed.reusedPersistedBatch,
+    pool: generationPoolSummary(armed.state),
+    create_order_called: false,
+  });
 }

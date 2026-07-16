@@ -3,7 +3,8 @@ import { LOCAL_LAB_ROLE } from "@/lib/local-lab/config";
 import { guardLocalLabMutation } from "@/lib/local-lab/route-guard";
 import { getSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { batchThreshold, shouldArmCloreScheduler } from "@/lib/local-lab/studio-mode";
+import { shouldArmCloreScheduler } from "@/lib/local-lab/studio-mode";
+import { armGenerationPool, createGenerationTask, generationThreshold, updateGenerationTasks, upsertGenerationTasks } from "@/lib/generation/task-pool";
 
 type BatchAction = "confirm" | "urgent" | "delete" | "regenerate";
 
@@ -60,6 +61,22 @@ async function queuedCount(userId: string) {
   return count ?? 0;
 }
 
+async function mirrorVideoJobs(userId: string, jobIds: string[], immediate: boolean) {
+  const admin = getSupabaseAdminClient();
+  const { data, error } = await admin.from("video_jobs").select("id,prompt,model_key,priority,status,created_at,confirmed_at,output_video_path,output_size_bytes,output_mime_type").eq("user_id", userId).in("id", jobIds);
+  if (error) throw new Error("Unable to mirror selected jobs into the generation pool.");
+  const tasks = (data ?? []).map((job) => createGenerationTask({
+    id: String(job.id), generationType: "video", prompt: String(job.prompt), modelProfile: "wan22-ti2v-5b",
+    priority: immediate || job.priority === "urgent" ? "immediate" : "normal",
+    status: immediate ? "armed" : job.status === "pending_confirmation" ? "pending_confirmation" : "waiting_for_batch",
+    createdAt: String(job.created_at), confirmedAt: job.confirmed_at ? String(job.confirmed_at) : null,
+    estimatedVram: 24, outputMetadata: { outputPath: job.output_video_path ?? null, sizeBytes: job.output_size_bytes ?? null, mimeType: job.output_mime_type ?? null },
+  }));
+  upsertGenerationTasks(tasks);
+  if (immediate) return armGenerationPool();
+  return null;
+}
+
 export async function POST(request: NextRequest) {
   const guard = guardLocalLabMutation(request);
   if (guard) return guard;
@@ -105,7 +122,8 @@ export async function POST(request: NextRequest) {
     const { data, error } = await supabase.rpc("confirm_video_jobs", { p_job_ids: jobIds, p_urgent: false });
     if (error) return NextResponse.json({ error: error.message.split("\n")[0] }, { status: 409 });
     const queueSize = await queuedCount(user.id);
-    const scheduler = shouldArmCloreScheduler({ immediate: false, queuedCount: queueSize, threshold: batchThreshold() });
+    await mirrorVideoJobs(user.id, jobIds, false);
+    const scheduler = shouldArmCloreScheduler({ immediate: false, queuedCount: queueSize, threshold: generationThreshold("video") });
     const autorent =
       gpuMode === "current" || !scheduler.schedulerArmed
         ? { request: null, error: null }
@@ -120,7 +138,7 @@ export async function POST(request: NextRequest) {
       create_order_called: false,
       automatic_provider: scheduler.provider,
       scheduler_armed: scheduler.schedulerArmed,
-      batch_threshold: batchThreshold(),
+      batch_threshold: generationThreshold("video"),
       queued_count: queueSize,
     });
   }
@@ -129,7 +147,8 @@ export async function POST(request: NextRequest) {
     const { data, error } = await supabase.rpc("mark_video_jobs_urgent", { p_job_ids: jobIds });
     if (error) return NextResponse.json({ error: error.message.split("\n")[0] }, { status: 409 });
     const queueSize = await queuedCount(user.id);
-    const scheduler = shouldArmCloreScheduler({ immediate: true, queuedCount: queueSize, threshold: batchThreshold() });
+    const poolArm = await mirrorVideoJobs(user.id, jobIds, true);
+    const scheduler = shouldArmCloreScheduler({ immediate: true, queuedCount: queueSize, threshold: generationThreshold("video") });
     const autorent =
       gpuMode === "current"
         ? { request: null, error: null }
@@ -144,7 +163,8 @@ export async function POST(request: NextRequest) {
       create_order_called: false,
       automatic_provider: scheduler.provider,
       scheduler_armed: scheduler.schedulerArmed,
-      batch_threshold: batchThreshold(),
+      generation_pool_armed: poolArm?.armed ?? false,
+      batch_threshold: generationThreshold("video"),
       queued_count: queueSize,
     });
   }
@@ -152,6 +172,7 @@ export async function POST(request: NextRequest) {
   if (action === "delete") {
     const { data, error } = await supabase.rpc("soft_delete_video_jobs", { p_job_ids: jobIds });
     if (error) return NextResponse.json({ error: error.message.split("\n")[0] }, { status: 409 });
+    updateGenerationTasks(jobIds, "delete");
     return NextResponse.json({
       action,
       deleted: true,
@@ -166,6 +187,9 @@ export async function POST(request: NextRequest) {
     if (error) return NextResponse.json({ error: error.message.split("\n")[0], failed_job_id: jobId }, { status: 409 });
     regenerated.push(Array.isArray(data) ? data[0] : data);
   }
+
+  const regeneratedTasks = regenerated.filter(Boolean).map((job) => createGenerationTask({ id: String(job.id), generationType: "video", prompt: String(job.prompt), modelProfile: "wan22-ti2v-5b", status: "pending_confirmation", createdAt: String(job.created_at), estimatedVram: 24 }));
+  upsertGenerationTasks(regeneratedTasks);
 
   return NextResponse.json({ action, regenerated });
 }

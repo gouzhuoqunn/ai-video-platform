@@ -1,6 +1,17 @@
 # Model Cache
 
-Status: private Cloudflare R2 bucket created, connected to dry-run planning, and permission-tested with separate admin and GPU read-only S3 credentials. No Wan2.2 weights were uploaded or downloaded.
+Status: the private Cloudflare R2 bucket contains the verified Wan2.2 Comfy cache revision. GPU inference has not been run.
+
+## Stage 3N verified Wan cache
+
+- GitHub Actions run: `29470206635`
+- Result and duration: success, 440 seconds
+- Source revision: `Comfy-Org/Wan_2.2_ComfyUI_Repackaged@fb1388adc906ab39ffc26ee40e96b22886b56bc4`
+- Objects: 3, totaling `18,144,966,705` bytes
+- Publication order: revision objects, immutable revision manifest, then current pointer
+- Independent verification: current pointer, manifest, every size/SHA256, and read-only HEAD plus first/last 1024-byte ranges passed
+
+The three downloads used isolated `$RUNNER_TEMP` Hugging Face caches and parallel jobs. This was the only Stage 3N dispatch. It created no GPU order and did not run inference. The authoritative readiness fields are in `comfy-runtime/model-availability.json`.
 
 ## Fixed Model
 

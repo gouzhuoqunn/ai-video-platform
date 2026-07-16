@@ -5,37 +5,45 @@ import { readActiveOrder } from "./order-state";
 
 type IncidentOrder = {
   order_id: string;
-  server_id: string;
-  gpu: string;
-  price_usd: number | null;
-  image: string;
-  payload: { autossh_entrypoint: boolean; ports: string[]; ssh_public_key_present: boolean; private_key_present: false };
-  outcome: { entered_running: boolean; ssh_endpoint_published: boolean; http_endpoint_published: boolean; wait_minutes: number | null; final_state: string };
+  server_id: string | null;
+  image_digest: string | null;
+  created_at: string | null;
+  cancelled_at: string | null;
+  final_status: string;
+  entered_running: boolean;
+  ssh_published: boolean;
   spend_usd: number | null;
+  evidence_note: string;
 };
 
-const image = "ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:187a7eb304075863dbd3f7a1b527530a06783ad8ea0fec5e51e2b9725d1bf137";
-const payload = { autossh_entrypoint: true, ports: ["22/tcp", "8080/http"], ssh_public_key_present: true, private_key_present: false as const };
-const orders: IncidentOrder[] = [
-  { order_id: "1954464", server_id: "105176", gpu: "NVIDIA GeForce RTX 4090", price_usd: null, image, payload, outcome: { entered_running: false, ssh_endpoint_published: false, http_endpoint_published: false, wait_minutes: 12, final_state: "cancelled:order_never_running" }, spend_usd: 0.18 },
-  { order_id: "1954484", server_id: "105173", gpu: "NVIDIA GeForce RTX 4090", price_usd: null, image, payload, outcome: { entered_running: false, ssh_endpoint_published: false, http_endpoint_published: false, wait_minutes: 12, final_state: "cancelled:order_never_running" }, spend_usd: 0.18 },
-  { order_id: "1954507", server_id: "104878", gpu: "NVIDIA GeForce RTX 5090", price_usd: null, image, payload, outcome: { entered_running: false, ssh_endpoint_published: false, http_endpoint_published: false, wait_minutes: 12, final_state: "cancelled:order_never_running" }, spend_usd: 0.19 },
-  { order_id: "1950673", server_id: "79445", gpu: "official-small-image-comparison", price_usd: null, image: "official_small_image_comparison", payload, outcome: { entered_running: false, ssh_endpoint_published: false, http_endpoint_published: false, wait_minutes: null, final_state: "historical_comparison_failed" }, spend_usd: null },
+const legacyDigest = "sha256:fd03ef72d7369f59b3af9e535d9f6a75add9430a5c1ef4e7fd5853be0e4c060a";
+const fixedRuntimeDigest = "sha256:187a7eb304075863dbd3f7a1b527530a06783ad8ea0fec5e51e2b9725d1bf137";
+const lightBootstrapDigest = "sha256:0586bbd2c26a8bcfd194d9d022ce4966ede23b3a743471032069c1f2ed2abc27";
+const unknownTime = "原始精确时间未保留；未进行推测";
+
+export const failedCloreOrders: IncidentOrder[] = [
+  { order_id: "1947533", server_id: null, image_digest: legacyDigest, created_at: null, cancelled_at: null, final_status: "cancelled:ssh_unavailable", entered_running: true, ssh_published: true, spend_usd: 0.34, evidence_note: `SSH 映射端口出现但持续重置/超时；${unknownTime}` },
+  { order_id: "1949701", server_id: "107713", image_digest: legacyDigest, created_at: "2026-07-13T09:27:31.000Z", cancelled_at: null, final_status: "expired:runtime_startup_failure_audit", entered_running: false, ssh_published: false, spend_usd: 0.11456018518518514, evidence_note: `创建时间来自脱敏 ct；${unknownTime}` },
+  { order_id: "1949948", server_id: null, image_digest: legacyDigest, created_at: null, cancelled_at: null, final_status: "expired:runtime_startup_failure_audit", entered_running: false, ssh_published: false, spend_usd: null, evidence_note: unknownTime },
+  { order_id: "1950673", server_id: "79445", image_digest: null, created_at: null, cancelled_at: null, final_status: "historical_official_image_comparison_failed", entered_running: false, ssh_published: false, spend_usd: null, evidence_note: unknownTime },
+  { order_id: "1954329", server_id: "91005", image_digest: "sha256:4e3dd6d2610c33ab2b260e970e4a9288043dc2c762cb1b8902b6712cfdfaa96c", created_at: null, cancelled_at: null, final_status: "cancelled:ssh_unavailable", entered_running: false, ssh_published: false, spend_usd: 0.25, evidence_note: `12 分钟内未发布 SSH；${unknownTime}` },
+  { order_id: "1954464", server_id: "105176", image_digest: fixedRuntimeDigest, created_at: null, cancelled_at: null, final_status: "cancelled:order_never_running", entered_running: false, ssh_published: false, spend_usd: 0.18, evidence_note: `12 分钟内未运行；${unknownTime}` },
+  { order_id: "1954484", server_id: "105173", image_digest: fixedRuntimeDigest, created_at: null, cancelled_at: null, final_status: "cancelled:order_never_running", entered_running: false, ssh_published: false, spend_usd: 0.18, evidence_note: `12 分钟内未运行；${unknownTime}` },
+  { order_id: "1954507", server_id: "104878", image_digest: fixedRuntimeDigest, created_at: null, cancelled_at: null, final_status: "cancelled:order_never_running", entered_running: false, ssh_published: false, spend_usd: 0.19, evidence_note: `12 分钟内未运行；${unknownTime}` },
+  { order_id: "1955984", server_id: "105175", image_digest: lightBootstrapDigest, created_at: "2026-07-15T19:59:54.438Z", cancelled_at: "2026-07-15T20:10:26.865Z", final_status: "cancelled:order_never_running", entered_running: false, ssh_published: false, spend_usd: 0.17, evidence_note: "611 秒内未运行" },
+  { order_id: "1956022", server_id: "105181", image_digest: lightBootstrapDigest, created_at: "2026-07-15T20:12:54.669Z", cancelled_at: "2026-07-15T20:23:22.831Z", final_status: "cancelled:order_never_running", entered_running: false, ssh_published: false, spend_usd: 0.17, evidence_note: "606 秒内未运行" },
+  { order_id: "1956054", server_id: "29169", image_digest: lightBootstrapDigest, created_at: "2026-07-15T20:25:24.600Z", cancelled_at: "2026-07-15T20:35:51.999Z", final_status: "cancelled:order_never_running", entered_running: false, ssh_published: false, spend_usd: 0.14, evidence_note: "606 秒内未运行" },
 ];
 
 export function buildCloreDeploymentIncident() {
   return {
-    schema_version: 1,
+    schema_version: 2,
     generated_at: new Date().toISOString(),
     deployment_hold: getCloreDeploymentHold(),
-    orders,
-    probe_summary: {
-      local_readiness_probe: "orders did not reach running or publish SSH; SSH was not attempted for the three incident orders",
-      github_runner_probe: "not_applicable: deployment failure occurred after Clore order creation, not in GitHub Actions",
-    },
-    balance: { before_usd: 14.78, after_usd: 14.23, observed_spend_usd: 0.55 },
+    orders: failedCloreOrders,
     final_active_order: readActiveOrder() === null ? 0 : 1,
-    redaction: { api_key: false, ssh_public_key_fulltext: false, passwords: false, environment: false, raw_payload: false },
+    known_total_spend_usd: Number(failedCloreOrders.reduce((total, order) => total + (order.spend_usd ?? 0), 0).toFixed(6)),
+    redaction: { api_key_included: false, full_ssh_public_key_included: false, authorization_header_included: false, password_included: false, raw_payload_included: false },
   };
 }
 
@@ -45,10 +53,12 @@ export function exportCloreDeploymentIncident(root = process.cwd()) {
   mkdirSync(dir, { recursive: true });
   const jsonPath = path.join(dir, "clore-deployment-incident.json");
   const mdPath = path.join(dir, "clore-deployment-incident.md");
+  const instructionsPath = path.join(dir, "README-发送给Clore支持.md");
   writeFileSync(jsonPath, `${JSON.stringify(incident, null, 2)}\n`, "utf8");
-  const rows = incident.orders.map((order) => `| ${order.order_id} | ${order.server_id} | ${order.gpu} | ${order.outcome.entered_running ? "yes" : "no"} | ${order.outcome.ssh_endpoint_published ? "yes" : "no"} | ${order.outcome.final_state} |`).join("\n");
-  writeFileSync(mdPath, `# Clore Deployment Incident\n\nGenerated: ${incident.generated_at}\n\n| Order | Server | GPU | Running | SSH published | Final state |\n| --- | --- | --- | --- | --- | --- |\n${rows}\n\nAll listed deployments used the fixed Runtime digest where applicable, ` + "`autossh_entrypoint=true`" + ", `22/tcp`, and `8080/http`; no `8188` port, API key, private key, password, environment dump, or raw payload is included. The three current incidents never entered running or published SSH/HTTP. Final active order count: ${incident.final_active_order}.\n", "utf8");
-  return { jsonPath, mdPath, finalActiveOrder: incident.final_active_order };
+  const rows = incident.orders.map((order) => `| ${order.order_id} | ${order.server_id ?? "未保留"} | ${order.created_at ?? "未保留"} | ${order.cancelled_at ?? "未保留"} | ${order.entered_running ? "是" : "否"} | ${order.ssh_published ? "是" : "否"} | ${order.spend_usd ?? "未保留"} | ${order.final_status} |`).join("\n");
+  writeFileSync(mdPath, `# Clore 部署失败证据\n\n生成时间：${incident.generated_at}\n\n| 订单 | 服务器 | 创建时间 | 取消时间 | Running | SSH | 花费 USD | 最终状态 |\n| --- | --- | --- | --- | --- | --- | ---: | --- |\n${rows}\n\n镜像 digest 及证据说明见 JSON。所有未知字段均明确标记为未保留，没有推测。最终本地活跃订单数：${incident.final_active_order}。\n`, "utf8");
+  writeFileSync(instructionsPath, "# 如何发送给 Clore 支持\n\n1. 在 Clore 支持工单中说明：多台独立服务器的订单长期未进入 Running 或未发布可用 SSH。\n2. 附上 `clore-deployment-incident.json` 和 `clore-deployment-incident.md`。\n3. 请支持人员核查订单对应宿主机的镜像拉取、容器启动和 SSH 代理日志，并确认平台恢复后再通知你。\n4. 不要附加 `.secrets`、API Key、SSH 私钥、公钥全文或浏览器授权头。\n5. 收到支持确认后，手工创建 `.secrets/clore-support-incident-ack.json`，内容仅为 `{\"acknowledged\":true,\"incident\":\"clore-order-never-running\"}`，然后再使用受保护的恢复命令。\n", "utf8");
+  return { jsonPath, mdPath, instructionsPath, failedOrderCount: incident.orders.length, finalActiveOrder: incident.final_active_order };
 }
 
 if (process.argv[1]?.endsWith("support-export.ts")) console.log(JSON.stringify(exportCloreDeploymentIncident(), null, 2));

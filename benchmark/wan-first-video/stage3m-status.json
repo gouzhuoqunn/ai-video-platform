@@ -1,12 +1,17 @@
 {
   "schemaVersion": 1,
-  "phase": "3M",
+  "phase": "3N",
   "wanCachePlanValid": true,
   "wanWorkflowPlanValid": true,
   "cacheRunTriggered": true,
-  "cacheRunId": 29446260840,
-  "cacheRunResult": "workflow_parse_failure_before_jobs",
-  "objectsUploaded": 0,
+  "cacheRunId": 29470206635,
+  "cacheRunResult": "success",
+  "cacheRunDurationSeconds": 440,
+  "objectsUploaded": 3,
+  "totalSizeBytes": 18144966705,
+  "currentPointerValidated": true,
+  "readonlyHeadRangeValidated": true,
+  "previousFailedRunId": 29446260840,
   "retryAllowedThisStage": false,
-  "nextAction": "Use the corrected workflow in a later explicitly authorized stage; Stage 3M does not launch a second run."
+  "nextAction": "Keep GPU deployment held until Clore support confirms recovery, then resume only with an armed model-ready batch."
 }

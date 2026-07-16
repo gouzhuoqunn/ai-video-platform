@@ -12,6 +12,10 @@ const workflow = readFileSync(".github/workflows/wan-stage3m-model-cache.yml", "
 assert.match(workflow, /workflow_dispatch/);
 assert.match(workflow, /alias: \[unet, text, vae\]/);
 assert.match(workflow, /hf_xet/);
+assert.match(workflow, /HF_HOME=\$RUNNER_TEMP\/hf-wan-/);
+assert.doesNotMatch(workflow, /HF_HOME:\s*\$\{\{\s*runner\.temp/);
+assert.match(workflow, /timeout-minutes: 35/);
+assert.match(workflow, /timeout-minutes: 8/);
 assert.match(workflow, /leavePartsOnError|multipart|wan-stage3m-cache\.ts upload-local/);
 assert.match(workflow, /current pointer/);
 assert.doesNotMatch(workflow, /upload-artifact/);
