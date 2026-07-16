@@ -109,6 +109,10 @@ export function buildManualParityCreateOrderBody(input: { serverId: string; curr
   return { currency: input.currency, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, renting_server: Number(input.serverId), type: "on-demand", ports: { "22": "tcp" }, ssh_password: input.sshPassword, ssh_key: input.sshPublicKey, autossh_entrypoint: true };
 }
 
+export function buildKeyOnlyCreateOrderBody(input: { serverId: string; currency: string; sshPublicKey: string; requiredPriceForApi: number }): CreateOrderRequest {
+  return { currency: input.currency, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, renting_server: Number(input.serverId), type: "on-demand", ports: { "22": "tcp" }, ssh_key: input.sshPublicKey, required_price: input.requiredPriceForApi, autossh_entrypoint: true };
+}
+
 export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
   const serialized = JSON.stringify(body);
   if (/CLORE_API_KEY|SUPABASE_SECRET_KEY|SUPABASE_SERVICE_ROLE_KEY|GPU_WORKER_PASSWORD|LOCAL_LAB_PASSWORD/i.test(serialized)) {
@@ -123,12 +127,13 @@ export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
   const fixedRuntime = body.image === COMFY_RUNTIME_IMAGE && /@sha256:[a-f0-9]{64}$/.test(body.image);
   const lightBootstrap = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.env?.RUNTIME_BOOTSTRAP_PROFILE === CLORE_LIGHT_BOOTSTRAP_PROFILE;
   const manualParity = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.ssh_password !== undefined && body.env === undefined && body.command === undefined && body.required_price === undefined && body.autossh_entrypoint === true;
-  if (!fixedRuntime && !lightBootstrap && !manualParity) throw new Error("Clore order image must be the pinned Runtime or an approved light bootstrap profile.");
+  const keyOnly = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.ssh_password === undefined && body.env === undefined && body.command === undefined && body.required_price !== undefined && body.autossh_entrypoint === true;
+  if (!fixedRuntime && !lightBootstrap && !manualParity && !keyOnly) throw new Error("Clore order image must be the pinned Runtime or an approved light bootstrap profile.");
   const ports = Object.keys(body.ports);
   if (body.ports["22"] !== "tcp" || body.ports["8188"] !== undefined || ports.some((port) => !["22", "8080"].includes(port)) || ports.filter((port) => body.ports[port] === "http").length > 1) {
     throw new Error("Order must expose SSH and at most one HTTP port; ComfyUI 8188 is forbidden.");
   }
-  if ((lightBootstrap || manualParity) && ports.length !== 1) {
+  if ((lightBootstrap || manualParity || keyOnly) && ports.length !== 1) {
     throw new Error("clore_light_bootstrap exposes SSH only.");
   }
   if (!body.ssh_key || !/^ssh-ed25519\s+[A-Za-z0-9+/=]+(?:\s+.*)?$/.test(body.ssh_key) || /private key|-----begin/i.test(body.ssh_key)) {

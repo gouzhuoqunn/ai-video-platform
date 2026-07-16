@@ -12,6 +12,7 @@ COMFY_COMMIT='da2608926eaf68fd532bba4e1ace3402c5d21399'
 prepare_overlay() {
   mkdir -p "$RUNTIME_DIR" /workspace/ai-runtime /workspace/models /workspace/logs /workspace/comfy-user
   tar -xzf "$ARCHIVE" -C "$RUNTIME_DIR"
+  find "$RUNTIME_DIR" -type f -name '*.sh' -exec sed -i 's/\r$//' {} +
   chmod 0755 "$RUNTIME_DIR/entrypoint.sh"
 }
 
@@ -22,7 +23,7 @@ docker_available() {
 prepare_native() {
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ffmpeg python3-venv ca-certificates curl
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ffmpeg python3-venv python3-dev gcc libc6-dev ca-certificates curl
     rm -rf /var/lib/apt/lists/*
   fi
   if [ ! -d "$COMFY_DIR/.git" ]; then

@@ -10,7 +10,7 @@ import { assertNoSecretOutput } from "./clore/client";
 import { readSupportAcknowledgement, billingSafetyBlockers, SUPPORT_ACK_PATH } from "./clore/support-acknowledgement";
 import { consumeOperatorRetryOverride, markOperatorRetryConsumed, operatorRetryPaths, readConsumedOperatorRetryOverride, readOperatorRetryOverride, type OperatorRetryPaths } from "./clore/operator-retry-override";
 import { readActiveOrder } from "./clore/order-state";
-import { failedCloreOrders } from "./clore/support-export";
+import { failedCloreOrders, knownVerifiedCloreHosts } from "./clore/support-export";
 import { LOCAL_WATCHDOG_TASK_NAME } from "./clore/watchdog-io";
 import { assertWatchdogsReadyForCreate } from "./clore/watchdog-preflight";
 import { readCloreSshAuthEvidence } from "./gpu-providers/clore";
@@ -31,7 +31,8 @@ const MAX_TOTAL_SPEND_USD = 2.5;
 const MAX_RUNTIME_MINUTES = 180;
 const MAX_SSH_WAIT_MINUTES = 10;
 const CLORE_CREATION_FEE_USD = 0.1;
-const FAILED_SERVER_IDS = new Set(failedCloreOrders.map((order) => order.server_id).filter((id): id is string => Boolean(id)));
+const KNOWN_VERIFIED_SERVER_IDS = new Set<string>(knownVerifiedCloreHosts.map((host) => host.server_id));
+const FAILED_SERVER_IDS = new Set(failedCloreOrders.map((order) => order.server_id).filter((id): id is string => typeof id === "string" && id.length > 0 && !KNOWN_VERIFIED_SERVER_IDS.has(id)));
 const MANUAL_GOLDEN_SERVER_IDS = new Set(["28726"]);
 
 function argument(name: string) { const prefix = `--${name}=`; return process.argv.find((value) => value.startsWith(prefix))?.slice(prefix.length); }
@@ -79,7 +80,7 @@ function checkpointThroughFailure(state: Stage3OLiveState, error: unknown) {
   while (true) {
     const checkpoint = nextStage3OCheckpoint(next);
     if (!checkpoint || checkpoint === "runtime_stopped") break;
-    next = completeStage3OCheckpoint(next, checkpoint, { success: false, skippedAfterError: true, errorClass: message.slice(0, 300) });
+    next = completeStage3OCheckpoint(next, checkpoint, { ...(next.details[checkpoint] ?? {}), success: false, skippedAfterError: true, errorClass: message.slice(0, 300) });
   }
   return next;
 }
@@ -90,6 +91,7 @@ export function rankStage3OCandidates(candidates: GpuCandidate[], recommendedSer
     .filter((candidate) => !FAILED_SERVER_IDS.has(candidate.id) && !MANUAL_GOLDEN_SERVER_IDS.has(candidate.id) && /RTX\s*(4090|5090)/i.test(candidate.gpuType) && candidate.vramGb >= 23 && candidate.minimumRamGb >= 32 && candidate.containerDiskGb >= 180 && candidate.interruptible === false && candidate.hourlyUsd !== null && candidate.hourlyUsd <= 0.7 && candidate.hourlyUsd * (MAX_RUNTIME_MINUTES / 60) + CLORE_CREATION_FEE_USD <= MAX_TOTAL_SPEND_USD)
     .sort((left, right) =>
       (recommended.get(left.id) ?? 999) - (recommended.get(right.id) ?? 999) ||
+      Number(KNOWN_VERIFIED_SERVER_IDS.has(right.id)) - Number(KNOWN_VERIFIED_SERVER_IDS.has(left.id)) ||
       left.priority - right.priority ||
       (right.reliability ?? -1) - (left.reliability ?? -1) ||
       (right.rating ?? -1) - (left.rating ?? -1) ||
@@ -155,6 +157,49 @@ export function stage3SHardwareInspectionCommand() {
   return "set -e; mkdir -p /workspace; echo '=== gpu_summary ==='; nvidia-smi --query-gpu=name,memory.total,memory.used,driver_version --format=csv,noheader; echo '=== nvidia_smi ==='; nvidia-smi; echo '=== memory_bytes ==='; free -b; echo '=== vcpu ==='; nproc; echo '=== root_disk_bytes ==='; df -B1 /; echo '=== workspace_disk_bytes ==='; df -B1 /workspace; echo '=== python_torch_cuda ==='; python3 --version; python3 -c 'import importlib.util; spec=importlib.util.find_spec(\"torch\"); print(\"torch_present=\"+str(spec is not None).lower()); exec(\"import torch\\nprint(\\\"torch_version=\\\"+torch.__version__)\\nprint(\\\"torch_cuda_version=\\\"+str(torch.version.cuda))\\nprint(\\\"cuda_available=\\\"+str(torch.cuda.is_available()).lower())\\nprint(\\\"cuda_device=\\\"+(torch.cuda.get_device_name(0) if torch.cuda.is_available() else \\\"none\\\"))\\nprint(\\\"compute_capability=\\\"+(str(torch.cuda.get_device_capability(0)) if torch.cuda.is_available() else \\\"none\\\"))\") if spec else None'; echo '=== docker ==='; if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then echo docker_available=true; docker version; else echo docker_available=false; fi; echo '=== network_probe ==='; curl -L -sS --max-time 20 -o /dev/null -w 'download_bytes=%{size_download} speed_bytes_per_second=%{speed_download} http_code=%{http_code}\\n' 'https://speed.cloudflare.com/__down?bytes=1000000' || echo network_probe_failed";
 }
 
+export type Stage3TCommandEvidence = { label: string; command: string; startedAt: string; completedAt: string; exitCode: number | null; stdout: string; stderr: string };
+
+export function stage3THardwareAuditCommands() {
+  return [
+    { label: "workspace_create", command: "mkdir -p /workspace" },
+    { label: "gpu_summary", command: "nvidia-smi --query-gpu=name,memory.total,memory.used,driver_version --format=csv,noheader" },
+    { label: "nvidia_smi", command: "nvidia-smi" },
+    { label: "memory", command: "free -b" },
+    { label: "cpu", command: "nproc; lscpu" },
+    { label: "root_filesystem", command: "df -B1 /" },
+    { label: "workspace_filesystem", command: "df -B1 /workspace" },
+    { label: "python", command: "python3 --version" },
+    { label: "docker", command: "if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then echo docker_available=true; docker version; else echo docker_available=false; fi" },
+    { label: "torch_optional", command: "python3 -c 'import importlib.util; s=importlib.util.find_spec(\"torch\"); print(\"torch_installed=\"+str(s is not None).lower()); exec(\"import torch\\nprint(\\\"torch_version=\\\"+torch.__version__)\\nprint(\\\"torch_cuda_version=\\\"+str(torch.version.cuda))\\nprint(\\\"cuda_available=\\\"+str(torch.cuda.is_available()).lower())\") if s else None'" },
+    { label: "network_probe", command: "curl -L -sS --max-time 20 -o /dev/null -w 'download_bytes=%{size_download} speed_bytes_per_second=%{speed_download} http_code=%{http_code}\\n' 'https://speed.cloudflare.com/__down?bytes=1000000' || echo network_probe_failed" },
+  ] as const;
+}
+
+export function runStage3THardwareAudit(target: GpuTarget, execute: typeof sshCommand = sshCommand) {
+  const evidence: Stage3TCommandEvidence[] = [];
+  for (const item of stage3THardwareAuditCommands()) {
+    const startedAt = new Date().toISOString(); const result = execute(target, item.command, 180_000); const completedAt = new Date().toISOString();
+    const record = { label: item.label, command: item.command, startedAt, completedAt, exitCode: result.status, stdout: String(result.stdout ?? ""), stderr: String(result.stderr ?? "") };
+    evidence.push(record);
+    if (result.status !== 0) throw Object.assign(new Error(`hardware_audit_${item.label}_failed:${record.stderr.trim().slice(-500)}`), { evidence });
+  }
+  return evidence;
+}
+
+export function validateStage3THardwareEvidence(evidence: Stage3TCommandEvidence[]) {
+  const output = (label: string) => evidence.find((item) => item.label === label)?.stdout ?? "";
+  const gpu = output("gpu_summary");
+  if (!/RTX\s*(4090|5090)/i.test(gpu)) throw new Error(`hardware_gpu_not_allowed:${gpu.split(/\r?\n/)[0]?.slice(0, 120)}`);
+  const vramMib = Number(/,\s*([0-9.]+)\s*MiB/i.exec(gpu)?.[1]);
+  if (!Number.isFinite(vramMib) || vramMib < 23 * 1024) throw new Error(`hardware_vram_below_23gb:${vramMib}`);
+  const ramBytes = Number(/^Mem:\s+(\d+)/m.exec(output("memory"))?.[1]);
+  if (!Number.isFinite(ramBytes) || ramBytes < 32 * 1024 ** 3) throw new Error(`hardware_ram_below_32gb:${ramBytes}`);
+  const workspaceLine = output("workspace_filesystem").trim().split(/\r?\n/).at(-1) ?? "";
+  const workspaceBytes = Number(workspaceLine.trim().split(/\s+/)[1]);
+  if (!Number.isFinite(workspaceBytes) || workspaceBytes < 180 * 1024 ** 3) throw new Error(`hardware_workspace_below_180gb:${workspaceBytes}`);
+  return { gpu: gpu.split(/\r?\n/)[0]?.trim() ?? "unknown", vramMib, ramBytes, workspaceBytes, torchInstalled: /torch_installed=true/i.test(output("torch_optional")), dockerAvailable: /docker_available=true/i.test(output("docker")) };
+}
+
 export function stage3SVideoFailureMetadata(error: unknown) {
   return { errorClass: error instanceof Error ? error.message.slice(0, 300) : "wan_failure", imagePreserved: true };
 }
@@ -165,6 +210,7 @@ export function resetStage3PPreCreateFailure() {
   pool.tasks = pool.tasks.map((task) => {
     if (!selected.has(task.id)) return task;
     const outputMetadata = { ...task.outputMetadata }; delete outputMetadata.errorClass; delete outputMetadata.imagePreserved;
+    if (task.id === STAGE3O_VIDEO_TASK_ID) Object.assign(outputMetadata, { width: 832, height: 480, frames: 33, fps: 16, durationSeconds: 2.0625 });
     return { ...task, status: "armed" as const, batchId: STAGE3O_BATCH_ID, outputMetadata };
   });
   pool.scheduler = { ...pool.scheduler, state: "batch_ready", selectedBatchId: STAGE3O_BATCH_ID, selectedTaskIds: [...STAGE3O_TASK_IDS], selectedServerId: null, orderCreationAttempted: false, drainingRequested: false };
@@ -175,7 +221,8 @@ export function resetStage3PPreCreateFailure() {
 export function resetStage3RContinuation() {
   const state = readStage3OState();
   if (readActiveOrder()) throw new Error("stage3r_continuation_active_order_present");
-  if (state.attemptCount !== 1 || state.failedDeploymentSpendUsd <= 0 || state.failedDeploymentSpendUsd >= MAX_FAILED_DEPLOYMENT_SPEND_USD) throw new Error("stage3r_continuation_state_invalid");
+  const postSshCleanupVerified = state.completed.includes("ssh_ready") && state.completed.includes("cleanup_verified") && state.details.cleanup_verified?.activeOrders === 0;
+  if (state.attemptCount !== 1 || state.failedDeploymentSpendUsd < 0 || state.failedDeploymentSpendUsd >= MAX_FAILED_DEPLOYMENT_SPEND_USD || (state.failedDeploymentSpendUsd === 0 && !postSshCleanupVerified)) throw new Error("stage3r_continuation_state_invalid");
   const pool = readGenerationPool(); const selected = new Set<string>(STAGE3O_TASK_IDS);
   pool.tasks = pool.tasks.map((task) => {
     if (!selected.has(task.id)) return task;
@@ -366,7 +413,7 @@ async function main() {
             sshPublicKey: "managed-by-clore-provider",
             bootstrapImage: FIXED_RUNTIME_DIGEST,
             dryRun: false,
-            cloreProfile: "clore_manual_parity",
+            cloreProfile: "clore_key_only",
             beforeCreateRequest: () => {
               if (preflight.authorization.method === "operator_retry" && attemptBeforeCreate === 0) consumeOperatorRetryOverride(preflight.authorization.paths);
               state = writeStage3OState({ ...state, attemptCount: state.attemptCount + 1, serverId: candidate.id });
@@ -378,7 +425,7 @@ async function main() {
           });
           const readinessTimeoutMs = deploymentReadinessTimeoutMs(session.hourlyUsd, remainingFailedSpendUsd);
           state = writeStage3OState({ ...state, orderId: session.id });
-          if (!state.completed.includes("order_created")) state = completeStage3OCheckpoint(state, "order_created", { orderId: session.id, serverId: candidate.id, gpu: candidate.gpuType, hourlyUsd: session.hourlyUsd, reliability: candidate.reliability, rating: candidate.rating, downloadMbps: candidate.downloadMbps, uploadMbps: candidate.uploadMbps, readinessTimeoutSeconds: Math.floor(readinessTimeoutMs / 1000), parityProfile: "password_key_autossh_minimal" });
+          if (!state.completed.includes("order_created")) state = completeStage3OCheckpoint(state, "order_created", { orderId: session.id, serverId: candidate.id, gpu: candidate.gpuType, hourlyUsd: session.hourlyUsd, reliability: candidate.reliability, rating: candidate.rating, downloadMbps: candidate.downloadMbps, uploadMbps: candidate.uploadMbps, readinessTimeoutSeconds: Math.floor(readinessTimeoutMs / 1000), parityProfile: "key_only_autossh_minimal" });
           const waitStartedAt = Date.now();
           target = await provider.waitForSsh(session, readinessTimeoutMs);
           if (!state.completed.includes("ssh_ready")) state = completeStage3OCheckpoint(state, "ssh_ready", { target: sanitizeGpuTarget(target), waitSeconds: Math.round((Date.now() - waitStartedAt) / 1000), ...readCloreSshAuthEvidence() });
@@ -405,8 +452,15 @@ async function main() {
     target ??= await provider.waitForSsh(session, deploymentReadinessTimeoutMs(session.hourlyUsd, preflight.authorization.limits.maxFailedSpendUsd - state.failedDeploymentSpendUsd));
     if (!state.completed.includes("ssh_ready")) state = completeStage3OCheckpoint(state, "ssh_ready", { target: sanitizeGpuTarget(target), ...readCloreSshAuthEvidence() });
     if (!state.completed.includes("hardware_inspected")) {
-      const inspection = requireSuccess(sshCommand(target, stage3SHardwareInspectionCommand(), 180_000), "hardware_inspection_failed");
-      state = completeStage3OCheckpoint(state, "hardware_inspected", { fullOutput: inspection });
+      let commands: Stage3TCommandEvidence[] = [];
+      try { commands = runStage3THardwareAudit(target); }
+      catch (error) {
+        commands = (error as Error & { evidence?: Stage3TCommandEvidence[] }).evidence ?? commands;
+        state = writeStage3OState({ ...state, details: { ...state.details, hardware_inspected: { commands } } });
+        throw error;
+      }
+      const parsed = validateStage3THardwareEvidence(commands);
+      state = completeStage3OCheckpoint(state, "hardware_inspected", { commands, parsed });
     }
     if (!state.completed.includes("image_synced")) {
       setGenerationTaskStatus([STAGE3O_IMAGE_TASK_ID], "restoring_models");

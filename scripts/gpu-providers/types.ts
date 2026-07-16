@@ -71,7 +71,7 @@ export type CreateSessionInput = {
   dryRun: boolean;
   beforeCreateRequest?: () => Promise<void> | void;
   afterCreateRequestAttempt?: () => Promise<void> | void;
-  cloreProfile?: "clore_manual_parity";
+  cloreProfile?: "clore_manual_parity" | "clore_key_only";
 };
 
 export type BillingSummary = {

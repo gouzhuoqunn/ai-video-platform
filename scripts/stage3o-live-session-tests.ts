@@ -3,8 +3,10 @@ import { mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { completeStage3OCheckpoint, initialStage3OState, nextStage3OCheckpoint, readStage3OState, STAGE3O_CHECKPOINTS } from "./stage3o-live-state";
-import { rankStage3OCandidates, stage3SHardwareInspectionCommand, stage3SVideoFailureMetadata } from "./generation-live-session";
+import { rankStage3OCandidates, runStage3THardwareAudit, stage3SHardwareInspectionCommand, stage3SVideoFailureMetadata, validateStage3THardwareEvidence } from "./generation-live-session";
 import type { GpuCandidate } from "./gpu-providers/types";
+import type { GpuTarget } from "./gpu-providers/types";
+import type { sshCommand } from "./gpu-providers/common";
 import { buildStage3OWanWorkflow, validateStage3OWanWorkflow } from "./stage3o-wan-executor";
 import { readFileSync } from "node:fs";
 
@@ -16,8 +18,14 @@ const candidate = (id: string, disk: number, price: number): GpuCandidate => ({ 
 assert.deepEqual(rankStage3OCandidates([candidate("2", 200, 0.4), candidate("1", 200, 0.5), candidate("bad", 120, 0.1)], ["1"]).map((item) => item.id), ["1", "2"]);
 assert.deepEqual(rankStage3OCandidates([candidate("28726", 200, 0.4), candidate("3", 200, 0.5)], []).map((item) => item.id), ["3"], "manual golden server must not be reused");
 assert.deepEqual(rankStage3OCandidates([candidate("small-disk", 179, 0.2), { ...candidate("low-vram", 200, 0.2), vramGb: 22 }, { ...candidate("a40", 200, 0.2), gpuType: "A40" }], []).map((item) => item.id), []);
+assert.deepEqual(rankStage3OCandidates([candidate("ordinary", 200, 0.1), candidate("29167", 200, 0.2), candidate("105178", 200, 0.3)], []).map((item) => item.id), ["29167", "105178", "ordinary"], "deployment/SSH-verified hosts must be preferred and not generically excluded");
 const hardwareCommand = stage3SHardwareInspectionCommand(); assert.ok(hardwareCommand.indexOf("mkdir -p /workspace") < hardwareCommand.indexOf("df -B1 /workspace")); assert.ok(hardwareCommand.includes("cuda_device=")); assert.ok(hardwareCommand.includes("root_disk_bytes")); assert.ok(hardwareCommand.includes("docker_available=false")); assert.ok(hardwareCommand.includes("network_probe")); assert.ok(hardwareCommand.includes("torch_present=")); assert.ok(hardwareCommand.includes("find_spec")); assert.ok(!hardwareCommand.includes("python3 -c 'import torch;"), "a pristine host must not fail inspection before bootstrap installs torch");
+const fakeTarget = {} as GpuTarget;
+const audit = runStage3THardwareAudit(fakeTarget, ((_target: GpuTarget, command: string) => ({ status: 0, stdout: command.includes("query-gpu") ? "NVIDIA GeForce RTX 4090, 24564 MiB, 0 MiB, 570.00\n" : command === "free -b" ? "Mem: 68719476736 1 1 1 1 1\n" : command === "df -B1 /workspace" ? "Filesystem 1B-blocks Used Available Use% Mounted on\n/dev/root 858993459200 1 858993459199 1% /workspace\n" : command.includes("find_spec") ? "torch_installed=false\n" : command.includes("docker_available") ? "docker_available=false\n" : "ok\n", stderr: "" })) as typeof sshCommand);
+assert.equal(audit.find((item) => item.label === "torch_optional")?.stdout.trim(), "torch_installed=false"); assert.equal(validateStage3THardwareEvidence(audit).torchInstalled, false);
 assert.deepEqual(stage3SVideoFailureMetadata(new Error("video failed")), { errorClass: "video failed", imagePreserved: true });
-assert.equal(validateStage3OWanWorkflow(buildStage3OWanWorkflow()).durationSeconds, 2.5625);
-const liveSource = readFileSync("scripts/generation-live-session.ts", "utf8"); assert.ok(liveSource.includes("clore:watchdog:local:install")); assert.ok(liveSource.includes("clore:watchdog:remote:arm")); assert.ok(liveSource.includes("clore:watchdog:remote:disarm")); assert.ok(liveSource.includes("/Disable")); assert.ok(liveSource.includes('cloreProfile: "clore_manual_parity"')); assert.ok(liveSource.includes("MAX_HOST_ATTEMPTS = 2")); assert.ok(liveSource.includes("MAX_FAILED_DEPLOYMENT_SPEND_USD = 0.4")); assert.ok(liveSource.includes("readCloreSshAuthEvidence()"), "checkpoint must use observed SSH authentication evidence");
+assert.equal(validateStage3OWanWorkflow(buildStage3OWanWorkflow()).durationSeconds, 2.0625);
+const liveSource = readFileSync("scripts/generation-live-session.ts", "utf8"); assert.ok(liveSource.includes("clore:watchdog:local:install")); assert.ok(liveSource.includes("clore:watchdog:remote:arm")); assert.ok(liveSource.includes("clore:watchdog:remote:disarm")); assert.ok(liveSource.includes("/Disable")); assert.ok(liveSource.includes('cloreProfile: "clore_key_only"')); assert.ok(liveSource.includes("MAX_HOST_ATTEMPTS = 2")); assert.ok(liveSource.includes("MAX_FAILED_DEPLOYMENT_SPEND_USD = 0.4")); assert.ok(liveSource.includes("readCloreSshAuthEvidence()"), "checkpoint must use observed SSH authentication evidence");
+const firstImageSource = readFileSync("scripts/gpu-first-image.ts", "utf8"); assert.ok(firstImageSource.includes("sed -i 's/\\\\r$//' /workspace/clore-light-bootstrap.sh"), "Windows-to-Linux bootstrap transfer must normalize CRLF before execution");
+const bootstrapSource = readFileSync("scripts/clore/clore-light-bootstrap.sh", "utf8"); assert.ok(bootstrapSource.includes("python3-dev gcc libc6-dev"), "host-mode bootstrap must include the compiler and C/Python headers required by Triton");
 console.log("Stage 3O checkpoint resume, sequential image-unload-video flow, candidate policy, and cleanup order passed.");

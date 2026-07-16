@@ -27,7 +27,7 @@ export function buildStage3OWanWorkflow(input: { width?: number; height?: number
   const workflow = structuredClone(workflowTemplate) as Record<string, WorkflowNode>;
   workflow["3"].inputs.seed = 20260715;
   workflow["6"].inputs.text = "A futuristic white research station beside a blue ocean at sunset, gentle waves moving, clouds drifting slowly, cinematic camera, realistic lighting";
-  workflow["55"].inputs.width = input.width ?? 1280; workflow["55"].inputs.height = input.height ?? 704; workflow["55"].inputs.length = 41; workflow["55"].inputs.batch_size = 1;
+  workflow["55"].inputs.width = input.width ?? 832; workflow["55"].inputs.height = input.height ?? 480; workflow["55"].inputs.length = 33; workflow["55"].inputs.batch_size = 1;
   workflow["47"].inputs.fps = 16;
   delete workflow["28"];
   return workflow;
@@ -39,8 +39,8 @@ export function validateStage3OWanWorkflow(workflow = buildStage3OWanWorkflow())
   const missing = required.filter((name) => !classes.has(name));
   if (missing.length) throw new Error(`wan_workflow_nodes_missing:${missing.join(",")}`);
   const width = Number(workflow["55"].inputs.width); const height = Number(workflow["55"].inputs.height);
-  if (!((width === 1280 && height === 704) || (width === 854 && height === 480)) || workflow["55"].inputs.length !== 41 || workflow["47"].inputs.fps !== 16) throw new Error("wan_stage3o_shape_invalid");
-  return { valid: true, requiredNodes: required, durationSeconds: 41 / 16, width, height };
+  if (!((width === 832 && height === 480) || (width === 640 && height === 368)) || workflow["55"].inputs.length !== 33 || workflow["47"].inputs.fps !== 16) throw new Error("wan_stage3o_shape_invalid");
+  return { valid: true, requiredNodes: required, durationSeconds: 33 / 16, width, height };
 }
 
 function savedVideo(history: unknown) {
@@ -84,8 +84,8 @@ async function main() {
   catch (error) {
     if (!(error instanceof Error) || error.message !== "wan_cuda_oom") throw error;
     await json(`${baseUrl}/free`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ unload_models: false, free_memory: true }) });
-    workflow = buildStage3OWanWorkflow({ width: 854, height: 480 }); validation = validateStage3OWanWorkflow(workflow); oomFallbackUsed = true;
-    generated = await generateVideo(baseUrl, workflow, `${STAGE3O_VIDEO_TASK_ID}-480p`);
+    workflow = buildStage3OWanWorkflow({ width: 640, height: 368 }); validation = validateStage3OWanWorkflow(workflow); oomFallbackUsed = true;
+    generated = await generateVideo(baseUrl, workflow, `${STAGE3O_VIDEO_TASK_ID}-low`);
   }
   const { promptId, video } = generated;
   const response = await fetch(`${baseUrl}/view?${new URLSearchParams(video)}`); const bytes = Buffer.from(await response.arrayBuffer());
@@ -93,10 +93,11 @@ async function main() {
   const tempWebm = path.join(os.tmpdir(), `${STAGE3O_VIDEO_TASK_ID}.webm`); writeFileSync(tempWebm, bytes);
   const date = new Date().toISOString().slice(0, 10); const paths = buildLocalJobPaths(loadLocalResultsConfig().libraryDir, date, STAGE3O_VIDEO_TASK_ID); mkdirSync(paths.jobDir, { recursive: true });
   const partialMp4 = `${paths.videoPath}.part`; command(spawnSync("ffmpeg", ["-y", "-i", tempWebm, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4", partialMp4], { encoding: "utf8", timeout: 10 * 60_000 }), "wan_mp4_conversion_failed"); renameSync(partialMp4, paths.videoPath);
-  command(spawnSync("ffmpeg", ["-y", "-i", paths.videoPath, "-vf", "scale=-2:360", "-frames:v", "1", paths.thumbnailPath], { encoding: "utf8", timeout: 2 * 60_000 }), "wan_thumbnail_failed");
+  const thumbnailSecond = Number((Math.random() * validation.durationSeconds).toFixed(3));
+  command(spawnSync("ffmpeg", ["-y", "-ss", String(thumbnailSecond), "-i", paths.videoPath, "-vf", "scale=-2:360", "-frames:v", "1", paths.thumbnailPath], { encoding: "utf8", timeout: 2 * 60_000 }), "wan_thumbnail_failed");
   if (!existsSync(paths.videoPath) || !existsSync(paths.thumbnailPath)) throw new Error("wan_local_sync_missing");
   const sha256 = createHash("sha256").update(readFileSync(paths.videoPath)).digest("hex");
-  writeFileSync(paths.metadataPath, `${JSON.stringify({ job_id: STAGE3O_VIDEO_TASK_ID, prompt_id: promptId, width: validation.width, height: validation.height, frames: 41, fps: 16, duration_seconds: validation.durationSeconds, seed: 20260715, audio: false, upscale: false, post_processing: false, oom_fallback_used: oomFallbackUsed, output_sha256: sha256, output_size_bytes: readFileSync(paths.videoPath).length, thumbnail_360p: true }, null, 2)}\n`, "utf8");
+  writeFileSync(paths.metadataPath, `${JSON.stringify({ job_id: STAGE3O_VIDEO_TASK_ID, prompt_id: promptId, width: validation.width, height: validation.height, frames: 33, fps: 16, duration_seconds: validation.durationSeconds, seed: 20260715, audio: false, upscale: false, post_processing: false, oom_fallback_used: oomFallbackUsed, output_sha256: sha256, output_size_bytes: readFileSync(paths.videoPath).length, thumbnail_360p: true, thumbnail_second: thumbnailSecond }, null, 2)}\n`, "utf8");
   writeFileSync(path.join(paths.jobDir, "workflow-api.json"), `${JSON.stringify(workflow, null, 2)}\n`, "utf8");
   console.log(JSON.stringify({ wan_video_verified: true, promptId, outputPath: paths.videoPath, thumbnailPath: paths.thumbnailPath, sha256, durationSeconds: validation.durationSeconds, width: validation.width, height: validation.height, oomFallbackUsed }));
 }

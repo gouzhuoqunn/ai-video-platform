@@ -36,7 +36,7 @@ const candidate = (id: string, reliability: number, network: number, price = 0.5
 assert.deepEqual(rankStage3OCandidates([candidate("cheap", 0.95, 100, 0.3), candidate("reliable", 0.999, 1000, 0.5), candidate("105175", 1, 5000, 0.1)], []).map((item) => item.id), ["reliable", "cheap"]);
 assert.equal(MAX_HOST_ATTEMPTS, 2); assert.equal(MAX_FAILED_DEPLOYMENT_SPEND_USD, 0.4);
 const wait = deploymentReadinessTimeoutMs(0.7); assert.ok(wait <= 10 * 60_000); assert.ok(0.1 + 0.7 * wait / 3_600_000 <= 0.4001);
-assert.equal(validateStage3OWanWorkflow(buildStage3OWanWorkflow({ width: 854, height: 480 })).width, 854);
+assert.equal(validateStage3OWanWorkflow(buildStage3OWanWorkflow({ width: 640, height: 368 })).width, 640);
 
 const liveSource = readFileSync("scripts/generation-live-session.ts", "utf8");
 assert.ok(liveSource.includes("imagePreserved: true"));

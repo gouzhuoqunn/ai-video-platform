@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { buildManualParityCreateOrderBody, assertCreateOrderBodySafe } from "./order-execution";
+import { buildKeyOnlyCreateOrderBody, buildManualParityCreateOrderBody, assertCreateOrderBodySafe } from "./order-execution";
 import { parseCloreOrder, parseSshCommand, readinessIssue } from "./order-readiness-parser";
 
 const fixture = JSON.parse(readFileSync(path.join(process.cwd(), "scripts", "clore", "fixtures", "stage3r-real-orders.sanitized.json"), "utf8"));
@@ -34,6 +34,11 @@ assert.equal(parityBody.command, undefined);
 assert.match(parityBody.ssh_key ?? "", /^ssh-ed25519 /);
 assert.equal(parityBody.required_price, undefined);
 assert.equal(parityBody.autossh_entrypoint, true);
+
+const keyOnlyBody = buildKeyOnlyCreateOrderBody({ serverId: "29167", currency: "USD-Blockchain", sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockPublicKeyForStage3TOnly0000000000 test", requiredPriceForApi: 5.5 });
+assertCreateOrderBodySafe(keyOnlyBody);
+assert.deepEqual(Object.keys(keyOnlyBody).sort(), ["autossh_entrypoint", "currency", "image", "ports", "renting_server", "required_price", "ssh_key", "type"]);
+assert.equal(keyOnlyBody.ssh_password, undefined); assert.equal(keyOnlyBody.env, undefined); assert.equal(keyOnlyBody.command, undefined); assert.equal(keyOnlyBody.required_price, 5.5);
 
 const readinessSource = readFileSync(path.join(process.cwd(), "scripts", "clore", "order-readiness.ts"), "utf8");
 assert.ok(readinessSource.includes('ssh-keygen", ["-R", endpoint'), "a reused Clore proxy endpoint must refresh its scoped known-host entry");

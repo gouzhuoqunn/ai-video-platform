@@ -53,12 +53,18 @@ export const manualGoldenControlOrders = [{
   password_stored: false,
 }] as const;
 
+export const knownVerifiedCloreHosts = [
+  { server_id: "29167", deployment_verified: true, ssh_verified: true, inference_verified: false },
+  { server_id: "105178", deployment_verified: true, ssh_verified: true, inference_verified: false },
+] as const;
+
 export function buildCloreDeploymentIncident() {
   return {
     schema_version: 2,
     generated_at: new Date().toISOString(),
     deployment_hold: getCloreDeploymentHold(),
     orders: failedCloreOrders,
+    known_verified_hosts: knownVerifiedCloreHosts,
     control_orders: manualGoldenControlOrders,
     control_classification: { manual_web_deployment_verified: true, clore_platform_globally_down: false, automatic_readiness_or_payload_bug_suspected: true, automatic_payload_and_endpoint_parser_fixed: true, automatic_password_and_key_ssh_verified: true },
     final_active_order: readActiveOrder() === null ? 0 : 1,

@@ -14,7 +14,7 @@ function fixtureTasks(existing: GenerationTask[]) {
   const createdAt = new Date().toISOString();
   return [
     byId.get(STAGE3O_IMAGE_TASK_ID) ?? createGenerationTask({ id: STAGE3O_IMAGE_TASK_ID, generationType: "image", prompt: IMAGE_PROMPT, modelProfile: "flux2-klein-4b", priority: "immediate", status: "armed", createdAt, confirmedAt: createdAt, batchId: STAGE3O_BATCH_ID, estimatedVram: 20, outputMetadata: { width: 1024, height: 1024, steps: 4, seed: 20260715, batch: 1, fixture: STAGE3O_BATCH_ID } }),
-    byId.get(STAGE3O_VIDEO_TASK_ID) ?? createGenerationTask({ id: STAGE3O_VIDEO_TASK_ID, generationType: "video", prompt: VIDEO_PROMPT, modelProfile: "wan22-ti2v-5b", gpuPreference: ["rtx4090", "rtx5090", "a40", "a6000", "rtx3090", "rtx3090ti"], priority: "immediate", status: "armed", createdAt, confirmedAt: createdAt, batchId: STAGE3O_BATCH_ID, estimatedVram: 24, outputMetadata: { width: 1280, height: 704, frames: 41, fps: 16, durationSeconds: 2.5625, steps: 30, seed: 20260715, batch: 1, audio: false, upscale: false, postProcessing: false, fixture: STAGE3O_BATCH_ID } }),
+    byId.get(STAGE3O_VIDEO_TASK_ID) ?? createGenerationTask({ id: STAGE3O_VIDEO_TASK_ID, generationType: "video", prompt: VIDEO_PROMPT, modelProfile: "wan22-ti2v-5b", gpuPreference: ["rtx4090", "rtx5090", "a40", "a6000", "rtx3090", "rtx3090ti"], priority: "immediate", status: "armed", createdAt, confirmedAt: createdAt, batchId: STAGE3O_BATCH_ID, estimatedVram: 24, outputMetadata: { width: 832, height: 480, frames: 33, fps: 16, durationSeconds: 2.0625, steps: 30, seed: 20260715, batch: 1, audio: false, upscale: false, postProcessing: false, fixture: STAGE3O_BATCH_ID } }),
   ];
 }
 

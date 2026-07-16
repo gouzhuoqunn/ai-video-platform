@@ -8,7 +8,7 @@ import { readLiveMarketplace, readLiveOrdersSummary, readWalletSummary } from ".
 import { readActiveOrder } from "../clore/order-state";
 import { getPrivateKeyPath } from "../clore/ssh-client";
 import { findBootstrapImageCandidates } from "../clore/bootstrap-image-profile";
-import { buildCreateOrderBody, buildManualParityCreateOrderBody, createCloreOrder } from "../clore/order-execution";
+import { buildCreateOrderBody, buildKeyOnlyCreateOrderBody, buildManualParityCreateOrderBody, createCloreOrder } from "../clore/order-execution";
 import { cancelCloreOrder } from "../clore/cancel-execution";
 import { assertWatchdogsReadyForCreate } from "../clore/watchdog-preflight";
 import { CLORE_LIGHT_BOOTSTRAP_IMAGE, CLORE_LIGHT_BOOTSTRAP_PROFILE, loadVerifiedCloreLightBootstrapImage } from "../clore/public-image";
@@ -101,9 +101,12 @@ export class CloreProvider implements GpuProvider {
     const keyValidation = ensureValidatedProjectSshKey();
     const parity = input.cloreProfile === "clore_manual_parity" ? createManualParityState(candidate.serverId) : null;
     const key = readFileSync(keyValidation.publicKeyPath, "utf8").split(/\r?\n/)[0].trim();
+    const requiredPriceForApi = candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null ? candidate.priceOriginalAmount : candidate.priceUsdPerHour ?? 0;
     const request = parity
       ? buildManualParityCreateOrderBody({ serverId: candidate.serverId, currency: config.rentalCurrency, sshPassword: parity.sshPassword, sshPublicKey: key })
-      : buildCreateOrderBody({ serverId: candidate.serverId, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, currency: config.rentalCurrency, sshPublicKey: key, maxPriceUsdPerHour: candidate.priceUsdPerHour ?? 0, requiredPriceForApi: candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null ? candidate.priceOriginalAmount : candidate.priceUsdPerHour ?? 0, bootstrapProfile: CLORE_LIGHT_BOOTSTRAP_PROFILE });
+      : input.cloreProfile === "clore_key_only"
+        ? buildKeyOnlyCreateOrderBody({ serverId: candidate.serverId, currency: config.rentalCurrency, sshPublicKey: key, requiredPriceForApi })
+        : buildCreateOrderBody({ serverId: candidate.serverId, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, currency: config.rentalCurrency, sshPublicKey: key, maxPriceUsdPerHour: candidate.priceUsdPerHour ?? 0, requiredPriceForApi, bootstrapProfile: CLORE_LIGHT_BOOTSTRAP_PROFILE });
     const created = await createCloreOrder({
       config,
       execution,
@@ -121,6 +124,11 @@ export class CloreProvider implements GpuProvider {
         if (!latest || latest.effectivePriceUsdPerHour === null || latest.effectivePriceUsdPerHour > 0.7) throw new Error("Selected Clore host price or compliance changed before create_order.");
         if ((latest.projectedFirstImageCostUsd ?? Infinity) > 2.5) throw new Error("Projected Clore session changed above 2.50 USD before create_order.");
         if (latestWallet.availableUsdBalance === null || latestWallet.availableUsdBalance - (latest.projectedFirstImageCostUsd ?? 0) < 1) throw new Error("Clore wallet reserve changed before create_order.");
+        if (input.cloreProfile === "clore_key_only") {
+          const freshRequiredPrice = latest.priceOriginalCurrency === "USD" && latest.priceOriginalUnit === "day" && latest.priceOriginalAmount !== null ? latest.priceOriginalAmount : latest.priceUsdPerHour;
+          if (freshRequiredPrice === null || !Number.isFinite(freshRequiredPrice) || freshRequiredPrice <= 0) throw new Error("Fresh Clore marketplace price is unavailable.");
+          request.required_price = freshRequiredPrice;
+        }
         await input.beforeCreateRequest?.();
       },
       afterCreateRequestAttempt: input.afterCreateRequestAttempt,
