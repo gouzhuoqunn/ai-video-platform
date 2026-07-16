@@ -3,6 +3,7 @@ import path from "node:path";
 import { assertCloreApiKey, loadCloreConfig } from "./config";
 import { assertNoSecretOutput, cloreRequest } from "./client";
 import { writeSanitizedFixture } from "./fixtures";
+import { parseCloreOrder } from "./order-readiness-parser";
 
 const ACTIVE_ORDER_PATH = path.join(process.cwd(), ".secrets", "clore-active-order.json");
 
@@ -11,13 +12,18 @@ function summarizeOrders(data: unknown) {
   const orders = Array.isArray(record.orders) ? record.orders : Array.isArray(data) ? data : [];
   return orders.map((order) => {
     const value = order && typeof order === "object" ? (order as Record<string, unknown>) : {};
+    const parsed = parseCloreOrder(value);
     return {
       order_id: value.id ?? value.order_id ?? null,
       server_id: value.server_id ?? value.renting_server ?? value.si ?? null,
-      status: value.status ?? value.state ?? null,
+      lifecycle_status: parsed.lifecycleStatus,
+      deployment_state: parsed.deploymentState,
       price: value.price ?? value.price_usd_per_hour ?? null,
       started_at: value.created_at ?? value.started_at ?? null,
-      ssh_summary_available: Boolean(value.ssh || value.ssh_host || value.ip),
+      ssh_summary_available: Boolean(parsed.ssh),
+      ssh_host: parsed.ssh?.host ?? null,
+      ssh_port: parsed.ssh?.port ?? null,
+      ssh_source: parsed.sshSource,
     };
   });
 }

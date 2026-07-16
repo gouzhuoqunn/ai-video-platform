@@ -181,11 +181,11 @@ async function main() {
       requestBody: body,
       request: async () => {
         createCalls += 1;
-        return { id: "mock-order-1", status: "created" };
+        return { id: "1950001", status: "created" };
       },
       readOrders: async () => [
         {
-          orderId: "mock-order-1",
+          orderId: "1950001",
           serverId: "120001",
           status: "running",
           currency: "USD-Blockchain",
@@ -201,7 +201,7 @@ async function main() {
     });
     assert(createCalls === 1, "mock create_order should be called once.");
     assert(createResult.order_created, "mock create should produce an active order.");
-    assert(readActiveOrder()?.order_id === "mock-order-1", "active order state should be written.");
+    assert(readActiveOrder()?.order_id === "1950001", "active order state should be written.");
 
     await createCloreOrder({
       config,
@@ -219,7 +219,7 @@ async function main() {
     await cancelCloreOrder({
       config,
       execution,
-      orderId: "mock-order-1",
+      orderId: "1950001",
       processingJobs: 1,
       uploading: false,
       finalVideoUploaded: true,
@@ -235,13 +235,13 @@ async function main() {
     const cancelResult = await cancelCloreOrder({
       config,
       execution,
-      orderId: "mock-order-1",
+      orderId: "1950001",
       processingJobs: 0,
       uploading: false,
       finalVideoUploaded: true,
       request: async (cancelBody) => {
         cancelCalls += 1;
-        assert(cancelBody.id === "mock-order-1", "cancel body must use order id.");
+        assert(cancelBody.id === "1950001", "cancel body must use order id.");
         return { code: 0 };
       },
     });

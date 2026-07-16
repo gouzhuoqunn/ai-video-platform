@@ -34,7 +34,7 @@ prepare_native() {
   python3 -m venv --system-site-packages "$VENV_DIR"
   "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
   if ! "$VENV_DIR/bin/python" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' >/dev/null 2>&1; then
-    "$VENV_DIR/bin/python" -m pip install --index-url https://download.pytorch.org/whl/cu128 'torch==2.7.1' 'torchvision==0.22.1' 'torchaudio==2.7.1'
+    "$VENV_DIR/bin/python" -m pip install --index-url https://download.pytorch.org/whl/cu124 'torch==2.6.0' 'torchvision==0.21.0' 'torchaudio==2.6.0'
   fi
   "$VENV_DIR/bin/python" -m pip install -r "$COMFY_DIR/requirements.txt" -r "$RUNTIME_DIR/requirements.lock"
   printf 'native\n' > /workspace/ai-runtime/bootstrap-mode

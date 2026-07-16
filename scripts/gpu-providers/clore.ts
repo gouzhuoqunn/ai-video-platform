@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { getCloreDeploymentHold } from "../clore/deployment-hold";
@@ -8,12 +8,14 @@ import { readLiveMarketplace, readLiveOrdersSummary, readWalletSummary } from ".
 import { readActiveOrder } from "../clore/order-state";
 import { getPrivateKeyPath } from "../clore/ssh-client";
 import { findBootstrapImageCandidates } from "../clore/bootstrap-image-profile";
-import { buildCreateOrderBody, createCloreOrder } from "../clore/order-execution";
+import { buildCreateOrderBody, buildManualParityCreateOrderBody, createCloreOrder } from "../clore/order-execution";
 import { cancelCloreOrder } from "../clore/cancel-execution";
 import { assertWatchdogsReadyForCreate } from "../clore/watchdog-preflight";
 import { CLORE_LIGHT_BOOTSTRAP_IMAGE, CLORE_LIGHT_BOOTSTRAP_PROFILE, loadVerifiedCloreLightBootstrapImage } from "../clore/public-image";
 import { assertGpuTarget, FIXED_RUNTIME_DIGEST, sshCommand } from "./common";
 import type { CreateSessionInput, GpuCandidate, GpuProvider, GpuSession, GpuTarget } from "./types";
+import { clearManualParitySecrets, createManualParityState, updateManualParityState } from "../clore/manual-parity";
+import { ensureValidatedProjectSshKey } from "../clore/ssh-key-validation";
 
 const CLORE_ENV = path.join(process.cwd(), ".secrets", "clore.env");
 const TARGET_PATH = path.join(process.cwd(), ".secrets", "clore-ssh-target.json");
@@ -80,16 +82,12 @@ export class CloreProvider implements GpuProvider {
     if (wallet.availableUsdBalance === null || wallet.availableUsdBalance - (candidate.projectedFirstImageCostUsd ?? 0) < 1) throw new Error("Clore wallet reserve would be violated.");
     const manifest = await loadVerifiedCloreLightBootstrapImage();
     await assertWatchdogsReadyForCreate(candidate.serverId);
-    const key = readFileSync(config.sshPublicKeyPath ?? "", "utf8").split(/\r?\n/)[0].trim();
-    const request = buildCreateOrderBody({
-      serverId: candidate.serverId,
-      image: CLORE_LIGHT_BOOTSTRAP_IMAGE,
-      currency: config.rentalCurrency,
-      sshPublicKey: key,
-      maxPriceUsdPerHour: candidate.priceUsdPerHour ?? 0,
-      requiredPriceForApi: candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null ? candidate.priceOriginalAmount : candidate.priceUsdPerHour ?? 0,
-      bootstrapProfile: CLORE_LIGHT_BOOTSTRAP_PROFILE,
-    });
+    const keyValidation = ensureValidatedProjectSshKey();
+    const parity = input.cloreProfile === "clore_manual_parity" ? createManualParityState(candidate.serverId) : null;
+    const key = readFileSync(keyValidation.publicKeyPath, "utf8").split(/\r?\n/)[0].trim();
+    const request = parity
+      ? buildManualParityCreateOrderBody({ serverId: candidate.serverId, currency: config.rentalCurrency, sshPassword: parity.sshPassword })
+      : buildCreateOrderBody({ serverId: candidate.serverId, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, currency: config.rentalCurrency, sshPublicKey: key, maxPriceUsdPerHour: candidate.priceUsdPerHour ?? 0, requiredPriceForApi: candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null ? candidate.priceOriginalAmount : candidate.priceUsdPerHour ?? 0, bootstrapProfile: CLORE_LIGHT_BOOTSTRAP_PROFILE });
     const created = await createCloreOrder({
       config,
       execution,
@@ -111,6 +109,7 @@ export class CloreProvider implements GpuProvider {
       },
       afterCreateRequestAttempt: input.afterCreateRequestAttempt,
     });
+    if (parity) updateManualParityState({ orderId: created.order_id });
     const session = await this.getSession(created.order_id);
     if (!session) throw new Error("clore_session_state_missing_after_create");
     return session;
@@ -149,6 +148,8 @@ export class CloreProvider implements GpuProvider {
     const active = readActiveOrder();
     if (!active || active.order_id !== session.id) return;
     await cancelCloreOrder({ config: loadCloreConfig(), execution: loadCloreExecutionConfig(), orderId: session.id, processingJobs: 0, uploading: false, finalVideoUploaded: true, issue: "stage3m_session_complete" });
+    clearManualParitySecrets();
+    rmSync(TARGET_PATH, { force: true });
   }
 
   async getBilling(session: GpuSession) {

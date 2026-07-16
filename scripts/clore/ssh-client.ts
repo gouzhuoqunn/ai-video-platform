@@ -1,8 +1,9 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 export const CLORE_KNOWN_HOSTS_PATH = path.join(process.cwd(), ".secrets", "clore-known-hosts");
 const PRIVATE_KEY_NAME = "clore_ai_video_worker_ed25519";
+const PROJECT_KEY_OVERRIDE_PATH = path.join(process.cwd(), ".secrets", "clore-project-ssh-key.json");
 
 export type SshTarget = {
   host: string;
@@ -29,7 +30,19 @@ export function shouldStopSshReadinessEarly(failures: SshReadinessFailureKind[])
 }
 
 export function getPrivateKeyPath() {
+  if (existsSync(PROJECT_KEY_OVERRIDE_PATH)) {
+    const value = JSON.parse(readFileSync(PROJECT_KEY_OVERRIDE_PATH, "utf8")) as { privateKeyPath?: string };
+    if (value.privateKeyPath && existsSync(value.privateKeyPath)) return value.privateKeyPath;
+  }
   return path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".ssh", PRIVATE_KEY_NAME);
+}
+
+export function getPublicKeyPath(configuredPath?: string) {
+  if (existsSync(PROJECT_KEY_OVERRIDE_PATH)) {
+    const value = JSON.parse(readFileSync(PROJECT_KEY_OVERRIDE_PATH, "utf8")) as { publicKeyPath?: string };
+    if (value.publicKeyPath && existsSync(value.publicKeyPath)) return value.publicKeyPath;
+  }
+  return configuredPath ?? `${getPrivateKeyPath()}.pub`;
 }
 
 export function buildSshArgs(target: SshTarget, command: string, options: { requirePrivateKey?: boolean } = {}) {

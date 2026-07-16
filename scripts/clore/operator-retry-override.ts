@@ -20,8 +20,8 @@ export type OperatorRetryOverride = {
   createdAt: string;
   expiresAt: string;
   limits: {
-    maxAttempts: 1;
-    maxFailedSpendUsd: 0.2;
+    maxAttempts: 1 | 2;
+    maxFailedSpendUsd: 0.2 | 0.4;
     maxSessionSpendUsd: 2.5;
   };
   nonce: string;
@@ -50,11 +50,11 @@ export function operatorRetryIntegrity(value: Omit<OperatorRetryOverride, "integ
   return createHash("sha256").update(unsignedRecord(value), "utf8").digest("hex");
 }
 
-export function buildOperatorRetryOverride(now = new Date(), expiresInMinutes = 180): OperatorRetryOverride {
+export function buildOperatorRetryOverride(now = new Date(), expiresInMinutes = 180, limits: OperatorRetryOverride["limits"] = { maxAttempts: 1, maxFailedSpendUsd: 0.2, maxSessionSpendUsd: 2.5 }): OperatorRetryOverride {
   const unsigned: Omit<OperatorRetryOverride, "integritySha256"> = {
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + expiresInMinutes * 60_000).toISOString(),
-    limits: { maxAttempts: 1, maxFailedSpendUsd: 0.2, maxSessionSpendUsd: 2.5 },
+    limits,
     nonce: randomBytes(24).toString("base64url"),
   };
   return { ...unsigned, integritySha256: operatorRetryIntegrity(unsigned) };
@@ -74,7 +74,8 @@ export function validateOperatorRetryOverride(value: unknown, now = Date.now()) 
     if (expiresAt - createdAt > 180 * 60_000) blockers.push("operator_retry_expiry_too_long");
   }
   const limits = record?.limits;
-  if (!limits || JSON.stringify(Object.keys(limits).sort()) !== JSON.stringify(["maxAttempts", "maxFailedSpendUsd", "maxSessionSpendUsd"]) || limits.maxAttempts !== 1 || limits.maxFailedSpendUsd !== 0.2 || limits.maxSessionSpendUsd !== 2.5) blockers.push("operator_retry_limits_invalid");
+  const validLimitPair = (limits?.maxAttempts === 1 && limits.maxFailedSpendUsd === 0.2) || (limits?.maxAttempts === 2 && limits.maxFailedSpendUsd === 0.4);
+  if (!limits || JSON.stringify(Object.keys(limits).sort()) !== JSON.stringify(["maxAttempts", "maxFailedSpendUsd", "maxSessionSpendUsd"]) || !validLimitPair || limits.maxSessionSpendUsd !== 2.5) blockers.push("operator_retry_limits_invalid");
   if (!/^[A-Za-z0-9_-]{32}$/.test(record?.nonce ?? "")) blockers.push("operator_retry_nonce_invalid");
   if (!/^[a-f0-9]{64}$/.test(record?.integritySha256 ?? "")) blockers.push("operator_retry_integrity_invalid");
   if (blockers.length === 0) {
@@ -156,12 +157,13 @@ export async function validateOperatorRetryPrerequisites() {
 
 async function main() {
   if (!process.argv.includes("--accept-platform-risk")) throw new Error("missing_exact_flag:--accept-platform-risk");
-  if (argument("max-attempts") !== "1") throw new Error("--max-attempts must be exactly 1");
-  if (argument("max-failed-spend") !== "0.20") throw new Error("--max-failed-spend must be exactly 0.20");
+  const maxAttempts = argument("max-attempts"); const maxFailedSpend = argument("max-failed-spend");
+  const stage3p = maxAttempts === "1" && maxFailedSpend === "0.20"; const stage3r = maxAttempts === "2" && maxFailedSpend === "0.40";
+  if (!stage3p && !stage3r) throw new Error("accepted limit pairs are exactly 1/0.20 or 2/0.40");
   if (argument("max-session-spend") !== "2.50") throw new Error("--max-session-spend must be exactly 2.50");
   if (argument("expires-in-minutes") !== "180") throw new Error("--expires-in-minutes must be exactly 180");
   await validateOperatorRetryPrerequisites();
-  const override = writeOperatorRetryOverride(buildOperatorRetryOverride());
+  const override = writeOperatorRetryOverride(buildOperatorRetryOverride(new Date(), 180, { maxAttempts: stage3r ? 2 : 1, maxFailedSpendUsd: stage3r ? 0.4 : 0.2, maxSessionSpendUsd: 2.5 }));
   const output = JSON.stringify({ created: true, expiresAt: override.expiresAt, limits: override.limits, supportRecoveryConfirmed: false, oneUse: true }, null, 2);
   assertNoSecretOutput(output);
   console.log(output);

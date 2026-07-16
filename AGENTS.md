@@ -186,3 +186,11 @@ GPU Worker 相关规则：
 - Real create must require `--execute`, `--server-id`, `--max-price`, `--confirm-project=ai-video-platform-wan22`, a queued-job count, live Clore revalidation, active-order check, and create lock.
 - Real cancel must verify the active project order, no processing job, no upload in progress, and final video uploaded.
 - First real Wan2.2 session must process only one synthetic text prompt before pausing for user inspection.
+
+## 2026-07-16 Clore Readiness and Host Bootstrap Rules
+
+- Never derive or construct a Clore SSH hostname. Use the exact active-order API host and mapped port; valid Clore endpoints are not limited to one domain suffix.
+- A closed order may have no endpoint even when its container was deployed. Do not classify `expired=true` as active, and do not infer readiness from a closed fixture.
+- For password-parity orders, prove password SSH first, install the validated project public key, then prove key SSH in the same order. Keep the temporary password only in ignored local state and delete it during cleanup.
+- Windows OpenSSH askpass must use an executable launcher such as `node.exe`; `.cmd` askpass files are not executable through its `CreateProcessW` path.
+- Public Jupyter bootstrap containers may not contain `/workspace`. Create it before filesystem inspection, restore, or runtime bootstrap. Docker must remain optional for this host-native path.

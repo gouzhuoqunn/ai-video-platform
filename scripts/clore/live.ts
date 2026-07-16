@@ -1,5 +1,6 @@
 import { cloreRequest, type CloreRequestOptions } from "./client";
 import type { CloreConfig, RawCloreServer, WalletSummary } from "./types";
+import { parseCloreOrder } from "./order-readiness-parser";
 
 export type MarketplacePayload = RawCloreServer[] | { servers?: RawCloreServer[]; marketplace?: RawCloreServer[]; data?: RawCloreServer[] };
 
@@ -76,6 +77,8 @@ export type CloreOrderSummary = {
   createdTimestamp: number | null;
   expired: boolean | null;
   active: boolean;
+  deploymentState?: string;
+  sshEndpointPublished?: boolean;
 };
 
 export function summarizeOrdersPayload(data: unknown): CloreOrderSummary[] {
@@ -83,9 +86,7 @@ export function summarizeOrdersPayload(data: unknown): CloreOrderSummary[] {
   const orders = Array.isArray(record.orders) ? record.orders : Array.isArray(data) ? data : [];
   return orders.map((order) => {
     const value = asRecord(order) ?? {};
-    const status = firstString(value, ["status", "state"]) ?? null;
-    const statusText = (status ?? "").toLowerCase();
-    const active = statusText ? !/(cancel|complete|stop|stopped|expire|expired|finish|finished|end|ended)/i.test(statusText) : true;
+    const parsed = parseCloreOrder(value); const status = firstString(value, ["status", "state"]) ?? null;
     return {
       orderId: firstString(value, ["id", "order_id"]) ?? null,
       serverId: firstString(value, ["server_id", "renting_server", "si"]) ?? null,
@@ -97,7 +98,9 @@ export function summarizeOrdersPayload(data: unknown): CloreOrderSummary[] {
       spend: firstNumber(value, ["spend"]),
       createdTimestamp: firstNumber(value, ["ct"]),
       expired: typeof value.expired === "boolean" ? value.expired : null,
-      active,
+      active: parsed.active,
+      deploymentState: parsed.deploymentState,
+      sshEndpointPublished: Boolean(parsed.ssh),
     };
   });
 }

@@ -24,11 +24,20 @@ export type CreateOrderRequest = {
   renting_server: number;
   type: "on-demand";
   ports: Record<string, "tcp" | "http">;
+  env?: Record<string, string>;
+  ssh_key?: string;
+  ssh_password?: string;
+  command?: string;
+  required_price?: number;
+  autossh_entrypoint?: boolean;
+};
+
+export type StandardCreateOrderRequest = CreateOrderRequest & {
   env: Record<string, string>;
   ssh_key: string;
   command: string;
   required_price: number;
-  autossh_entrypoint: boolean;
+  autossh_entrypoint: true;
 };
 
 export type CreateOrderPreflightInput = {
@@ -74,7 +83,7 @@ export function buildCreateOrderBody(input: {
   maxPriceUsdPerHour: number;
   requiredPriceForApi?: number;
   bootstrapProfile?: typeof CLORE_LIGHT_BOOTSTRAP_PROFILE | "fixed_runtime";
-}): CreateOrderRequest {
+}): StandardCreateOrderRequest {
   const bootstrapProfile = input.bootstrapProfile ?? "fixed_runtime";
   const image = bootstrapProfile === CLORE_LIGHT_BOOTSTRAP_PROFILE ? CLORE_LIGHT_BOOTSTRAP_IMAGE : COMFY_RUNTIME_IMAGE;
   if (input.image && input.image !== image) throw new Error("Clore order image does not match the selected bootstrap profile.");
@@ -96,6 +105,10 @@ export function buildCreateOrderBody(input: {
   };
 }
 
+export function buildManualParityCreateOrderBody(input: { serverId: string; currency: string; sshPassword: string }): CreateOrderRequest {
+  return { currency: input.currency, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, renting_server: Number(input.serverId), type: "on-demand", ports: { "22": "tcp" }, ssh_password: input.sshPassword };
+}
+
 export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
   const serialized = JSON.stringify(body);
   if (/CLORE_API_KEY|SUPABASE_SECRET_KEY|SUPABASE_SERVICE_ROLE_KEY|GPU_WORKER_PASSWORD|LOCAL_LAB_PASSWORD/i.test(serialized)) {
@@ -108,19 +121,21 @@ export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
     throw new Error("Clore order currency must be USD-Blockchain.");
   }
   const fixedRuntime = body.image === COMFY_RUNTIME_IMAGE && /@sha256:[a-f0-9]{64}$/.test(body.image);
-  const lightBootstrap = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.env.RUNTIME_BOOTSTRAP_PROFILE === CLORE_LIGHT_BOOTSTRAP_PROFILE;
-  if (!fixedRuntime && !lightBootstrap) throw new Error("Clore order image must be the pinned Runtime or the exact approved light bootstrap image.");
+  const lightBootstrap = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.env?.RUNTIME_BOOTSTRAP_PROFILE === CLORE_LIGHT_BOOTSTRAP_PROFILE;
+  const manualParity = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.ssh_password !== undefined && body.env === undefined && body.command === undefined && body.ssh_key === undefined && body.required_price === undefined && body.autossh_entrypoint === undefined;
+  if (!fixedRuntime && !lightBootstrap && !manualParity) throw new Error("Clore order image must be the pinned Runtime or an approved light bootstrap profile.");
   const ports = Object.keys(body.ports);
   if (body.ports["22"] !== "tcp" || body.ports["8188"] !== undefined || ports.some((port) => !["22", "8080"].includes(port)) || ports.filter((port) => body.ports[port] === "http").length > 1) {
     throw new Error("Order must expose SSH and at most one HTTP port; ComfyUI 8188 is forbidden.");
   }
-  if (lightBootstrap && ports.length !== 1) {
+  if ((lightBootstrap || manualParity) && ports.length !== 1) {
     throw new Error("clore_light_bootstrap exposes SSH only.");
   }
-  if (!/^ssh-ed25519\s+[A-Za-z0-9+/=]+(?:\s+.*)?$/.test(body.ssh_key) || /private key|-----begin/i.test(body.ssh_key)) {
+  if (!manualParity && (!body.ssh_key || !/^ssh-ed25519\s+[A-Za-z0-9+/=]+(?:\s+.*)?$/.test(body.ssh_key) || /private key|-----begin/i.test(body.ssh_key))) {
     throw new Error("Order must contain a non-empty SSH public key only.");
   }
-  if (!Number.isFinite(body.required_price) || body.required_price <= 0) {
+  if (manualParity && !/^[A-Za-z0-9\s\-=.@+/]{20,32}$/.test(body.ssh_password ?? "")) throw new Error("clore_manual_parity requires a temporary strong SSH password.");
+  if (!manualParity && (!Number.isFinite(body.required_price) || (body.required_price ?? 0) <= 0)) {
     throw new Error("Order required_price must be a positive locked candidate price.");
   }
 }
@@ -272,8 +287,8 @@ export async function createCloreOrder(input: {
       project_tag: PROJECT_TAG,
       created_at: new Date().toISOString(),
       status: "order_pending",
-      usd_per_hour: input.candidate.priceUsdPerHour ?? input.requestBody.required_price,
-      max_price_usd_per_hour: input.candidate.priceUsdPerHour ?? input.requestBody.required_price,
+      usd_per_hour: input.candidate.priceUsdPerHour ?? input.requestBody.required_price ?? 0,
+      max_price_usd_per_hour: input.candidate.priceUsdPerHour ?? input.requestBody.required_price ?? 0,
       order_type: "on-demand",
       open_ports: input.requestBody.ports["8080"] === "http" ? ["ssh/tcp", "controller/http:8080"] : ["ssh/tcp"],
       gpu_type: input.sessionMetadata?.gpuType ?? input.candidate.gpu,

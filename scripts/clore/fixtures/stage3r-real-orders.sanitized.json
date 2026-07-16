@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "source_endpoint": "/my_orders?return_completed=true",
+  "captured_at": "2026-07-16T10:55:01.796Z",
+  "manual_golden": {
+    "id": 1957892,
+    "si": 28726,
+    "expired": true,
+    "online": true,
+    "mon_container": 2,
+    "image": "cloreai/jupyter:ubuntu24.04-v2",
+    "tcp_ports": [],
+    "price_usd_per_day": 1.83,
+    "creation_fee_usd": 0.1,
+    "api_spend_usd": 0.02130763888888889,
+    "ct": 1784197589,
+    "order_end": 1784198537,
+    "cuda_version": "12.4",
+    "gpu_array": [" RTX 4070 SUPER"],
+    "specs": {
+      "ram_gib": 15.8592,
+      "disk": "Q100SMRIMY128x20x20x2 76.3925GB",
+      "gpu": "1x NVIDIA GeForce RTX 4070 SUPER",
+      "gpuram_gib": 11.99
+    },
+    "closed_response_endpoint_note": "pub_cluster is absent and tcp_ports is empty after order closure",
+    "verified_live_control_evidence": {
+      "ui_status": ["Active", "Deployed"],
+      "ssh_host": "n1.msk.cloreai.ru",
+      "ssh_port": 1584,
+      "password_ssh": true,
+      "password_stored": false
+    }
+  },
+  "recent_automatic_comparison": [
+    { "id": 1957188, "si": 101767, "expired": true, "online": true, "mon_container": 2, "image": "cloreai/jupyter:ubuntu24.04-v2", "tcp_ports": [], "api_spend_usd": 0.04432175925925927 },
+    { "id": 1956054, "si": 29169, "expired": true, "online": true, "mon_container": 2, "image": "cloreai/jupyter:ubuntu24.04-v2", "tcp_ports": [], "api_spend_usd": 0.04392361111111111 }
+  ],
+  "top_level_fields_observed": ["creation_fee", "ct", "cuda_version", "currency", "expired", "gpu_array", "gpu_count", "id", "image", "mon_container", "mrl", "online", "order_end", "owner", "price", "rating", "reliability", "si", "specs", "spend", "tcp_ports", "total_gpus"],
+  "sensitive_fields_included": false
+}

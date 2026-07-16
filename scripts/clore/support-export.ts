@@ -33,7 +33,25 @@ export const failedCloreOrders: IncidentOrder[] = [
   { order_id: "1955984", server_id: "105175", image_digest: lightBootstrapDigest, created_at: "2026-07-15T19:59:54.438Z", cancelled_at: "2026-07-15T20:10:26.865Z", final_status: "cancelled:order_never_running", entered_running: false, ssh_published: false, spend_usd: 0.17, evidence_note: "611 秒内未运行" },
   { order_id: "1956022", server_id: "105181", image_digest: lightBootstrapDigest, created_at: "2026-07-15T20:12:54.669Z", cancelled_at: "2026-07-15T20:23:22.831Z", final_status: "cancelled:order_never_running", entered_running: false, ssh_published: false, spend_usd: 0.17, evidence_note: "606 秒内未运行" },
   { order_id: "1956054", server_id: "29169", image_digest: lightBootstrapDigest, created_at: "2026-07-15T20:25:24.600Z", cancelled_at: "2026-07-15T20:35:51.999Z", final_status: "cancelled:order_never_running", entered_running: false, ssh_published: false, spend_usd: 0.14, evidence_note: "606 秒内未运行" },
+  { order_id: "1957188", server_id: "101767", image_digest: lightBootstrapDigest, created_at: "2026-07-16T05:29:01.000Z", cancelled_at: "2026-07-16T05:43:37.000Z", final_status: "cancelled:order_not_deployed", entered_running: false, ssh_published: false, spend_usd: 0.15, evidence_note: "Stage 3P 自动订单未发布 SSH；API 关闭记录 spend 为 0.04432175925925927，钱包总差额含 0.10 创建费为 0.15 USD" },
+  { order_id: "1957995", server_id: "33459", image_digest: lightBootstrapDigest, created_at: "2026-07-16T11:32:16.000Z", cancelled_at: "2026-07-16T11:39:52.000Z", final_status: "cancelled:local_windows_askpass_launcher_failed", entered_running: true, ssh_published: true, spend_usd: 0.12306666666666667, evidence_note: "API deployed and published n1.de.clorecloud.net:1963; TCP and the corrected Node askpass password probe succeeded before cancellation" },
+  { order_id: "1958009", server_id: "105169", image_digest: lightBootstrapDigest, created_at: "2026-07-16T11:45:18.000Z", cancelled_at: "2026-07-16T11:46:15.000Z", final_status: "cancelled:runtime_workspace_precondition_failed", entered_running: true, ssh_published: true, spend_usd: 0.10756979166666667, evidence_note: "API endpoint became ready in 35 seconds; password auth, key install, and key auth all succeeded; hardware audit failed because /workspace was absent before mkdir fix" },
 ];
+
+export const manualGoldenControlOrders = [{
+  order_id: "1957892",
+  server_id: "28726",
+  image: "cloreai/jupyter:ubuntu24.04-v2",
+  ui_status: ["Active", "Deployed"],
+  endpoint_published: true,
+  password_ssh: true,
+  ssh_host: "n1.msk.cloreai.ru",
+  ssh_port: 1584,
+  hardware: { gpu: "RTX 4070 SUPER", vram_mib: 12282, driver: "550.90.07", cuda: "12.4", ram_gib_approx: 15, disk_gib_approx: 79, python: "3.12.3", docker_available: false },
+  closed: true,
+  spend_usd: 0.02130763888888889,
+  password_stored: false,
+}] as const;
 
 export function buildCloreDeploymentIncident() {
   return {
@@ -41,6 +59,8 @@ export function buildCloreDeploymentIncident() {
     generated_at: new Date().toISOString(),
     deployment_hold: getCloreDeploymentHold(),
     orders: failedCloreOrders,
+    control_orders: manualGoldenControlOrders,
+    control_classification: { manual_web_deployment_verified: true, clore_platform_globally_down: false, automatic_readiness_or_payload_bug_suspected: true, automatic_payload_and_endpoint_parser_fixed: true, automatic_password_and_key_ssh_verified: true },
     final_active_order: readActiveOrder() === null ? 0 : 1,
     known_total_spend_usd: Number(failedCloreOrders.reduce((total, order) => total + (order.spend_usd ?? 0), 0).toFixed(6)),
     redaction: { api_key_included: false, full_ssh_public_key_included: false, authorization_header_included: false, password_included: false, raw_payload_included: false },

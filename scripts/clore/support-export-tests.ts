@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { buildCloreDeploymentIncident } from "./support-export";
 const incident = buildCloreDeploymentIncident();
-assert.equal(incident.orders.length, 11);
+assert.equal(incident.orders.length, 14);
 assert.ok(incident.orders.every((order) => "created_at" in order && "cancelled_at" in order && "image_digest" in order && "spend_usd" in order));
+assert.equal(incident.control_orders[0]?.order_id, "1957892");
+assert.equal(incident.control_orders[0]?.ssh_host, "n1.msk.cloreai.ru");
+assert.equal(incident.control_orders[0]?.ssh_port, 1584);
+assert.equal(incident.control_classification.manual_web_deployment_verified, true);
+assert.equal(incident.control_classification.automatic_password_and_key_ssh_verified, true);
 assert.equal(JSON.stringify(incident).match(/CLORE_API_KEY|BEGIN OPENSSH PRIVATE KEY|ssh-ed25519\s+[A-Za-z0-9+/=]{20,}/i), null);
 console.log("Clore support evidence redaction tests passed.");

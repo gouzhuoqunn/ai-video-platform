@@ -122,6 +122,7 @@
     "stage3o:batch:test": "tsx scripts/stage3o-batch-tests.ts",
     "stage3o:live-session:test": "tsx scripts/stage3o-live-session-tests.ts",
     "stage3p:operator-retry:test": "tsx scripts/stage3p-operator-retry-tests.ts",
+    "stage3r:readiness:test": "tsx scripts/clore/stage3r-readiness-tests.ts",
     "gpu:candidates": "tsx scripts/gpu-candidates.ts",
     "gpu:first-image": "tsx scripts/gpu-first-image.ts",
     "first-image:resume": "tsx scripts/first-image-resume.ts",
