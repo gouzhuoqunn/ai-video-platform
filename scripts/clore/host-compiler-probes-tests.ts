@@ -1,0 +1,22 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { classifyHostProbeFailure, HOST_TOOLCHAIN_PACKAGES, hostProbeCorrectionCommand, parseTritonProbeOutput, stage3UHostCompilerProbes } from "./host-compiler-probes";
+
+assert.deepEqual(stage3UHostCompilerProbes().map((probe) => probe.label), ["stdlib_header", "stdio_header", "python_include_directory", "python_header", "c_compile_run", "cpp_compile_run", "torch_cuda_rtx4090", "triton_import", "triton_vector_add"]);
+assert.deepEqual([...HOST_TOOLCHAIN_PACKAGES], ["build-essential", "gcc", "g++", "make", "libc6-dev", "linux-libc-dev", "python3-dev", "python3-venv", "git", "curl", "ca-certificates", "pkg-config", "cmake", "ninja-build", "ffmpeg"]);
+assert.equal(classifyHostProbeFailure("stdlib_header", "stdlib.h: No such file").classification, "c_headers_missing");
+assert.equal(classifyHostProbeFailure("stdio_header", "").missingPath, "/usr/include/stdio.h");
+assert.deepEqual(classifyHostProbeFailure("c_compile_run", "fatal error: stdlib.h").packages, ["libc6-dev", "linux-libc-dev"]);
+assert.equal(classifyHostProbeFailure("c_compile_run", "cc: command not found").classification, "c_compiler_missing");
+assert.equal(classifyHostProbeFailure("cpp_compile_run", "c++: command not found").classification, "cpp_compiler_missing");
+assert.equal(classifyHostProbeFailure("python_header", "Python.h missing").classification, "python_headers_missing");
+assert.ok(hostProbeCorrectionCommand(classifyHostProbeFailure("python_header", "Python.h missing"))?.includes("python${pyver}-dev"));
+assert.equal(classifyHostProbeFailure("triton_vector_add", "cuda_utils compile failed").classification, "triton_compile_failed");
+assert.ok(hostProbeCorrectionCommand(classifyHostProbeFailure("triton_import", "ModuleNotFoundError"))?.includes("triton==3.2.0"));
+assert.ok(hostProbeCorrectionCommand(classifyHostProbeFailure("torch_cuda_rtx4090", "cuda_available=false"))?.includes("torch==2.6.0"));
+assert.deepEqual(parseTritonProbeOutput("triton_vector_add_ok=true max_error=0.0 device=NVIDIA GeForce RTX 4090"), { valid: true, maximumError: 0 });
+assert.equal(parseTritonProbeOutput("compile failed").valid, false);
+const bootstrap = readFileSync("scripts/clore/clore-light-bootstrap.sh", "utf8");
+for (const pkg of HOST_TOOLCHAIN_PACKAGES) assert.ok(bootstrap.includes(pkg), `bootstrap package missing: ${pkg}`);
+assert.ok(bootstrap.indexOf("apt-get install") < bootstrap.indexOf("python3 -m venv"));
+console.log("Stage 3U host toolchain package, probe ordering, header classification, and Triton parser passed.");

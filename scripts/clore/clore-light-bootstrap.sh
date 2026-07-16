@@ -23,7 +23,12 @@ docker_available() {
 prepare_native() {
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ffmpeg python3-venv python3-dev gcc libc6-dev ca-certificates curl
+    pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    pydev="python${pyver}-dev"
+    apt-cache show "$pydev" >/dev/null 2>&1 || pydev=python3-dev
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential gcc g++ make libc6-dev linux-libc-dev python3-dev "$pydev" python3-venv \
+      git curl ca-certificates pkg-config cmake ninja-build ffmpeg
     rm -rf /var/lib/apt/lists/*
   fi
   if [ ! -d "$COMFY_DIR/.git" ]; then

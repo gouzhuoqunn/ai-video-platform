@@ -11,6 +11,7 @@ import type { GpuSession, GpuTarget } from "./gpu-providers/types";
 import { armRunPodWatchdog } from "./runpod-watchdog";
 import { buildRuntimeOverlay } from "./runtime-overlay";
 import { getCloreDeploymentHold, setCloreDeploymentHold } from "./clore/deployment-hold";
+import { classifyHostProbeFailure, HOST_TOOLCHAIN_PACKAGES, hostProbeCorrectionCommand, parseTritonProbeOutput, stage3UHostCompilerProbes } from "./clore/host-compiler-probes";
 
 function argument(name: string) {
   const inline = process.argv.find((item) => item.startsWith(`--${name}=`));
@@ -73,6 +74,12 @@ function requireSuccess(result: ReturnType<typeof spawnSync>, classification: st
 const STAGE3T_COMMAND_EVIDENCE_PATH = path.join(process.cwd(), ".secrets", "stage3t-command-evidence.json");
 type CommandEvidence = { label: string; command: string; startedAt: string; completedAt: string; exitCode: number | null; stdout: string; stderr: string };
 
+function sanitizeEvidenceText(value: unknown) {
+  return String(value ?? "")
+    .replace(/(https:\/\/[^\s?]+)\?[^\s]+/g, "$1?<redacted-query>")
+    .replace(/(authorization|bearer|token|secret|password)\s*[:=]\s*[^\s]+/gi, "$1=<redacted>");
+}
+
 function writeCommandEvidence(records: CommandEvidence[]) {
   mkdirSync(path.dirname(STAGE3T_COMMAND_EVIDENCE_PATH), { recursive: true });
   const partial = `${STAGE3T_COMMAND_EVIDENCE_PATH}.${process.pid}.part`;
@@ -82,18 +89,81 @@ function writeCommandEvidence(records: CommandEvidence[]) {
 
 function recordedCommand(records: CommandEvidence[], label: string, command: string, execute: () => ReturnType<typeof spawnSync>) {
   const startedAt = new Date().toISOString(); const result = execute();
-  records.push({ label, command, startedAt, completedAt: new Date().toISOString(), exitCode: result.status, stdout: String(result.stdout ?? ""), stderr: String(result.stderr ?? "") });
+  records.push({ label, command, startedAt, completedAt: new Date().toISOString(), exitCode: result.status, stdout: sanitizeEvidenceText(result.stdout), stderr: sanitizeEvidenceText(result.stderr) });
   writeCommandEvidence(records);
   return result;
 }
 
-async function verifyRuntimeWebSocket(baseUrl: string) {
+function recordEvidence(records: CommandEvidence[], label: string, command: string, exitCode: number, stdout: string, stderr = "") {
+  const now = new Date().toISOString();
+  records.push({ label, command, startedAt: now, completedAt: now, exitCode, stdout, stderr });
+  writeCommandEvidence(records);
+}
+
+export function runStage3UHostCompilerProbes(target: GpuTarget, records: CommandEvidence[], execute = sshCommand) {
+  const mode = recordedCommand(records, "bootstrap_mode", "cat /workspace/ai-runtime/bootstrap-mode", () => execute(target, "cat /workspace/ai-runtime/bootstrap-mode", 30_000));
+  requireSuccess(mode, "bootstrap_mode_missing");
+  if (String(mode.stdout).trim() !== "native") {
+    recordEvidence(records, "host_compiler_probes", "native host compiler probes", 0, "skipped_for_fixed_docker_runtime=true");
+    return [];
+  }
+  const results: Array<{ label: string; corrected: boolean; classification: string | null; stdout: string }> = [];
+  for (const probe of stage3UHostCompilerProbes()) {
+    let result = recordedCommand(records, probe.label, probe.command, () => execute(target, probe.command, probe.label === "triton_vector_add" ? 5 * 60_000 : 120_000));
+    let corrected = false;
+    let classification: string | null = null;
+    if (result.status !== 0) {
+      const output = `${String(result.stdout ?? "")}\n${String(result.stderr ?? "")}`;
+      const failure = classifyHostProbeFailure(probe.label, output);
+      classification = failure.classification;
+      recordEvidence(records, `${probe.label}_classification`, `classify ${probe.label}`, 0, JSON.stringify(failure));
+      const correction = hostProbeCorrectionCommand(failure);
+      if (!correction) throw new Error(`host_probe_failed_without_package_correction:${probe.label}:${failure.classification}`);
+      requireSuccess(recordedCommand(records, `${probe.label}_in_place_correction`, correction, () => execute(target, correction, 20 * 60_000)), `host_probe_correction_failed:${probe.label}:${failure.classification}`);
+      result = recordedCommand(records, `${probe.label}_retry`, probe.command, () => execute(target, probe.command, probe.label === "triton_vector_add" ? 5 * 60_000 : 120_000));
+      corrected = true;
+    }
+    requireSuccess(result, `host_probe_failed:${probe.label}:${classification ?? "unclassified"}`);
+    const stdout = String(result.stdout ?? "");
+    if (probe.label === "triton_vector_add" && !parseTritonProbeOutput(stdout).valid) throw new Error("triton_probe_output_invalid");
+    results.push({ label: probe.label, corrected, classification, stdout });
+  }
+  return results;
+}
+
+async function waitForRuntimeHealth(target: GpuTarget, records: CommandEvidence[], labelPrefix: string, healthCommand: string, timeoutMs = 5 * 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = recordedCommand(records, `${labelPrefix}_poll`, healthCommand, () => sshCommand(target, healthCommand, 20_000));
+    if (result.status === 0) return result;
+    await sleep(5_000);
+  }
+  return recordedCommand(records, `${labelPrefix}_final`, healthCommand, () => sshCommand(target, healthCommand, 20_000));
+}
+
+async function verifyRuntimeWebSocket(baseUrl: string, clientId: string) {
   await new Promise<void>((resolve, reject) => {
-    const socket = new WebSocket(baseUrl.replace("http://", "ws://") + "/ws");
+    const socket = new WebSocket(`${baseUrl.replace("http://", "ws://")}/ws?clientId=${encodeURIComponent(clientId)}`);
     const timeout = setTimeout(() => { socket.close(); reject(new Error("runtime_websocket_timeout")); }, 15_000);
     socket.addEventListener("open", () => { clearTimeout(timeout); socket.close(); resolve(); }, { once: true });
     socket.addEventListener("error", () => { clearTimeout(timeout); reject(new Error("runtime_websocket_failed")); }, { once: true });
   });
+}
+
+async function verifyRuntimeTunnel(baseUrl: string, clientId: string) {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(`${baseUrl}/system_stats`, { signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) throw new Error(`runtime_tunnel_http_${response.status}`);
+      await verifyRuntimeWebSocket(baseUrl, clientId);
+      return { attempts: attempt };
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) await sleep(2_000);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("runtime_tunnel_verification_failed");
 }
 
 export async function runRemoteFirstImage(target: GpuTarget, providerId: GpuProviderId, sessionId: string, gpuModel: string, options: { warmRun?: boolean } = {}) {
@@ -109,10 +179,11 @@ export async function runRemoteFirstImage(target: GpuTarget, providerId: GpuProv
       const prepareCommand = "sed -i 's/\\r$//' /workspace/clore-light-bootstrap.sh; chmod 700 /workspace/clore-light-bootstrap.sh; /workspace/clore-light-bootstrap.sh prepare /workspace/runtime-overlay.tgz";
       let prepare = recordedCommand(evidence, "runtime_prepare", prepareCommand, () => sshCommand(target, prepareCommand, 40 * 60_000));
       if (prepare.status !== 0) {
-        const fixCommand = "set -e; sed -i 's/\\r$//' /workspace/clore-light-bootstrap.sh; rm -rf /workspace/ai-runtime/venv; if command -v apt-get >/dev/null 2>&1; then apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ffmpeg python3-venv python3-dev python3-pip gcc libc6-dev ca-certificates curl; fi; /workspace/clore-light-bootstrap.sh prepare /workspace/runtime-overlay.tgz";
+        const fixCommand = "set -e; sed -i 's/\\r$//' /workspace/clore-light-bootstrap.sh; rm -rf /workspace/ai-runtime/venv; /workspace/clore-light-bootstrap.sh prepare /workspace/runtime-overlay.tgz";
         prepare = recordedCommand(evidence, "runtime_prepare_in_place_fix", fixCommand, () => sshCommand(target, fixCommand, 45 * 60_000));
       }
       requireSuccess(prepare, "clore_light_bootstrap_prepare_failed");
+      runStage3UHostCompilerProbes(target, evidence);
     }
     const runtimeCommand = providerId === "clore"
       ? `/workspace/clore-light-bootstrap.sh start ${target.gpuProfile}`
@@ -122,20 +193,28 @@ export async function runRemoteFirstImage(target: GpuTarget, providerId: GpuProv
       const cudaCommand = "set -e; mode=$(cat /workspace/ai-runtime/bootstrap-mode); if [ \"$mode\" = docker ]; then docker exec stage3m-comfy-runtime python3 -c 'import torch; print(\"torch_version=\"+torch.__version__); print(\"torch_cuda_version=\"+str(torch.version.cuda)); print(\"cuda_available=\"+str(torch.cuda.is_available()).lower()); print(\"cuda_device=\"+torch.cuda.get_device_name(0)); assert torch.cuda.is_available()'; else /workspace/ai-runtime/venv/bin/python -c 'import torch; print(\"torch_version=\"+torch.__version__); print(\"torch_cuda_version=\"+str(torch.version.cuda)); print(\"cuda_available=\"+str(torch.cuda.is_available()).lower()); print(\"cuda_device=\"+torch.cuda.get_device_name(0)); assert torch.cuda.is_available()'; fi";
       requireSuccess(recordedCommand(evidence, "post_bootstrap_torch_cuda", cudaCommand, () => sshCommand(target, cudaCommand, 180_000)), "post_bootstrap_torch_cuda_failed");
     }
-    const healthDeadline = Date.now() + 5 * 60_000;
     const healthCommand = "set -e; curl -fsS --max-time 5 http://127.0.0.1:8080/healthz >/dev/null; curl -fsS --max-time 5 http://127.0.0.1:8188/system_stats >/dev/null; curl -fsS --max-time 5 http://127.0.0.1:8188/object_info | python3 -c 'import json,sys; d=json.load(sys.stdin); required={\"UNETLoader\",\"CLIPLoader\",\"VAELoader\",\"KSampler\",\"VAEDecode\",\"SaveImage\",\"SaveWEBM\"}; missing=sorted(required-set(d)); print(\"required_nodes_missing=\"+\",\".join(missing)); raise SystemExit(1 if missing else 0)'; test -r /workspace/comfy-user/comfyui.db";
-    while (Date.now() < healthDeadline) {
-      if (recordedCommand(evidence, "runtime_health_poll", healthCommand, () => sshCommand(target, healthCommand, 20_000)).status === 0) break;
-      await sleep(5_000);
+    let health = await waitForRuntimeHealth(target, evidence, "runtime_health", healthCommand);
+    if (health.status !== 0 && providerId === "clore") {
+      const logsCommand = "set +e; echo '=== runtime log ==='; cat /workspace/logs/runtime-stage3m.log; echo '=== processes ==='; ps -ef; echo '=== ports ==='; ss -ltnp";
+      const logs = recordedCommand(evidence, "runtime_startup_logs", logsCommand, () => sshCommand(target, logsCommand, 120_000));
+      const failure = classifyHostProbeFailure("runtime_startup", `${String(logs.stdout ?? "")}\n${String(logs.stderr ?? "")}`);
+      recordEvidence(evidence, "runtime_startup_classification", "classify runtime startup", 0, JSON.stringify(failure));
+      const packages = HOST_TOOLCHAIN_PACKAGES.join(" ");
+      const correctionCommand = `set -e; apt-get update; pyver=$(python3 -c 'import sys; print(f\"{sys.version_info.major}.{sys.version_info.minor}\")'); pydev=python${"${pyver}"}-dev; apt-cache show \"$pydev\" >/dev/null 2>&1 || pydev=python3-dev; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${packages} \"$pydev\"; rm -rf /root/.triton/cache /tmp/torchinductor_root; /workspace/clore-light-bootstrap.sh stop`;
+      requireSuccess(recordedCommand(evidence, "runtime_startup_in_place_correction", correctionCommand, () => sshCommand(target, correctionCommand, 20 * 60_000)), "runtime_startup_in_place_correction_failed");
+      requireSuccess(recordedCommand(evidence, "runtime_start_retry", runtimeCommand, () => sshCommand(target, runtimeCommand, 60_000)), "runtime_start_retry_failed");
+      health = await waitForRuntimeHealth(target, evidence, "runtime_health_retry", healthCommand);
+      if (health.status !== 0) recordedCommand(evidence, "runtime_startup_logs_after_fix", logsCommand, () => sshCommand(target, logsCommand, 120_000));
     }
-    if (recordedCommand(evidence, "runtime_health_final", healthCommand, () => sshCommand(target, healthCommand, 20_000)).status !== 0) throw new Error("runtime_health_timeout");
+    if (health.status !== 0) throw new Error("runtime_health_failed_after_in_place_fix");
     const port = await availableLoopbackPort();
     const tunnel = spawn("ssh", ["-N", "-i", target.sshKeyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "PasswordAuthentication=no", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-p", String(target.port), "-L", `127.0.0.1:${port}:127.0.0.1:8188`, `${target.username}@${target.host}`], { stdio: "ignore" });
     try {
       await sleep(1500); if (tunnel.exitCode !== null) throw new Error("ssh_tunnel_failed");
       const websocketStartedAt = new Date().toISOString();
-      try { await verifyRuntimeWebSocket(`http://127.0.0.1:${port}`); evidence.push({ label: "runtime_websocket", command: `WebSocket ws://127.0.0.1:${port}/ws`, startedAt: websocketStartedAt, completedAt: new Date().toISOString(), exitCode: 0, stdout: "websocket_verified=true", stderr: "" }); writeCommandEvidence(evidence); }
-      catch (error) { evidence.push({ label: "runtime_websocket", command: `WebSocket ws://127.0.0.1:${port}/ws`, startedAt: websocketStartedAt, completedAt: new Date().toISOString(), exitCode: 1, stdout: "", stderr: error instanceof Error ? error.message : "websocket_failed" }); writeCommandEvidence(evidence); throw error; }
+      try { const verified = await verifyRuntimeTunnel(`http://127.0.0.1:${port}`, sessionId); evidence.push({ label: "runtime_websocket", command: `HTTP /system_stats then WebSocket ws://127.0.0.1:${port}/ws?clientId=<session-id>`, startedAt: websocketStartedAt, completedAt: new Date().toISOString(), exitCode: 0, stdout: `websocket_verified=true attempts=${verified.attempts}`, stderr: "" }); writeCommandEvidence(evidence); }
+      catch (error) { evidence.push({ label: "runtime_websocket", command: `HTTP /system_stats then WebSocket ws://127.0.0.1:${port}/ws?clientId=<session-id>`, startedAt: websocketStartedAt, completedAt: new Date().toISOString(), exitCode: 1, stdout: "", stderr: error instanceof Error ? error.message : "websocket_failed" }); writeCommandEvidence(evidence); throw error; }
       requireSuccess(recordedCommand(evidence, "flux_manifest_copy", "scp flux-r2-manifest.json /workspace/flux-r2-manifest.json", () => scpFile(target, bundlePath, "/workspace/flux-r2-manifest.json", 5 * 60_000)), "r2_bundle_copy_failed");
       requireSuccess(recordedCommand(evidence, "flux_restore_script_copy", "scp restore-flux-r2.py /workspace/restore-flux-r2.py", () => scpFile(target, restorePath, "/workspace/restore-flux-r2.py", 2 * 60_000)), "r2_restore_script_copy_failed");
       const restoreStarted = Date.now(); const restoreCommand = "set -e; FLUX_R2_RESTORE_MANIFEST=/workspace/flux-r2-manifest.json python3 /workspace/restore-flux-r2.py";

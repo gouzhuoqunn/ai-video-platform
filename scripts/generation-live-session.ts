@@ -32,6 +32,7 @@ const MAX_RUNTIME_MINUTES = 180;
 const MAX_SSH_WAIT_MINUTES = 10;
 const CLORE_CREATION_FEE_USD = 0.1;
 const KNOWN_VERIFIED_SERVER_IDS = new Set<string>(knownVerifiedCloreHosts.map((host) => host.server_id));
+const STAGE3U_PREFERRED_SERVER_ORDER = new Map([["29167", 0], ["105178", 1]]);
 const FAILED_SERVER_IDS = new Set(failedCloreOrders.map((order) => order.server_id).filter((id): id is string => typeof id === "string" && id.length > 0 && !KNOWN_VERIFIED_SERVER_IDS.has(id)));
 const MANUAL_GOLDEN_SERVER_IDS = new Set(["28726"]);
 
@@ -91,6 +92,7 @@ export function rankStage3OCandidates(candidates: GpuCandidate[], recommendedSer
     .filter((candidate) => !FAILED_SERVER_IDS.has(candidate.id) && !MANUAL_GOLDEN_SERVER_IDS.has(candidate.id) && /RTX\s*(4090|5090)/i.test(candidate.gpuType) && candidate.vramGb >= 23 && candidate.minimumRamGb >= 32 && candidate.containerDiskGb >= 180 && candidate.interruptible === false && candidate.hourlyUsd !== null && candidate.hourlyUsd <= 0.7 && candidate.hourlyUsd * (MAX_RUNTIME_MINUTES / 60) + CLORE_CREATION_FEE_USD <= MAX_TOTAL_SPEND_USD)
     .sort((left, right) =>
       (recommended.get(left.id) ?? 999) - (recommended.get(right.id) ?? 999) ||
+      (STAGE3U_PREFERRED_SERVER_ORDER.get(left.id) ?? 999) - (STAGE3U_PREFERRED_SERVER_ORDER.get(right.id) ?? 999) ||
       Number(KNOWN_VERIFIED_SERVER_IDS.has(right.id)) - Number(KNOWN_VERIFIED_SERVER_IDS.has(left.id)) ||
       left.priority - right.priority ||
       (right.reliability ?? -1) - (left.reliability ?? -1) ||

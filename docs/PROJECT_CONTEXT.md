@@ -1,5 +1,14 @@
 # Project Context
 
+## 2026-07-16 Stage 3U verified host compiler gate and WebSocket blocker
+
+- Stage 3U hardens the native Clore bootstrap with one minimum apt transaction containing build-essential, gcc/g++, make, libc6-dev, linux-libc-dev, generic and active-version Python development headers, python3-venv, git, curl, CA certificates, pkg-config, cmake, ninja-build, and ffmpeg. ComfyUI cannot start until ordered probes verify stdlib.h, stdio.h, the sysconfig include directory, Python.h, compiled C/C++ executables, Torch CUDA on RTX 4090, Triton import, and a real Triton GPU vector-add kernel.
+- Probe evidence records exact commands, timestamps, exit codes, and sanitized output. A classified missing package/path gets one in-place correction and only the failed probe is rerun. Runtime startup separately captures full logs, applies one same-host toolchain/cache correction, and retries once before cleanup.
+- The real Stage 3U order was `1958422` on known host `29167` at 0.2291666667 USD/hour, using the exact returned endpoint `n1.de.clorecloud.net:1754`. Dedicated-key SSH succeeded in 26 seconds without password authentication. The host was RTX 4090 with 24,564 MiB VRAM, driver 550.144.03/CUDA 12.4, 32 vCPU, about 62.45 GiB RAM, and about 867.5 GiB workspace capacity; Docker was unavailable, so native bootstrap was used.
+- Native preparation completed in about 441 seconds. Every compiler/Triton probe passed on its first run: `/usr/include/stdlib.h`, `/usr/include/stdio.h`, `/usr/include/python3.12`, Python.h, C, C++, Torch 2.6.0+cu124 CUDA, Triton 3.2.0, and GPU vector-add with zero maximum error. ComfyUI/controller health, SQLite, object_info, and required nodes also passed on the first health poll.
+- The remaining execution blocker was the first local SSH-tunnel WebSocket handshake failing immediately after health passed. The order was then cleaned up by the existing exception path before any FLUX R2 restore. Tunnel verification now waits for loopback `/system_stats`, supplies a client ID, and retries the WebSocket up to three times. This change is locally verified but not yet rerun on a GPU.
+- No FLUX or Wan object was restored and no image/video was generated. Both task records remain failed without false completion. The wallet moved from 13.20 to 13.05 USD. Final Clore orders, RunPod Pods/volumes, watchdogs/watchers, and create locks are zero; both provider holds are enabled and R2 caches are preserved.
+
 ## 2026-07-16 Stage 3P one-use operator retry and single Clore outcome
 
 - Stage 3P adds a separate `clore:deployment:operator-retry` command. Its ignored record contains only creation/expiration times, the exact one-attempt/0.20 USD failed-deployment/2.50 USD session limits, a random nonce, and SHA256 integrity. It does not claim Clore support recovery. A valid support acknowledgement remains preferred; the operator record is a one-use fallback.
