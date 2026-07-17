@@ -7,6 +7,8 @@ import { buildCurrentPointer, buildProductionManifest, loadProductionFamilies, p
 
 const read = (relative: string) => readFileSync(path.join(process.cwd(), relative), "utf8");
 const workflow = YAML.parse(read(".github/workflows/production-model-cache.yml"));
+assert.deepEqual(workflow.on.push.branches, ["codex/phase-3h-flux-parallel"]);
+assert.deepEqual(workflow.on.push.paths, [".github/stage3y-cache-trigger.json"]);
 assert.equal(workflow.concurrency["cancel-in-progress"], false);
 assert.equal(workflow.jobs.cache["timeout-minutes"], 75);
 assert.equal(workflow.jobs.cache.strategy["fail-fast"], false);

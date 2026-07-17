@@ -2,6 +2,11 @@ name: Stage 3Y production model cache
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - codex/phase-3h-flux-parallel
+    paths:
+      - .github/stage3y-cache-trigger.json
 
 permissions:
   contents: read
