@@ -13,7 +13,7 @@ import { readGpuBillingStatus } from "./gpu-billing-status";
 import { billingSafetyBlockers } from "./clore/support-acknowledgement";
 import { buildRuntimeOverlay } from "./runtime-overlay";
 import { buildRestoreBundle } from "./model-cache/production-restore-bundle";
-import { buildRemoteRestoreLaunchCommand, buildRemoteRestorePollCommand } from "./clore/production-r2-restore";
+import { buildDetachedLaunchCommand, installDetachedWorker, inspectRemoteJob, launchDetachedJob, remoteJobDir, stopDetachedJob, waitForDetachedJob } from "./clore/detached-remote-job";
 import { installRemoteComfyRunner, runRemoteComfyProbe, runRemoteComfyWorkflow, downloadRemoteRunnerOutputPersistent, removeRemoteRunnerOutput, type RemoteRunnerResult } from "./comfy-remote-runner";
 import { validatePngPixels } from "./flux-first-image-executor";
 import { archiveFluxFirstImage } from "./flux-first-image";
@@ -25,13 +25,13 @@ type Json = Record<string, unknown>;
 type WorkflowNode = { class_type: string; inputs: Record<string, unknown> };
 type Evidence = Json & { started_at: string; events: Json[] };
 
-const LIMITS = { maxHostAttempts: 2, maxFailedDeploymentSpendUsd: 0.4, maxTotalSpendUsd: 2, wallClockMinutes: 180, drainingMinutes: 160 } as const;
+const LIMITS = { maxActiveOrders: 1, maxHostAttempts: 2, maxFailedDeploymentSpendUsd: 0.4, maxTotalSpendUsd: 2, wallClockMinutes: 180, drainingMinutes: 165, preserveSuccessfulImage: true } as const;
 const CREATION_FEE_USD = 0.1;
 const SECRET_DIR = path.join(process.cwd(), ".secrets");
-const AUTH = path.join(SECRET_DIR, "stage4c-operator-authorization.json");
-const AUTH_CONSUMING = path.join(SECRET_DIR, "stage4c-operator-authorization.consuming.json");
-const AUTH_CONSUMED = path.join(SECRET_DIR, "stage4c-operator-authorization.consumed.json");
-const EVIDENCE_PATH = path.join(SECRET_DIR, "stage4c-session-evidence.json");
+const AUTH = path.join(SECRET_DIR, "stage4d-operator-authorization.json");
+const AUTH_CONSUMING = path.join(SECRET_DIR, "stage4d-operator-authorization.consuming.json");
+const AUTH_CONSUMED = path.join(SECRET_DIR, "stage4d-operator-authorization.consumed.json");
+const EVIDENCE_PATH = path.join(SECRET_DIR, "stage4d-session-evidence.json");
 const IMAGE_FAMILY = "ultrareal-flux1-dev-fp8";
 const VIDEO_FAMILY = "wan22-remix-14b-i2v-fp8";
 const IMAGE_LIBRARY = "D:\\AI-Creative-Library";
@@ -93,7 +93,8 @@ async function preflight(evidence: Evidence) {
   if (blockers.length) throw new Error(`stage4c_preflight:${blockers.join(";")}`);
   if (billing.clore.activeOrders !== 0 || billing.runpod.activePods !== 0 || billing.runpod.networkVolumes !== 0) throw new Error("stage4c_resources_not_zero");
   if (!billing.holds.clore || !billing.holds.runpod) throw new Error("stage4c_holds_not_enabled");
-  const pool = prepareStage4AFinalBatch(); if (pool.completed) throw new Error("stage4c_tasks_already_completed");
+  setGenerationTaskStatus([STAGE4A_IMAGE_TASK_ID, STAGE4A_VIDEO_TASK_ID], "armed", { stage4dRetry: true, inferenceVerified: false });
+  const pool = prepareStage4AFinalBatch(); if (pool.completed) throw new Error("stage4d_tasks_already_completed");
   const ffmpeg = require("@ffmpeg-installer/ffmpeg") as { path: string }; const ffprobe = require("@ffprobe-installer/ffprobe") as { path: string };
   requireSuccess(spawnSync(ffmpeg.path, ["-version"], { encoding: "utf8", timeout: 30_000 }), "stage4c_ffmpeg_missing");
   requireSuccess(spawnSync(ffprobe.path, ["-version"], { encoding: "utf8", timeout: 30_000 }), "stage4c_ffprobe_missing");
@@ -163,29 +164,105 @@ async function bootstrap(target: GpuTarget, evidence: Evidence) {
   return { mode, cuda, runner };
 }
 
+async function detachedCanary(target: GpuTarget, evidence: Evidence) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const jobId = `stage4d-canary-${randomUUID().slice(0, 8)}`;
+    try {
+      await installDetachedWorker(target);
+      const launch = await launchDetachedJob(target, { jobId, mode: "canary" });
+      event(evidence, "canary_launched", { attempt, job_id: jobId, returned_ms: launch.returnedMs, transport_timed_out: launch.transportTimedOut });
+      if (launch.returnedMs > 15_000) throw new Error("canary_launcher_exceeded_15_seconds");
+      await sleep(12_000);
+      const first = inspectRemoteJob(target, jobId);
+      if (!first.reachable || !first.state || !first.alive || first.state.phase !== "running") throw new Error("canary_not_observable_after_disconnect");
+      const firstHeartbeat = first.state.last_heartbeat_at;
+      await sleep(12_000);
+      const second = inspectRemoteJob(target, jobId);
+      if (!second.reachable || !second.state || second.state.last_heartbeat_at <= firstHeartbeat) throw new Error("canary_heartbeat_did_not_advance");
+      const completed = await waitForDetachedJob(target, jobId, 120_000);
+      if (!completed.reachable || !completed.result || completed.state?.phase !== "completed") throw new Error("canary_result_invalid");
+      event(evidence, "canary_completed", { attempt, job_id: jobId, survived_disconnect: true, second_connection_observed_running: true, heartbeat_advanced: true, result: completed.result });
+      sshCommand(target, `rm -rf ${remoteJobDir(jobId)}`, 30_000);
+      return { jobId, launch, completed };
+    } catch (error) {
+      stopDetachedJob(target, jobId);
+      event(evidence, "canary_attempt_failed", { attempt, job_id: jobId, error: safe(error instanceof Error ? error.message : error) });
+      if (attempt === 1) event(evidence, "canary_in_place_repair", { action: "recreate_tools_directory_and_reinstall_worker", next_attempt: 2 });
+    }
+  }
+  const handoff = await manualHandoff(target, evidence, `stage4d-canary-${randomUUID().slice(0, 8)}`, "canary");
+  const completed = handoff.state?.phase === "completed" ? handoff : await waitForDetachedJob(target, handoff.state!.job_id, 120_000);
+  return { jobId: handoff.state!.job_id, launch: { returnedMs: 0, transportTimedOut: false, stdout: "manual_handoff" }, completed };
+}
+
+async function manualHandoff(target: GpuTarget, evidence: Evidence, jobId: string, mode: "canary" | "restore", bundlePath?: string) {
+  const artifactDir = path.join(process.cwd(), "artifacts", "stage4d"); mkdirSync(artifactDir, { recursive: true });
+  const remoteScript = path.join(artifactDir, "manual-restore-remote.sh");
+  const localScript = path.join(artifactDir, "manual-restore.ps1");
+  const statusFile = path.join(artifactDir, "manual-status.txt");
+  const remoteCommand = buildDetachedLaunchCommand({ jobId, mode, bundlePath });
+  writeFileSync(remoteScript, `#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /workspace/tools\nchmod 700 /workspace/tools/detached-job-worker.py\n${remoteCommand}\n`, "utf8");
+  const host = target.host.replace(/'/g, "''"); const username = target.username.replace(/'/g, "''");
+  writeFileSync(localScript, `param([Parameter(Mandatory=$true)][string]$KeyPath)\n$ErrorActionPreference = 'Stop'\n$root = (Resolve-Path (Join-Path $PSScriptRoot '..\\..')).Path\n$sshBase = @('-i',$KeyPath,'-o','StrictHostKeyChecking=accept-new','-o','PasswordAuthentication=no','-o','BatchMode=yes','-o','ConnectTimeout=15','-p','${target.port}','${username}@${host}')\n& ssh @sshBase 'mkdir -p /workspace/tools'\nif ($LASTEXITCODE -ne 0) { throw 'manual remote directory failed' }\n& scp -i $KeyPath -o StrictHostKeyChecking=accept-new -o PasswordAuthentication=no -o BatchMode=yes -P ${target.port} (Join-Path $root 'scripts\\clore\\detached-job-worker.py') '${username}@${host}:/workspace/tools/detached-job-worker.py'\nif ($LASTEXITCODE -ne 0) { throw 'manual worker upload failed' }\n& scp -i $KeyPath -o StrictHostKeyChecking=accept-new -o PasswordAuthentication=no -o BatchMode=yes -P ${target.port} (Join-Path $PSScriptRoot 'manual-restore-remote.sh') '${username}@${host}:/workspace/tools/manual-restore-remote.sh'\nif ($LASTEXITCODE -ne 0) { throw 'manual launcher upload failed' }\n& ssh @sshBase 'chmod 700 /workspace/tools/manual-restore-remote.sh && /workspace/tools/manual-restore-remote.sh'\nif ($LASTEXITCODE -ne 0) { throw 'manual launch failed' }\n`, "utf8");
+  const safeCommand = `powershell -NoProfile -ExecutionPolicy Bypass -File "${localScript}" -KeyPath $env:CLORE_SSH_KEY_PATH`;
+  writeFileSync(statusFile, `MANUAL_HANDOFF_REQUIRED\ncreated_at=${new Date().toISOString()}\nendpoint=${target.host}:${target.port}\njob_id=${jobId}\nmode=${mode}\ncommand=${safeCommand}\n`, "utf8");
+  console.log("MANUAL_HANDOFF_REQUIRED"); console.log(safeCommand);
+  event(evidence, "manual_handoff_required", { endpoint: `${target.host}:${target.port}`, job_id: jobId, mode, command: safeCommand, secrets_in_artifacts: false });
+  const handoffStarted = Date.now() / 1000; const deadline = Math.min(Date.now() + 15 * 60_000, Date.parse(evidence.started_at) + LIMITS.drainingMinutes * 60_000);
+  while (Date.now() < deadline) {
+    const observed = inspectRemoteJob(target, jobId);
+    if (observed.reachable && observed.state && observed.state.started_at >= handoffStarted && ["running", "completed"].includes(observed.state.phase)) {
+      event(evidence, "manual_handoff_detected", { job_id: jobId, phase: observed.state.phase, pid: observed.pid });
+      return observed;
+    }
+    await sleep(20_000);
+  }
+  throw new Error(`manual_handoff_timeout:${jobId}`);
+}
+
 async function restoreFamily(target: GpuTarget, family: string, evidence: Evidence, parallel = 3) {
   const bundle = await buildRestoreBundle(family, 7200); bundle.parallelDownloads = parallel;
   const local = path.join(os.tmpdir(), `stage4c-${family}-${randomUUID()}.json`); writeFileSync(local, `${JSON.stringify(bundle)}\n`, { mode: 0o600 });
+  const jobId = `stage4d-${family}-${randomUUID().slice(0, 8)}`; const dir = remoteJobDir(jobId); const remoteBundle = `${dir}/bundle.json`;
   try {
-    requireSuccess(sshCommand(target, "mkdir -p /workspace/tools /workspace/restore /workspace/logs", 30_000), "stage4c_restore_dirs_failed");
+    requireSuccess(sshCommand(target, `mkdir -p /workspace/tools /workspace/logs ${dir}`, 30_000), "stage4d_restore_dirs_failed");
+    await installDetachedWorker(target);
     requireSuccess(scpFile(target, path.join(process.cwd(), "scripts", "clore", "restore-production-r2.py"), "/workspace/tools/restore-production-r2.py", 2 * 60_000), "stage4c_restore_tool_upload_failed");
-    requireSuccess(scpFile(target, local, `/workspace/restore/${family}.json`, 2 * 60_000), "stage4c_restore_bundle_upload_failed");
-    const pid = requireSuccess(sshCommand(target, buildRemoteRestoreLaunchCommand(family), 30_000), "stage4c_restore_launch_failed").trim();
-    event(evidence, "restore_started", { family, pid, parallel_downloads: parallel, restore_bytes: bundle.restoreBytes, shared_object_keys: bundle.sharedObjectKeys });
-    const started = Date.now(); let last: Json = { status: "starting" };
-    while (Date.now() - started < 100 * 60_000) {
-      const text = requireSuccess(sshCommand(target, buildRemoteRestorePollCommand(family), 30_000), "stage4c_restore_poll_failed").trim();
-      try { last = JSON.parse(text) as Json; } catch { last = { status: "starting" }; }
-      if (last.status === "completed") break;
-      if (last.status === "failed") {
-        const log = sshCommand(target, `tail -200 /workspace/logs/restore-${family}.log`, 30_000);
-        throw new Error(`stage4c_restore_failed:${family}:${safe(last.error)}:${safe(log.stdout ?? log.stderr)}`);
+    requireSuccess(scpFile(target, local, remoteBundle, 2 * 60_000), "stage4d_restore_bundle_upload_failed");
+    const started = Date.now();
+    let launch = { returnedMs: 0, transportTimedOut: false, stdout: "" };
+    let initial: ReturnType<typeof inspectRemoteJob> | null = null;
+    for (let attempt = 1; attempt <= 2 && !(initial?.reachable && initial.state); attempt += 1) {
+      try {
+        if (attempt > 1) {
+          const existing = inspectRemoteJob(target, jobId);
+          if (existing.reachable && existing.state) { initial = existing; break; }
+          await installDetachedWorker(target);
+          event(evidence, "restore_launcher_in_place_repair", { family, job_id: jobId, attempt });
+        }
+        launch = await launchDetachedJob(target, { jobId, mode: "restore", bundlePath: remoteBundle });
+        initial = inspectRemoteJob(target, jobId);
+        if (launch.transportTimedOut) {
+          event(evidence, "restore_launch_transport_timeout", { family, job_id: jobId, attempt, reclassified_from_fresh_observation: initial.reachable ? initial.state?.phase ?? "not_created" : "ssh_temporarily_unreachable" });
+          for (let reconnect = 0; reconnect < 3 && (!initial.reachable || !initial.state); reconnect += 1) { await sleep(10_000); initial = inspectRemoteJob(target, jobId); }
+        }
+        if (!initial.reachable || !initial.state) throw new Error(`remote_job_not_created:${family}`);
+      } catch (error) {
+        event(evidence, "restore_launcher_attempt_failed", { family, job_id: jobId, attempt, error: safe(error instanceof Error ? error.message : error) });
+        initial = null;
       }
-      await sleep(15_000);
     }
-    if (last.status !== "completed") throw new Error(`stage4c_restore_timeout:${family}`);
-    requireSuccess(sshCommand(target, `rm -f /workspace/restore/${family}.json`, 30_000), "stage4c_restore_bundle_cleanup_failed");
-    const result = { family, elapsed_ms: Date.now() - started, progress: last, direct_r2: true, admin_credentials_on_gpu: false, parallel_downloads: parallel };
+    if (!initial?.reachable || !initial.state) initial = await manualHandoff(target, evidence, jobId, "restore", remoteBundle);
+    if (!initial.reachable || !initial.state) throw new Error(`stage4d_restore_launch_state_missing:${family}`);
+    event(evidence, "restore_started", { family, job_id: jobId, pid: initial.pid, launcher_returned_ms: launch.returnedMs, transport_timed_out: launch.transportTimedOut, parallel_downloads: parallel, restore_bytes: bundle.restoreBytes, shared_object_keys: bundle.sharedObjectKeys });
+    const completed = initial.state.phase === "completed" ? initial : await waitForDetachedJob(target, jobId, 100 * 60_000, (status, classification) => {
+      if (status.reachable && status.state) event(evidence, "restore_poll", { family, job_id: jobId, classification, phase: status.state.phase, completed_bytes: status.state.completed_bytes, total_bytes: status.state.total_bytes, current_object: status.state.current_object, heartbeat_at: status.state.last_heartbeat_at });
+    });
+    if (!completed.reachable || !completed.state) throw new Error(`stage4d_restore_completion_state_missing:${family}`);
+    const text = requireSuccess(sshCommand(target, `cat /workspace/logs/restore-${family}.json`, 30_000), "stage4d_restore_progress_read_failed").trim();
+    const last = JSON.parse(text) as Json;
+    requireSuccess(sshCommand(target, `rm -f ${remoteBundle}`, 30_000), "stage4d_restore_bundle_cleanup_failed");
+    const result = { family, job_id: jobId, elapsed_ms: Date.now() - started, lifecycle: completed.state, progress: last, direct_r2: true, admin_credentials_on_gpu: false, parallel_downloads: parallel };
     event(evidence, "restore_completed", result); return result;
   } finally { rmSync(local, { force: true }); }
 }
@@ -263,7 +340,7 @@ async function videoPhase(target: GpuTarget, image: Awaited<ReturnType<typeof im
 }
 
 async function cleanup(session: GpuSession | null, target: GpuTarget | null, provider: ReturnType<typeof getGpuProvider>, evidence: Evidence) {
-  if (target) sshCommand(target, "/workspace/clore-light-bootstrap.sh stop || true", 120_000);
+  if (target) sshCommand(target, "for p in /workspace/jobs/*/worker.pid; do test -s \"$p\" && kill -TERM $(cat \"$p\") 2>/dev/null || true; done; /workspace/clore-light-bootstrap.sh stop || true", 120_000);
   let billing = null; if (session) { try { billing = await provider.getBilling(session); } catch { /* wallet delta below */ } try { await provider.terminateSession(session); } catch (error) { event(evidence, "order_cancel_error", { error: safe(error instanceof Error ? error.message : error) }); } }
   runNpm(["run", "clore:watchdog:remote:disarm"]); disableLocalWatchdog(); setCloreDeploymentHold(true, "stage4c_cleanup"); clearManualParitySecrets();
   rmSync(AUTH, { force: true }); rmSync(AUTH_CONSUMING, { force: true });
@@ -288,7 +365,9 @@ async function main() {
     evidence.candidate = { id: acquired.candidate.id, gpu: acquired.candidate.gpuType, hourly_usd: acquired.candidate.hourlyUsd, ram_gb: acquired.candidate.minimumRamGb, disk_gb: acquired.candidate.containerDiskGb };
     evidence.order_id = session.id; evidence.ssh_endpoint = `${target.host}:${target.port}`; evidence.failed_deployment_spend_usd = acquired.failedSpend; writeEvidence(evidence);
     event(evidence, "hardware_inspection", { output: inspectHardware(target) });
-    const runtime = await bootstrap(target, evidence); const image = await imagePhase(target, runtime, evidence); unload(target, evidence);
+    const runtime = await bootstrap(target, evidence); const canary = await detachedCanary(target, evidence);
+    evidence.detached_canary = { job_id: canary.jobId, launcher_returned_ms: canary.launch.returnedMs, passed: true }; writeEvidence(evidence);
+    const image = await imagePhase(target, runtime, evidence); unload(target, evidence);
     try { await videoPhase(target, image, runtime, evidence); } catch (error) { setGenerationTaskStatus([STAGE4A_VIDEO_TASK_ID], "failed", { errorClass: safe(error instanceof Error ? error.message : error), imagePreserved: true }); throw error; }
   } catch (error) {
     primary = error;
