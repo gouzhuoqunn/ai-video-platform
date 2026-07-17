@@ -1,12 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/route-guard";
 import { armGenerationPool, createGenerationTask, generationPoolSummary, readGenerationPool, updateGenerationTasks, upsertGenerationTasks, type GenerationPriority, type GenerationTask, type GenerationType } from "@/lib/generation/task-pool";
+import { validateProductionPrompt } from "@/lib/generation/production-prompt-safety";
 
 type Payload = {
   action?: "create" | "sync" | "confirm" | "immediate" | "cancel" | "delete" | "regenerate" | "arm";
   generationType?: GenerationType;
   prompt?: string;
   modelProfile?: string;
+  gpuPreference?: string[];
   taskIds?: string[];
   tasks?: Array<Partial<GenerationTask> & Pick<GenerationTask, "id" | "generationType" | "prompt" | "modelProfile">>;
 };
@@ -28,12 +30,17 @@ export async function POST(request: NextRequest) {
     const generationType = payload.generationType;
     const modelProfile = String(payload.modelProfile ?? "").trim();
     if (!generationType || !["image", "video"].includes(generationType) || !prompt || prompt.length > 2000 || !modelProfile) return NextResponse.json({ error: "任务字段无效。" }, { status: 400 });
-    const task = createGenerationTask({ generationType, prompt, modelProfile });
+    const safety = validateProductionPrompt(prompt);
+    if (!safety.allowed) return NextResponse.json({ error: safety.reason, code: safety.code }, { status: 400 });
+    const task = createGenerationTask({ generationType, prompt, modelProfile, gpuPreference: payload.gpuPreference });
     const state = upsertGenerationTasks([task]);
     return NextResponse.json({ task, pool: generationPoolSummary(state), create_order_called: false });
   }
   if (payload.action === "sync") {
-    const tasks = (payload.tasks ?? []).slice(0, 100).map((task) => createGenerationTask(task));
+    const requested = (payload.tasks ?? []).slice(0, 100);
+    const rejected = requested.map((task) => validateProductionPrompt(String(task.prompt ?? ""))).find((result) => !result.allowed);
+    if (rejected) return NextResponse.json({ error: rejected.reason, code: rejected.code }, { status: 400 });
+    const tasks = requested.map((task) => createGenerationTask(task));
     return NextResponse.json({ synced: tasks.length, pool: generationPoolSummary(upsertGenerationTasks(tasks)), create_order_called: false });
   }
   if (payload.action === "arm") {

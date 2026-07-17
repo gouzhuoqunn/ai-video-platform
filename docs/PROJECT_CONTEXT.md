@@ -717,3 +717,20 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - The explicit post-SSH failure rule prevented a third host. FLUX and Wan files were not restored, no image or video was generated, no local media/UI completion was claimed, and the prepared real tasks remain failed with the exact prerequisite error.
 - Final cleanup canceled both orders, removed temporary SSH/password target state, disarmed the watchdog, disabled its scheduled task, restored both provider holds, and confirmed twice that Clore orders, RunPod Pods, and RunPod volumes were zero. The USD wallet stabilized at 13.37 after starting at 13.45.
 - `gpu_inference_verified=false`, `flux_first_image_verified=false`, `production_ready=false`, and the real video loop remains incomplete.
+
+## 2026-07-17 Stage 3X: Production Model Lock and Token Gate
+
+- The production defaults are now `ultrareal-flux1-dev-fp8` for images and `wan22-remix-14b-i2v-fp8` for image-to-video. RTX 4090 and RTX 5090 share each family’s exact weights; there are four execution profiles but only two R2 object families.
+- The Civitai API audit is recorded in `benchmark/stage3x/civitai-model-audit.json`. UltraReal selects V4 file `1320644`, the full SafeTensor FP8 FLUX.1 Dev checkpoint with SHA256 `4e675980...28c18e`. Wan selects the matched I2V A14B V3 high/low files `2657128` and `2657705`; T2V, GGUF, FP16 alternatives, and mixed generations are not production candidates.
+- UltraReal uses the creator’s DPM++ 2M, 50-step, beta-scheduler guidance. Wan uses the official two-expert I2V graph with a step-10 expert switch, a real input image, 832x480/33-frame conservative RTX 4090 profile, and 1280x704/41-frame RTX 5090 profile.
+- New R2 prefixes use immutable SHA-addressed objects, revision manifests, and `current.json` published last. The GPU host fetches the current pointer, manifest, and objects directly through short-lived read-only URLs with parallel `.part` resume, size/SHA validation, atomic rename, per-object timeout, heartbeat, and local progress JSON. R2 administrator credentials never go to the GPU.
+- `flux2-klein-4b` remains `legacy_verified`; `wan22-ti2v-5b` remains `legacy_cached`. Their existing R2 caches are preserved but neither is a production default.
+- The local single-user prompt gate rejects sexual content involving minors and non-consensual sexual activity. The Wan family is recorded as `adult_model=true`; the main UI shows the neutral model/profile/cache metadata without promoting the source-site content rating.
+- No `CIVITAI_API_TOKEN` was present in `.secrets/civitai.env`, the process environment, or GitHub Actions secrets. Therefore no GitHub cache run was dispatched, no GitHub secret was changed, no model was downloaded, and no GPU/provider resource was created.
+- Manual credential completion steps:
+  1. 在 Civitai 账户的 API Keys 页面创建只用于本项目的 token。
+  2. 新建本地忽略文件 `.secrets/civitai.env`，仅写入 `CIVITAI_API_TOKEN=<token>`，不要提交到 Git。
+  3. 运行 `npx tsx scripts/model-cache/production-model-cache.ts credential-gate`，确认精确凭证门通过。
+  4. 将同一个 token 添加为当前 GitHub 仓库的 Actions secret `CIVITAI_API_TOKEN`；同时确认已有授权的 `HF_TOKEN` 与六个 R2 secrets 均存在。
+  5. 只手动触发一次 `Stage 3X production model cache` workflow。两个族全部下载、SHA/大小验证、R2 HEAD/Range 验证并最后发布 `current.json` 后，再把 `model-availability.json` 的对应 `cached` 和 `restoreReady` 改为 `true`。
+- Until those manual steps succeed, both production model gates fail closed with `metadata_locked_token_blocked`; the UI may create pending local tasks, but the scheduler cannot create a paid order.

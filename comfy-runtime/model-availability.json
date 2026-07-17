@@ -1,21 +1,60 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "models": [
     {
       "generationType": "image",
+      "modelProfile": "ultrareal-flux1-dev-fp8",
+      "displayName": "Image UltraReal Flux FP8",
+      "status": "metadata_locked_token_blocked",
+      "defaultProduction": true,
+      "cached": false,
+      "restoreReady": false,
+      "inferenceVerified": false,
+      "validatedFallback": false,
+      "executableWorkflow": true,
+      "currentKey": "production/models/ultrareal-flux1-dev-fp8/current.json",
+      "revision": "civitai-1413133-file-1320644",
+      "restoreBytes": 17640339740,
+      "updatedAt": "2026-07-17T04:00:00.000Z"
+    },
+    {
+      "generationType": "video",
+      "modelProfile": "wan22-remix-14b-i2v-fp8",
+      "displayName": "Video Wan 2.2 Remix 14B FP8",
+      "status": "metadata_locked_token_blocked",
+      "defaultProduction": true,
+      "cached": false,
+      "restoreReady": false,
+      "inferenceVerified": false,
+      "validatedFallback": false,
+      "executableWorkflow": true,
+      "currentKey": "production/models/wan22-remix-14b-i2v-fp8/current.json",
+      "revision": "civitai-2770795-2771407-v3",
+      "restoreBytes": 35572266487,
+      "updatedAt": "2026-07-17T04:00:00.000Z"
+    },
+    {
+      "generationType": "image",
       "modelProfile": "flux2-klein-4b",
+      "displayName": "Flux2 Klein 4B",
+      "status": "legacy_verified",
+      "defaultProduction": false,
       "cached": true,
       "restoreReady": true,
-      "inferenceVerified": false,
+      "inferenceVerified": true,
       "validatedFallback": true,
       "executableWorkflow": true,
       "currentKey": "production/rtx4090/image/current.json",
       "revision": "flux2-klein-4b-5b4408e59397-a9e4ca87c16d",
+      "restoreBytes": 0,
       "updatedAt": "2026-07-16T00:00:00.000Z"
     },
     {
       "generationType": "video",
       "modelProfile": "wan22-ti2v-5b",
+      "displayName": "Wan2.2 TI2V-5B",
+      "status": "legacy_cached",
+      "defaultProduction": false,
       "cached": true,
       "restoreReady": true,
       "inferenceVerified": false,
@@ -23,6 +62,7 @@
       "executableWorkflow": true,
       "currentKey": "wan22-ti2v-5b/current.json",
       "revision": "wan22-ti2v-5b-fb1388adc906",
+      "restoreBytes": 0,
       "updatedAt": "2026-07-16T04:05:30.000Z"
     }
   ]

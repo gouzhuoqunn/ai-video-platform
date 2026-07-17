@@ -1,0 +1,75 @@
+name: Stage 3X production model cache
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cache:
+    name: Cache ${{ matrix.family }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        family:
+          - ultrareal-flux1-dev-fp8
+          - wan22-remix-14b-i2v-fp8
+    env:
+      CIVITAI_API_TOKEN: ${{ secrets.CIVITAI_API_TOKEN }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      AWS_DEFAULT_REGION: auto
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      HF_XET_HIGH_PERFORMANCE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Exact credential gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${CIVITAI_API_TOKEN:-}"
+          test -n "${HF_TOKEN:-}"
+          test -n "${AWS_ACCESS_KEY_ID:-}"
+          test -n "${AWS_SECRET_ACCESS_KEY:-}"
+          test -n "${R2_ACCOUNT_ID:-}"
+          test -n "${R2_BUCKET_NAME:-}"
+      - name: Install bounded tooling
+        run: |
+          npm ci --ignore-scripts
+          python -m pip install --disable-pip-version-check hf_xet awscli
+      - name: Download and verify exact files
+        run: python scripts/model-cache/production-cache-download.py --family "${{ matrix.family }}" --output "$RUNNER_TEMP/model"
+      - name: Emit immutable manifest and current pointer
+        run: npx tsx scripts/model-cache/production-model-cache.ts emit "${{ matrix.family }}" "$RUNNER_TEMP/meta"
+      - name: Upload objects, verify HEAD and Range, publish current last
+        shell: bash
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          manifest="$RUNNER_TEMP/meta/manifest.json"
+          current="$RUNNER_TEMP/meta/current.json"
+          while IFS=$'\t' read -r local_path object_key size; do
+            aws --endpoint-url "$endpoint" s3 cp "$RUNNER_TEMP/model/$local_path" "s3://${R2_BUCKET_NAME}/$object_key" --only-show-errors
+            actual="$(aws --endpoint-url "$endpoint" s3api head-object --bucket "$R2_BUCKET_NAME" --key "$object_key" --query ContentLength --output text)"
+            test "$actual" = "$size"
+            aws --endpoint-url "$endpoint" s3api get-object --bucket "$R2_BUCKET_NAME" --key "$object_key" --range bytes=0-0 "$RUNNER_TEMP/range-byte" >/dev/null
+          done < <(node -e 'const m=require(process.argv[1]); for(const f of m.files) console.log(`${f.path}\t${f.objectKey}\t${f.bytes}`)' "$manifest")
+          manifest_key="$(node -e 'console.log(require(process.argv[1]).manifestKey)' "$current")"
+          current_key="$(node -e 'const r=require("./comfy-runtime/production-model-registry.json"); console.log(r.families.find(x=>x.id===process.argv[1]).currentKey)' "${{ matrix.family }}")"
+          aws --endpoint-url "$endpoint" s3 cp "$manifest" "s3://${R2_BUCKET_NAME}/$manifest_key" --content-type application/json --only-show-errors
+          aws --endpoint-url "$endpoint" s3api head-object --bucket "$R2_BUCKET_NAME" --key "$manifest_key" >/dev/null
+          aws --endpoint-url "$endpoint" s3 cp "$current" "s3://${R2_BUCKET_NAME}/$current_key" --content-type application/json --only-show-errors
+          aws --endpoint-url "$endpoint" s3api head-object --bucket "$R2_BUCKET_NAME" --key "$current_key" >/dev/null

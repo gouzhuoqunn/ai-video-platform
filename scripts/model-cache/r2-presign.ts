@@ -151,3 +151,22 @@ export function createPresignedPutUrl(input: { creds: R2Credentials; key: string
   url.searchParams.set("X-Amz-Signature", signature);
   return url.toString();
 }
+
+export function createPresignedGetUrl(input: { creds: R2Credentials; key: string; expiresSeconds: number; now?: Date }) {
+  if (input.expiresSeconds < 1 || input.expiresSeconds > 7200) throw new Error("presigned GET expiry must be between 1 and 7200 seconds");
+  const now = input.now ?? new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+  const dateStamp = amzDate.slice(0, 8);
+  const scope = `${dateStamp}/${input.creds.region}/s3/aws4_request`;
+  const url = buildR2ObjectUrl(input.creds, input.key);
+  url.searchParams.set("X-Amz-Algorithm", "AWS4-HMAC-SHA256");
+  url.searchParams.set("X-Amz-Credential", `${input.creds.accessKeyId}/${scope}`);
+  url.searchParams.set("X-Amz-Date", amzDate);
+  url.searchParams.set("X-Amz-Expires", String(input.expiresSeconds));
+  url.searchParams.set("X-Amz-SignedHeaders", "host");
+  const canonicalRequest = ["GET", url.pathname, canonicalQuery(url), `host:${url.host}\n`, "host", "UNSIGNED-PAYLOAD"].join("\n");
+  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, scope, sha256Hex(canonicalRequest)].join("\n");
+  const signature = createHmac("sha256", signingKey(input.creds.secretAccessKey, dateStamp, input.creds.region)).update(stringToSign, "utf8").digest("hex");
+  url.searchParams.set("X-Amz-Signature", signature);
+  return url.toString();
+}

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import path from "node:path";
 import { getCloreDeploymentHold } from "../../../scripts/clore/deployment-hold";
 import { modelAvailabilityGate } from "./model-availability";
+import { PRODUCTION_GPU_CLASSES, PRODUCTION_IMAGE_MODEL, PRODUCTION_VIDEO_MODEL, productionModelSummary } from "./production-models";
 
 export type GenerationType = "image" | "video";
 export type GenerationPriority = "normal" | "immediate";
@@ -58,6 +59,10 @@ export type PoolCandidate = {
   serverId: string;
   gpu: string;
   vramGb: number;
+  ramGb?: number;
+  diskGb?: number;
+  onDemand?: boolean;
+  downloadMbps?: number | null;
   reliability: number | null;
   rating: number | null;
   projectedCostUsd: number;
@@ -67,8 +72,7 @@ export type PoolCandidate = {
 export const GENERATION_POOL_PATH = path.join(process.cwd(), ".secrets", "generation-pool-state.json");
 export const MAX_ACCEPTABLE_HOURLY_USD = 0.7;
 
-const IMAGE_GPU_CLASSES = ["rtx4090", "rtx5090", "a40", "a6000", "rtx3090", "rtx3090ti"];
-const VIDEO_GPU_CLASSES = ["rtx4090", "rtx5090"];
+const PRODUCTION_MODELS = new Set([PRODUCTION_IMAGE_MODEL, PRODUCTION_VIDEO_MODEL]);
 
 function now() { return new Date().toISOString(); }
 
@@ -79,9 +83,8 @@ export function generationThreshold(type: GenerationType, value?: string) {
 }
 
 export function acceptableGpuClasses(type: GenerationType, modelProfile: string) {
-  if (type === "image" && modelProfile === "flux2-klein-4b") return [...IMAGE_GPU_CLASSES];
-  if (type === "video" && modelProfile === "wan22-ti2v-5b") return [...VIDEO_GPU_CLASSES];
-  if (type === "video" && /a40|a6000/i.test(modelProfile)) return ["rtx4090", "rtx5090", "a40", "a6000"];
+  if (type === "image" && [PRODUCTION_IMAGE_MODEL, "flux2-klein-4b"].includes(modelProfile)) return [...PRODUCTION_GPU_CLASSES];
+  if (type === "video" && [PRODUCTION_VIDEO_MODEL, "wan22-ti2v-5b"].includes(modelProfile)) return [...PRODUCTION_GPU_CLASSES];
   return [];
 }
 
@@ -94,6 +97,18 @@ export function classifyGpu(value: string) {
   if (gpu.includes("3090ti")) return "rtx3090ti";
   if (gpu.includes("3090")) return "rtx3090";
   return "unknown";
+}
+
+export function validateProductionCandidate(candidate: PoolCandidate) {
+  const reasons: string[] = [];
+  if (!PRODUCTION_GPU_CLASSES.includes(classifyGpu(candidate.gpu) as (typeof PRODUCTION_GPU_CLASSES)[number])) reasons.push("只允许 RTX4090 或 RTX5090");
+  if (candidate.vramGb < 23) reasons.push("生产模型至少需要 23GB 显存");
+  if ((candidate.ramGb ?? 0) < 32) reasons.push("生产模型至少需要 32GB RAM");
+  if ((candidate.diskGb ?? 0) < 200) reasons.push("生产模型至少需要 200GB 磁盘");
+  if (candidate.onDemand !== true) reasons.push("生产模型只允许 On-Demand");
+  if (candidate.hourlyUsd > MAX_ACCEPTABLE_HOURLY_USD) reasons.push("小时价格超过上限");
+  if (candidate.projectedCostUsd > 2.5) reasons.push("预计会话费用超过上限");
+  return reasons;
 }
 
 export function defaultGenerationPoolState(): GenerationPoolState {
@@ -125,7 +140,9 @@ export function writeGenerationPool(state: GenerationPoolState, filePath = GENER
 }
 
 export function createGenerationTask(input: Partial<GenerationTask> & Pick<GenerationTask, "generationType" | "prompt" | "modelProfile">): GenerationTask {
-  const gpuPreference = input.gpuPreference?.length ? input.gpuPreference : acceptableGpuClasses(input.generationType, input.modelProfile);
+  const allowed: string[] = acceptableGpuClasses(input.generationType, input.modelProfile);
+  const requested = input.gpuPreference?.filter((gpu) => allowed.includes(gpu)) ?? [];
+  const gpuPreference = requested.length ? [...new Set(requested)] : allowed;
   return {
     id: input.id ?? randomUUID(), generationType: input.generationType, prompt: input.prompt.trim(), modelProfile: input.modelProfile,
     gpuPreference, priority: input.priority ?? "normal", status: input.status ?? "pending_confirmation", createdAt: input.createdAt ?? now(), confirmedAt: input.confirmedAt ?? null,
@@ -225,8 +242,10 @@ export function selectCloreCandidate(candidates: PoolCandidate[], state: Generat
   if (!selection.ready) return { candidate: null, rejected: [] as RejectedHost[], reason: selection.reason };
   const rejectedIds = new Set(state.scheduler.rejectedHosts.map((entry) => entry.serverId));
   const rejected: RejectedHost[] = [];
+  const productionSession = selection.batches.every((batch) => PRODUCTION_MODELS.has(batch.modelProfile));
   const accepted = candidates.filter((candidate) => {
     const reasons: string[] = [];
+    if (productionSession) reasons.push(...validateProductionCandidate(candidate));
     const gpuClass = classifyGpu(candidate.gpu);
     if (!selection.acceptableGpuClasses?.includes(gpuClass)) reasons.push("显卡类别不兼容");
     if (candidate.vramGb < Math.max(...selection.batches.map((batch) => batch.estimatedVram))) reasons.push("显存不足");
@@ -235,7 +254,7 @@ export function selectCloreCandidate(candidates: PoolCandidate[], state: Generat
     if (rejectedIds.has(candidate.serverId)) reasons.push("此前已记录为不可用主机");
     if (reasons.length) rejected.push({ serverId: candidate.serverId, reasons, rejectedAt: now() });
     return reasons.length === 0;
-  }).sort((left, right) => (right.reliability ?? 0) - (left.reliability ?? 0) || (right.rating ?? 0) - (left.rating ?? 0) || left.projectedCostUsd - right.projectedCostUsd || left.hourlyUsd - right.hourlyUsd);
+  }).sort((left, right) => (right.reliability ?? 0) - (left.reliability ?? 0) || (right.downloadMbps ?? 0) - (left.downloadMbps ?? 0) || (right.rating ?? 0) - (left.rating ?? 0) || left.projectedCostUsd - right.projectedCostUsd || left.hourlyUsd - right.hourlyUsd);
   return { candidate: accepted[0] ?? null, rejected, reason: accepted.length ? null : "当前市场没有满足模型、显存、可靠性和预算条件的主机。" };
 }
 
@@ -273,7 +292,7 @@ export function generationPoolSummary(state = readGenerationPool()) {
     imageBatchThreshold: generationThreshold("image"), videoBatchThreshold: generationThreshold("video"), mixedBatchEnabled: false,
     tasksNeeded: { image: Math.max(0, generationThreshold("image") - eligibleGroups(state, "image").flat().length), video: Math.max(0, generationThreshold("video") - eligibleGroups(state, "video").flat().length) },
     marketMonitoringActive: ["market_watching", "candidate_found"].includes(state.scheduler.state), nextMarketplaceRequestAt: state.scheduler.nextMarketplaceRequestAt,
-    estimatedMaximumSessionCost: 2.5, deploymentHold: getCloreDeploymentHold().enabled,
+    estimatedMaximumSessionCost: 2.5, deploymentHold: getCloreDeploymentHold().enabled, productionModels: productionModelSummary(),
     sessionSequence: selection.batches?.length === 2 ? ["图片批次", "卸载图片模型", "视频批次", "结束会话"] : selection.batches?.length === 1 ? [selection.batches[0].generationType === "image" ? "图片批次" : "视频批次", "结束会话"] : [],
   };
 }

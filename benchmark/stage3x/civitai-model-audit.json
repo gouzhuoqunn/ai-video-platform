@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "auditedAt": "2026-07-17T04:00:00.000Z",
+  "source": "https://civitai.com/api/v1/models/{modelId}",
+  "authenticationProbe": {
+    "ultraRealSelectedDownload": { "anonymousHeadStatus": 307, "tokenRequiredByWorkflow": true },
+    "wanHighSelectedDownload": { "anonymousHeadStatus": 401, "tokenRequiredByWorkflow": true },
+    "wanLowSelectedDownload": { "anonymousHeadStatus": 401, "tokenRequiredByWorkflow": true }
+  },
+  "selectionDecision": {
+    "ultraReal": { "versionId": 1413133, "fileId": 1320644, "reason": "Newest V4 official full SafeTensor FP8 with Flux.1 D base.", "interim": false },
+    "wan": { "highVersionId": 2770795, "lowVersionId": 2771407, "reason": "Newest matched V3 I2V-A14B SafeTensor FP8 high/low pair.", "rejectedClasses": ["T2V", "GGUF", "FP16", "mixed-generation pair"] }
+  },
+  "models": [
+    {
+      "modelId": 978314,
+      "name": "UltraReal Fine-Tune",
+      "type": "Checkpoint",
+      "nsfw": false,
+      "license": { "allowNoCredit": false, "allowCommercialUse": ["Image", "RentCivit", "Rent", "Sell"], "allowDerivatives": false, "allowDifferentLicense": true },
+      "settings": { "sampler": "DPM++ 2M", "steps": [30, 50], "scheduler": "beta", "guidance": 3, "triggerWords": [] },
+      "versions": [
+        { "id": 1413133, "name": "v4", "createdAt": "2025-02-14T13:30:11.842Z", "baseModel": "Flux.1 D", "status": "Published", "files": [
+          { "id": 1315039, "name": "ultrarealFineTune_v4.gguf", "sizeKB": 6777801.28125, "format": "GGUF", "size": "pruned", "fp": "fp8", "sha256": "8D817E129C805B4A8B64E88E1BFA5DF35612A9C2717F5CF701B0FEFDE8AFDC4D", "primary": false },
+          { "id": 1315342, "name": "ultrarealFineTune_v4.safetensors", "sizeKB": 23245029.875, "format": "SafeTensor", "size": "full", "fp": "fp16", "sha256": "F3CD5EB8ACC7649691C40471F927C4226D87562C0029A0C6EA6601158FDB82F4", "primary": true },
+          { "id": 1315069, "name": "ultrarealFineTune_v4.gguf", "sizeKB": 12424905.28125, "format": "GGUF", "size": "pruned", "fp": "fp16", "sha256": "81B64654E6A2779689577B425D1A22F940C7E136F8864B66EC21714ADAD1624C", "primary": false },
+          { "id": 1320644, "name": "ultrarealFineTune_v4.safetensors", "sizeKB": 11622600.109375, "format": "SafeTensor", "size": "full", "fp": "fp8", "sha256": "4E675980EA771AE64B566FA5A81CD8FBECDE1A1A7CE8B6F0207E836B6F28C18E", "primary": false }
+        ]},
+        { "id": 1319700, "name": "v3", "createdAt": "2025-01-23T10:55:18.489Z", "baseModel": "Flux.1 D", "status": "Published", "files": [
+          { "id": 1223783, "name": "ultrarealFineTune_v3.safetensors", "sizeKB": 23245029.875, "format": "SafeTensor", "size": "full", "fp": "bf16", "sha256": "AD6BE02021C25FF99758AD8988DB8BBA4FADEF23FD85815984B265AB93F9A873", "primary": true },
+          { "id": 1223727, "name": "ultrarealFineTune_v3.gguf", "sizeKB": 6777801.28125, "format": "GGUF", "size": "pruned", "fp": "fp8", "sha256": "96C97EDCE24C7903B574DE5DBEAA139FF8784D4D80A32D9179E15572E0FCFF49", "primary": false },
+          { "id": 1223749, "name": "ultrarealFineTune_v3.gguf", "sizeKB": 12424905.28125, "format": "GGUF", "size": "pruned", "fp": "fp16", "sha256": "E4CECF71EB991E67FAC1A06B07694E4EC80E571BFE087DEC7D6A8EA14DFD3354", "primary": false }
+        ]},
+        { "id": 1164498, "name": "v2.0", "createdAt": "2024-12-14T21:59:24.702Z", "baseModel": "Flux.1 D", "status": "Published", "files": [
+          { "id": 1069732, "name": "ultrarealFineTune_v20.gguf", "sizeKB": 12424905.28125, "format": "GGUF", "size": "pruned", "fp": "fp16", "sha256": "1009066177A6A7AA9B415C293159575482E7D5C5574211AB7362E6B880E9C96B", "primary": false },
+          { "id": 1077344, "name": "ultrarealFineTune_v20.safetensors", "sizeKB": 6542245.526367188, "format": "SafeTensor", "size": "pruned", "fp": "nf4", "sha256": "8394D797B339AA8B9A8B2D4ADE78EF6AC533BF4292AB8A44D0EBA10CC8FEB7E8", "primary": true },
+          { "id": 1069708, "name": "ultrarealFineTune_v20.gguf", "sizeKB": 6777801.28125, "format": "GGUF", "size": "pruned", "fp": "fp8", "sha256": "2BB72AFBE2779220F201612B55BDD3E02A3AF5125F6584B370FFF1E7F76C98AE", "primary": false },
+          { "id": 1069855, "name": "ultrarealFineTune_v20.safetensors", "sizeKB": 23245029.625, "format": "SafeTensor", "size": "full", "fp": "bf16", "sha256": "110B0C35DF91F22524B3E87FC8D0747E3C0DB4C210344FA92830D82F050071DA", "primary": false },
+          { "id": 1078490, "name": "ultrarealFineTune_v20.safetensors", "sizeKB": 11622555.46875, "format": "SafeTensor", "size": "full", "fp": "fp8", "sha256": "68C30C43D9CE699DC40BE1B56E4987161200253E059E521D96633E65EB1CC7EE", "primary": false }
+        ]},
+        { "id": 1095703, "name": "v1.0", "createdAt": "2024-11-24T17:03:12.202Z", "baseModel": "Flux.1 D", "status": "Published", "files": [
+          { "id": 1000910, "name": "ultrarealFineTune_v10.safetensors", "sizeKB": 23245028.875, "format": "SafeTensor", "size": "full", "fp": "fp16", "sha256": "B5BBF114087EA1AE0D13C19A4734338B0F5FE3BE63CEF7C918B1D8CD23DBDA3A", "primary": true },
+          { "id": 1013972, "name": "ultrarealFineTune_v10.gguf", "sizeKB": 6640447.15625, "format": "GGUF", "size": "pruned", "fp": "fp16", "sha256": "0E2FB4C12BF6BFE918C109741A3C2DEDE09F2E1B8C9F4D96DAE1D8F569B726C2", "primary": false },
+          { "id": 1000937, "name": "ultrarealFineTune_v10.safetensors", "sizeKB": 11622555.7734375, "format": "SafeTensor", "size": "full", "fp": "fp8", "sha256": "4C2E14A34A76D369946DEA111AD31ABE6C14915F0FD1411E794F6C75C1BC3D45", "primary": false }
+        ]}
+      ]
+    },
+    {
+      "modelId": 2003153,
+      "name": "Wan2.2-Remix (T2V&I2V)",
+      "type": "Checkpoint",
+      "nsfw": true,
+      "license": { "allowNoCredit": true, "allowCommercialUse": ["Image", "RentCivit", "Rent", "Sell"], "allowDerivatives": true, "allowDifferentLicense": true },
+      "settings": { "triggerWords": [] },
+      "versions": [
+        { "id": 2770795, "name": "I2V High v3.0", "createdAt": "2026-03-14T03:35:38.862Z", "baseModel": "Wan Video 2.2 I2V-A14B", "files": [{ "id": 2657128, "name": "wan22RemixT2VI2V_i2vHighV30.safetensors", "sizeKB": 13956320.4453125, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "2AC60C97CA6911090CDBDF055B685AF3646B7BD93C19C9AAE0F86F4EA018E97D" }] },
+        { "id": 2771407, "name": "I2V Low v3.0", "createdAt": "2026-03-14T09:16:48.153Z", "baseModel": "Wan Video 2.2 I2V-A14B", "files": [{ "id": 2657705, "name": "wan22RemixT2VI2V_i2vLowV30.safetensors", "sizeKB": 13956320.4453125, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "A239063C377E530229C4E5B1FECDCBE9DE1201A30126DD42297435287E713229" }] },
+        { "id": 2567309, "name": "I2V High v2.1", "createdAt": "2026-01-05T08:26:42.563Z", "baseModel": "Wan Video 2.2 I2V-A14B", "files": [{ "id": 2455678, "name": "wan22RemixT2VI2V_i2vHighV21.safetensors", "sizeKB": 13956345.671875, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "B1A7F8A4BBD7A65ECD34270FC99C778D0A0A380409D7E7D099636A0224FB8296" }, { "id": 2458290, "name": "wan22RemixT2VI2V_i2vHighV21.safetensors", "sizeKB": 27909622.234375, "format": "SafeTensor", "size": "full", "fp": "fp16", "sha256": "4AFDBE82B936A37588809334BA1D6B38569BBB039F6F238478830A8D3500AF69" }] },
+        { "id": 2567410, "name": "I2V Low v2.1", "createdAt": "2026-01-05T09:24:20.027Z", "baseModel": "Wan Video 2.2 I2V-A14B", "files": [{ "id": 2455785, "name": "wan22RemixT2VI2V_i2vLowV21.safetensors", "sizeKB": 13956345.671875, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "502497DA8177DD2881177845510AAFB3EA265FA33386C475BB402131F22DE068" }, { "id": 2458519, "name": "wan22RemixT2VI2V_i2vLowV21.safetensors", "sizeKB": 27909622.234375, "format": "SafeTensor", "size": "full", "fp": "fp16", "sha256": "0B1F15F569A0132ADD4BEA2DEBFD90519FD3730D4C959FB5638092E40943A5A7" }] },
+        { "id": 2424167, "name": "T2V High v2.0", "createdAt": "2025-11-20T17:19:41.121Z", "baseModel": "Wan Video 2.2 T2V-A14B", "files": [{ "id": 2314897, "name": "wan22RemixT2VI2V_t2vHighV20.safetensors", "sizeKB": 13954720.4453125, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "B1C4725CFE80EA3A01F9AF518F7A2F343320E1173482B8D8FB08858DDC72C69A" }] },
+        { "id": 2424912, "name": "T2V Low v2.0", "createdAt": "2025-11-20T22:32:53.163Z", "baseModel": "Wan Video 2.2 T2V-A14B", "files": [{ "id": 2315734, "name": "wan22RemixT2VI2V_t2vLowV20.safetensors", "sizeKB": 13954720.4453125, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "D9457044066AF43E24C1D215842E1540ECC29B724AC6A7B96F0DDAEE0D56950E" }] },
+        { "id": 2381931, "name": "I2V High v2.0", "createdAt": "2025-11-06T12:45:12.917Z", "baseModel": "Wan Video 2.2 I2V-A14B", "files": [{ "id": 2272220, "name": "wan22RemixT2VI2V_i2vHighV20.safetensors", "sizeKB": 13956320.4453125, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "B8C2FB3BF2D0E6916005EF6743802420C7DA36F9F7369FC0BFFB72333B452169" }] },
+        { "id": 2382303, "name": "I2V Low v2.0", "createdAt": "2025-11-06T15:33:46.910Z", "baseModel": "Wan Video 2.2 I2V-A14B", "files": [{ "id": 2272376, "name": "wan22RemixT2VI2V_i2vLowV20.safetensors", "sizeKB": 13956320.4453125, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "3A8C1520C733662DD6757EA1CD84154DC9D8605ED6AC3EEB5F04C3CF932FCD71" }] },
+        { "id": 2289469, "name": "T2V HighNoise v1.0", "createdAt": "2025-10-07T04:27:49.360Z", "baseModel": "Wan Video 2.2 T2V-A14B", "files": [{ "id": 2180729, "name": "wan22RemixT2VI2V_t2vHighnoiseV10.safetensors", "sizeKB": 13954720.09375, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "F2FC9E718CEED558EBA8E78107715D46EC993F8C09A5049B4921C90E86C7464D" }] },
+        { "id": 2289612, "name": "T2V LowNoise v1.0", "createdAt": "2025-10-07T05:23:12.536Z", "baseModel": "Wan Video 2.2 T2V-A14B", "files": [{ "id": 2180861, "name": "wan22RemixT2VI2V_t2vLownoiseV10.safetensors", "sizeKB": 13954720.09375, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "D3AB25F87E69D605B0536E119489EF72E692A5BDE47DE09F0540C50683643DA7" }] },
+        { "id": 2301890, "name": "I2V HighNoise v0.8", "createdAt": "2025-10-11T03:56:15.527Z", "baseModel": "Wan Video 2.2 I2V-A14B", "files": [{ "id": 2193030, "name": "wan22RemixT2VI2V_i2vHighnoiseV08.safetensors", "sizeKB": 13956320.3203125, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "A7411ED46695E5105F6605D97AAC5F4A682316E953B6B9758ED31B2BC37AA8E9" }] },
+        { "id": 2302179, "name": "I2V LowNoise v0.8", "createdAt": "2025-10-11T06:06:42.905Z", "baseModel": "Wan Video 2.2 I2V-A14B", "files": [{ "id": 2193220, "name": "wan22RemixT2VI2V_i2vLownoiseV08.safetensors", "sizeKB": 13956320.3203125, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "1B5457FF9191423E4E5795E3014B2764F13797FE60D297AC6126D44DD7CEC571" }] },
+        { "id": 2267348, "name": "T2V HighNoise v0.9", "createdAt": "2025-09-30T11:29:11.031Z", "baseModel": "Wan Video 2.2 T2V-A14B", "files": [{ "id": 2160092, "name": "wan22RemixT2VI2V_t2vHighnoiseV09.safetensors", "sizeKB": 13954754.5546875, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "386DC228EA1327ADB7C5465F1147FBFDDD1E0DE77F8A0D524CB3B0EB74794AD9" }] },
+        { "id": 2267712, "name": "T2V LowNoise v0.9", "createdAt": "2025-09-30T14:13:09.894Z", "baseModel": "Wan Video 2.2 T2V-A14B", "files": [{ "id": 2160056, "name": "wan22RemixT2VI2V_t2vLownoiseV09.safetensors", "sizeKB": 13954754.84375, "format": "SafeTensor", "size": "pruned", "fp": "fp8", "sha256": "C452F0AEFC4E5A15478175AEBA04A60195614B7A8F1CC73A90F27A79942BAF51" }] }
+      ]
+    }
+  ]
+}

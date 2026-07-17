@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "credentialGate": {
+    "requiredSecret": "CIVITAI_API_TOKEN",
+    "presentAtAudit": false,
+    "downloadOrDispatchAllowed": false,
+    "reason": "CIVITAI_API_TOKEN is absent locally, in the process environment, and in GitHub Actions secrets."
+  },
+  "hardwarePolicy": {
+    "providers": ["clore"],
+    "gpuClasses": ["rtx4090", "rtx5090"],
+    "onDemandOnly": true,
+    "minimumVramGb": 23,
+    "minimumRamGb": 32,
+    "preferredRamGb": 64,
+    "minimumDiskGb": 200,
+    "maximumHourlyUsd": 0.7,
+    "compatibilityBeforePrice": true
+  },
+  "families": [
+    {
+      "id": "ultrareal-flux1-dev-fp8",
+      "generationType": "image",
+      "displayName": "Image UltraReal Flux FP8",
+      "adultModel": false,
+      "defaultProduction": true,
+      "status": "metadata_locked_token_blocked",
+      "r2Prefix": "production/models/ultrareal-flux1-dev-fp8",
+      "currentKey": "production/models/ultrareal-flux1-dev-fp8/current.json",
+      "revision": "civitai-1413133-file-1320644",
+      "restoreBytes": 17640339740,
+      "parallelDownloads": 3,
+      "objects": [
+        { "role": "unet", "path": "diffusion_models/ultrarealFineTune_v4_fp8.safetensors", "source": "https://civitai.com/api/download/models/1413133?type=Model&format=SafeTensor&size=full&fp=fp8", "sourceModelId": 978314, "sourceVersionId": 1413133, "sourceFileId": 1320644, "bytes": 11901542512, "sha256": "4e675980ea771ae64b566fa5a81cd8fbecde1a1a7ce8b6f0207e836b6f28c18e" },
+        { "role": "clip_l", "path": "text_encoders/clip_l.safetensors", "source": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5/clip_l.safetensors", "bytes": 246144152, "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd" },
+        { "role": "t5xxl", "path": "text_encoders/t5xxl_fp8_e4m3fn_scaled.safetensors", "source": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5/t5xxl_fp8_e4m3fn_scaled.safetensors", "bytes": 5157348688, "sha256": "a498f0485dc9536735258018417c3fd7758dc3bccc0a645feaa472b34955557a" },
+        { "role": "vae", "path": "vae/ae.safetensors", "source": "https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/741f7c3ce8b383c54771c7003378a50191e9efe9/ae.safetensors", "bytes": 335304388, "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38" }
+      ],
+      "sampling": { "steps": 50, "guidance": 3, "sampler": "dpmpp_2m", "scheduler": "beta", "seed": 20260715, "width": 1024, "height": 1024, "batch": 1 }
+    },
+    {
+      "id": "wan22-remix-14b-i2v-fp8",
+      "generationType": "video",
+      "displayName": "Video Wan 2.2 Remix 14B FP8",
+      "adultModel": true,
+      "defaultProduction": true,
+      "status": "metadata_locked_token_blocked",
+      "r2Prefix": "production/models/wan22-remix-14b-i2v-fp8",
+      "currentKey": "production/models/wan22-remix-14b-i2v-fp8/current.json",
+      "revision": "civitai-2770795-2771407-v3",
+      "restoreBytes": 35572266487,
+      "parallelDownloads": 4,
+      "objects": [
+        { "role": "high_noise_unet", "path": "diffusion_models/wan22RemixT2VI2V_i2vHighV30.safetensors", "source": "https://civitai.com/api/download/models/2770795", "sourceModelId": 2003153, "sourceVersionId": 2770795, "sourceFileId": 2657128, "bytes": 14291272136, "sha256": "2ac60c97ca6911090cdbdf055b685af3646b7bd93c19c9aae0f86f4ea018e97d" },
+        { "role": "low_noise_unet", "path": "diffusion_models/wan22RemixT2VI2V_i2vLowV30.safetensors", "source": "https://civitai.com/api/download/models/2771407", "sourceModelId": 2003153, "sourceVersionId": 2771407, "sourceFileId": 2657705, "bytes": 14291272136, "sha256": "a239063c377e530229c4e5b1fecdcbe9de1201a30126dd42297435287e713229" },
+        { "role": "umt5", "path": "text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", "source": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/fb1388adc906ab39ffc26ee40e96b22886b56bc4/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", "bytes": 6735906897, "sha256": "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68" },
+        { "role": "vae", "path": "vae/wan_2.1_vae.safetensors", "source": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/fb1388adc906ab39ffc26ee40e96b22886b56bc4/split_files/vae/wan_2.1_vae.safetensors", "bytes": 253815318, "sha256": "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b" }
+      ],
+      "sampling": { "steps": 20, "guidance": 3.5, "sampler": "euler", "scheduler": "simple", "expertSwitchStep": 10, "seed": 20260715, "fps": 16, "batch": 1 }
+    }
+  ],
+  "profiles": [
+    { "id": "ultrareal-flux1-dev-fp8-rtx4090", "familyId": "ultrareal-flux1-dev-fp8", "gpuClass": "rtx4090", "workflow": "comfy-runtime/workflows/production/ultrareal-flux1-dev-fp8-rtx4090-api.json" },
+    { "id": "ultrareal-flux1-dev-fp8-rtx5090", "familyId": "ultrareal-flux1-dev-fp8", "gpuClass": "rtx5090", "workflow": "comfy-runtime/workflows/production/ultrareal-flux1-dev-fp8-rtx5090-api.json" },
+    { "id": "wan22-remix-14b-i2v-fp8-rtx4090", "familyId": "wan22-remix-14b-i2v-fp8", "gpuClass": "rtx4090", "workflow": "comfy-runtime/workflows/production/wan22-remix-14b-i2v-fp8-rtx4090-api.json", "width": 832, "height": 480, "frames": 33 },
+    { "id": "wan22-remix-14b-i2v-fp8-rtx5090", "familyId": "wan22-remix-14b-i2v-fp8", "gpuClass": "rtx5090", "workflow": "comfy-runtime/workflows/production/wan22-remix-14b-i2v-fp8-rtx5090-api.json", "width": 1280, "height": 704, "frames": 41 }
+  ],
+  "legacy": [
+    { "modelProfile": "flux2-klein-4b", "status": "legacy_verified", "defaultProduction": false, "preserveCache": true },
+    { "modelProfile": "wan22-ti2v-5b", "status": "legacy_cached", "defaultProduction": false, "preserveCache": true }
+  ],
+  "executionPolicy": { "sequential": ["image", "unload_image_models", "video"], "reuseWeightsAcrossGpuProfiles": true, "singleLocalUser": true },
+  "safety": { "adult_model": true, "localSingleUserOnly": true, "rejectMinorSexualContent": true, "rejectNonConsensualSexualContent": true }
+}

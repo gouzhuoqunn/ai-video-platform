@@ -80,6 +80,7 @@ type ImageResult = { sessionId: string; date: string; metadata: Record<string, u
 type PendingImage = { sessionId: string; completedStages: string[]; status: "pending" | "completed" };
 type PoolTaskStatus = "pending_confirmation" | "waiting_for_batch" | "armed" | "waiting_for_gpu" | "deploying" | "restoring_models" | "generating" | "syncing" | "completed" | "failed" | "cancelled";
 type PoolTask = { id: string; generationType: StudioMode; prompt: string; modelProfile: string; priority: "normal" | "immediate"; status: PoolTaskStatus; createdAt: string };
+type ProductionModelSummary = { modelProfile: string; displayName: string; cacheStatus: string; cacheReady: boolean; restoreBytes: number; revision: string; gpuProfiles: string[] };
 type PoolSummary = {
   tasks: PoolTask[];
   counts: Partial<Record<PoolTaskStatus, number>>;
@@ -91,6 +92,7 @@ type PoolSummary = {
   marketMonitoringActive: boolean;
   estimatedMaximumSessionCost: number;
   orderBlockingReason: string;
+  productionModels: Record<StudioMode, ProductionModelSummary>;
 };
 
 const poolStatusLabels: Record<PoolTaskStatus, string> = {
@@ -206,6 +208,7 @@ export function LocalCreationStudio() {
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [selectedImageId, setSelectedImageId] = useState("");
   const [pool, setPool] = useState<PoolSummary | null>(null);
+  const [gpuPreference, setGpuPreference] = useState<"auto" | "rtx4090" | "rtx5090">("auto");
 
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
   const localResultForSelected = selectedJob ? localResults.find((result) => result.jobId === selectedJob.id) : null;
@@ -383,7 +386,7 @@ export function LocalCreationStudio() {
     setIsSubmitting(true);
     try {
       if (mode === "image") {
-        const response = await fetch("/api/local-lab/generation-pool", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "create", generationType: "image", prompt: trimmedPrompt, modelProfile: "flux2-klein-4b" }) });
+        const response = await fetch("/api/local-lab/generation-pool", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "create", generationType: "image", prompt: trimmedPrompt, modelProfile: "ultrareal-flux1-dev-fp8", gpuPreference: gpuPreference === "auto" ? ["rtx4090", "rtx5090"] : [gpuPreference] }) });
         const payload = await response.json().catch(() => ({})) as { error?: string };
         if (!response.ok) { setNotice(payload.error ?? "创建图片任务失败。"); return; }
         setPrompt("");
@@ -399,7 +402,7 @@ export function LocalCreationStudio() {
       const createdJob = pickRpcJob(data);
       if (createdJob) {
         setSelectedJobId(createdJob.id);
-        await fetch("/api/local-lab/generation-pool", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "sync", tasks: [{ id: createdJob.id, generationType: "video", prompt: createdJob.prompt, modelProfile: "wan22-ti2v-5b", priority: "normal", status: "pending_confirmation", createdAt: createdJob.created_at, confirmedAt: createdJob.confirmed_at, estimatedVram: 24, outputMetadata: {} }] }) });
+        await fetch("/api/local-lab/generation-pool", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "sync", tasks: [{ id: createdJob.id, generationType: "video", prompt: createdJob.prompt, modelProfile: "wan22-remix-14b-i2v-fp8", gpuPreference: gpuPreference === "auto" ? ["rtx4090", "rtx5090"] : [gpuPreference], priority: "normal", status: "pending_confirmation", createdAt: createdJob.created_at, confirmedAt: createdJob.confirmed_at, estimatedVram: 24, outputMetadata: {} }] }) });
       }
       setPrompt("");
       setNotice("已扣除积分并创建未生成任务。确认或加急后才会进入队列。");
@@ -527,7 +530,7 @@ export function LocalCreationStudio() {
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? `图片 ${imageResults.length}` : `未生成 ${counts.pending_confirmation ?? 0}`}</span>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? `图片任务 ${pendingImage?.status === "pending" ? 1 : 0}` : `排队 ${counts.queued ?? 0}`}</span>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">GPU {session?.orderId ? "运行中" : "无"}</span>
-            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">Wan2.2 TI2V-5B</span>
+            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? "Image UltraReal Flux FP8" : "Video Wan 2.2 Remix 14B FP8"}</span>
             <span className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 font-semibold text-emerald-800">积分 ∞</span>
           </div>
         </div>
@@ -593,6 +596,14 @@ export function LocalCreationStudio() {
               </div>
             </div>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+              <label className="text-sm font-semibold text-stone-700">
+                GPU
+                <select className="ml-2 rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setGpuPreference(event.target.value as "auto" | "rtx4090" | "rtx5090")} value={gpuPreference}>
+                  <option value="auto">自动选择</option>
+                  <option value="rtx4090">RTX4090</option>
+                  <option value="rtx5090">RTX5090</option>
+                </select>
+              </label>
               <span className="text-sm text-stone-500">{prompt.trim().length}/2000</span>
               <button
                 className="rounded-md bg-emerald-700 px-5 py-3 text-sm font-bold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-400"
@@ -626,6 +637,14 @@ export function LocalCreationStudio() {
               <p>调度状态：{schedulerStateLabels[pool?.schedulerState ?? "idle"] ?? "未知状态"}</p>
             </div>
             <p className="mt-2 rounded-md bg-stone-50 px-3 py-2 text-sm text-stone-700">{pool?.orderBlockingReason ?? "正在读取调度门禁。"}</p>
+            {pool?.productionModels?.[mode] ? (
+              <div className="mt-2 rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2 text-sm text-stone-700">
+                <p className="font-semibold">{pool.productionModels[mode].displayName}</p>
+                <p className="mt-1 text-xs text-stone-500">
+                  配置 {gpuPreference === "auto" ? "自动选择" : gpuPreference.toUpperCase()} · 缓存 {pool.productionModels[mode].cacheReady ? "已就绪" : "等待凭证"} · 恢复量 {(pool.productionModels[mode].restoreBytes / 1024 ** 3).toFixed(1)} GiB
+                </p>
+              </div>
+            ) : null}
             {mode === "video" && poolVideoResult?.thumbnailUrl && poolVideoResult.videoUrl ? (
               <div className="mt-3 flex items-center gap-3 rounded-md border border-stone-200 bg-[#faf8f4] p-2">
                 {/* eslint-disable-next-line @next/next/no-img-element */}

@@ -4,6 +4,9 @@ import path from "node:path";
 export type ModelAvailability = {
   generationType: "image" | "video";
   modelProfile: string;
+  displayName?: string;
+  status?: string;
+  defaultProduction?: boolean;
   cached: boolean;
   restoreReady: boolean;
   inferenceVerified: boolean;
@@ -11,11 +14,12 @@ export type ModelAvailability = {
   executableWorkflow: boolean;
   currentKey: string;
   revision: string;
+  restoreBytes?: number;
   updatedAt: string;
 };
 
 export type ModelAvailabilityRegistry = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   models: ModelAvailability[];
 };
 
@@ -23,7 +27,7 @@ export const MODEL_AVAILABILITY_PATH = path.join(process.cwd(), "comfy-runtime",
 
 export function loadModelAvailabilityRegistry(filePath = MODEL_AVAILABILITY_PATH): ModelAvailabilityRegistry {
   const parsed = JSON.parse(readFileSync(filePath, "utf8")) as ModelAvailabilityRegistry;
-  if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.models)) throw new Error("model_availability_registry_invalid");
+  if (![1, 2].includes(parsed.schemaVersion) || !Array.isArray(parsed.models)) throw new Error("model_availability_registry_invalid");
   return parsed;
 }
 

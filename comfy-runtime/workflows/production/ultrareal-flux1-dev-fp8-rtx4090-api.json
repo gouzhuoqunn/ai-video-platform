@@ -1,0 +1,12 @@
+{
+  "1": { "class_type": "UNETLoader", "inputs": { "unet_name": "ultrarealFineTune_v4_fp8.safetensors", "weight_dtype": "default" } },
+  "2": { "class_type": "DualCLIPLoader", "inputs": { "clip_name1": "clip_l.safetensors", "clip_name2": "t5xxl_fp8_e4m3fn_scaled.safetensors", "type": "flux", "device": "default" } },
+  "3": { "class_type": "CLIPTextEncode", "inputs": { "text": "__PROMPT__", "clip": ["2", 0] } },
+  "4": { "class_type": "CLIPTextEncode", "inputs": { "text": "", "clip": ["2", 0] } },
+  "5": { "class_type": "FluxGuidance", "inputs": { "conditioning": ["3", 0], "guidance": 3 } },
+  "6": { "class_type": "EmptyLatentImage", "inputs": { "width": 1024, "height": 1024, "batch_size": 1 } },
+  "7": { "class_type": "KSampler", "inputs": { "model": ["1", 0], "seed": 20260715, "steps": 50, "cfg": 1, "sampler_name": "dpmpp_2m", "scheduler": "beta", "positive": ["5", 0], "negative": ["4", 0], "latent_image": ["6", 0], "denoise": 1 } },
+  "8": { "class_type": "VAELoader", "inputs": { "vae_name": "ae.safetensors" } },
+  "9": { "class_type": "VAEDecode", "inputs": { "samples": ["7", 0], "vae": ["8", 0] } },
+  "10": { "class_type": "SaveImage", "inputs": { "images": ["9", 0], "filename_prefix": "ultrareal-flux1-dev-fp8" } }
+}
