@@ -5,10 +5,10 @@
       "generationType": "image",
       "modelProfile": "ultrareal-flux1-dev-fp8",
       "displayName": "Image UltraReal Flux FP8",
-      "status": "source_access_ready_cache_publish_failed",
+      "status": "production_cache_ready",
       "defaultProduction": true,
-      "cached": false,
-      "restoreReady": false,
+      "cached": true,
+      "restoreReady": true,
       "inferenceVerified": false,
       "validatedFallback": false,
       "executableWorkflow": true,
@@ -17,16 +17,16 @@
       "restoreBytes": 17640339740,
       "uniqueRestoreBytes": 17640339740,
       "sharedBytes": 0,
-      "updatedAt": "2026-07-17T07:35:47.000Z"
+      "updatedAt": "2026-07-17T12:45:14.000Z"
     },
     {
       "generationType": "video",
       "modelProfile": "wan22-remix-14b-i2v-fp8",
       "displayName": "Video Wan 2.2 Remix 14B FP8",
-      "status": "source_access_ready_cache_publish_failed",
+      "status": "production_cache_ready",
       "defaultProduction": true,
-      "cached": false,
-      "restoreReady": false,
+      "cached": true,
+      "restoreReady": true,
       "inferenceVerified": false,
       "validatedFallback": false,
       "executableWorkflow": true,
@@ -35,7 +35,7 @@
       "restoreBytes": 35572266487,
       "uniqueRestoreBytes": 28836359590,
       "sharedBytes": 6735906897,
-      "updatedAt": "2026-07-17T07:35:47.000Z"
+      "updatedAt": "2026-07-17T12:45:14.000Z"
     },
     {
       "generationType": "image",

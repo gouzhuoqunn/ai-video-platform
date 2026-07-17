@@ -73,8 +73,8 @@ assert.deepEqual(acceptableGpuClasses("image", "ultrareal-flux1-dev-fp8"), ["rtx
 assert.deepEqual(acceptableGpuClasses("video", "wan22-remix-14b-i2v-fp8"), ["rtx4090", "rtx5090"]);
 assert.equal(validateProductionCandidate({ serverId: "ok", gpu: "RTX 4090", vramGb: 24, ramGb: 64, diskGb: 200, onDemand: true, reliability: 0.99, rating: 5, projectedCostUsd: 2.5, hourlyUsd: 0.7 }).length, 0);
 assert.ok(validateProductionCandidate({ serverId: "bad", gpu: "A40", vramGb: 48, ramGb: 128, diskGb: 1000, onDemand: true, reliability: 1, rating: 5, projectedCostUsd: 1, hourlyUsd: 0.4 }).length > 0);
-assert.equal(modelAvailabilityGate("ultrareal-flux1-dev-fp8").allowed, false);
-assert.equal(modelAvailabilityGate("wan22-remix-14b-i2v-fp8").allowed, false);
+assert.equal(modelAvailabilityGate("ultrareal-flux1-dev-fp8").allowed, true);
+assert.equal(modelAvailabilityGate("wan22-remix-14b-i2v-fp8").allowed, true);
 
 assert.equal(validateProductionPrompt("a cinematic portrait").allowed, true);
 assert.equal(validateProductionPrompt("explicit nude child").code, "minor_sexual_content");

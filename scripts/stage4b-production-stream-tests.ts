@@ -128,6 +128,31 @@ assert.ok(publisher.includes("production_object_missing"));
 assert.ok(publisher.indexOf("manifest_verify_failed") < publisher.lastIndexOf("current_verify_failed"));
 assert.ok(publisher.includes("publishSharedRetentionReferences"));
 
+const availability = JSON.parse(read("comfy-runtime/model-availability.json")) as {
+  models: Array<{ modelProfile: string; cached: boolean; restoreReady: boolean; status: string }>;
+};
+for (const modelProfile of ["ultrareal-flux1-dev-fp8", "wan22-remix-14b-i2v-fp8"]) {
+  const model = availability.models.find((entry) => entry.modelProfile === modelProfile);
+  assert.equal(model?.cached, true);
+  assert.equal(model?.restoreReady, true);
+  assert.equal(model?.status, "production_cache_ready");
+}
+const studio = read("src/components/LocalCreationStudio.tsx");
+for (const label of [
+  "UltraReal Flux FP8",
+  "Wan 2.2 Remix 14B FP8",
+  "缓存",
+  "已就绪",
+  "最终批次",
+  "已准备，等待确认生成",
+  "自动选择",
+  "RTX 4090",
+  "RTX 5090",
+  "独占",
+  "共享",
+  "总恢复量",
+]) assert.ok(studio.includes(label), label);
+
 console.log(JSON.stringify({
   rangedRedirectResumeReady: true,
   tokenHeaderRedactionReady: true,
@@ -137,6 +162,7 @@ console.log(JSON.stringify({
   perObjectDagReady: true,
   sharedUmt5ZeroCopyReady: true,
   atomicPublicationReady: true,
+  chineseReadyState: true,
 }));
 }
 

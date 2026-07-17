@@ -644,7 +644,7 @@ export function LocalCreationStudio() {
                 <p className="mt-1 text-xs text-stone-500">
                   配置 {gpuPreference === "auto" ? "自动选择" : gpuPreference.toUpperCase()} · 独占 {(pool.productionModels[mode].uniqueRestoreBytes / 1024 ** 3).toFixed(1)} GiB · 共享 {(pool.productionModels[mode].sharedBytes / 1024 ** 3).toFixed(1)} GiB · 总恢复量 {(pool.productionModels[mode].restoreBytes / 1024 ** 3).toFixed(1)} GiB
                 </p>
-                <p className="mt-1 text-xs text-stone-500">最终批次：{pool.selectedBatchId === "stage4a-final-production" ? "已准备" : "未准备"}</p>
+                <p className="mt-1 text-xs text-stone-500">最终批次：{pool.selectedBatchId === "stage4a-final-production" ? "已准备，等待确认生成" : "未准备"}</p>
               </div>
             ) : null}
             {mode === "video" && poolVideoResult?.thumbnailUrl && poolVideoResult.videoUrl ? (

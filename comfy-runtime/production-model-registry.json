@@ -5,7 +5,7 @@
     "civitaiTokenPresent": true,
     "hfTokenPresent": true,
     "downloadOrDispatchAllowed": true,
-    "reason": "All locked sources are authorized and the 6.7GB UMT5 is safely shared by immutable R2 key. Stage 4A cache run 29563486550 failed before downloads because its fixed 40GiB ephemeral-runner disk guard exceeded the available space on both hosted runners."
+    "reason": "Stage 4B run 29580102828 published and readonly-verified both production families. All seven unique objects used bounded ranged streaming; Wan UMT5 remains a zero-copy immutable shared R2 reference."
   },
   "hardwarePolicy": {
     "providers": ["clore"],
@@ -25,7 +25,7 @@
       "displayName": "Image UltraReal Flux FP8",
       "adultModel": false,
       "defaultProduction": true,
-      "status": "source_access_ready_cache_publish_failed",
+      "status": "production_cache_ready",
       "r2Prefix": "production/models/ultrareal-flux1-dev-fp8",
       "currentKey": "production/models/ultrareal-flux1-dev-fp8/current.json",
       "revision": "civitai-1413133-file-1320644",
@@ -47,7 +47,7 @@
       "displayName": "Video Wan 2.2 Remix 14B FP8",
       "adultModel": true,
       "defaultProduction": true,
-      "status": "source_access_ready_cache_publish_failed",
+      "status": "production_cache_ready",
       "r2Prefix": "production/models/wan22-remix-14b-i2v-fp8",
       "currentKey": "production/models/wan22-remix-14b-i2v-fp8/current.json",
       "revision": "civitai-2770795-2771407-v3",

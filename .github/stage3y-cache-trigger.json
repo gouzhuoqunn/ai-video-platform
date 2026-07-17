@@ -1,6 +1,9 @@
 {
-  "stage": "4A",
-  "requestedAt": "2026-07-17T07:30:26Z",
-  "reason": "Shared-object manifest, retention references, exact source access, and multipart-copy probe passed",
-  "maxActualRuns": 1
+  "stage": "4B",
+  "requestedAt": "2026-07-17T12:23:30Z",
+  "reason": "Bounded-disk per-object streaming, local behavior probes, R2 abort probe, and in-run authenticated source strategy gate are ready",
+  "maxActualRuns": 1,
+  "result": "success",
+  "runId": 29580102828,
+  "completedAt": "2026-07-17T12:45:14Z"
 }

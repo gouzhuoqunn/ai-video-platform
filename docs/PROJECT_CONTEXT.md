@@ -766,3 +766,23 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 - Production `current.json` now binds the full revision manifest SHA. Object uploads carry SHA metadata; verification reads first/last byte ranges. The readonly verifier checks current, manifest SHA, every object HEAD/ranges, and denial of write, overwrite, and delete.
 - The no-GPU direct-restore preflight verifies exact R2-to-ComfyUI paths, direct host downloads, parallelism `3/4`, independent heartbeat, stall timeout, reconnect/resume, `.part` atomic rename, size/SHA rejection, and required free disk. Workflow structures and the RTX 4090/5090, RAM `>=32GB`, disk `>=200GB`, On-Demand-only policy are ready.
 - Because the locked FLUX VAE is not accessible and neither production R2 pointer has been published, both production entries are `metadata_locked_aux_auth_blocked`; `ultrareal_cache_ready=false`, `wan_remix_cache_ready=false`, `production_gpu_restore_ready=false`, and `final_model_session_ready=false`. The Chinese UI correctly remains at “等待凭证”; it was not falsely changed to “缓存已就绪”.
+
+## 2026-07-17 Stage 4B: Bounded Production Cache Publication
+
+- Stage 4B preserved zero provider billing: no Clore order, RunPod Pod/volume, SSH session, Runtime build, or GPU work occurred; both provider holds remained enabled.
+- Replaced the fixed 32/40 GiB runner gate with one isolated job per unique object. Every source passed authenticated first-byte and nonzero Range probes in the run, so all seven unique objects used sequential 256 MiB Range chunks. Peak temporary model data was 256 MiB per job, no full-file fallback was used, and no model bytes were stored in Actions artifacts.
+- GitHub Actions run `29580102828` was the only new cache run. It completed successfully from `12:24:13Z` to `12:45:14Z` (21 minutes 1 second). The source/R2 gate, inventory, seven object jobs, two family publication jobs, and final readonly job all succeeded.
+- Exact per-object results, all with zero retries and verified final SHA metadata:
+  - UltraReal FP8: `11,901,542,512` bytes, `752.886s`, `15,807,895 B/s`.
+  - CLIP-L: `246,144,152` bytes, `13.267s`, `18,553,113 B/s`.
+  - T5XXL: `5,157,348,688` bytes, `504.599s`, `10,220,687 B/s`.
+  - FLUX VAE: `335,304,388` bytes, `18.754s`, `17,879,086 B/s`.
+  - Wan High: `14,291,272,136` bytes, `1,138.400s`, `12,553,823 B/s`.
+  - Wan Low: `14,291,272,136` bytes, `839.259s`, `17,028,441 B/s`.
+  - Wan VAE: `253,815,318` bytes, `15.077s`, `16,834,604 B/s`.
+- The Wan UMT5 object remains a zero-copy immutable reference to the legacy `wan22-ti2v-5b` cache. Its `6,735,906,897` bytes were neither downloaded nor copied; a production retention reference was published only after High, Low, and VAE completed.
+- Image revision `civitai-1413133-file-1320644` now has four verified objects totaling `17,640,339,740` bytes. Video revision `civitai-2770795-2771407-v3` has three unique objects plus the shared UMT5 reference totaling `35,572,266,487` bytes. Both immutable manifests were read back before their `current.json` pointers were written last.
+- Local readonly verification passed current/manifest GET, object HEAD, first/last Range, exact size/SHA metadata, shared UMT5 retention, and denial of Put, overwrite, and Delete.
+- The direct-GPU no-op preflight reports `ultrareal_workflow_ready=true`, `wan_remix_i2v_workflow_ready=true`, and `final_model_session_ready=true`. Unique production bytes are `46,476,699,330`, shared bytes are `6,735,906,897`, sequential peak free disk is `46,309,684,727`, and the last measured Clore throughput estimates about `77.4` minutes for both restores.
+- The final unpaid batch `stage4a-final-production` is prepared idempotently with the conservative `832x480`, 33-frame, 16-fps video fixture. It selects UltraReal image first, unloads image models, then runs Wan Remix I2V; `paidExecutionAuthorized=false` and both provider holds remain true.
+- The Chinese studio now derives `缓存已就绪` for both production models, shows automatic/RTX 4090/RTX 5090 selection and unique/shared/total restore sizes, and displays `最终批次：已准备，等待确认生成`. Legacy media and caches remain preserved.
