@@ -6,7 +6,7 @@ import path from "node:path";
 import { buildDetachedLaunchCommand, classifyDetached, type DetachedState } from "./clore/detached-remote-job";
 
 const detachedSource = readFileSync(path.join(process.cwd(), "scripts", "clore", "detached-remote-job.ts"), "utf8");
-assert.match(detachedSource, /mkdir -p \/workspace\/tools[\s\S]*scpFile\(target, source, "\/workspace\/tools\/detached-job-worker\.py"/);
+assert.match(detachedSource, /uploadExecutableWithRepair\(targetWorkspaceIo\(target\), source, "\/workspace\/tools\/detached-job-worker\.py", 2\)/);
 const sessionSource = readFileSync(path.join(process.cwd(), "scripts", "stage4c-production-session.ts"), "utf8");
 assert.match(sessionSource, /for \(let attempt = 1; attempt <= 2; attempt \+= 1\)[\s\S]*try \{[\s\S]*await installDetachedWorker\(target\);[\s\S]*await launchDetachedJob/);
 assert.match(sessionSource, /canary_in_place_repair/);

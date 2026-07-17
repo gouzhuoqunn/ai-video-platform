@@ -44,10 +44,21 @@ function readMetadata(metadataPath: string) {
   }
 
   try {
-    return JSON.parse(readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
+    return sanitizeMetadata(JSON.parse(readFileSync(metadataPath, "utf8"))) as Record<string, unknown>;
   } catch {
     return null;
   }
+}
+
+function sanitizeMetadata(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeMetadata);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, nested]) => [key, sanitizeMetadata(nested)]));
+  }
+  if (typeof value === "string" && (/^[A-Za-z]:[\\/]/.test(value) || /^\/(?:workspace|home|root|tmp)\//.test(value))) {
+    return path.basename(value.replace(/\\/g, "/"));
+  }
+  return value;
 }
 
 export function listLocalResults(): LocalResultSummary[] {

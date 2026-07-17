@@ -27,6 +27,7 @@ function main() {
   assert(localResultsHelper.includes("JOB_ID_PATTERN"), "local results helper must validate job ids.");
   assert(localResultsHelper.includes("path.relative"), "local results helper must prevent directory traversal.");
   assert(!localResultsHelper.includes("absolutePath"), "local results helper must not return absolute paths to the browser.");
+  assert(localResultsHelper.includes("sanitizeMetadata"), "local result metadata must remove absolute filesystem paths before browser delivery.");
   assert(resultsRoute.includes("guardLocalLabRequest"), "local results listing must be loopback protected.");
   assert(videoRoute.includes("range"), "local video route must support Range requests.");
   assert(videoRoute.includes("content-range"), "local video route must return Content-Range for partial video reads.");

@@ -2,7 +2,8 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { GpuTarget } from "../gpu-providers/types";
-import { scpFile, sleep, sshCommand } from "../gpu-providers/common";
+import { sleep, sshCommand } from "../gpu-providers/common";
+import { targetWorkspaceIo, uploadExecutableWithRepair } from "./remote-workspace";
 
 export type DetachedState = {
   job_id: string; pid: number | null; phase: "launching" | "running" | "completed" | "failed" | "canceled";
@@ -22,12 +23,7 @@ function sshArgs(target: GpuTarget, command: string) {
 }
 export async function installDetachedWorker(target: GpuTarget) {
   const source = path.join(process.cwd(), "scripts", "clore", "detached-job-worker.py");
-  const directory = sshCommand(target, "mkdir -p /workspace/tools", 30_000);
-  if (directory.status !== 0) throw new Error(`detached_worker_directory_failed:${String(directory.stderr ?? directory.error?.message).slice(-1000)}`);
-  const result = scpFile(target, source, "/workspace/tools/detached-job-worker.py", 120_000);
-  if (result.status !== 0) throw new Error(`detached_worker_upload_failed:${String(result.stderr ?? result.error?.message).slice(-1000)}`);
-  const prepared = sshCommand(target, "chmod 700 /workspace/tools/detached-job-worker.py", 30_000);
-  if (prepared.status !== 0) throw new Error("detached_worker_prepare_failed");
+  return await uploadExecutableWithRepair(targetWorkspaceIo(target), source, "/workspace/tools/detached-job-worker.py", 2);
 }
 export function buildDetachedLaunchCommand(input: { jobId: string; mode: "canary" | "restore"; bundlePath?: string }) {
   const job = safeId(input.jobId); const dir = remoteJobDir(job);

@@ -14,12 +14,13 @@ import { billingSafetyBlockers } from "./clore/support-acknowledgement";
 import { buildRuntimeOverlay } from "./runtime-overlay";
 import { buildRestoreBundle } from "./model-cache/production-restore-bundle";
 import { buildDetachedLaunchCommand, installDetachedWorker, inspectRemoteJob, launchDetachedJob, remoteJobDir, stopDetachedJob, waitForDetachedJob } from "./clore/detached-remote-job";
+import { buildWorkspacePreparationCommand, prepareRemoteWorkspace, verifyWorkspaceRoundtrip } from "./clore/remote-workspace";
 import { installRemoteComfyRunner, runRemoteComfyProbe, runRemoteComfyWorkflow, downloadRemoteRunnerOutputPersistent, removeRemoteRunnerOutput, type RemoteRunnerResult } from "./comfy-remote-runner";
 import { validatePngPixels } from "./flux-first-image-executor";
 import { archiveFluxFirstImage } from "./flux-first-image";
 import { archiveStage3OWanVideo, probeMedia } from "./stage3o-wan-executor";
 import { STAGE4A_BATCH_ID, STAGE4A_IMAGE_TASK_ID, STAGE4A_VIDEO_TASK_ID, prepareStage4AFinalBatch } from "./stage4a-final-batch";
-import { readGenerationPool, setGenerationTaskStatus } from "../src/lib/generation/task-pool";
+import { readGenerationPool, setGenerationTaskStatus, writeGenerationPool } from "../src/lib/generation/task-pool";
 
 type Json = Record<string, unknown>;
 type WorkflowNode = { class_type: string; inputs: Record<string, unknown> };
@@ -28,10 +29,10 @@ type Evidence = Json & { started_at: string; events: Json[] };
 const LIMITS = { maxActiveOrders: 1, maxHostAttempts: 2, maxFailedDeploymentSpendUsd: 0.4, maxTotalSpendUsd: 2, wallClockMinutes: 180, drainingMinutes: 165, preserveSuccessfulImage: true } as const;
 const CREATION_FEE_USD = 0.1;
 const SECRET_DIR = path.join(process.cwd(), ".secrets");
-const AUTH = path.join(SECRET_DIR, "stage4d-operator-authorization.json");
-const AUTH_CONSUMING = path.join(SECRET_DIR, "stage4d-operator-authorization.consuming.json");
-const AUTH_CONSUMED = path.join(SECRET_DIR, "stage4d-operator-authorization.consumed.json");
-const EVIDENCE_PATH = path.join(SECRET_DIR, "stage4d-session-evidence.json");
+const AUTH = path.join(SECRET_DIR, "stage4e-operator-authorization.json");
+const AUTH_CONSUMING = path.join(SECRET_DIR, "stage4e-operator-authorization.consuming.json");
+const AUTH_CONSUMED = path.join(SECRET_DIR, "stage4e-operator-authorization.consumed.json");
+const EVIDENCE_PATH = path.join(SECRET_DIR, "stage4e-session-evidence.json");
 const IMAGE_FAMILY = "ultrareal-flux1-dev-fp8";
 const VIDEO_FAMILY = "wan22-remix-14b-i2v-fp8";
 const IMAGE_LIBRARY = "D:\\AI-Creative-Library";
@@ -93,8 +94,8 @@ async function preflight(evidence: Evidence) {
   if (blockers.length) throw new Error(`stage4c_preflight:${blockers.join(";")}`);
   if (billing.clore.activeOrders !== 0 || billing.runpod.activePods !== 0 || billing.runpod.networkVolumes !== 0) throw new Error("stage4c_resources_not_zero");
   if (!billing.holds.clore || !billing.holds.runpod) throw new Error("stage4c_holds_not_enabled");
-  setGenerationTaskStatus([STAGE4A_IMAGE_TASK_ID, STAGE4A_VIDEO_TASK_ID], "armed", { stage4dRetry: true, inferenceVerified: false });
-  const pool = prepareStage4AFinalBatch(); if (pool.completed) throw new Error("stage4d_tasks_already_completed");
+  setGenerationTaskStatus([STAGE4A_IMAGE_TASK_ID, STAGE4A_VIDEO_TASK_ID], "armed", { stage4eRetry: true, inferenceVerified: false });
+  const pool = prepareStage4AFinalBatch(); if (pool.completed) throw new Error("stage4e_tasks_already_completed");
   const ffmpeg = require("@ffmpeg-installer/ffmpeg") as { path: string }; const ffprobe = require("@ffprobe-installer/ffprobe") as { path: string };
   requireSuccess(spawnSync(ffmpeg.path, ["-version"], { encoding: "utf8", timeout: 30_000 }), "stage4c_ffmpeg_missing");
   requireSuccess(spawnSync(ffprobe.path, ["-version"], { encoding: "utf8", timeout: 30_000 }), "stage4c_ffprobe_missing");
@@ -127,7 +128,7 @@ async function acquire(evidence: Evidence) {
       session = await provider.createSession({ sessionId: STAGE4A_BATCH_ID, candidate, sshPublicKey: "managed-by-clore-provider", bootstrapImage: FIXED_RUNTIME_DIGEST, dryRun: false, cloreProfile: "clore_key_only", beforeCreateRequest: () => { if (!createStarted) consumeAuthorization(); createStarted = true; }, afterCreateRequestAttempt: () => finishAuthorization() });
       event(evidence, "order_created", { attempt: attempt + 1, order_id: session.id, server_id: candidate.id, gpu: candidate.gpuType, hourly_usd: candidate.hourlyUsd, state: session.status });
       const target = await provider.waitForSsh(session, 10 * 60_000);
-      requireSuccess(sshCommand(target, "mkdir -p /workspace && printf key-ssh-ok", 60_000), "stage4c_key_ssh_failed");
+      requireSuccess(sshCommand(target, "printf key-ssh-ok", 60_000), "stage4e_key_ssh_failed");
       event(evidence, "ssh_ready", { endpoint: `${target.host}:${target.port}`, exact_target: sanitizeGpuTarget(target), key_only: true });
       return { provider, candidate, session, target, failedSpend };
     } catch (error) {
@@ -142,8 +143,44 @@ async function acquire(evidence: Evidence) {
 }
 
 function inspectHardware(target: GpuTarget) {
-  const command = "set -e; mkdir -p /workspace; echo '=== gpu ==='; nvidia-smi --query-gpu=name,memory.total,memory.used,driver_version --format=csv,noheader; echo '=== nvidia_smi ==='; nvidia-smi; echo '=== cpu_ram ==='; free -b; nproc; echo '=== disks ==='; df -B1 / /workspace; echo '=== python ==='; python3 --version; echo '=== docker ==='; if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then echo docker_available=true; docker version; else echo docker_available=false; fi; echo '=== network ==='; curl -L -sS --max-time 20 -o /dev/null -w 'download_bytes=%{size_download} speed_bytes_per_second=%{speed_download} http_code=%{http_code}\\n' 'https://speed.cloudflare.com/__down?bytes=1000000' || echo network_probe_failed";
+  const command = "set -e; gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1); case \"$gpu\" in *RTX\\ 4090*|*RTX\\ 5090*) ;; *) echo unsupported_gpu:$gpu >&2; exit 42;; esac; test $(awk '/MemTotal/{print $2*1024}' /proc/meminfo) -ge 32000000000; test $(df -PB1 /workspace | awk 'NR==2{print $2}') -ge 200000000000; echo '=== gpu ==='; nvidia-smi --query-gpu=name,memory.total,memory.used,driver_version --format=csv,noheader; echo '=== nvidia_smi ==='; nvidia-smi; echo '=== cpu_ram ==='; free -b; nproc; echo '=== disks ==='; df -B1 / /workspace; echo '=== python ==='; python3 --version; echo '=== docker ==='; if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then echo docker_available=true; docker version; else echo docker_available=false; fi; echo '=== network ==='; curl -L -sS --max-time 20 -o /dev/null -w 'download_bytes=%{size_download} speed_bytes_per_second=%{speed_download} http_code=%{http_code}\\n' 'https://speed.cloudflare.com/__down?bytes=1000000' || echo network_probe_failed";
   return requireSuccess(sshCommand(target, command, 180_000), "stage4c_hardware_inspection_failed");
+}
+
+async function workspacePreflight(target: GpuTarget, evidence: Evidence) {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const contract = await prepareRemoteWorkspace(target, 1);
+      const roundtrip = await verifyWorkspaceRoundtrip(target);
+      event(evidence, "workspace_contract_ready", { attempt, ...contract, ...roundtrip });
+      return { contract, roundtrip };
+    } catch (error) {
+      lastError = error;
+      event(evidence, "workspace_contract_attempt_failed", { attempt, error: safe(error instanceof Error ? error.message : error) });
+    }
+  }
+  const artifactDir = path.join(process.cwd(), "artifacts", "stage4e"); mkdirSync(artifactDir, { recursive: true });
+  const remoteScript = path.join(artifactDir, "manual-workspace-remote.sh");
+  const localScript = path.join(artifactDir, "manual-workspace.ps1");
+  const statusFile = path.join(artifactDir, "manual-status.txt");
+  writeFileSync(remoteScript, `#!/usr/bin/env bash\n${buildWorkspacePreparationCommand()}\n`, "utf8");
+  const host = target.host.replace(/'/g, "''"); const username = target.username.replace(/'/g, "''");
+  writeFileSync(localScript, `param([Parameter(Mandatory=$true)][string]$KeyPath)\n$ErrorActionPreference='Stop'\n$remote=Join-Path $PSScriptRoot 'manual-workspace-remote.sh'\nGet-Content -Raw $remote | & ssh -i $KeyPath -o StrictHostKeyChecking=accept-new -o PasswordAuthentication=no -o BatchMode=yes -o ConnectTimeout=15 -T -p ${target.port} '${username}@${host}' 'bash -s'\nif ($LASTEXITCODE -ne 0) { throw 'manual workspace preparation failed' }\n`, "utf8");
+  const safeCommand = `powershell -NoProfile -ExecutionPolicy Bypass -File "${localScript}" -KeyPath $env:CLORE_SSH_KEY_PATH`;
+  const statusCommand = `ssh -i $env:CLORE_SSH_KEY_PATH -o BatchMode=yes -o ConnectTimeout=15 -p ${target.port} ${target.username}@${target.host} "cat /workspace/logs/workspace-contract.json"`;
+  writeFileSync(statusFile, `MANUAL_HANDOFF_REQUIRED\nendpoint=${target.host}:${target.port}\nreason=${safe(lastError instanceof Error ? lastError.message : lastError)}\ncommand=${safeCommand}\nexpected=workspace_contract_ready:true\nstatus_command=${statusCommand}\n`, "utf8");
+  console.log("MANUAL_HANDOFF_REQUIRED"); console.log(safeCommand); console.log(statusCommand);
+  event(evidence, "workspace_manual_handoff_required", { endpoint: `${target.host}:${target.port}`, command: safeCommand, status_command: statusCommand, secrets_in_artifacts: false });
+  const deadline = Math.min(Date.now() + 15 * 60_000, Date.parse(evidence.started_at) + LIMITS.drainingMinutes * 60_000);
+  while (Date.now() < deadline) {
+    try {
+      const contract = await prepareRemoteWorkspace(target, 1); const roundtrip = await verifyWorkspaceRoundtrip(target);
+      event(evidence, "workspace_manual_handoff_detected", { ...contract, ...roundtrip });
+      return { contract, roundtrip };
+    } catch { await sleep(20_000); }
+  }
+  throw lastError;
 }
 
 async function bootstrap(target: GpuTarget, evidence: Evidence) {
@@ -166,7 +203,7 @@ async function bootstrap(target: GpuTarget, evidence: Evidence) {
 
 async function detachedCanary(target: GpuTarget, evidence: Evidence) {
   for (let attempt = 1; attempt <= 2; attempt += 1) {
-    const jobId = `stage4d-canary-${randomUUID().slice(0, 8)}`;
+    const jobId = `stage4e-canary-${randomUUID().slice(0, 8)}`;
     try {
       await installDetachedWorker(target);
       const launch = await launchDetachedJob(target, { jobId, mode: "canary" });
@@ -190,13 +227,13 @@ async function detachedCanary(target: GpuTarget, evidence: Evidence) {
       if (attempt === 1) event(evidence, "canary_in_place_repair", { action: "recreate_tools_directory_and_reinstall_worker", next_attempt: 2 });
     }
   }
-  const handoff = await manualHandoff(target, evidence, `stage4d-canary-${randomUUID().slice(0, 8)}`, "canary");
+  const handoff = await manualHandoff(target, evidence, `stage4e-canary-${randomUUID().slice(0, 8)}`, "canary");
   const completed = handoff.state?.phase === "completed" ? handoff : await waitForDetachedJob(target, handoff.state!.job_id, 120_000);
   return { jobId: handoff.state!.job_id, launch: { returnedMs: 0, transportTimedOut: false, stdout: "manual_handoff" }, completed };
 }
 
 async function manualHandoff(target: GpuTarget, evidence: Evidence, jobId: string, mode: "canary" | "restore", bundlePath?: string) {
-  const artifactDir = path.join(process.cwd(), "artifacts", "stage4d"); mkdirSync(artifactDir, { recursive: true });
+  const artifactDir = path.join(process.cwd(), "artifacts", "stage4e"); mkdirSync(artifactDir, { recursive: true });
   const remoteScript = path.join(artifactDir, "manual-restore-remote.sh");
   const localScript = path.join(artifactDir, "manual-restore.ps1");
   const statusFile = path.join(artifactDir, "manual-status.txt");
@@ -222,8 +259,8 @@ async function manualHandoff(target: GpuTarget, evidence: Evidence, jobId: strin
 
 async function restoreFamily(target: GpuTarget, family: string, evidence: Evidence, parallel = 3) {
   const bundle = await buildRestoreBundle(family, 7200); bundle.parallelDownloads = parallel;
-  const local = path.join(os.tmpdir(), `stage4c-${family}-${randomUUID()}.json`); writeFileSync(local, `${JSON.stringify(bundle)}\n`, { mode: 0o600 });
-  const jobId = `stage4d-${family}-${randomUUID().slice(0, 8)}`; const dir = remoteJobDir(jobId); const remoteBundle = `${dir}/bundle.json`;
+  const local = path.join(os.tmpdir(), `stage4e-${family}-${randomUUID()}.json`); writeFileSync(local, `${JSON.stringify(bundle)}\n`, { mode: 0o600 });
+  const jobId = `stage4e-${family}-${randomUUID().slice(0, 8)}`; const dir = remoteJobDir(jobId); const remoteBundle = `${dir}/bundle.json`;
   try {
     requireSuccess(sshCommand(target, `mkdir -p /workspace/tools /workspace/logs ${dir}`, 30_000), "stage4d_restore_dirs_failed");
     await installDetachedWorker(target);
@@ -269,7 +306,7 @@ async function restoreFamily(target: GpuTarget, family: string, evidence: Eviden
 
 function downloadImage(target: GpuTarget, result: RemoteRunnerResult) {
   const remote = result.staged_path; if (typeof remote !== "string" || !remote.startsWith("/workspace/runtime-tools/results/")) throw new Error("stage4c_image_remote_path_invalid");
-  const local = path.join(os.tmpdir(), `stage4c-${randomUUID()}.png`); const part = `${local}.part`;
+  const local = path.join(os.tmpdir(), `stage4e-${randomUUID()}.png`); const part = `${local}.part`;
   requireSuccess(scpFromRemote(target, remote, part, 30 * 60_000), "stage4c_image_download_failed"); renameSync(part, local);
   const pixels = validatePngPixels(readFileSync(local)); return { local, pixels };
 }
@@ -286,18 +323,18 @@ async function imagePhase(target: GpuTarget, runtime: Json, evidence: Evidence) 
     result = runRemoteComfyWorkflow({ target, workflow: value as unknown as Record<string, unknown>, clientId: `${STAGE4A_IMAGE_TASK_ID}-768`, kind: "image", timeoutSeconds: 60 * 60 });
   }
   const downloaded = downloadImage(target, result); const inferenceMs = Date.now() - started;
-  const archived = archiveFluxFirstImage({ sourcePng: downloaded.local, sessionId: STAGE4A_IMAGE_TASK_ID, workflow: value as never, metadata: { job_id: STAGE4A_IMAGE_TASK_ID, prompt_id: result.prompt_id, model: IMAGE_FAMILY, width: value["6"].inputs.width, height: value["6"].inputs.height, steps: 50, seed: 20260715, batch: 1, oom_fallback_used: oom, png_validation: downloaded.pixels }, evidence: { stage: "4C", runtime, restore, inference_elapsed_ms: inferenceMs, remote_runner: result } });
+  const archived = archiveFluxFirstImage({ sourcePng: downloaded.local, sessionId: STAGE4A_IMAGE_TASK_ID, workflow: value as never, metadata: { job_id: STAGE4A_IMAGE_TASK_ID, prompt_id: result.prompt_id, model: IMAGE_FAMILY, width: value["6"].inputs.width, height: value["6"].inputs.height, steps: 50, seed: 20260715, batch: 1, oom_fallback_used: oom, png_validation: downloaded.pixels }, evidence: { stage: "4E", runtime, restore, inference_elapsed_ms: inferenceMs, remote_runner: result } });
   rmSync(downloaded.local, { force: true }); removeRemoteRunnerOutput(target, result);
   writeFileSync(path.join(archived.archiveDir, "provider-session.json"), `${JSON.stringify({ order_id: evidence.order_id, endpoint: evidence.ssh_endpoint, candidate: evidence.candidate }, null, 2)}\n`);
   writeFileSync(path.join(archived.archiveDir, "restore-evidence.json"), `${JSON.stringify(restore, null, 2)}\n`);
-  setGenerationTaskStatus([STAGE4A_IMAGE_TASK_ID], "completed", { outputPath: archived.outputPath, outputSha256: archived.sha256, inferenceVerified: true, oomFallbackUsed: oom });
+  setGenerationTaskStatus([STAGE4A_IMAGE_TASK_ID], "completed", { outputPath: archived.outputPath, outputSha256: archived.sha256, inferenceVerified: true, oomFallbackUsed: oom, errorClass: null, imagePreserved: true, stage4dRetry: false, stage4eRetry: false });
   event(evidence, "image_completed", { ...archived, inference_ms: inferenceMs, oom_fallback_used: oom, png_validation: downloaded.pixels });
   return { ...archived, workflow: value, inferenceMs, restore, oom };
 }
 
 function unload(target: GpuTarget, evidence: Evidence) {
-  requireSuccess(sshCommand(target, "set -e; curl -fsS -X POST -H 'Content-Type: application/json' -d '{\"unload_models\":true,\"free_memory\":true}' http://127.0.0.1:8188/free >/dev/null; mode=$(cat /workspace/ai-runtime/bootstrap-mode); if [ \"$mode\" = docker ]; then docker exec stage3m-comfy-runtime python3 -c 'import gc,torch;gc.collect();torch.cuda.empty_cache()'; else /workspace/ai-runtime/venv/bin/python -c 'import gc,torch;gc.collect();torch.cuda.empty_cache()'; fi; nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader; free -b", 180_000), "stage4c_unload_failed");
-  event(evidence, "image_models_unloaded", { cuda_cache_cleared: true });
+  const memory = requireSuccess(sshCommand(target, "set -e; curl -fsS -X POST -H 'Content-Type: application/json' -d '{\"unload_models\":true,\"free_memory\":true}' http://127.0.0.1:8188/free >/dev/null; mode=$(cat /workspace/ai-runtime/bootstrap-mode); if [ \"$mode\" = docker ]; then docker exec stage3m-comfy-runtime python3 -c 'import gc,torch;gc.collect();torch.cuda.empty_cache()'; else /workspace/ai-runtime/venv/bin/python -c 'import gc,torch;gc.collect();torch.cuda.empty_cache()'; fi; nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader; free -b", 180_000), "stage4c_unload_failed");
+  event(evidence, "image_models_unloaded", { cuda_cache_cleared: true, memory_after_unload: memory.trim() });
 }
 
 function remoteMp4Fallback(target: GpuTarget, result: RemoteRunnerResult, destinationDir: string) {
@@ -322,7 +359,7 @@ async function videoPhase(target: GpuTarget, image: Awaited<ReturnType<typeof im
   }
   const inferenceMs = Date.now() - started; const dir = jobDir(VIDEO_LIBRARY, STAGE4A_VIDEO_TASK_ID); const downloaded = downloadRemoteRunnerOutputPersistent(target, result, dir);
   const validation = { valid: true, requiredNodes: requiredNodes(value), durationSeconds: 33 / 16, width: Number(value["8"].inputs.width), height: Number(value["8"].inputs.height) };
-  const runtimeEvidence = { stage: "4C", runtime, restore, inference_elapsed_ms: inferenceMs, remote_runner: result, image_input: sha(image.outputPath) };
+  const runtimeEvidence = { stage: "4E", runtime, restore, inference_elapsed_ms: inferenceMs, remote_runner: result, image_input: sha(image.outputPath) };
   let archived;
   try { archived = archiveStage3OWanVideo({ sourceWebm: downloaded.sourcePath, workflow: value, promptId: String(result.prompt_id ?? ""), validation, oomFallbackUsed: oom, runtimeEvidence, libraryDir: VIDEO_LIBRARY, jobId: STAGE4A_VIDEO_TASK_ID, seed: 20260715 }); }
   catch (localError) {
@@ -334,7 +371,8 @@ async function videoPhase(target: GpuTarget, image: Awaited<ReturnType<typeof im
   removeRemoteRunnerOutput(target, result);
   writeFileSync(path.join(dir, "provider-session.json"), `${JSON.stringify({ order_id: evidence.order_id, endpoint: evidence.ssh_endpoint, candidate: evidence.candidate }, null, 2)}\n`);
   writeFileSync(path.join(dir, "restore-evidence.json"), `${JSON.stringify(restore, null, 2)}\n`);
-  setGenerationTaskStatus([STAGE4A_VIDEO_TASK_ID], "completed", { outputPath: archived.outputPath, sourcePath: archived.sourcePath, thumbnailPath: archived.thumbnailPath, outputSha256: archived.sha256, inferenceVerified: true, oomFallbackUsed: oom });
+  setGenerationTaskStatus([STAGE4A_VIDEO_TASK_ID], "completed", { outputPath: archived.outputPath, sourcePath: archived.sourcePath, thumbnailPath: archived.thumbnailPath, outputSha256: archived.sha256, inferenceVerified: true, oomFallbackUsed: oom, errorClass: null, imagePreserved: true, stage4dRetry: false, stage4eRetry: false });
+  const pool = readGenerationPool(); pool.scheduler.state = "completed"; writeGenerationPool(pool);
   event(evidence, "video_completed", { ...archived, inference_ms: inferenceMs, oom_fallback_used: oom });
   return archived;
 }
@@ -364,6 +402,7 @@ async function main() {
     const acquired = await acquire(evidence); session = acquired.session; target = acquired.target;
     evidence.candidate = { id: acquired.candidate.id, gpu: acquired.candidate.gpuType, hourly_usd: acquired.candidate.hourlyUsd, ram_gb: acquired.candidate.minimumRamGb, disk_gb: acquired.candidate.containerDiskGb };
     evidence.order_id = session.id; evidence.ssh_endpoint = `${target.host}:${target.port}`; evidence.failed_deployment_spend_usd = acquired.failedSpend; writeEvidence(evidence);
+    const workspace = await workspacePreflight(target, evidence); evidence.workspace_contract = workspace; writeEvidence(evidence);
     event(evidence, "hardware_inspection", { output: inspectHardware(target) });
     const runtime = await bootstrap(target, evidence); const canary = await detachedCanary(target, evidence);
     evidence.detached_canary = { job_id: canary.jobId, launcher_returned_ms: canary.launch.returnedMs, passed: true }; writeEvidence(evidence);
@@ -386,7 +425,7 @@ async function main() {
     evidence.task_state = readGenerationPool().tasks.filter((task) => [STAGE4A_IMAGE_TASK_ID, STAGE4A_VIDEO_TASK_ID].includes(task.id)); writeEvidence(evidence);
   }
   if (primary) throw primary;
-  console.log(JSON.stringify({ stage4c_complete: true, evidence: EVIDENCE_PATH, tasks: (evidence.task_state as unknown[]) }, null, 2));
+  console.log(JSON.stringify({ stage4e_complete: true, evidence: EVIDENCE_PATH, tasks: (evidence.task_state as unknown[]) }, null, 2));
 }
 
 if (process.argv[1]?.endsWith("stage4c-production-session.ts")) void main().catch((error) => { console.error(error instanceof Error ? error.message : "stage4c_failed"); process.exitCode = 1; });
