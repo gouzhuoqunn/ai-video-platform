@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
+  AbortMultipartUploadCommand,
   CopyObjectCommand,
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
@@ -9,6 +10,7 @@ import {
   GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
+  ListPartsCommand,
   PutObjectCommand,
   S3Client,
   UploadPartCopyCommand,
@@ -44,7 +46,21 @@ export type ProductionManifest = {
   revision: string;
   generatedAt: string;
   totalSizeBytes: number;
-  files: Array<ProductionObject & { objectKey: string }>;
+  files: ProductionManifestFile[];
+};
+
+export type SharedObjectSource = {
+  familyId: string;
+  objectKey: string;
+  bytes: number;
+  sha256: string;
+  retentionKey: string;
+};
+
+export type ProductionManifestFile = ProductionObject & {
+  objectKey: string;
+  shared?: boolean;
+  sharedSource?: SharedObjectSource;
 };
 
 export function loadProductionFamilies(filePath = path.join(process.cwd(), "comfy-runtime", "production-model-registry.json")) {
@@ -57,6 +73,17 @@ export function buildProductionManifest(family: ProductionFamily, generatedAt = 
   const totalSizeBytes = files.reduce((total, file) => total + file.bytes, 0);
   if (totalSizeBytes !== family.restoreBytes) throw new Error(`restore_size_mismatch:${family.id}`);
   return { schemaVersion: 1, familyId: family.id, revision: family.revision, generatedAt, totalSizeBytes, files };
+}
+
+function sourceFamilyId(key: string) {
+  if (key.startsWith("production/rtx4090/video/")) return "wan22-ti2v-5b";
+  if (key.startsWith("production/rtx4090/image/")) return "flux2-klein-4b";
+  if (key.startsWith("production/models/")) return key.split("/")[2] ?? "production-model";
+  return "existing-r2-object";
+}
+
+function retentionKey(family: ProductionFamily, file: ProductionManifestFile) {
+  return `production/retention-references/${family.id}/${file.sha256}.json`;
 }
 
 export function buildCurrentPointer(family: ProductionFamily, manifest: ProductionManifest) {
@@ -97,7 +124,7 @@ function createProductionS3Client(creds: R2Credentials) {
     endpoint: creds.endpoint,
     forcePathStyle: true,
     maxAttempts: 4,
-    requestHandler: new NodeHttpHandler({ connectionTimeout: 15_000, socketTimeout: 10 * 60_000 }),
+    requestHandler: new NodeHttpHandler({ connectionTimeout: 15_000, socketTimeout: 120_000 }),
     credentials: { accessKeyId: creds.accessKeyId, secretAccessKey: creds.secretAccessKey },
   });
 }
@@ -163,11 +190,40 @@ async function matchingExistingObject(
   return null;
 }
 
+async function resolveProductionManifest(
+  client: S3Client,
+  bucket: string,
+  family: ProductionFamily,
+  generatedAt = new Date().toISOString(),
+) {
+  const inventory = await listAllObjects(client, bucket);
+  const manifest = buildProductionManifest(family, generatedAt);
+  manifest.files = await Promise.all(manifest.files.map(async (file) => {
+    if (inventory.some((object) => object.key === file.objectKey)) {
+      await verifyRemoteObject(client, bucket, file);
+      return file;
+    }
+    const sharedKey = await matchingExistingObject(client, bucket, inventory, file);
+    if (!sharedKey) return file;
+    const sharedSource: SharedObjectSource = {
+      familyId: sourceFamilyId(sharedKey),
+      objectKey: sharedKey,
+      bytes: file.bytes,
+      sha256: file.sha256,
+      retentionKey: retentionKey(family, file),
+    };
+    const sharedFile = { ...file, objectKey: sharedKey, shared: true, sharedSource };
+    await verifyRemoteObject(client, bucket, sharedFile);
+    return sharedFile;
+  }));
+  return manifest;
+}
+
 function copySource(bucket: string, key: string) {
   return `${bucket}/${key.split("/").map((part) => encodeURIComponent(part)).join("/")}`;
 }
 
-async function copyExistingObject(
+export async function copyExistingObject(
   client: S3Client,
   bucket: string,
   sourceKey: string,
@@ -186,13 +242,32 @@ async function copyExistingObject(
     }));
     return { method: "CopyObject", partCount: 1 };
   }
-  const created = await client.send(new CreateMultipartUploadCommand({
-    Bucket: bucket,
-    Key: file.objectKey,
-    ContentType: "application/octet-stream",
-    Metadata: metadata,
-  }));
-  if (!created.UploadId) throw new Error(`r2_multipart_copy_upload_id_missing:${file.objectKey}`);
+  const stateKey = `production/multipart-copy-state/${file.sha256}.json`;
+  type MultipartCopyState = { schemaVersion: 1; uploadId: string; sourceKey: string; objectKey: string; bytes: number; sha256: string };
+  let state: MultipartCopyState | null = null;
+  if (await remoteObjectExists(client, bucket, stateKey)) {
+    const saved = await client.send(new GetObjectCommand({ Bucket: bucket, Key: stateKey }));
+    state = JSON.parse((await bodyBuffer(saved.Body)).toString("utf8")) as MultipartCopyState;
+    const valid = state.schemaVersion === 1 && state.sourceKey === sourceKey && state.objectKey === file.objectKey && state.bytes === file.bytes && state.sha256 === file.sha256;
+    if (!valid) {
+      if (state.uploadId) {
+        await client.send(new AbortMultipartUploadCommand({ Bucket: bucket, Key: state.objectKey, UploadId: state.uploadId })).catch(() => undefined);
+      }
+      await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: stateKey }));
+      throw new Error(`r2_multipart_copy_state_mismatch:${file.objectKey}`);
+    }
+  }
+  if (!state) {
+    const created = await client.send(new CreateMultipartUploadCommand({
+      Bucket: bucket,
+      Key: file.objectKey,
+      ContentType: "application/octet-stream",
+      Metadata: metadata,
+    }));
+    if (!created.UploadId) throw new Error(`r2_multipart_copy_upload_id_missing:${file.objectKey}`);
+    state = { schemaVersion: 1, uploadId: created.UploadId, sourceKey, objectKey: file.objectKey, bytes: file.bytes, sha256: file.sha256 };
+    await client.send(new PutObjectCommand({ Bucket: bucket, Key: stateKey, Body: `${JSON.stringify(state)}\n`, ContentType: "application/json" }));
+  }
   const partSize = 128 * 1024 * 1024;
   const ranges = Array.from({ length: Math.ceil(file.bytes / partSize) }, (_, index) => ({
     PartNumber: index + 1,
@@ -200,12 +275,34 @@ async function copyExistingObject(
     end: Math.min(file.bytes, (index + 1) * partSize) - 1,
   }));
   const completedParts: Array<{ ETag: string; PartNumber: number }> = [];
-  for (let offset = 0; offset < ranges.length; offset += 4) {
-    const copied = await Promise.all(ranges.slice(offset, offset + 4).map(async (range) => {
+  let partNumberMarker: string | undefined;
+  do {
+    const listed = await client.send(new ListPartsCommand({
+      Bucket: bucket,
+      Key: file.objectKey,
+      UploadId: state.uploadId,
+      PartNumberMarker: partNumberMarker,
+    }));
+    for (const part of listed.Parts ?? []) {
+      if (!part.ETag || !part.PartNumber) throw new Error(`r2_multipart_copy_listed_part_invalid:${file.objectKey}`);
+      const expected = ranges[part.PartNumber - 1];
+      if (!expected || part.Size !== expected.end - expected.start + 1) {
+        await client.send(new AbortMultipartUploadCommand({ Bucket: bucket, Key: file.objectKey, UploadId: state.uploadId }));
+        await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: stateKey }));
+        throw new Error(`r2_multipart_copy_part_size_mismatch:${file.objectKey}:${part.PartNumber}`);
+      }
+      completedParts.push({ ETag: part.ETag, PartNumber: part.PartNumber });
+    }
+    partNumberMarker = listed.IsTruncated ? listed.NextPartNumberMarker : undefined;
+  } while (partNumberMarker);
+  const completedNumbers = new Set(completedParts.map((part) => part.PartNumber));
+  const missingRanges = ranges.filter((range) => !completedNumbers.has(range.PartNumber));
+  for (let offset = 0; offset < missingRanges.length; offset += 4) {
+    const copied = await Promise.all(missingRanges.slice(offset, offset + 4).map(async (range) => {
       const response = await client.send(new UploadPartCopyCommand({
         Bucket: bucket,
         Key: file.objectKey,
-        UploadId: created.UploadId,
+        UploadId: state.uploadId,
         PartNumber: range.PartNumber,
         CopySource: copySource(bucket, sourceKey),
         CopySourceRange: `bytes=${range.start}-${range.end}`,
@@ -226,19 +323,134 @@ async function copyExistingObject(
   await client.send(new CompleteMultipartUploadCommand({
     Bucket: bucket,
     Key: file.objectKey,
-    UploadId: created.UploadId,
+    UploadId: state.uploadId,
     MultipartUpload: { Parts: completedParts.sort((left, right) => left.PartNumber - right.PartNumber) },
   }));
-  return { method: "UploadPartCopy", partCount: ranges.length };
+  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: stateKey }));
+  await verifyRemoteObject(client, bucket, file);
+  return { method: "UploadPartCopy", partCount: ranges.length, resumedParts: ranges.length - missingRanges.length };
 }
 
-export async function inventoryAndDeduplicateProductionObjects(copyMatches = false) {
+function retentionPayload(family: ProductionFamily, file: ProductionManifestFile) {
+  if (!file.shared || !file.sharedSource) throw new Error(`retention_reference_requires_shared_file:${file.path}`);
+  return {
+    schemaVersion: 1,
+    productionFamilyId: family.id,
+    productionRevision: family.revision,
+    sourceFamilyId: file.sharedSource.familyId,
+    sourceKey: file.sharedSource.objectKey,
+    bytes: file.bytes,
+    sha256: file.sha256,
+    retainedForProduction: true,
+  };
+}
+
+async function publishSharedRetentionReferences(client: S3Client, bucket: string, family: ProductionFamily, manifest: ProductionManifest) {
+  const references = [];
+  for (const file of manifest.files.filter((entry) => entry.shared)) {
+    if (!file.sharedSource) throw new Error(`shared_source_missing:${file.path}`);
+    const payload = retentionPayload(family, file);
+    const serialized = `${JSON.stringify(payload, null, 2)}\n`;
+    if (!await remoteObjectExists(client, bucket, file.sharedSource.retentionKey)) {
+      await client.send(new PutObjectCommand({
+        Bucket: bucket,
+        Key: file.sharedSource.retentionKey,
+        Body: serialized,
+        ContentType: "application/json",
+        Metadata: { sha256: createHash("sha256").update(serialized).digest("hex") },
+      }));
+    }
+    const read = await client.send(new GetObjectCommand({ Bucket: bucket, Key: file.sharedSource.retentionKey }));
+    const published = JSON.parse((await bodyBuffer(read.Body)).toString("utf8")) as typeof payload;
+    if (
+      published.productionFamilyId !== payload.productionFamilyId
+      || published.productionRevision !== payload.productionRevision
+      || published.sourceFamilyId !== payload.sourceFamilyId
+      || published.sourceKey !== payload.sourceKey
+      || published.bytes !== payload.bytes
+      || published.sha256 !== payload.sha256
+      || published.retainedForProduction !== true
+    ) throw new Error(`retention_reference_mismatch:${file.path}`);
+    references.push({ path: file.path, retentionKey: file.sharedSource.retentionKey, sourceKey: file.objectKey });
+  }
+  return references;
+}
+
+async function verifySharedRetentionReferences(client: S3Client, bucket: string, family: ProductionFamily, manifest: ProductionManifest) {
+  for (const file of manifest.files.filter((entry) => entry.shared)) {
+    if (!file.sharedSource || file.objectKey !== file.sharedSource.objectKey || file.bytes !== file.sharedSource.bytes || file.sha256 !== file.sharedSource.sha256) {
+      throw new Error(`shared_manifest_identity_mismatch:${file.path}`);
+    }
+    const payload = retentionPayload(family, file);
+    const read = await client.send(new GetObjectCommand({ Bucket: bucket, Key: file.sharedSource.retentionKey }));
+    const published = JSON.parse((await bodyBuffer(read.Body)).toString("utf8")) as typeof payload;
+    if (published.sourceKey !== payload.sourceKey || published.bytes !== payload.bytes || published.sha256 !== payload.sha256 || published.retainedForProduction !== true) {
+      throw new Error(`readonly_retention_reference_mismatch:${file.path}`);
+    }
+  }
+}
+
+export async function runMultipartCopyProbe() {
+  const creds = loadR2Credentials("model-cache-admin.env");
+  const client = createProductionS3Client(creds);
+  const probeKey = `production/probes/stage4a-multipart-copy-${randomUUID()}`;
+  let uploadId: string | undefined;
+  try {
+    const inventory = await listAllObjects(client, creds.bucket);
+    const source = inventory
+      .filter((object) => object.bytes > 0 && object.bytes <= 1024 * 1024 && !object.key.startsWith("production/probes/"))
+      .sort((left, right) => left.bytes - right.bytes)[0];
+    if (!source) throw new Error("multipart_copy_probe_source_missing");
+    const sourceRead = await client.send(new GetObjectCommand({ Bucket: creds.bucket, Key: source.key }));
+    const sourceBytes = await bodyBuffer(sourceRead.Body);
+    if (sourceBytes.length !== source.bytes) throw new Error("multipart_copy_probe_source_size_mismatch");
+    const sha256 = createHash("sha256").update(sourceBytes).digest("hex");
+    const created = await client.send(new CreateMultipartUploadCommand({
+      Bucket: creds.bucket,
+      Key: probeKey,
+      ContentType: "application/octet-stream",
+      Metadata: { sha256, probe: "stage4a" },
+    }));
+    uploadId = created.UploadId;
+    if (!uploadId) throw new Error("multipart_copy_probe_upload_id_missing");
+    const copied = await client.send(new UploadPartCopyCommand({
+      Bucket: creds.bucket,
+      Key: probeKey,
+      UploadId: uploadId,
+      PartNumber: 1,
+      CopySource: copySource(creds.bucket, source.key),
+      CopySourceRange: `bytes=0-${source.bytes - 1}`,
+    }));
+    const ETag = copied.CopyPartResult?.ETag;
+    if (!ETag) throw new Error("multipart_copy_probe_etag_missing");
+    await client.send(new CompleteMultipartUploadCommand({
+      Bucket: creds.bucket,
+      Key: probeKey,
+      UploadId: uploadId,
+      MultipartUpload: { Parts: [{ PartNumber: 1, ETag }] },
+    }));
+    uploadId = undefined;
+    const head = await client.send(new HeadObjectCommand({ Bucket: creds.bucket, Key: probeKey }));
+    if (head.ContentLength !== source.bytes || head.Metadata?.sha256 !== sha256) throw new Error("multipart_copy_probe_head_mismatch");
+    await client.send(new DeleteObjectCommand({ Bucket: creds.bucket, Key: probeKey }));
+    if (await remoteObjectExists(client, creds.bucket, probeKey)) throw new Error("multipart_copy_probe_delete_failed");
+    return { multipartCopyProbeReady: true, sourceKey: source.key, bytes: source.bytes, partCount: 1, destinationDeleted: true };
+  } catch (error) {
+    if (uploadId) await client.send(new AbortMultipartUploadCommand({ Bucket: creds.bucket, Key: probeKey, UploadId: uploadId })).catch(() => undefined);
+    await client.send(new DeleteObjectCommand({ Bucket: creds.bucket, Key: probeKey })).catch(() => undefined);
+    throw error;
+  } finally {
+    client.destroy();
+  }
+}
+
+export async function inventoryAndDeduplicateProductionObjects() {
   const creds = loadR2Credentials("model-cache-admin.env");
   const client = createProductionS3Client(creds);
   try {
     const inventory = await listAllObjects(client, creds.bucket);
     const reusedObjects: Array<{ familyId: string; path: string; objectKey: string; bytes: number; sha256: string }> = [];
-    const copiedObjects: Array<{ familyId: string; path: string; sourceKey: string; objectKey: string; bytes: number; sha256: string }> = [];
+    const sharedObjects: Array<{ familyId: string; path: string; sourceFamilyId: string; objectKey: string; retentionKey: string; bytes: number; sha256: string }> = [];
     const newlyDownloadedObjects: Array<{ familyId: string; path: string; objectKey: string; bytes: number; sha256: string }> = [];
     for (const family of loadProductionFamilies()) {
       for (const file of buildProductionManifest(family).files) {
@@ -253,19 +465,21 @@ export async function inventoryAndDeduplicateProductionObjects(copyMatches = fal
           newlyDownloadedObjects.push({ familyId: family.id, path: file.path, objectKey: file.objectKey, bytes: file.bytes, sha256: file.sha256 });
           continue;
         }
-        if (!copyMatches) {
-          copiedObjects.push({ familyId: family.id, path: file.path, sourceKey, objectKey: file.objectKey, bytes: file.bytes, sha256: file.sha256 });
-          continue;
-        }
-        await copyExistingObject(client, creds.bucket, sourceKey, file, family.id);
-        await verifyRemoteObject(client, creds.bucket, file);
-        copiedObjects.push({ familyId: family.id, path: file.path, sourceKey, objectKey: file.objectKey, bytes: file.bytes, sha256: file.sha256 });
+        sharedObjects.push({
+          familyId: family.id,
+          path: file.path,
+          sourceFamilyId: sourceFamilyId(sourceKey),
+          objectKey: sourceKey,
+          retentionKey: retentionKey(family, file),
+          bytes: file.bytes,
+          sha256: file.sha256,
+        });
       }
     }
-    const avoided = [...reusedObjects, ...copiedObjects];
+    const avoided = [...reusedObjects, ...sharedObjects];
     return {
       schemaVersion: 1,
-      mode: copyMatches ? "copy-identical-r2-objects" : "inventory-only",
+      mode: "shared-object-reference-preferred",
       inventory: {
         objectCount: inventory.length,
         totalBytes: inventory.reduce((total, object) => total + object.bytes, 0),
@@ -273,8 +487,16 @@ export async function inventoryAndDeduplicateProductionObjects(copyMatches = fal
         productionObjectCount: inventory.filter((object) => object.key.startsWith("production/models/")).length,
       },
       reusedObjects,
-      copiedObjects,
+      sharedObjects,
       newlyDownloadedObjects,
+      retentionReferences: sharedObjects.map((object) => ({
+        productionFamilyId: object.familyId,
+        sourceFamilyId: object.sourceFamilyId,
+        sourceKey: object.objectKey,
+        retentionKey: object.retentionKey,
+        bytes: object.bytes,
+        sha256: object.sha256,
+      })),
       bytesAvoided: avoided.reduce((total, object) => total + object.bytes, 0),
     };
   } finally {
@@ -290,15 +512,28 @@ export async function buildRemoteDownloadPlan(familyId: string) {
   try {
     const skipPaths: string[] = [];
     const downloadPaths: string[] = [];
-    for (const file of buildProductionManifest(family).files) {
-      if (await remoteObjectExists(client, creds.bucket, file.objectKey)) {
+    const manifest = await resolveProductionManifest(client, creds.bucket, family);
+    for (const file of manifest.files) {
+      if (file.shared || await remoteObjectExists(client, creds.bucket, file.objectKey)) {
         await verifyRemoteObject(client, creds.bucket, file);
         skipPaths.push(file.path);
       } else {
         downloadPaths.push(file.path);
       }
     }
-    return { schemaVersion: 1, familyId, skipPaths, downloadPaths };
+    return {
+      schemaVersion: 1,
+      familyId,
+      skipPaths,
+      downloadPaths,
+      sharedObjects: manifest.files.filter((file) => file.shared).map((file) => ({
+        path: file.path,
+        objectKey: file.objectKey,
+        bytes: file.bytes,
+        sha256: file.sha256,
+        sharedSource: file.sharedSource,
+      })),
+    };
   } finally {
     client.destroy();
   }
@@ -310,9 +545,13 @@ export async function publishProductionFamily(familyId: string, localRoot: strin
   assertProductionCredentialGate();
   const creds = loadR2Credentials("model-cache-admin.env");
   const client = createProductionS3Client(creds);
-  const manifest = buildProductionManifest(family, generatedAt);
   try {
+    const manifest = await resolveProductionManifest(client, creds.bucket, family, generatedAt);
     for (const file of manifest.files) {
+      if (file.shared) {
+        await verifyRemoteObject(client, creds.bucket, file);
+        continue;
+      }
       const reusable = await remoteObjectExists(client, creds.bucket, file.objectKey);
       if (reusable) {
         await verifyRemoteObject(client, creds.bucket, file);
@@ -334,9 +573,26 @@ export async function publishProductionFamily(familyId: string, localRoot: strin
         partSize: 128 * 1024 * 1024,
         leavePartsOnError: true,
       });
-      await upload.done();
+      let uploadedBytes = 0;
+      upload.on("httpUploadProgress", (progress) => { uploadedBytes = progress.loaded ?? uploadedBytes; });
+      const uploadHeartbeat = setInterval(() => {
+        console.log(JSON.stringify({
+          stage: "r2_upload_heartbeat",
+          familyId: family.id,
+          path: file.path,
+          uploadedBytes,
+          expectedBytes: file.bytes,
+          at: new Date().toISOString(),
+        }));
+      }, 30_000);
+      try {
+        await upload.done();
+      } finally {
+        clearInterval(uploadHeartbeat);
+      }
       await verifyRemoteObject(client, creds.bucket, file);
     }
+    const retentionReferences = await publishSharedRetentionReferences(client, creds.bucket, family, manifest);
     const manifestPayload = `${JSON.stringify(manifest, null, 2)}\n`;
     const current = buildCurrentPointer(family, manifest);
     const manifestKey = current.manifestKey;
@@ -352,7 +608,16 @@ export async function publishProductionFamily(familyId: string, localRoot: strin
     const currentRead = await client.send(new GetObjectCommand({ Bucket: creds.bucket, Key: family.currentKey }));
     const publishedCurrent = JSON.parse((await bodyBuffer(currentRead.Body)).toString("utf8")) as typeof current;
     if (publishedCurrent.familyId !== family.id || publishedCurrent.revision !== family.revision || publishedCurrent.manifestSha256 !== current.manifestSha256) throw new Error(`current_verify_failed:${family.id}`);
-    return { familyId: family.id, manifestKey, currentKey: family.currentKey, totalSizeBytes: manifest.totalSizeBytes, objectCount: manifest.files.length };
+    return {
+      familyId: family.id,
+      manifestKey,
+      currentKey: family.currentKey,
+      totalSizeBytes: manifest.totalSizeBytes,
+      objectCount: manifest.files.length,
+      sharedObjectCount: manifest.files.filter((file) => file.shared).length,
+      sharedBytes: manifest.files.filter((file) => file.shared).reduce((total, file) => total + file.bytes, 0),
+      retentionReferences,
+    };
   } finally {
     client.destroy();
   }
@@ -369,6 +634,52 @@ async function expectDenied(operation: () => Promise<unknown>, label: string) {
   throw new Error(`readonly_boundary_allowed:${label}`);
 }
 
+function assertPublishedManifestMatchesFamily(family: ProductionFamily, manifest: ProductionManifest) {
+  if (
+    manifest.schemaVersion !== 1
+    || manifest.familyId !== family.id
+    || manifest.revision !== family.revision
+    || manifest.totalSizeBytes !== family.restoreBytes
+    || manifest.files.length !== family.objects.length
+  ) throw new Error(`manifest_identity_mismatch:${family.id}`);
+  for (const expected of family.objects) {
+    const file = manifest.files.find((entry) => entry.path === expected.path);
+    if (
+      !file
+      || file.role !== expected.role
+      || file.source !== expected.source
+      || file.bytes !== expected.bytes
+      || file.sha256 !== expected.sha256
+      || file.sourceModelId !== expected.sourceModelId
+      || file.sourceVersionId !== expected.sourceVersionId
+      || file.sourceFileId !== expected.sourceFileId
+    ) throw new Error(`manifest_source_lock_mismatch:${family.id}:${expected.path}`);
+    const canonicalKey = `${family.r2Prefix}/objects/${expected.sha256}`;
+    if (!file.shared && file.objectKey !== canonicalKey) throw new Error(`manifest_object_key_mismatch:${family.id}:${expected.path}`);
+    if (file.shared && (!file.sharedSource || file.objectKey !== file.sharedSource.objectKey)) throw new Error(`manifest_shared_key_mismatch:${family.id}:${expected.path}`);
+  }
+}
+
+export async function readPublishedProductionManifest(familyId: string) {
+  const family = loadProductionFamilies().find((entry) => entry.id === familyId);
+  if (!family) throw new Error(`unknown_family:${familyId}`);
+  const creds = loadR2Credentials("model-cache-readonly.env");
+  const client = createProductionS3Client(creds);
+  try {
+    const currentRead = await client.send(new GetObjectCommand({ Bucket: creds.bucket, Key: family.currentKey }));
+    const current = JSON.parse((await bodyBuffer(currentRead.Body)).toString("utf8")) as ReturnType<typeof buildCurrentPointer>;
+    if (current.familyId !== family.id || current.revision !== family.revision) throw new Error(`current_identity_mismatch:${family.id}`);
+    const manifestRead = await client.send(new GetObjectCommand({ Bucket: creds.bucket, Key: current.manifestKey }));
+    const manifestBytes = await bodyBuffer(manifestRead.Body);
+    if (createHash("sha256").update(manifestBytes).digest("hex") !== current.manifestSha256) throw new Error(`manifest_sha256_mismatch:${family.id}`);
+    const manifest = JSON.parse(manifestBytes.toString("utf8")) as ProductionManifest;
+    assertPublishedManifestMatchesFamily(family, manifest);
+    return { family, current, manifest };
+  } finally {
+    client.destroy();
+  }
+}
+
 export async function verifyProductionReadonly(familyId: string, verifyBoundary = true) {
   const family = loadProductionFamilies().find((entry) => entry.id === familyId);
   if (!family) throw new Error(`unknown_family:${familyId}`);
@@ -382,15 +693,28 @@ export async function verifyProductionReadonly(familyId: string, verifyBoundary 
     const manifestBytes = await bodyBuffer(manifestRead.Body);
     if (createHash("sha256").update(manifestBytes).digest("hex") !== current.manifestSha256) throw new Error(`manifest_sha256_mismatch:${family.id}`);
     const manifest = JSON.parse(manifestBytes.toString("utf8")) as ProductionManifest;
-    if (manifest.familyId !== family.id || manifest.totalSizeBytes !== family.restoreBytes) throw new Error(`manifest_identity_mismatch:${family.id}`);
+    assertPublishedManifestMatchesFamily(family, manifest);
     for (const file of manifest.files) await verifyRemoteObject(client, creds.bucket, file);
+    await verifySharedRetentionReferences(client, creds.bucket, family, manifest);
     if (verifyBoundary) {
       const probeKey = `${family.r2Prefix}/boundary-probe/stage3y-denied`;
       await expectDenied(() => client.send(new PutObjectCommand({ Bucket: creds.bucket, Key: probeKey, Body: "denied" })), "write");
       await expectDenied(() => client.send(new PutObjectCommand({ Bucket: creds.bucket, Key: family.currentKey, Body: "denied", IfNoneMatch: "*" })), "overwrite");
       await expectDenied(() => client.send(new DeleteObjectCommand({ Bucket: creds.bucket, Key: probeKey })), "delete");
     }
-    return { familyId: family.id, cacheReady: true, currentKey: family.currentKey, manifestKey: current.manifestKey, totalSizeBytes: manifest.totalSizeBytes, objectCount: manifest.files.length, readonlyBoundary: verifyBoundary };
+    const sharedFiles = manifest.files.filter((file) => file.shared);
+    return {
+      familyId: family.id,
+      cacheReady: true,
+      currentKey: family.currentKey,
+      manifestKey: current.manifestKey,
+      totalSizeBytes: manifest.totalSizeBytes,
+      objectCount: manifest.files.length,
+      sharedObjectCount: sharedFiles.length,
+      sharedBytes: sharedFiles.reduce((total, file) => total + file.bytes, 0),
+      sharedObjects: sharedFiles.map((file) => ({ path: file.path, objectKey: file.objectKey, sharedSource: file.sharedSource })),
+      readonlyBoundary: verifyBoundary,
+    };
   } finally {
     client.destroy();
   }
@@ -420,7 +744,9 @@ async function main() {
     if (!familyId || !localRoot) throw new Error("usage: production-model-cache.ts publish-local <family-id> <local-root>");
     console.log(JSON.stringify(await publishProductionFamily(familyId, localRoot)));
   } else if (command === "deduplicate") {
-    console.log(JSON.stringify(await inventoryAndDeduplicateProductionObjects(process.argv.includes("--copy")), null, 2));
+    console.log(JSON.stringify(await inventoryAndDeduplicateProductionObjects(), null, 2));
+  } else if (command === "multipart-copy-probe") {
+    console.log(JSON.stringify(await runMultipartCopyProbe(), null, 2));
   } else if (command === "download-plan") {
     const familyId = process.argv[3];
     if (!familyId) throw new Error("usage: production-model-cache.ts download-plan <family-id>");

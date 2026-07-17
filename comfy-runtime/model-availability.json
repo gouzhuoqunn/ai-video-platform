@@ -15,6 +15,8 @@
       "currentKey": "production/models/ultrareal-flux1-dev-fp8/current.json",
       "revision": "civitai-1413133-file-1320644",
       "restoreBytes": 17640339740,
+      "uniqueRestoreBytes": 17640339740,
+      "sharedBytes": 0,
       "updatedAt": "2026-07-17T06:17:04.000Z"
     },
     {
@@ -31,6 +33,8 @@
       "currentKey": "production/models/wan22-remix-14b-i2v-fp8/current.json",
       "revision": "civitai-2770795-2771407-v3",
       "restoreBytes": 35572266487,
+      "uniqueRestoreBytes": 28836359590,
+      "sharedBytes": 6735906897,
       "updatedAt": "2026-07-17T06:17:04.000Z"
     },
     {

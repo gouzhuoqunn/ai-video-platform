@@ -30,6 +30,8 @@
       "currentKey": "production/models/ultrareal-flux1-dev-fp8/current.json",
       "revision": "civitai-1413133-file-1320644",
       "restoreBytes": 17640339740,
+      "uniqueRestoreBytes": 17640339740,
+      "sharedBytes": 0,
       "parallelDownloads": 3,
       "objects": [
         { "role": "unet", "path": "diffusion_models/ultrarealFineTune_v4_fp8.safetensors", "source": "https://civitai.com/api/download/models/1413133?type=Model&format=SafeTensor&size=full&fp=fp8", "sourceModelId": 978314, "sourceVersionId": 1413133, "sourceFileId": 1320644, "bytes": 11901542512, "sha256": "4e675980ea771ae64b566fa5a81cd8fbecde1a1a7ce8b6f0207e836b6f28c18e" },
@@ -50,6 +52,8 @@
       "currentKey": "production/models/wan22-remix-14b-i2v-fp8/current.json",
       "revision": "civitai-2770795-2771407-v3",
       "restoreBytes": 35572266487,
+      "uniqueRestoreBytes": 28836359590,
+      "sharedBytes": 6735906897,
       "parallelDownloads": 4,
       "objects": [
         { "role": "high_noise_unet", "path": "diffusion_models/wan22RemixT2VI2V_i2vHighV30.safetensors", "source": "https://civitai.com/api/download/models/2770795", "sourceModelId": 2003153, "sourceVersionId": 2770795, "sourceFileId": 2657128, "bytes": 14291272136, "sha256": "2ac60c97ca6911090cdbdf055b685af3646b7bd93c19c9aae0f86f4ea018e97d" },

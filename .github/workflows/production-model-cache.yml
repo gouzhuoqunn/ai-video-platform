@@ -33,11 +33,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --ignore-scripts
-      - name: Reuse or server-side copy exact SHA and size matches
+      - name: Resolve exact shared R2 references and retention plan
         shell: bash
         run: |
           set -euo pipefail
-          npx tsx scripts/model-cache/production-model-cache.ts deduplicate --copy | tee "$RUNNER_TEMP/deduplication-report.json"
+          npx tsx scripts/model-cache/production-model-cache.ts deduplicate | tee "$RUNNER_TEMP/deduplication-report.json"
           {
             echo '```json'
             cat "$RUNNER_TEMP/deduplication-report.json"
@@ -64,6 +64,7 @@ jobs:
       R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
       MODEL_CACHE_REGION: auto
       HF_XET_HIGH_PERFORMANCE: "1"
+      HF_HUB_DOWNLOAD_TIMEOUT: "120"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -85,6 +86,9 @@ jobs:
           test -n "${R2_BUCKET_NAME:-}"
       - name: Install bounded tooling
         run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc /usr/share/swift
+          available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')"
+          test "$available_kib" -ge 41943040
           npm ci --ignore-scripts
           python -m pip install --disable-pip-version-check "huggingface_hub[hf_xet]"
       - name: Plan downloads after verified R2 reuse

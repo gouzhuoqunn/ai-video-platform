@@ -80,11 +80,12 @@ type ImageResult = { sessionId: string; date: string; metadata: Record<string, u
 type PendingImage = { sessionId: string; completedStages: string[]; status: "pending" | "completed" };
 type PoolTaskStatus = "pending_confirmation" | "waiting_for_batch" | "armed" | "waiting_for_gpu" | "deploying" | "restoring_models" | "generating" | "syncing" | "completed" | "failed" | "cancelled";
 type PoolTask = { id: string; generationType: StudioMode; prompt: string; modelProfile: string; priority: "normal" | "immediate"; status: PoolTaskStatus; createdAt: string };
-type ProductionModelSummary = { modelProfile: string; displayName: string; cacheStatus: string; cacheReady: boolean; restoreBytes: number; revision: string; gpuProfiles: string[] };
+type ProductionModelSummary = { modelProfile: string; displayName: string; cacheStatus: string; cacheReady: boolean; restoreBytes: number; uniqueRestoreBytes: number; sharedBytes: number; revision: string; gpuProfiles: string[] };
 type PoolSummary = {
   tasks: PoolTask[];
   counts: Partial<Record<PoolTaskStatus, number>>;
   schedulerState: string;
+  selectedBatchId: string | null;
   imageBatchThreshold: number;
   videoBatchThreshold: number;
   tasksNeeded: { image: number; video: number };
@@ -639,10 +640,11 @@ export function LocalCreationStudio() {
             <p className="mt-2 rounded-md bg-stone-50 px-3 py-2 text-sm text-stone-700">{pool?.orderBlockingReason ?? "正在读取调度门禁。"}</p>
             {pool?.productionModels?.[mode] ? (
               <div className="mt-2 rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2 text-sm text-stone-700">
-                <p className="font-semibold">{pool.productionModels[mode].displayName}</p>
+                <p className="font-semibold">{mode === "image" ? "UltraReal Flux FP8" : "Wan 2.2 Remix 14B FP8"}：缓存{pool.productionModels[mode].cacheReady ? "已就绪" : "发布未完成"}</p>
                 <p className="mt-1 text-xs text-stone-500">
-                  配置 {gpuPreference === "auto" ? "自动选择" : gpuPreference.toUpperCase()} · 缓存 {pool.productionModels[mode].cacheReady ? "已就绪" : "发布未完成"} · 恢复量 {(pool.productionModels[mode].restoreBytes / 1024 ** 3).toFixed(1)} GiB
+                  配置 {gpuPreference === "auto" ? "自动选择" : gpuPreference.toUpperCase()} · 独占 {(pool.productionModels[mode].uniqueRestoreBytes / 1024 ** 3).toFixed(1)} GiB · 共享 {(pool.productionModels[mode].sharedBytes / 1024 ** 3).toFixed(1)} GiB · 总恢复量 {(pool.productionModels[mode].restoreBytes / 1024 ** 3).toFixed(1)} GiB
                 </p>
+                <p className="mt-1 text-xs text-stone-500">最终批次：{pool.selectedBatchId === "stage4a-final-production" ? "已准备" : "未准备"}</p>
               </div>
             ) : null}
             {mode === "video" && poolVideoResult?.thumbnailUrl && poolVideoResult.videoUrl ? (

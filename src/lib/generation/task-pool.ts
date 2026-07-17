@@ -284,7 +284,7 @@ export function generationPoolSummary(state = readGenerationPool()) {
   const nextBatch = selection.batches?.[0];
   const estimatedMinutes = selection.batches?.reduce((total, batch) => total + (batch.generationType === "image" ? 15 + batch.tasks.length * 6 : 20 + batch.tasks.length * 20), 0) + ((selection.batches?.length ?? 0) > 1 ? 5 : 0);
   return {
-    schedulerState: state.scheduler.state, tasks: state.tasks, counts, queuedTaskCount: state.tasks.filter((task) => ["waiting_for_batch", "armed", "waiting_for_gpu"].includes(task.status)).length,
+    schedulerState: state.scheduler.state, selectedBatchId: state.scheduler.selectedBatchId, tasks: state.tasks, counts, queuedTaskCount: state.tasks.filter((task) => ["waiting_for_batch", "armed", "waiting_for_gpu"].includes(task.status)).length,
     selectedTaskIds: selected.map((task) => task.id), selectedTasks: selected, nextBatchTasks: nextBatch?.tasks.map((task) => task.id) ?? [], requiredModelProfile: nextBatch?.modelProfile ?? null,
     acceptableGpuClasses: selection.ready ? selection.acceptableGpuClasses ?? [] : [], estimatedSessionDurationMinutes: typeof estimatedMinutes === "number" && Number.isFinite(estimatedMinutes) ? estimatedMinutes : 0,
     maximumAcceptableHourlyPrice: MAX_ACCEPTABLE_HOURLY_USD, orderWouldBeCreated: false,

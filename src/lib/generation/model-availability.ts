@@ -15,6 +15,8 @@ export type ModelAvailability = {
   currentKey: string;
   revision: string;
   restoreBytes?: number;
+  uniqueRestoreBytes?: number;
+  sharedBytes?: number;
   updatedAt: string;
 };
 

@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import shutil
+import threading
 import time
 import urllib.request
 import urllib.parse
@@ -24,6 +25,8 @@ class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 SAFE_OPENER = urllib.request.build_opener(SafeRedirectHandler())
+STALL_TIMEOUT_SECONDS = 120
+HEARTBEAT_SECONDS = 30
 
 
 def verify_and_publish(part: pathlib.Path, target: pathlib.Path, expected_size: int, expected_sha: str) -> None:
@@ -78,7 +81,7 @@ def download(url: str, target: pathlib.Path, expected_size: int, expected_sha: s
         if offset:
             request_headers["Range"] = f"bytes={offset}-"
         try:
-            with SAFE_OPENER.open(urllib.request.Request(url, headers=request_headers), timeout=300) as response:
+            with SAFE_OPENER.open(urllib.request.Request(url, headers=request_headers), timeout=STALL_TIMEOUT_SECONDS) as response:
                 if offset and response.status != 206:
                     part.unlink(missing_ok=True)
                     raise RuntimeError(f"range_resume_rejected:{target.name}")
@@ -121,13 +124,40 @@ def main() -> None:
         "downloadObjects": len(selected),
         "downloadBytes": sum(int(item["bytes"]) for item in selected),
     }))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=int(family["parallelDownloads"])) as pool:
-        futures = [
-            pool.submit(download, item["source"], output / item["path"], int(item["bytes"]), item["sha256"])
-            for item in selected
-        ]
-        for future in concurrent.futures.as_completed(futures):
-            future.result()
+    heartbeat_stop = threading.Event()
+    observed: dict[str, tuple[int, float]] = {}
+
+    def heartbeat() -> None:
+        while not heartbeat_stop.wait(HEARTBEAT_SECONDS):
+            now = time.monotonic()
+            progress = []
+            stalled = []
+            for item in selected:
+                target = output / item["path"]
+                part = target.with_suffix(target.suffix + ".part")
+                current = target.stat().st_size if target.exists() else part.stat().st_size if part.exists() else 0
+                previous, changed_at = observed.get(item["path"], (-1, now))
+                if current != previous:
+                    changed_at = now
+                observed[item["path"]] = (current, changed_at)
+                progress.append({"path": item["path"], "bytes": current, "expectedBytes": int(item["bytes"])})
+                if current < int(item["bytes"]) and now - changed_at >= STALL_TIMEOUT_SECONDS:
+                    stalled.append(item["path"])
+            print(json.dumps({"stage": "download_heartbeat", "familyId": family["id"], "files": progress, "stalledPaths": stalled}), flush=True)
+
+    heartbeat_thread = threading.Thread(target=heartbeat, name="production-cache-heartbeat", daemon=True)
+    heartbeat_thread.start()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=int(family["parallelDownloads"])) as pool:
+            futures = [
+                pool.submit(download, item["source"], output / item["path"], int(item["bytes"]), item["sha256"])
+                for item in selected
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+    finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2)
 
 
 if __name__ == "__main__":

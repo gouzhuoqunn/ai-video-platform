@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { loadModelAvailabilityRegistry } from "./model-availability";
 
 export const PRODUCTION_IMAGE_MODEL = "ultrareal-flux1-dev-fp8";
 export const PRODUCTION_VIDEO_MODEL = "wan22-remix-14b-i2v-fp8";
@@ -14,6 +15,8 @@ type ProductionFamily = {
   currentKey: string;
   revision: string;
   restoreBytes: number;
+  uniqueRestoreBytes: number;
+  sharedBytes: number;
   parallelDownloads: number;
   objects: Array<{ role: string; path: string; source: string; bytes: number; sha256: string }>;
 };
@@ -31,12 +34,15 @@ export function loadProductionModelRegistry(filePath = path.join(process.cwd(), 
 }
 
 export function productionModelSummary() {
+  const availability = new Map(loadModelAvailabilityRegistry().models.map((model) => [model.modelProfile, model]));
   return Object.fromEntries(loadProductionModelRegistry().families.map((family) => [family.generationType, {
     modelProfile: family.id,
     displayName: family.displayName,
     cacheStatus: family.status,
-    cacheReady: false,
+    cacheReady: availability.get(family.id)?.restoreReady === true,
     restoreBytes: family.restoreBytes,
+    uniqueRestoreBytes: family.uniqueRestoreBytes,
+    sharedBytes: family.sharedBytes,
     revision: family.revision,
     gpuProfiles: [...PRODUCTION_GPU_CLASSES],
   }]));

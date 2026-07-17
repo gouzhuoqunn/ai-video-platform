@@ -54,6 +54,10 @@ const image = familyById.get("ultrareal-flux1-dev-fp8")!;
 const video = familyById.get("wan22-remix-14b-i2v-fp8")!;
 const cacheReady = [image, video].every((family) => cacheByProfile.get(family.id)?.restoreReady === true);
 const minimumRequiredDiskBytes = Math.max(image.restoreBytes, video.restoreBytes) + 10 * 1024 ** 3;
+const uniqueRestoreBytes = image.uniqueRestoreBytes + video.uniqueRestoreBytes;
+const sharedRestoreBytes = image.sharedBytes + video.sharedBytes;
+const lastVerifiedCloreThroughputBytesPerSecond = 12_451_817_860 / (1_086_080 / 1000);
+const expectedRestoreMinutes = (image.restoreBytes + video.restoreBytes) / lastVerifiedCloreThroughputBytesPerSecond / 60;
 
 console.log(JSON.stringify({
   ultrareal_workflow_ready: true,
@@ -65,7 +69,11 @@ console.log(JSON.stringify({
   restore: {
     ultrareal_bytes: image.restoreBytes,
     wan_remix_bytes: video.restoreBytes,
+    unique_restore_bytes: uniqueRestoreBytes,
+    shared_restore_bytes: sharedRestoreBytes,
     sequential_minimum_free_disk_bytes: minimumRequiredDiskBytes,
+    last_verified_clore_throughput_bytes_per_second: Math.round(lastVerifiedCloreThroughputBytesPerSecond),
+    expected_restore_minutes: Number(expectedRestoreMinutes.toFixed(1)),
     image_parallel_downloads: image.parallelDownloads,
     video_parallel_downloads: video.parallelDownloads,
   },

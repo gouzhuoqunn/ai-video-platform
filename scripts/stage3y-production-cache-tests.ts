@@ -17,7 +17,8 @@ assert.equal(workflow.jobs.cache.strategy["fail-fast"], false);
 assert.deepEqual(workflow.jobs.cache.strategy.matrix.family, ["ultrareal-flux1-dev-fp8", "wan22-remix-14b-i2v-fp8"]);
 assert.deepEqual(workflow.jobs["final-readonly-verification"].needs, "cache");
 assert.match(read(".github/workflows/production-model-cache.yml"), /publish-local/);
-assert.match(read(".github/workflows/production-model-cache.yml"), /deduplicate --copy/);
+assert.match(read(".github/workflows/production-model-cache.yml"), /production-model-cache\.ts deduplicate/);
+assert.ok(!read(".github/workflows/production-model-cache.yml").includes("deduplicate --copy"));
 assert.match(read(".github/workflows/production-model-cache.yml"), /download-plan/);
 assert.match(read(".github/workflows/production-model-cache.yml"), /verify-readonly ultrareal-flux1-dev-fp8/);
 assert.match(read(".github/workflows/production-model-cache.yml"), /verify-readonly wan22-remix-14b-i2v-fp8/);
@@ -34,11 +35,11 @@ for (const family of loadProductionFamilies()) {
 }
 
 const downloader = read("scripts/model-cache/production-cache-download.py");
-for (const marker of ["ThreadPoolExecutor", "hf_hub_download", "HF_TOKEN", ".part", "sha256", "parallelDownloads", "skipPaths", "--download-plan"]) assert.ok(downloader.includes(marker));
+for (const marker of ["ThreadPoolExecutor", "hf_hub_download", "HF_TOKEN", ".part", "sha256", "parallelDownloads", "skipPaths", "--download-plan", "download_heartbeat", "STALL_TIMEOUT_SECONDS"]) assert.ok(downloader.includes(marker));
 const publisher = read("scripts/model-cache/production-model-cache.ts");
-for (const marker of ["new Upload", "partSize", "leavePartsOnError", "Metadata: { sha256", "Range: \"bytes=0-0\"", "IfNoneMatch: \"*\"", "DeleteObjectCommand", "remoteObjectExists", "CopyObjectCommand", "CreateMultipartUploadCommand", "UploadPartCopyCommand", "CompleteMultipartUploadCommand", "ListObjectsV2Command", "bytesAvoided"]) assert.ok(publisher.includes(marker));
+for (const marker of ["new Upload", "partSize", "leavePartsOnError", "Metadata: { sha256", "Range: \"bytes=0-0\"", "IfNoneMatch: \"*\"", "DeleteObjectCommand", "remoteObjectExists", "CopyObjectCommand", "CreateMultipartUploadCommand", "UploadPartCopyCommand", "CompleteMultipartUploadCommand", "AbortMultipartUploadCommand", "ListPartsCommand", "ListObjectsV2Command", "sharedObjects", "sharedSource", "retentionReferences", "bytesAvoided"]) assert.ok(publisher.includes(marker));
 const restoreBundle = read("scripts/model-cache/production-restore-bundle.ts");
-for (const marker of ["minimumFreeDiskBytes", "objectPathMapping", "parallelDownloads"]) assert.ok(restoreBundle.includes(marker));
+for (const marker of ["minimumFreeDiskBytes", "objectPathMapping", "parallelDownloads", "readPublishedProductionManifest", "sharedObjectKeys"]) assert.ok(restoreBundle.includes(marker));
 const studio = read("src/components/LocalCreationStudio.tsx");
 for (const label of ["Image UltraReal Flux FP8", "Video Wan 2.2 Remix 14B FP8", "自动选择", "RTX 4090", "RTX 5090", "发布未完成"]) assert.ok(studio.includes(label));
 
