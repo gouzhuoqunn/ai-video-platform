@@ -600,8 +600,8 @@ export function LocalCreationStudio() {
                 GPU
                 <select className="ml-2 rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setGpuPreference(event.target.value as "auto" | "rtx4090" | "rtx5090")} value={gpuPreference}>
                   <option value="auto">自动选择</option>
-                  <option value="rtx4090">RTX4090</option>
-                  <option value="rtx5090">RTX5090</option>
+                  <option value="rtx4090">RTX 4090</option>
+                  <option value="rtx5090">RTX 5090</option>
                 </select>
               </label>
               <span className="text-sm text-stone-500">{prompt.trim().length}/2000</span>
@@ -641,7 +641,7 @@ export function LocalCreationStudio() {
               <div className="mt-2 rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2 text-sm text-stone-700">
                 <p className="font-semibold">{pool.productionModels[mode].displayName}</p>
                 <p className="mt-1 text-xs text-stone-500">
-                  配置 {gpuPreference === "auto" ? "自动选择" : gpuPreference.toUpperCase()} · 缓存 {pool.productionModels[mode].cacheReady ? "已就绪" : "等待凭证"} · 恢复量 {(pool.productionModels[mode].restoreBytes / 1024 ** 3).toFixed(1)} GiB
+                  配置 {gpuPreference === "auto" ? "自动选择" : gpuPreference.toUpperCase()} · 缓存 {pool.productionModels[mode].cacheReady ? "已就绪" : "发布未完成"} · 恢复量 {(pool.productionModels[mode].restoreBytes / 1024 ** 3).toFixed(1)} GiB
                 </p>
               </div>
             ) : null}

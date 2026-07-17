@@ -5,7 +5,7 @@
       "generationType": "image",
       "modelProfile": "ultrareal-flux1-dev-fp8",
       "displayName": "Image UltraReal Flux FP8",
-      "status": "metadata_locked_aux_auth_blocked",
+      "status": "source_access_ready_cache_publish_failed",
       "defaultProduction": true,
       "cached": false,
       "restoreReady": false,
@@ -15,13 +15,13 @@
       "currentKey": "production/models/ultrareal-flux1-dev-fp8/current.json",
       "revision": "civitai-1413133-file-1320644",
       "restoreBytes": 17640339740,
-      "updatedAt": "2026-07-17T04:00:00.000Z"
+      "updatedAt": "2026-07-17T06:17:04.000Z"
     },
     {
       "generationType": "video",
       "modelProfile": "wan22-remix-14b-i2v-fp8",
       "displayName": "Video Wan 2.2 Remix 14B FP8",
-      "status": "metadata_locked_aux_auth_blocked",
+      "status": "source_access_ready_cache_publish_failed",
       "defaultProduction": true,
       "cached": false,
       "restoreReady": false,
@@ -31,7 +31,7 @@
       "currentKey": "production/models/wan22-remix-14b-i2v-fp8/current.json",
       "revision": "civitai-2770795-2771407-v3",
       "restoreBytes": 35572266487,
-      "updatedAt": "2026-07-17T04:00:00.000Z"
+      "updatedAt": "2026-07-17T06:17:04.000Z"
     },
     {
       "generationType": "image",

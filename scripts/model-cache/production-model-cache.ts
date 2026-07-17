@@ -3,12 +3,15 @@ import { createReadStream, mkdirSync, readFileSync, statSync, writeFileSync } fr
 import path from "node:path";
 import {
   CopyObjectCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
+  UploadPartCopyCommand,
 } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
@@ -164,6 +167,71 @@ function copySource(bucket: string, key: string) {
   return `${bucket}/${key.split("/").map((part) => encodeURIComponent(part)).join("/")}`;
 }
 
+async function copyExistingObject(
+  client: S3Client,
+  bucket: string,
+  sourceKey: string,
+  file: ProductionManifest["files"][number],
+  familyId: string,
+) {
+  const metadata = { sha256: file.sha256, family: familyId, role: file.role, "deduplicated-from": sourceKey };
+  if (file.bytes <= 5 * 1024 ** 3) {
+    await client.send(new CopyObjectCommand({
+      Bucket: bucket,
+      Key: file.objectKey,
+      CopySource: copySource(bucket, sourceKey),
+      MetadataDirective: "REPLACE",
+      ContentType: "application/octet-stream",
+      Metadata: metadata,
+    }));
+    return { method: "CopyObject", partCount: 1 };
+  }
+  const created = await client.send(new CreateMultipartUploadCommand({
+    Bucket: bucket,
+    Key: file.objectKey,
+    ContentType: "application/octet-stream",
+    Metadata: metadata,
+  }));
+  if (!created.UploadId) throw new Error(`r2_multipart_copy_upload_id_missing:${file.objectKey}`);
+  const partSize = 128 * 1024 * 1024;
+  const ranges = Array.from({ length: Math.ceil(file.bytes / partSize) }, (_, index) => ({
+    PartNumber: index + 1,
+    start: index * partSize,
+    end: Math.min(file.bytes, (index + 1) * partSize) - 1,
+  }));
+  const completedParts: Array<{ ETag: string; PartNumber: number }> = [];
+  for (let offset = 0; offset < ranges.length; offset += 4) {
+    const copied = await Promise.all(ranges.slice(offset, offset + 4).map(async (range) => {
+      const response = await client.send(new UploadPartCopyCommand({
+        Bucket: bucket,
+        Key: file.objectKey,
+        UploadId: created.UploadId,
+        PartNumber: range.PartNumber,
+        CopySource: copySource(bucket, sourceKey),
+        CopySourceRange: `bytes=${range.start}-${range.end}`,
+      }));
+      const ETag = response.CopyPartResult?.ETag;
+      if (!ETag) throw new Error(`r2_multipart_copy_etag_missing:${file.objectKey}:${range.PartNumber}`);
+      return { ETag, PartNumber: range.PartNumber };
+    }));
+    completedParts.push(...copied);
+    console.log(JSON.stringify({
+      stage: "r2_multipart_copy",
+      objectKey: file.objectKey,
+      copiedParts: completedParts.length,
+      totalParts: ranges.length,
+      at: new Date().toISOString(),
+    }));
+  }
+  await client.send(new CompleteMultipartUploadCommand({
+    Bucket: bucket,
+    Key: file.objectKey,
+    UploadId: created.UploadId,
+    MultipartUpload: { Parts: completedParts.sort((left, right) => left.PartNumber - right.PartNumber) },
+  }));
+  return { method: "UploadPartCopy", partCount: ranges.length };
+}
+
 export async function inventoryAndDeduplicateProductionObjects(copyMatches = false) {
   const creds = loadR2Credentials("model-cache-admin.env");
   const client = createProductionS3Client(creds);
@@ -189,14 +257,7 @@ export async function inventoryAndDeduplicateProductionObjects(copyMatches = fal
           copiedObjects.push({ familyId: family.id, path: file.path, sourceKey, objectKey: file.objectKey, bytes: file.bytes, sha256: file.sha256 });
           continue;
         }
-        await client.send(new CopyObjectCommand({
-          Bucket: creds.bucket,
-          Key: file.objectKey,
-          CopySource: copySource(creds.bucket, sourceKey),
-          MetadataDirective: "REPLACE",
-          ContentType: "application/octet-stream",
-          Metadata: { sha256: file.sha256, family: family.id, role: file.role, "deduplicated-from": sourceKey },
-        }));
+        await copyExistingObject(client, creds.bucket, sourceKey, file, family.id);
         await verifyRemoteObject(client, creds.bucket, file);
         copiedObjects.push({ familyId: family.id, path: file.path, sourceKey, objectKey: file.objectKey, bytes: file.bytes, sha256: file.sha256 });
       }

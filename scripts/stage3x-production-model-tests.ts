@@ -28,7 +28,8 @@ assert.deepEqual(registry.hardwarePolicy.gpuClasses, ["rtx4090", "rtx5090"]);
 assert.equal(registry.hardwarePolicy.minimumRamGb, 32);
 assert.equal(registry.hardwarePolicy.preferredRamGb, 64);
 assert.equal(registry.hardwarePolicy.minimumDiskGb, 200);
-assert.equal(registry.credentialGate.downloadOrDispatchAllowed, false);
+assert.equal(registry.credentialGate.downloadOrDispatchAllowed, true);
+assert.equal(registry.credentialGate.hfTokenPresent, true);
 assert.equal(registry.families[1].adultModel, true);
 assert.equal(registry.profiles.length, 4);
 assert.equal(new Set(registry.profiles.map((profile: any) => profile.familyId)).size, 2);
@@ -100,7 +101,7 @@ assert.match(workflowYaml, /CIVITAI_API_TOKEN/);
 assert.match(workflowYaml, /hf_xet/);
 assert.ok(!workflowYaml.includes("upload-artifact"));
 const studio = text("src/components/LocalCreationStudio.tsx");
-for (const label of ["Image UltraReal Flux FP8", "Video Wan 2.2 Remix 14B FP8", "自动选择", "RTX4090", "RTX5090"]) assert.ok(studio.includes(label));
+for (const label of ["Image UltraReal Flux FP8", "Video Wan 2.2 Remix 14B FP8", "自动选择", "RTX 4090", "RTX 5090"]) assert.ok(studio.includes(label));
 assert.ok(!studio.toLowerCase().includes("nsfw"));
 
 const stage3w = text("scripts/stage3w-wan-retry-session.ts");

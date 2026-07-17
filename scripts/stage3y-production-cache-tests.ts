@@ -36,10 +36,10 @@ for (const family of loadProductionFamilies()) {
 const downloader = read("scripts/model-cache/production-cache-download.py");
 for (const marker of ["ThreadPoolExecutor", "hf_hub_download", "HF_TOKEN", ".part", "sha256", "parallelDownloads", "skipPaths", "--download-plan"]) assert.ok(downloader.includes(marker));
 const publisher = read("scripts/model-cache/production-model-cache.ts");
-for (const marker of ["new Upload", "partSize", "leavePartsOnError", "Metadata: { sha256", "Range: \"bytes=0-0\"", "IfNoneMatch: \"*\"", "DeleteObjectCommand", "remoteObjectExists", "CopyObjectCommand", "ListObjectsV2Command", "bytesAvoided"]) assert.ok(publisher.includes(marker));
+for (const marker of ["new Upload", "partSize", "leavePartsOnError", "Metadata: { sha256", "Range: \"bytes=0-0\"", "IfNoneMatch: \"*\"", "DeleteObjectCommand", "remoteObjectExists", "CopyObjectCommand", "CreateMultipartUploadCommand", "UploadPartCopyCommand", "CompleteMultipartUploadCommand", "ListObjectsV2Command", "bytesAvoided"]) assert.ok(publisher.includes(marker));
 const restoreBundle = read("scripts/model-cache/production-restore-bundle.ts");
 for (const marker of ["minimumFreeDiskBytes", "objectPathMapping", "parallelDownloads"]) assert.ok(restoreBundle.includes(marker));
 const studio = read("src/components/LocalCreationStudio.tsx");
-for (const label of ["Image UltraReal Flux FP8", "Video Wan 2.2 Remix 14B FP8", "自动选择", "RTX4090", "RTX5090"]) assert.ok(studio.includes(label));
+for (const label of ["Image UltraReal Flux FP8", "Video Wan 2.2 Remix 14B FP8", "自动选择", "RTX 4090", "RTX 5090", "发布未完成"]) assert.ok(studio.includes(label));
 
 console.log(JSON.stringify({ ok: true, cacheDag: "two_parallel_families_then_final_readonly_verify", publishOrder: "objects_manifest_current", noArtifacts: true }));
