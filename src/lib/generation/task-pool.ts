@@ -7,12 +7,12 @@ import {
   estimateProductionSession,
   loadProductionReadiness,
   loadProductionVerification,
-  loadSchedulerPolicy,
   planSequentialProductionSession,
   productionReadinessGate,
   type GroupableProductionTask,
 } from "./production-pipeline";
 import { PRODUCTION_GPU_CLASSES, PRODUCTION_IMAGE_MODEL, PRODUCTION_VIDEO_MODEL, productionModelSummary } from "./production-models";
+import { loadSchedulerPolicy } from "./scheduler-policy";
 
 export type GenerationType = "image" | "video";
 export type GenerationPriority = "normal" | "immediate";

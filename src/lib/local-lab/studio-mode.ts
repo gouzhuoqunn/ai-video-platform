@@ -1,3 +1,5 @@
+import { loadSchedulerPolicy } from "@/lib/generation/scheduler-policy";
+
 export type StudioMode = "image" | "video";
 
 export const STUDIO_MODE_STORAGE_KEY = "ai-video-platform:studio-mode";
@@ -22,4 +24,3 @@ export function shouldArmCloreScheduler(input: { immediate: boolean; queuedCount
     createOrderAllowed: tasksReady && input.compliantHostExists === true,
   };
 }
-import { loadSchedulerPolicy } from "@/lib/generation/production-pipeline";

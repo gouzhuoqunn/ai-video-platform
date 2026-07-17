@@ -7,7 +7,7 @@ import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { VIDEO_JOB_SELECT_FIELDS } from "@/lib/video-jobs/fields";
 import { requestSignedVideoUrl } from "@/lib/video-jobs/signed-url";
 import { videoJobStatusLabels } from "@/types/video-config";
-import type { SignedVideoResponse, VideoJob, VideoJobStatus, VideoJobWithBalance } from "@/types/video-jobs";
+import type { SignedVideoResponse, VideoJob, VideoJobStatus } from "@/types/video-jobs";
 import { normalizeStudioMode, STUDIO_MODE_STORAGE_KEY, type StudioMode } from "@/lib/local-lab/studio-mode";
 
 type JobCounts = Partial<Record<VideoJobStatus, number>>;
@@ -78,9 +78,27 @@ type BatchGpuMode = "auto" | "current" | "wait_for_current_to_close";
 
 type ImageResult = { sessionId: string; date: string; metadata: Record<string, unknown> | null; imageUrl: string };
 type PendingImage = { sessionId: string; completedStages: string[]; status: "pending" | "completed" };
-type PoolTaskStatus = "pending_confirmation" | "waiting_for_batch" | "armed" | "waiting_for_gpu" | "deploying" | "restoring_models" | "generating" | "syncing" | "completed" | "failed" | "cancelled";
-type PoolTask = { id: string; generationType: StudioMode; prompt: string; modelProfile: string; priority: "normal" | "immediate"; status: PoolTaskStatus; createdAt: string };
-type ProductionModelSummary = { modelProfile: string; displayName: string; cacheStatus: string; cacheReady: boolean; restoreBytes: number; uniqueRestoreBytes: number; sharedBytes: number; revision: string; gpuProfiles: string[] };
+type PoolTaskStatus = "pending_confirmation" | "waiting_for_batch" | "armed" | "waiting_for_gpu" | "deploying" | "provisioning" | "restoring_models" | "restoring_image_model" | "generating_image" | "unloading_image_model" | "restoring_video_model" | "generating_video" | "downloading_transcoding" | "generating" | "syncing" | "cancel_requested" | "completed" | "failed" | "cancelled";
+type PoolTask = {
+  id: string;
+  generationType: StudioMode;
+  prompt: string;
+  negativePrompt: string;
+  modelProfile: string;
+  modelRevision: string;
+  priority: "normal" | "immediate";
+  status: PoolTaskStatus;
+  createdAt: string;
+  jobForm: "image_only" | "video_from_generated_image" | "video_from_existing_image";
+  inputImageJobId: string | null;
+  generationNumber: number;
+  width: number;
+  height: number;
+  frames: number | null;
+  fps: number | null;
+  attempts: Array<{ id: string; number: number; resumeBoundary: PoolTaskStatus; status: string }>;
+};
+type ProductionModelSummary = { modelProfile: string; displayName: string; cacheStatus: string; cacheReady: boolean; inferenceVerified: boolean; workflowReady: boolean; restoreBytes: number; uniqueRestoreBytes: number; sharedBytes: number; revision: string; gpuProfiles: string[] };
 type PoolSummary = {
   tasks: PoolTask[];
   counts: Partial<Record<PoolTaskStatus, number>>;
@@ -88,33 +106,66 @@ type PoolSummary = {
   selectedBatchId: string | null;
   imageBatchThreshold: number;
   videoBatchThreshold: number;
+  combinedBatchThreshold: number;
+  maximumWaitMinutes: number;
   tasksNeeded: { image: number; video: number };
   deploymentHold: boolean;
   marketMonitoringActive: boolean;
   estimatedMaximumSessionCost: number;
   orderBlockingReason: string;
   productionModels: Record<StudioMode, ProductionModelSummary>;
+  estimatedSessionDurationMinutes: { minMinutes: number; maxMinutes: number };
+  costEstimate: {
+    imageRestore: { minMinutes: number; maxMinutes: number };
+    videoRestore: { minMinutes: number; maxMinutes: number };
+    imageInference: { minMinutes: number; maxMinutes: number };
+    videoInference: { minMinutes: number; maxMinutes: number };
+    totalSession: { minMinutes: number; maxMinutes: number };
+    projectedComputeUsd: { min: number; max: number };
+    creationFeeCaveat: string;
+    reuse: { activeSession: boolean; imageModel: boolean; videoModel: boolean };
+  };
+  session: {
+    phase: string;
+    activeTaskIds: string[];
+    approximateSpendUsd: number;
+    estimatedRemainingMinutes: number;
+    automaticShutdownAt: string | null;
+    shutdownMode: "immediate" | "after_current" | null;
+  } | null;
+  readiness: {
+    model_cache_ready: boolean;
+    gpu_inference_verified: boolean;
+    normal_ui_pipeline_implemented: boolean;
+    normal_ui_pipeline_gpu_verified: boolean;
+    daily_use_release_candidate: boolean;
+    production_ready: boolean;
+  };
 };
 
 const poolStatusLabels: Record<PoolTaskStatus, string> = {
   pending_confirmation: "待确认", waiting_for_batch: "等待凑批", armed: "已准备", waiting_for_gpu: "等待显卡",
   deploying: "正在部署", restoring_models: "正在恢复模型", generating: "正在生成", syncing: "正在同步",
+  provisioning: "正在准备主机", restoring_image_model: "恢复图片模型", generating_image: "生成图片",
+  unloading_image_model: "卸载图片模型", restoring_video_model: "恢复视频模型", generating_video: "生成视频",
+  downloading_transcoding: "下载并转码", cancel_requested: "等待安全停止",
   completed: "已完成", failed: "失败", cancelled: "已取消",
 };
 const schedulerStateLabels: Record<string, string> = {
   idle: "空闲", batch_ready: "批次已就绪", market_watching: "正在观察市场", candidate_found: "已找到候选",
-  order_pending: "等待创建订单", session_active: "显卡会话运行中", draining: "正在排空", completed: "已完成", blocked_by_provider: "平台阻塞",
+  order_pending: "等待创建订单", session_active: "显卡会话运行中", draining: "正在排空", cleanup_pending: "等待清理", completed: "已完成", blocked_by_provider: "平台阻塞",
+};
+const sessionPhaseLabels: Record<string, string> = {
+  no_provider_order: "没有显卡订单", order_provisioning: "正在准备显卡", ssh_ready: "主机已连接",
+  runtime_ready: "运行环境已就绪", restore_running: "正在恢复图片模型", image_inference_running: "正在生成图片",
+  image_completed: "图片已保存", video_restore_running: "正在恢复视频模型", video_inference_running: "正在生成视频",
+  media_conversion_running: "正在下载并转码", cleanup_pending: "正在清理并退租",
 };
 const autorentStatusLabels: Record<AutorentRequest["status"], string> = {
   waiting: "等待中", searching: "寻找显卡", candidate_found: "已找到候选", provisioning: "正在部署", assigned: "已分配", failed: "失败", cancelled: "已取消",
 };
 
 const starterPrompt = "A clean text-only 5 second video title card, cinematic lighting, no people, no logos.";
-
-function pickRpcJob(data: unknown): VideoJobWithBalance | null {
-  if (Array.isArray(data)) return (data[0] as VideoJobWithBalance | undefined) ?? null;
-  return (data as VideoJobWithBalance | null) ?? null;
-}
 
 function formatMoney(value: number | null | undefined) {
   return typeof value === "number" ? `$${value.toFixed(3)}` : "未确认";
@@ -210,6 +261,12 @@ export function LocalCreationStudio() {
   const [selectedImageId, setSelectedImageId] = useState("");
   const [pool, setPool] = useState<PoolSummary | null>(null);
   const [gpuPreference, setGpuPreference] = useState<"auto" | "rtx4090" | "rtx5090">("auto");
+  const [negativePrompt, setNegativePrompt] = useState("");
+  const [seed, setSeed] = useState("");
+  const [imageSizePreset, setImageSizePreset] = useState<"square_1024" | "landscape_1024">("square_1024");
+  const [videoSource, setVideoSource] = useState<"generated" | "existing">("generated");
+  const [videoProfile, setVideoProfile] = useState<"wan_4090" | "wan_5090">("wan_4090");
+  const [existingImageJobId, setExistingImageJobId] = useState("");
 
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
   const localResultForSelected = selectedJob ? localResults.find((result) => result.jobId === selectedJob.id) : null;
@@ -219,6 +276,7 @@ export function LocalCreationStudio() {
   const activeAutorent = autorentRequests.find((request) => !["assigned", "failed", "cancelled"].includes(request.status));
   const selectedImage = imageResults.find((result) => result.sessionId === selectedImageId) ?? imageResults[0] ?? null;
   const modePoolTasks = pool?.tasks.filter((task) => task.generationType === mode) ?? [];
+  const queuedPoolTasks = modePoolTasks.filter((task) => ["waiting_for_batch", "armed", "waiting_for_gpu"].includes(task.status));
   const poolVideoResult = localResults.find((result) => pool?.tasks.some((task) => task.generationType === "video" && task.id === result.jobId)) ?? null;
   const poolVideoTask = poolVideoResult ? pool?.tasks.find((task) => task.id === poolVideoResult.jobId) ?? null : null;
   const previewVideoResult = localResultForSelected ?? poolVideoResult;
@@ -372,7 +430,7 @@ export function LocalCreationStudio() {
       .catch((error) => setNotice(error instanceof Error ? error.message : "获取临时播放链接失败。"));
   }, [localResultForSelected?.videoUrl, selectedJob, signedVideos]);
 
-  async function submitPrompt() {
+  async function submitPrompt(startMode: "pending" | "immediate" = "pending") {
     if (!supabase || !user || isSubmitting) return;
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) {
@@ -386,42 +444,64 @@ export function LocalCreationStudio() {
 
     setIsSubmitting(true);
     try {
-      if (mode === "image") {
-        const response = await fetch("/api/local-lab/generation-pool", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "create", generationType: "image", prompt: trimmedPrompt, modelProfile: "ultrareal-flux1-dev-fp8", gpuPreference: gpuPreference === "auto" ? ["rtx4090", "rtx5090"] : [gpuPreference] }) });
-        const payload = await response.json().catch(() => ({})) as { error?: string };
-        if (!response.ok) { setNotice(payload.error ?? "创建图片任务失败。"); return; }
-        setPrompt("");
-        setNotice("图片任务已加入任务池，确认后将等待同类任务凑批；不会在部署暂停期间创建订单。");
-        await refreshPool();
+      const parsedSeed = seed.trim() ? Number(seed) : null;
+      if (parsedSeed !== null && (!Number.isSafeInteger(parsedSeed) || parsedSeed <= 0)) {
+        setNotice("种子必须是正整数，留空则自动生成。");
         return;
       }
-      const { data, error } = await supabase.rpc("create_video_job", { p_prompt: trimmedPrompt, p_model_key: "standard-video" });
-      if (error) {
-        setNotice(error.message.split("\n")[0] || "创建未生成任务失败。");
+      const jobForm = mode === "image" ? "image_only" : videoSource === "existing" ? "video_from_existing_image" : "video_from_generated_image";
+      const sourceImageId = existingImageJobId || selectedImage?.sessionId || "";
+      if (jobForm === "video_from_existing_image" && !sourceImageId) {
+        setNotice("请先选择一张已经保存的本地图片。");
         return;
       }
-      const createdJob = pickRpcJob(data);
-      if (createdJob) {
-        setSelectedJobId(createdJob.id);
-        await fetch("/api/local-lab/generation-pool", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "sync", tasks: [{ id: createdJob.id, generationType: "video", prompt: createdJob.prompt, modelProfile: "wan22-remix-14b-i2v-fp8", gpuPreference: gpuPreference === "auto" ? ["rtx4090", "rtx5090"] : [gpuPreference], priority: "normal", status: "pending_confirmation", createdAt: createdJob.created_at, confirmedAt: createdJob.confirmed_at, estimatedVram: 24, outputMetadata: {} }] }) });
+      const response = await fetch("/api/local-lab/generation-pool", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "create",
+          jobForm,
+          prompt: trimmedPrompt,
+          negativePrompt,
+          seed: parsedSeed,
+          sizePreset: mode === "image" ? imageSizePreset : videoProfile,
+          existingImageJobId: sourceImageId || null,
+          gpuPreference: gpuPreference === "auto" ? ["rtx4090", "rtx5090"] : [gpuPreference],
+          startMode,
+        }),
+      });
+      const payload = await response.json().catch(() => ({})) as { error?: string; tasks?: PoolTask[] };
+      if (!response.ok) {
+        setNotice(payload.error ?? "创建任务失败。");
+        return;
       }
       setPrompt("");
-      setNotice("已扣除积分并创建未生成任务。确认或加急后才会进入队列。");
-      await Promise.all([refreshJobs(), refreshPool()]);
+      setNegativePrompt("");
+      setSeed("");
+      setNotice(startMode === "immediate" ? "立即任务已加入常规生产队列；部署暂停期间不会租用显卡。" : "任务已保存为待确认，不扣重复积分，也不会启动显卡。");
+      await refreshPool();
     } finally {
       setIsSubmitting(false);
     }
   }
 
-  async function runPoolAction(action: "confirm" | "immediate" | "cancel" | "delete" | "regenerate") {
-    const eligible = modePoolTasks.filter((task) => action === "confirm" || action === "immediate" ? task.status === "pending_confirmation" : !["deploying", "restoring_models", "generating", "syncing"].includes(task.status));
+  async function runPoolAction(action: "confirm" | "immediate" | "cancel" | "delete" | "retry" | "regenerate", targetTaskIds?: string[]) {
+    const expandedIds = new Set(targetTaskIds ?? []);
+    if (action === "confirm" || action === "immediate") {
+      for (const task of pool?.tasks ?? []) {
+        if (expandedIds.has(task.id) && task.inputImageJobId) expandedIds.add(task.inputImageJobId);
+      }
+    }
+    const allPoolTasks = pool?.tasks ?? modePoolTasks;
+    const requested = targetTaskIds?.length ? allPoolTasks.filter((task) => expandedIds.has(task.id)) : modePoolTasks;
+    const eligible = requested.filter((task) => action === "confirm" || action === "immediate" ? task.status === "pending_confirmation" : action === "retry" ? task.status === "failed" : !["deploying", "provisioning", "restoring_models", "restoring_image_model", "generating_image", "unloading_image_model", "restoring_video_model", "generating_video", "downloading_transcoding", "generating", "syncing"].includes(task.status));
     if (!eligible.length) { setNotice("当前模式没有可执行该操作的任务。"); return; }
     if (mode === "video" && action === "cancel" && supabase) {
       for (const task of eligible) await supabase.rpc("cancel_video_job", { p_job_id: task.id });
     }
     const response = await fetch("/api/local-lab/generation-pool", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, taskIds: eligible.map((task) => task.id) }) });
     const payload = await response.json().catch(() => ({})) as { error?: string };
-    setNotice(response.ok ? ({ confirm: "任务已确认，等待达到批量阈值。", immediate: "立即任务已锁定批次，部署暂停期间只观察市场。", cancel: "任务已取消；视频任务沿用原退款规则。", delete: "任务已从本地调度池删除。", regenerate: "已创建新的待确认任务。" }[action]) : payload.error ?? "任务池操作失败。");
+    setNotice(response.ok ? ({ confirm: "任务已确认，等待达到批量阈值。", immediate: "立即任务已锁定批次，部署暂停期间不会租用显卡。", cancel: "任务已取消或已请求安全停止。", delete: "任务已从本地调度池删除。", retry: "失败步骤已创建新尝试，并从最后验证边界继续。", regenerate: "已创建新的待确认输出，旧结果继续保留。" }[action]) : payload.error ?? "任务池操作失败。");
     await Promise.all([refreshPool(), refreshJobs()]);
   }
 
@@ -502,6 +582,22 @@ export function LocalCreationStudio() {
     const payload = (await response.json().catch(() => ({}))) as { error?: string };
     setNotice(response.ok ? "自动寻机请求已取消。" : payload.error ?? "取消自动寻机失败。");
     await refreshClore();
+  }
+
+  async function requestShutdown(shutdownMode: "immediate" | "after_current" | "cancel_waiting") {
+    const response = await fetch("/api/local-lab/generation-pool", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "shutdown", shutdownMode }),
+    });
+    const payload = await response.json().catch(() => ({})) as { error?: string };
+    const labels = {
+      immediate: "已请求立即安全停止并退租。",
+      after_current: "将在当前任务完成后立即退租。",
+      cancel_waiting: "所有未开始任务已取消；运行中的任务不受影响。",
+    };
+    setNotice(response.ok ? labels[shutdownMode] : payload.error ?? "无法更新关机策略。");
+    await refreshPool();
   }
 
   function toggleSelected(jobId: string) {
@@ -596,6 +692,46 @@ export function LocalCreationStudio() {
                 <button className={`rounded px-3 py-1.5 ${mode === "video" ? "bg-stone-900 text-white" : "text-stone-600"}`} onClick={() => selectMode("video")} type="button">视频</button>
               </div>
             </div>
+            <details className="mt-3 rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2">
+              <summary className="cursor-pointer text-sm font-semibold text-stone-700">可选负面提示词</summary>
+              <textarea className="mt-2 min-h-20 w-full resize-y rounded-md border border-stone-200 bg-white p-3 text-sm outline-none focus:border-emerald-500" maxLength={1000} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="不希望出现的内容，留空使用生产默认值" value={negativePrompt} />
+            </details>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              {mode === "image" ? (
+                <label className="text-sm font-semibold text-stone-700">尺寸
+                  <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setImageSizePreset(event.target.value as "square_1024" | "landscape_1024")} value={imageSizePreset}>
+                    <option value="square_1024">方图 1024×1024</option>
+                    <option value="landscape_1024">横图 1024×768</option>
+                  </select>
+                </label>
+              ) : (
+                <>
+                  <label className="text-sm font-semibold text-stone-700">来源
+                    <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setVideoSource(event.target.value as "generated" | "existing")} value={videoSource}>
+                      <option value="generated">先生成图片</option>
+                      <option value="existing">选择已有图片</option>
+                    </select>
+                  </label>
+                  <label className="text-sm font-semibold text-stone-700">视频配置
+                    <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setVideoProfile(event.target.value as "wan_4090" | "wan_5090")} value={videoProfile}>
+                      <option value="wan_4090">标准 832×480 · 33帧</option>
+                      <option value="wan_5090">高分辨率 1280×704 · 41帧</option>
+                    </select>
+                  </label>
+                </>
+              )}
+              {mode === "video" && videoSource === "existing" ? (
+                <label className="text-sm font-semibold text-stone-700 sm:col-span-2">已有图片
+                  <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setExistingImageJobId(event.target.value)} value={existingImageJobId || selectedImage?.sessionId || ""}>
+                    <option value="">请选择本地图片</option>
+                    {imageResults.map((image) => <option key={image.sessionId} value={image.sessionId}>{image.date} · {image.sessionId}</option>)}
+                  </select>
+                </label>
+              ) : null}
+              <label className="text-sm font-semibold text-stone-700">种子
+                <input className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" inputMode="numeric" onChange={(event) => setSeed(event.target.value)} placeholder="留空自动生成" value={seed} />
+              </label>
+            </div>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
               <label className="text-sm font-semibold text-stone-700">
                 GPU
@@ -606,14 +742,14 @@ export function LocalCreationStudio() {
                 </select>
               </label>
               <span className="text-sm text-stone-500">{prompt.trim().length}/2000</span>
-              <button
-                className="rounded-md bg-emerald-700 px-5 py-3 text-sm font-bold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-stone-400"
-                disabled={isSubmitting || !user}
-                onClick={() => void submitPrompt()}
-                type="button"
-              >
-                {isSubmitting ? "创建中..." : mode === "image" ? "创建图片任务" : "创建未生成任务"}
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <button className="rounded-md bg-stone-900 px-4 py-3 text-sm font-bold text-white disabled:bg-stone-400" disabled={isSubmitting || !user} onClick={() => void submitPrompt("pending")} type="button">
+                  {isSubmitting ? "创建中..." : "创建待确认任务"}
+                </button>
+                <button className="rounded-md bg-emerald-700 px-4 py-3 text-sm font-bold text-white hover:bg-emerald-800 disabled:bg-stone-400" disabled={isSubmitting || !user} onClick={() => void submitPrompt("immediate")} type="button">
+                  立即生成
+                </button>
+              </div>
             </div>
             {notice ? <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">{notice}</p> : null}
           </section>
@@ -622,29 +758,30 @@ export function LocalCreationStudio() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h2 className="text-lg font-bold">生成队列</h2>
-                <p className="text-sm text-stone-500">{mode === "image" ? `图片每 ${pool?.imageBatchThreshold ?? 3} 个普通任务触发` : `视频每 ${pool?.videoBatchThreshold ?? 2} 个普通任务触发`}；立即任务无需等待阈值。</p>
+                <p className="text-sm text-stone-500">{mode === "image" ? `图片每 ${pool?.imageBatchThreshold ?? 3} 个普通任务触发` : `I2V 每 ${pool?.videoBatchThreshold ?? 2} 个、组合链每 ${pool?.combinedBatchThreshold ?? 2} 个触发`}；最长等待 {pool?.maximumWaitMinutes ?? 360} 分钟，立即任务无需等待。</p>
               </div>
               <span className="rounded-md bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">{pool?.deploymentHold ? "Clore 部署已暂停" : "Clore 可由操作员恢复"}</span>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
-              {(["pending_confirmation", "waiting_for_batch", "waiting_for_gpu", "deploying", "restoring_models", "generating", "syncing", "completed", "failed"] as PoolTaskStatus[]).map((status) => (
+              {(["pending_confirmation", "waiting_for_batch", "waiting_for_gpu", "provisioning", "restoring_image_model", "generating_image", "restoring_video_model", "generating_video", "downloading_transcoding", "completed", "failed"] as PoolTaskStatus[]).map((status) => (
                 <div className="rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2" key={status}><span className="text-stone-500">{poolStatusLabels[status]}</span><strong className="ml-2">{modePoolTasks.filter((task) => task.status === status || (status === "waiting_for_gpu" && task.status === "armed")).length}</strong></div>
               ))}
             </div>
             <div className="mt-3 grid gap-1 text-sm text-stone-600 sm:grid-cols-2">
               <p>还需 {mode === "image" ? pool?.tasksNeeded.image ?? 3 : pool?.tasksNeeded.video ?? 2} 个任务触发</p>
               <p>市场监控：{pool?.marketMonitoringActive ? "运行中" : "未启动"}</p>
-              <p>预计最高会话费用：${(pool?.estimatedMaximumSessionCost ?? 2.5).toFixed(2)}</p>
+              <p>预计会话：{pool?.costEstimate?.totalSession.minMinutes ?? 0}–{pool?.costEstimate?.totalSession.maxMinutes ?? 0} 分钟</p>
+              <p>预计计算费：${(pool?.costEstimate?.projectedComputeUsd.min ?? 0).toFixed(2)}–${(pool?.costEstimate?.projectedComputeUsd.max ?? 0).toFixed(2)}</p>
               <p>调度状态：{schedulerStateLabels[pool?.schedulerState ?? "idle"] ?? "未知状态"}</p>
             </div>
             <p className="mt-2 rounded-md bg-stone-50 px-3 py-2 text-sm text-stone-700">{pool?.orderBlockingReason ?? "正在读取调度门禁。"}</p>
             {pool?.productionModels?.[mode] ? (
               <div className="mt-2 rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2 text-sm text-stone-700">
-                <p className="font-semibold">{mode === "image" ? "UltraReal Flux FP8" : "Wan 2.2 Remix 14B FP8"}：缓存{pool.productionModels[mode].cacheReady ? "已就绪" : "发布未完成"}</p>
+                <p className="font-semibold">{mode === "image" ? "UltraReal Flux FP8" : "Wan 2.2 Remix 14B FP8"}：缓存{pool.productionModels[mode].cacheReady ? "已就绪" : "发布未完成"} · 推理{pool.productionModels[mode].inferenceVerified ? "已验证" : "未验证"}</p>
                 <p className="mt-1 text-xs text-stone-500">
                   配置 {gpuPreference === "auto" ? "自动选择" : gpuPreference.toUpperCase()} · 独占 {(pool.productionModels[mode].uniqueRestoreBytes / 1024 ** 3).toFixed(1)} GiB · 共享 {(pool.productionModels[mode].sharedBytes / 1024 ** 3).toFixed(1)} GiB · 总恢复量 {(pool.productionModels[mode].restoreBytes / 1024 ** 3).toFixed(1)} GiB
                 </p>
-                <p className="mt-1 text-xs text-stone-500">最终批次：{pool.selectedBatchId === "stage4a-final-production" ? "已准备，等待确认生成" : "未准备"}</p>
+                <p className="mt-1 text-xs text-stone-500">模型恢复发生在 GPU 与 R2 之间，不计入本机下载流量。{pool.costEstimate?.creationFeeCaveat}</p>
               </div>
             ) : null}
             {mode === "video" && poolVideoResult?.thumbnailUrl && poolVideoResult.videoUrl ? (
@@ -654,13 +791,6 @@ export function LocalCreationStudio() {
                 <div><p className="text-sm font-semibold">任务池视频已同步</p><p className="text-xs text-stone-500">刷新页面或重启应用后仍可播放本地 MP4。</p></div>
               </div>
             ) : null}
-            {mode === "image" ? <div className="mt-3 flex flex-wrap gap-2">
-              <button className="rounded-md bg-stone-900 px-3 py-2 text-sm font-bold text-white" onClick={() => void runPoolAction("confirm")} type="button">确认生成</button>
-              <button className="rounded-md bg-emerald-700 px-3 py-2 text-sm font-bold text-white" onClick={() => void runPoolAction("immediate")} type="button">立即生成</button>
-              <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold" onClick={() => void runPoolAction("cancel")} type="button">取消</button>
-              <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold" onClick={() => void runPoolAction("delete")} type="button">删除</button>
-              <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold" onClick={() => void runPoolAction("regenerate")} type="button">重新生成</button>
-            </div> : null}
           </section>
 
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
@@ -712,6 +842,30 @@ export function LocalCreationStudio() {
             </div> : null}
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {modePoolTasks.map((task) => {
+                const queuePosition = queuedPoolTasks.findIndex((candidate) => candidate.id === task.id);
+                const estimate = task.generationType === "image" ? pool?.costEstimate?.imageInference : pool?.costEstimate?.videoInference;
+                return (
+                  <article className="rounded-lg border border-stone-200 bg-white p-3" key={`pool-${task.id}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-semibold">{task.generationNumber === 1 ? (task.generationType === "image" ? "图片" : "视频") : task.generationNumber === 2 ? "二次生成" : `${task.generationNumber}次生成`}</p>
+                      <span className="rounded-md border border-stone-200 bg-[#faf8f4] px-2 py-1 text-xs">{poolStatusLabels[task.status]}</span>
+                    </div>
+                    <p className="mt-2 text-sm font-semibold leading-5">{safePromptPreview(task.prompt)}</p>
+                    <p className="mt-2 text-xs text-stone-500">{task.generationType === "image" ? "UltraReal Flux FP8" : "Wan 2.2 Remix 14B FP8"} · {task.width}×{task.height}{task.frames ? ` · ${task.frames}帧` : ""}</p>
+                    <p className="mt-1 break-all text-xs text-stone-500">来源图片：{task.inputImageJobId ?? "无"} · {queuePosition >= 0 ? `队列第 ${queuePosition + 1} 位` : "不在等待队列"} · 约 {estimate?.minMinutes ?? 1}–{estimate?.maxMinutes ?? 1} 分钟</p>
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {task.status === "pending_confirmation" ? <button className="rounded bg-stone-900 px-2 py-1.5 text-xs font-bold text-white" onClick={() => void runPoolAction("confirm", [task.id])} type="button">确认生成</button> : null}
+                      {task.status === "pending_confirmation" ? <button className="rounded bg-emerald-700 px-2 py-1.5 text-xs font-bold text-white" onClick={() => void runPoolAction("immediate", [task.id])} type="button">立即生成</button> : null}
+                      {task.status === "failed" ? <button className="rounded border border-stone-300 px-2 py-1.5 text-xs font-semibold" onClick={() => void runPoolAction("retry", [task.id])} type="button">重试失败步骤</button> : null}
+                      {["completed", "failed", "cancelled"].includes(task.status) ? <button className="rounded border border-stone-300 px-2 py-1.5 text-xs font-semibold" onClick={() => void runPoolAction("regenerate", [task.id])} type="button">重新生成</button> : null}
+                      {!["completed", "cancelled", "failed"].includes(task.status) ? <button className="rounded border border-stone-300 px-2 py-1.5 text-xs font-semibold" onClick={() => void runPoolAction("cancel", [task.id])} type="button">取消</button> : null}
+                      {!["provisioning", "restoring_image_model", "generating_image", "unloading_image_model", "restoring_video_model", "generating_video", "downloading_transcoding"].includes(task.status) ? <button className="rounded border border-rose-200 px-2 py-1.5 text-xs font-semibold text-rose-700" onClick={() => void runPoolAction("delete", [task.id])} type="button">删除</button> : null}
+                    </div>
+                    <details className="mt-2 text-xs text-stone-500"><summary className="cursor-pointer">详细信息</summary><p className="mt-1 break-all">任务 {task.id}</p><p>尝试 {task.attempts.at(-1)?.number ?? 1} · {task.priority === "immediate" ? "立即" : "普通"} · 修订 {task.modelRevision}</p></details>
+                  </article>
+                );
+              })}
               {mode === "image" ? (
                 <>
                   {pendingImage?.status === "pending" ? (
@@ -804,6 +958,22 @@ export function LocalCreationStudio() {
               {filteredCandidates.length === 0 ? <p className="text-sm text-stone-500">当前价格范围内没有候选。</p> : null}
             </div>
             <p className="mt-3 text-xs text-stone-500">当前选中：{selectedCandidate ? `${formatMoney(selectedCandidate.effective_usd_per_hour)}/h` : "未选择"}</p>
+          </section>
+
+          <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
+            <h2 className="text-lg font-bold">当前会话与自动退租</h2>
+            <div className="mt-3 space-y-1 text-sm text-stone-600">
+              <p>阶段：{pool?.session ? sessionPhaseLabels[pool.session.phase] ?? "正在恢复会话" : "没有活动会话"}</p>
+              <p>活动任务：{pool?.session?.activeTaskIds.length ?? 0}</p>
+              <p>预计剩余：{pool?.session?.estimatedRemainingMinutes ?? 0} 分钟</p>
+              <p>当前约花费：${(pool?.session?.approximateSpendUsd ?? 0).toFixed(2)}</p>
+              <p>自动关机倒计时：{pool?.session?.automaticShutdownAt ? formatDateTime(pool.session.automaticShutdownAt) : "最终任务后立即开始清理"}</p>
+            </div>
+            <div className="mt-3 grid gap-2">
+              <button className="rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white" onClick={() => void requestShutdown("immediate")} type="button">立即停止并退租</button>
+              <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold" onClick={() => void requestShutdown("after_current")} type="button">完成当前任务后退租</button>
+              <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold" onClick={() => void requestShutdown("cancel_waiting")} type="button">取消未开始任务</button>
+            </div>
           </section>
 
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
