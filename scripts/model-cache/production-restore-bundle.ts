@@ -16,14 +16,14 @@ export async function buildRestoreBundle(familyId: string, expiresSeconds = 7200
     manifestUrl: sign(current.manifestKey),
     objectUrls: Object.fromEntries(manifest.files.map((file) => [file.objectKey, sign(file.objectKey)])),
     parallelDownloads: family.parallelDownloads,
-    destinationRoot: "/workspace/ComfyUI/models",
+    destinationRoot: "/workspace/models",
     progressPath: `/workspace/logs/restore-${familyId}.json`,
     restoreBytes: family.restoreBytes,
     uniqueBytes: manifest.files.filter((file) => !file.shared).reduce((total, file) => total + file.bytes, 0),
     sharedBytes: sharedFiles.reduce((total, file) => total + file.bytes, 0),
     sharedObjectKeys: sharedFiles.map((file) => file.objectKey),
     minimumFreeDiskBytes: family.restoreBytes + 10 * 1024 ** 3,
-    objectPathMapping: Object.fromEntries(manifest.files.map((file) => [file.objectKey, `/workspace/ComfyUI/models/${file.path}`])),
+    objectPathMapping: Object.fromEntries(manifest.files.map((file) => [file.objectKey, `/workspace/models/${file.path}`])),
   };
 }
 

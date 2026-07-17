@@ -2,7 +2,11 @@ export function buildRemoteRestoreLaunchCommand(familyId: string) {
   if (!/^[a-z0-9-]+$/.test(familyId)) throw new Error("unsafe_family_id");
   const bundle = `/workspace/restore/${familyId}.json`;
   const log = `/workspace/logs/restore-${familyId}.log`;
-  return `mkdir -p /workspace/restore /workspace/logs && nohup python3 /workspace/tools/restore-production-r2.py --bundle ${bundle} >${log} 2>&1 </dev/null & echo $!`;
+  const pid = `/workspace/logs/restore-${familyId}.pid`;
+  // Some SSH servers keep the exec channel open for a plain shell background
+  // job even when nohup redirects every stream. setsid -f performs the final
+  // detach; the pid file and progress JSON are used for all later polling.
+  return `mkdir -p /workspace/restore /workspace/logs && rm -f ${pid} && nohup setsid -f sh -c 'echo $$ >${pid}; exec python3 /workspace/tools/restore-production-r2.py --bundle ${bundle}' >${log} 2>&1 </dev/null && for i in 1 2 3 4 5; do test -s ${pid} && break; sleep 1; done; cat ${pid}`;
 }
 
 export function buildRemoteRestorePollCommand(familyId: string) {

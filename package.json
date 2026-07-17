@@ -131,6 +131,8 @@
     "stage4a:final-batch:test": "tsx scripts/stage4a-final-batch-tests.ts",
     "stage4b:stream:test": "tsx scripts/stage4b-production-stream-tests.ts",
     "stage4b:source:probe": "tsx scripts/model-cache/production-object-stream.ts probe-sources",
+    "stage4c:execute": "tsx scripts/stage4c-production-session.ts",
+    "stage4c:test": "tsx scripts/stage4c-production-session-tests.ts",
     "stage4b:multipart-abort:probe": "tsx scripts/model-cache/production-object-stream.ts multipart-abort-probe",
     "stage3r:readiness:test": "tsx scripts/clore/stage3r-readiness-tests.ts",
     "gpu:candidates": "tsx scripts/gpu-candidates.ts",

@@ -46,14 +46,21 @@ def restore_file(file: dict, url: str, root: pathlib.Path, update) -> dict:
     part = target.with_suffix(target.suffix + ".part")
     expected_size = int(file["bytes"])
     expected_sha = file["sha256"].lower()
+    wall_started = time.time()
+    retries = 0
+    initial_part_bytes = part.stat().st_size if part.exists() else 0
     if target.exists() and target.stat().st_size == expected_size:
         existing_digest = hashlib.sha256()
         with target.open("rb") as existing:
             for chunk in iter(lambda: existing.read(CHUNK_BYTES), b""):
                 existing_digest.update(chunk)
         if existing_digest.hexdigest() == expected_sha:
-            update(file["path"], "verified", expected_size)
-            return {"path": file["path"], "status": "verified"}
+            result = {"path": file["path"], "objectKey": file["objectKey"], "status": "verified",
+                      "expectedBytes": expected_size, "reusedBytes": expected_size, "transferredBytes": 0,
+                      "retries": 0, "startedAt": wall_started, "completedAt": time.time(),
+                      "durationSeconds": time.time() - wall_started, "averageBytesPerSecond": 0}
+            update(file["path"], result)
+            return result
         target.unlink()
 
     if part.exists() and part.stat().st_size > expected_size:
@@ -78,11 +85,19 @@ def restore_file(file: dict, url: str, root: pathlib.Path, update) -> dict:
                         break
                     output.write(chunk)
                     offset += len(chunk)
-                    update(file["path"], "downloading", offset)
+                    update(file["path"], {"status": "downloading", "completedBytes": offset,
+                           "expectedBytes": expected_size, "reusedBytes": initial_part_bytes,
+                           "transferredBytes": max(0, offset - initial_part_bytes), "retries": retries,
+                           "startedAt": wall_started})
             last_error = None
         except Exception as error:
             last_error = error
-            update(file["path"], "reconnecting", part.stat().st_size if part.exists() else 0)
+            retries += 1
+            offset_now = part.stat().st_size if part.exists() else 0
+            update(file["path"], {"status": "reconnecting", "completedBytes": offset_now,
+                   "expectedBytes": expected_size, "reusedBytes": initial_part_bytes,
+                   "transferredBytes": max(0, offset_now - initial_part_bytes), "retries": retries,
+                   "startedAt": wall_started})
             time.sleep(2 ** attempt)
     if last_error and (not part.exists() or part.stat().st_size != expected_size):
         raise RuntimeError(f"restore_reconnect_exhausted:{file['path']}:{last_error}")
@@ -95,8 +110,16 @@ def restore_file(file: dict, url: str, root: pathlib.Path, update) -> dict:
     if digest.hexdigest() != expected_sha:
         raise ValueError(f"sha256_mismatch:{file['path']}")
     os.replace(part, target)
-    update(file["path"], "verified", expected_size)
-    return {"path": file["path"], "status": "verified"}
+    completed_at = time.time()
+    duration = max(0.001, completed_at - wall_started)
+    transferred = max(0, expected_size - initial_part_bytes)
+    result = {"path": file["path"], "objectKey": file["objectKey"], "status": "verified",
+              "expectedBytes": expected_size, "completedBytes": expected_size,
+              "reusedBytes": initial_part_bytes, "transferredBytes": transferred,
+              "retries": retries, "startedAt": wall_started, "completedAt": completed_at,
+              "durationSeconds": duration, "averageBytesPerSecond": transferred / duration}
+    update(file["path"], result)
+    return result
 
 
 def run(bundle_path: pathlib.Path) -> None:
@@ -113,9 +136,9 @@ def run(bundle_path: pathlib.Path) -> None:
     state = {"familyId": bundle["familyId"], "status": "restoring", "startedAt": time.time(), "files": {}}
     lock = threading.Lock()
 
-    def update(name: str, status: str, completed: int) -> None:
+    def update(name: str, detail: dict) -> None:
         with lock:
-            state["files"][name] = {"status": status, "completedBytes": completed, "updatedAt": time.time()}
+            state["files"][name] = {**detail, "updatedAt": time.time()}
             state["heartbeatAt"] = time.time()
             atomic_json(progress_path, state)
 

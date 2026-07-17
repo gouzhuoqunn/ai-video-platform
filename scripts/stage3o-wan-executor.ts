@@ -117,9 +117,12 @@ export function archiveStage3OWanVideo(input: {
   runtimeEvidence?: Record<string, unknown>;
   libraryDir?: string;
   preconvertedMp4?: string;
+  jobId?: string;
+  seed?: number;
 }) {
   if (!existsSync(input.sourceWebm) || statSync(input.sourceWebm).size < 1024) throw new Error("wan_webm_invalid");
-  const date = new Date().toISOString().slice(0, 10); const paths = buildLocalJobPaths(input.libraryDir ?? loadLocalResultsConfig().libraryDir, date, STAGE3O_VIDEO_TASK_ID); mkdirSync(paths.jobDir, { recursive: true });
+  const jobId = input.jobId ?? STAGE3O_VIDEO_TASK_ID; const seed = input.seed ?? 20260715;
+  const date = new Date().toISOString().slice(0, 10); const paths = buildLocalJobPaths(input.libraryDir ?? loadLocalResultsConfig().libraryDir, date, jobId); mkdirSync(paths.jobDir, { recursive: true });
   const preservedWebm = path.join(paths.jobDir, "source.webm"); const partialWebm = `${preservedWebm}.part`;
   if (path.resolve(input.sourceWebm) !== path.resolve(preservedWebm) && !existsSync(preservedWebm)) {
     rmSync(partialWebm, { force: true }); copyFileSync(input.sourceWebm, partialWebm);
@@ -139,14 +142,14 @@ export function archiveStage3OWanVideo(input: {
   }
   const videoProbe = assertMp4(partialMp4); rmSync(paths.videoPath, { force: true }); renameSync(partialMp4, paths.videoPath);
   const duration = Number(videoProbe.format.duration ?? input.validation.durationSeconds);
-  const thumbnailSecond = deterministicThumbnailSecond(20260715, Number.isFinite(duration) && duration > 0 ? duration : input.validation.durationSeconds);
+  const thumbnailSecond = deterministicThumbnailSecond(seed, Number.isFinite(duration) && duration > 0 ? duration : input.validation.durationSeconds);
   const partialThumbnail = `${paths.thumbnailPath}.part`; rmSync(partialThumbnail, { force: true });
   command(spawnSync(FFMPEG_PATH, ["-y", "-ss", String(thumbnailSecond), "-i", paths.videoPath, "-vf", "scale=min(640\\,iw):min(360\\,ih):force_original_aspect_ratio=decrease", "-frames:v", "1", "-f", "image2", partialThumbnail], { encoding: "utf8", timeout: 2 * 60_000 }), "wan_thumbnail_failed");
   const thumbnailProbe = assertJpeg(partialThumbnail); rmSync(paths.thumbnailPath, { force: true }); renameSync(partialThumbnail, paths.thumbnailPath);
   if (!existsSync(paths.videoPath) || !existsSync(paths.thumbnailPath)) throw new Error("wan_local_sync_missing");
   const sourceEvidence = fileEvidence(preservedWebm); const videoEvidence = fileEvidence(paths.videoPath); const thumbnailEvidence = fileEvidence(paths.thumbnailPath);
   writeFileSync(path.join(paths.jobDir, "workflow-api.json"), `${JSON.stringify(input.workflow, null, 2)}\n`, "utf8");
-  const metadata = { job_id: STAGE3O_VIDEO_TASK_ID, prompt_id: input.promptId, width: input.validation.width, height: input.validation.height, frames: 33, fps: 16, duration_seconds: duration, seed: 20260715, audio: false, upscale: false, post_processing: false, oom_fallback_used: input.oomFallbackUsed, source_webm: sourceEvidence, output_mp4: videoEvidence, thumbnail_jpeg: thumbnailEvidence, source_probe: sourceProbe, output_probe: videoProbe, thumbnail_probe: thumbnailProbe, browser_codec: "h264", pixel_format: "yuv420p", faststart: true, thumbnail_360p: true, thumbnail_second: thumbnailSecond, thumbnail_seed_range: "10%-90%", local_conversion: !input.preconvertedMp4, source_preserved: true };
+  const metadata = { job_id: jobId, prompt_id: input.promptId, width: input.validation.width, height: input.validation.height, frames: 33, fps: 16, duration_seconds: duration, seed, audio: false, upscale: false, post_processing: false, oom_fallback_used: input.oomFallbackUsed, source_webm: sourceEvidence, output_mp4: videoEvidence, thumbnail_jpeg: thumbnailEvidence, source_probe: sourceProbe, output_probe: videoProbe, thumbnail_probe: thumbnailProbe, browser_codec: "h264", pixel_format: "yuv420p", faststart: true, thumbnail_360p: true, thumbnail_second: thumbnailSecond, thumbnail_seed_range: "10%-90%", local_conversion: !input.preconvertedMp4, source_preserved: true };
   writeFileSync(paths.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
   if (input.runtimeEvidence) writeFileSync(path.join(paths.jobDir, "runtime-evidence.json"), `${JSON.stringify({ ...input.runtimeEvidence, local_media: metadata }, null, 2)}\n`, "utf8");
   return { wan_video_verified: true, promptId: input.promptId, sourcePath: preservedWebm, outputPath: paths.videoPath, thumbnailPath: paths.thumbnailPath, sha256: videoEvidence.sha256, outputSizeBytes: videoEvidence.size_bytes, sourceSha256: sourceEvidence.sha256, sourceSizeBytes: sourceEvidence.size_bytes, thumbnailSha256: thumbnailEvidence.sha256, thumbnailSizeBytes: thumbnailEvidence.size_bytes, durationSeconds: duration, width: input.validation.width, height: input.validation.height, oomFallbackUsed: input.oomFallbackUsed, sourcePreserved: true, localConversion: !input.preconvertedMp4, videoProbe, thumbnailProbe };
