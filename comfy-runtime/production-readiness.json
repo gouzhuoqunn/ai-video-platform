@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-18T00:00:00.000Z",
+  "model_cache_ready": true,
+  "gpu_inference_verified": true,
+  "normal_ui_pipeline_implemented": true,
+  "normal_ui_pipeline_gpu_verified": false,
+  "daily_use_release_candidate": true,
+  "production_ready": false,
+  "nextAcceptance": "Complete one normal UI-created image-only job and one normal UI-created image-to-video chain on a single automatically selected Clore session."
+}

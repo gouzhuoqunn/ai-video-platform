@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "baseline": "stage4e",
+  "immutable": true,
+  "verifiedAt": "2026-07-17T16:40:07.620Z",
+  "provider": "clore",
+  "imageModel": {
+    "family": "ultrareal-flux1-dev-fp8",
+    "revision": "civitai-1413133-file-1320644",
+    "currentKey": "production/models/ultrareal-flux1-dev-fp8/current.json"
+  },
+  "videoModel": {
+    "family": "wan22-remix-14b-i2v-fp8",
+    "revision": "civitai-2770795-2771407-v3",
+    "currentKey": "production/models/wan22-remix-14b-i2v-fp8/current.json"
+  },
+  "executionProfile": {
+    "gpuClass": "rtx4090",
+    "gpuName": "NVIDIA GeForce RTX 4090",
+    "vramMiB": 24564,
+    "ramBytes": 67051868160,
+    "driver": "550.144.03",
+    "cuda": "12.4"
+  },
+  "runtime": {
+    "bootstrapMode": "native",
+    "comfyUiCommit": "da2608926eaf68fd532bba4e1ace3402c5d21399",
+    "python": "3.12.3",
+    "torch": "2.6.0+cu124",
+    "triton": "3.2.0"
+  },
+  "image": {
+    "width": 1024,
+    "height": 1024,
+    "steps": 50,
+    "seed": 20260715,
+    "batch": 1,
+    "inferenceMs": 136485,
+    "sizeBytes": 1615397,
+    "outputSha256": "a79bede54ba4de24fe519ad294ab54cc291cbb95c9527f45380c1d9a3627f886"
+  },
+  "video": {
+    "width": 832,
+    "height": 480,
+    "frames": 33,
+    "fps": 16,
+    "steps": 20,
+    "seed": 20260715,
+    "batch": 1,
+    "inferenceMs": 229809,
+    "durationSeconds": 2.0625,
+    "outputSizeBytes": 330600,
+    "outputSha256": "94378363495175acd4a71f7a9d383e2255a3febb2c73cb5da26882cf2743c404"
+  },
+  "restores": {
+    "imageBytes": 17640339740,
+    "imageMs": 1587751,
+    "videoBytes": 35572266487,
+    "videoMs": 3146255,
+    "parallelDownloads": 3,
+    "directR2": true
+  },
+  "conversion": {
+    "source": "vp9-webm",
+    "output": "h264-high-yuv420p-mp4",
+    "faststart": true,
+    "thumbnail": "jpeg-max-640x360"
+  },
+  "cleanup": {
+    "runtimeStopped": true,
+    "providerOrderCancelled": true,
+    "activeOrders": 0,
+    "runpodPods": 0,
+    "runpodVolumes": 0,
+    "holdsRestored": true
+  }
+}

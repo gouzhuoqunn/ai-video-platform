@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import workflowTemplate from "../comfy-runtime/workflows/official/wan22-ti2v-5b-api.json";
-import { buildLocalJobPaths, loadLocalResultsConfig } from "./local-results/config";
+import { buildLocalJobPaths, loadLocalResultsConfig, writeJsonAtomic } from "./local-results/config";
 import { STAGE3O_VIDEO_TASK_ID } from "./stage3o-batch";
 
 type JsonRecord = Record<string, unknown>;
@@ -148,10 +148,10 @@ export function archiveStage3OWanVideo(input: {
   const thumbnailProbe = assertJpeg(partialThumbnail); rmSync(paths.thumbnailPath, { force: true }); renameSync(partialThumbnail, paths.thumbnailPath);
   if (!existsSync(paths.videoPath) || !existsSync(paths.thumbnailPath)) throw new Error("wan_local_sync_missing");
   const sourceEvidence = fileEvidence(preservedWebm); const videoEvidence = fileEvidence(paths.videoPath); const thumbnailEvidence = fileEvidence(paths.thumbnailPath);
-  writeFileSync(path.join(paths.jobDir, "workflow-api.json"), `${JSON.stringify(input.workflow, null, 2)}\n`, "utf8");
+  writeJsonAtomic(path.join(paths.jobDir, "workflow-api.json"), input.workflow);
   const metadata = { job_id: jobId, prompt_id: input.promptId, width: input.validation.width, height: input.validation.height, frames: 33, fps: 16, duration_seconds: duration, seed, audio: false, upscale: false, post_processing: false, oom_fallback_used: input.oomFallbackUsed, source_webm: sourceEvidence, output_mp4: videoEvidence, thumbnail_jpeg: thumbnailEvidence, source_probe: sourceProbe, output_probe: videoProbe, thumbnail_probe: thumbnailProbe, browser_codec: "h264", pixel_format: "yuv420p", faststart: true, thumbnail_360p: true, thumbnail_second: thumbnailSecond, thumbnail_seed_range: "10%-90%", local_conversion: !input.preconvertedMp4, source_preserved: true };
-  writeFileSync(paths.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
-  if (input.runtimeEvidence) writeFileSync(path.join(paths.jobDir, "runtime-evidence.json"), `${JSON.stringify({ ...input.runtimeEvidence, local_media: metadata }, null, 2)}\n`, "utf8");
+  writeJsonAtomic(paths.metadataPath, metadata);
+  if (input.runtimeEvidence) writeJsonAtomic(path.join(paths.jobDir, "runtime-evidence.json"), { ...input.runtimeEvidence, local_media: metadata });
   return { wan_video_verified: true, promptId: input.promptId, sourcePath: preservedWebm, outputPath: paths.videoPath, thumbnailPath: paths.thumbnailPath, sha256: videoEvidence.sha256, outputSizeBytes: videoEvidence.size_bytes, sourceSha256: sourceEvidence.sha256, sourceSizeBytes: sourceEvidence.size_bytes, thumbnailSha256: thumbnailEvidence.sha256, thumbnailSizeBytes: thumbnailEvidence.size_bytes, durationSeconds: duration, width: input.validation.width, height: input.validation.height, oomFallbackUsed: input.oomFallbackUsed, sourcePreserved: true, localConversion: !input.preconvertedMp4, videoProbe, thumbnailProbe };
 }
 

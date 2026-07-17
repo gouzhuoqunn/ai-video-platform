@@ -138,6 +138,7 @@
     "stage4e:execute": "tsx scripts/stage4c-production-session.ts",
     "stage4e:test": "tsx scripts/stage4e-workspace-contract-tests.ts && tsx scripts/stage4d-detached-job-tests.ts && tsx scripts/stage4c-production-session-tests.ts",
     "stage4e:ui:test": "tsx scripts/stage4e-ui-live-check.ts",
+    "stage4f:test": "tsx scripts/stage4f-production-pipeline-tests.ts",
     "stage4b:multipart-abort:probe": "tsx scripts/model-cache/production-object-stream.ts multipart-abort-probe",
     "stage3r:readiness:test": "tsx scripts/clore/stage3r-readiness-tests.ts",
     "gpu:candidates": "tsx scripts/gpu-candidates.ts",

@@ -8,8 +8,9 @@ export function normalizeStudioMode(value: unknown): StudioMode {
 }
 
 export function batchThreshold(value = process.env.CLORE_AUTORENT_BATCH_THRESHOLD) {
+  if (value === undefined) return loadSchedulerPolicy().videoI2vBatchThreshold;
   const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 && parsed <= 50 ? parsed : 3;
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 50 ? parsed : loadSchedulerPolicy().videoI2vBatchThreshold;
 }
 
 export function shouldArmCloreScheduler(input: { immediate: boolean; queuedCount: number; threshold: number; compliantHostExists?: boolean }) {
@@ -21,3 +22,4 @@ export function shouldArmCloreScheduler(input: { immediate: boolean; queuedCount
     createOrderAllowed: tasksReady && input.compliantHostExists === true,
   };
 }
+import { loadSchedulerPolicy } from "@/lib/generation/production-pipeline";

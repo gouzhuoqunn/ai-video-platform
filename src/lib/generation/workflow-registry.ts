@@ -1,7 +1,7 @@
 import type { ModelSlotKey } from "./model-registry";
-import flux2Klein4bSubgraphApi from "../../../comfy-runtime/workflows/official/flux2-klein-4b-distilled-subgraph-api.json";
-import wan22I2vA14bApi from "../../../comfy-runtime/workflows/official/wan22-i2v-a14b-api.json";
+import ultraRealProductionApi from "../../../comfy-runtime/workflows/production/ultrareal-flux1-dev-fp8-rtx4090-api.json";
 import wan22Ti2v5bApi from "../../../comfy-runtime/workflows/official/wan22-ti2v-5b-api.json";
+import wanRemixProductionApi from "../../../comfy-runtime/workflows/production/wan22-remix-14b-i2v-fp8-rtx4090-api.json";
 
 export type WorkflowKey = "image_t2i" | "video_ti2v" | "video_i2v" | "video_flf2v";
 export type WorkflowOrigin = "official" | "community";
@@ -26,17 +26,21 @@ export type WorkflowInputs = Partial<Record<WorkflowParameter, string | number>>
 export const WORKFLOW_TEMPLATES: Record<WorkflowKey, WorkflowTemplate> = {
   image_t2i: {
     key: "image_t2i",
-    version: "official-flux2-klein-4b-distilled-subgraph-2026-07-14",
-    origin: "official",
+    version: "production-ultrareal-flux1-dev-fp8-stage4e",
+    origin: "community",
     api_format: "comfy_api_json",
     required_model_slots: ["rtx4090_image"],
     required_custom_nodes: [],
-    output_node: "94",
+    output_node: "10",
     parameter_nodes: {
-      prompt: { node: "92", input: "text" },
+      prompt: { node: "3", input: "text" },
+      negative_prompt: { node: "4", input: "text" },
+      seed: { node: "7", input: "seed" },
+      width: { node: "6", input: "width" },
+      height: { node: "6", input: "height" },
     },
-    template: flux2Klein4bSubgraphApi as Record<string, unknown>,
-    execution_status: "subgraph_registration_required",
+    template: ultraRealProductionApi as Record<string, unknown>,
+    execution_status: "api_executable_when_models_present",
   },
   video_ti2v: {
     key: "video_ti2v",
@@ -59,21 +63,21 @@ export const WORKFLOW_TEMPLATES: Record<WorkflowKey, WorkflowTemplate> = {
   },
   video_i2v: {
     key: "video_i2v",
-    version: "official-wan22-i2v-a14b-2026-07-14",
-    origin: "official",
+    version: "production-wan22-remix-14b-i2v-fp8-stage4e",
+    origin: "community",
     api_format: "comfy_api_json",
-    required_model_slots: ["rtx5090_video"],
+    required_model_slots: ["rtx4090_video"],
     required_custom_nodes: [],
-    output_node: "47",
+    output_node: "14",
     parameter_nodes: {
       prompt: { node: "6", input: "text" },
       negative_prompt: { node: "7", input: "text" },
-      seed: { node: "57", input: "noise_seed" },
-      width: { node: "50", input: "width" },
-      height: { node: "50", input: "height" },
-      frames: { node: "50", input: "length" },
+      seed: { node: "11", input: "noise_seed" },
+      width: { node: "8", input: "width" },
+      height: { node: "8", input: "height" },
+      frames: { node: "8", input: "length" },
     },
-    template: wan22I2vA14bApi as Record<string, unknown>,
+    template: wanRemixProductionApi as Record<string, unknown>,
     execution_status: "api_executable_when_models_present",
   },
   video_flf2v: {
@@ -129,6 +133,9 @@ export function injectWorkflowParameters(workflow: WorkflowTemplate, inputs: Wor
       throw new Error(`workflow parameter target missing: ${parameter}`);
     }
     node.inputs[mapping.input] = value;
+    if (workflow.key === "video_i2v" && parameter === "seed" && cloned["12"]?.inputs && "noise_seed" in cloned["12"].inputs) {
+      cloned["12"].inputs.noise_seed = value;
+    }
   }
   return cloned;
 }

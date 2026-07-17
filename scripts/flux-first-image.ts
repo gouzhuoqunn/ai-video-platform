@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import workflowTemplate from "../comfy-runtime/workflows/bootstrap/flux2-klein-4b-t2i-api.json";
+import { writeJsonAtomic } from "./local-results/config";
 
 export const FLUX_FIRST_IMAGE_PROMPT =
   "A cinematic wide shot of a futuristic white research station beside a clear blue ocean at sunset, realistic architecture, warm sunlight, detailed clouds, clean composition, high detail";
@@ -108,8 +109,8 @@ export function archiveFluxFirstImage(input: {
   copyFileSync(input.sourcePng, partialPath);
   renameSync(partialPath, outputPath);
   const sha256 = crypto.createHash("sha256").update(readFileSync(outputPath)).digest("hex");
-  writeFileSync(path.join(archiveDir, "workflow-api.json"), `${JSON.stringify(input.workflow, null, 2)}\n`, "utf8");
-  writeFileSync(path.join(archiveDir, "metadata.json"), `${JSON.stringify({ ...input.metadata, output_sha256: sha256 }, null, 2)}\n`, "utf8");
-  writeFileSync(path.join(archiveDir, "runtime-evidence.json"), `${JSON.stringify(input.evidence, null, 2)}\n`, "utf8");
+  writeJsonAtomic(path.join(archiveDir, "workflow-api.json"), input.workflow);
+  writeJsonAtomic(path.join(archiveDir, "metadata.json"), { ...input.metadata, output_sha256: sha256 });
+  writeJsonAtomic(path.join(archiveDir, "runtime-evidence.json"), input.evidence);
   return { archiveDir, outputPath, sha256 };
 }

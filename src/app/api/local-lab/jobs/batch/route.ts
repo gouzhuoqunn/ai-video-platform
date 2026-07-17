@@ -67,6 +67,7 @@ async function mirrorVideoJobs(userId: string, jobIds: string[], immediate: bool
   if (error) throw new Error("Unable to mirror selected jobs into the generation pool.");
   const tasks = (data ?? []).map((job) => createGenerationTask({
     id: String(job.id), generationType: "video", prompt: String(job.prompt), modelProfile: "wan22-ti2v-5b",
+    contentMode: "legacy_debug",
     priority: immediate || job.priority === "urgent" ? "immediate" : "normal",
     status: immediate ? "armed" : job.status === "pending_confirmation" ? "pending_confirmation" : "waiting_for_batch",
     createdAt: String(job.created_at), confirmedAt: job.confirmed_at ? String(job.confirmed_at) : null,
@@ -188,7 +189,7 @@ export async function POST(request: NextRequest) {
     regenerated.push(Array.isArray(data) ? data[0] : data);
   }
 
-  const regeneratedTasks = regenerated.filter(Boolean).map((job) => createGenerationTask({ id: String(job.id), generationType: "video", prompt: String(job.prompt), modelProfile: "wan22-ti2v-5b", status: "pending_confirmation", createdAt: String(job.created_at), estimatedVram: 24 }));
+  const regeneratedTasks = regenerated.filter(Boolean).map((job) => createGenerationTask({ id: String(job.id), generationType: "video", prompt: String(job.prompt), modelProfile: "wan22-ti2v-5b", contentMode: "legacy_debug", status: "pending_confirmation", createdAt: String(job.created_at), estimatedVram: 24 }));
   upsertGenerationTasks(regeneratedTasks);
 
   return NextResponse.json({ action, regenerated });
