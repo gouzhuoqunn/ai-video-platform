@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import { createReadStream, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  CopyObjectCommand,
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { loadR2Credentials, type R2Credentials } from "./r2-presign";
@@ -122,6 +130,119 @@ async function remoteObjectExists(client: S3Client, bucket: string, key: string)
   }
 }
 
+function metadataSha256(metadata: Record<string, string | undefined> | undefined) {
+  return (metadata?.sha256 ?? metadata?.["expected-sha256"] ?? "").toLowerCase();
+}
+
+async function listAllObjects(client: S3Client, bucket: string) {
+  const objects: Array<{ key: string; bytes: number }> = [];
+  let continuationToken: string | undefined;
+  do {
+    const page = await client.send(new ListObjectsV2Command({ Bucket: bucket, ContinuationToken: continuationToken }));
+    for (const object of page.Contents ?? []) {
+      if (object.Key && object.Size !== undefined) objects.push({ key: object.Key, bytes: object.Size });
+    }
+    continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+  } while (continuationToken);
+  return objects;
+}
+
+async function matchingExistingObject(
+  client: S3Client,
+  bucket: string,
+  candidates: Array<{ key: string; bytes: number }>,
+  file: ProductionManifest["files"][number],
+) {
+  for (const candidate of candidates.filter((object) => object.bytes === file.bytes).sort((left, right) => left.key.localeCompare(right.key))) {
+    const head = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: candidate.key }));
+    if (head.ContentLength === file.bytes && metadataSha256(head.Metadata) === file.sha256) return candidate.key;
+  }
+  return null;
+}
+
+function copySource(bucket: string, key: string) {
+  return `${bucket}/${key.split("/").map((part) => encodeURIComponent(part)).join("/")}`;
+}
+
+export async function inventoryAndDeduplicateProductionObjects(copyMatches = false) {
+  const creds = loadR2Credentials("model-cache-admin.env");
+  const client = createProductionS3Client(creds);
+  try {
+    const inventory = await listAllObjects(client, creds.bucket);
+    const reusedObjects: Array<{ familyId: string; path: string; objectKey: string; bytes: number; sha256: string }> = [];
+    const copiedObjects: Array<{ familyId: string; path: string; sourceKey: string; objectKey: string; bytes: number; sha256: string }> = [];
+    const newlyDownloadedObjects: Array<{ familyId: string; path: string; objectKey: string; bytes: number; sha256: string }> = [];
+    for (const family of loadProductionFamilies()) {
+      for (const file of buildProductionManifest(family).files) {
+        const destination = inventory.find((object) => object.key === file.objectKey);
+        if (destination) {
+          await verifyRemoteObject(client, creds.bucket, file);
+          reusedObjects.push({ familyId: family.id, path: file.path, objectKey: file.objectKey, bytes: file.bytes, sha256: file.sha256 });
+          continue;
+        }
+        const sourceKey = await matchingExistingObject(client, creds.bucket, inventory, file);
+        if (!sourceKey) {
+          newlyDownloadedObjects.push({ familyId: family.id, path: file.path, objectKey: file.objectKey, bytes: file.bytes, sha256: file.sha256 });
+          continue;
+        }
+        if (!copyMatches) {
+          copiedObjects.push({ familyId: family.id, path: file.path, sourceKey, objectKey: file.objectKey, bytes: file.bytes, sha256: file.sha256 });
+          continue;
+        }
+        await client.send(new CopyObjectCommand({
+          Bucket: creds.bucket,
+          Key: file.objectKey,
+          CopySource: copySource(creds.bucket, sourceKey),
+          MetadataDirective: "REPLACE",
+          ContentType: "application/octet-stream",
+          Metadata: { sha256: file.sha256, family: family.id, role: file.role, "deduplicated-from": sourceKey },
+        }));
+        await verifyRemoteObject(client, creds.bucket, file);
+        copiedObjects.push({ familyId: family.id, path: file.path, sourceKey, objectKey: file.objectKey, bytes: file.bytes, sha256: file.sha256 });
+      }
+    }
+    const avoided = [...reusedObjects, ...copiedObjects];
+    return {
+      schemaVersion: 1,
+      mode: copyMatches ? "copy-identical-r2-objects" : "inventory-only",
+      inventory: {
+        objectCount: inventory.length,
+        totalBytes: inventory.reduce((total, object) => total + object.bytes, 0),
+        legacyObjectCount: inventory.filter((object) => !object.key.startsWith("production/models/")).length,
+        productionObjectCount: inventory.filter((object) => object.key.startsWith("production/models/")).length,
+      },
+      reusedObjects,
+      copiedObjects,
+      newlyDownloadedObjects,
+      bytesAvoided: avoided.reduce((total, object) => total + object.bytes, 0),
+    };
+  } finally {
+    client.destroy();
+  }
+}
+
+export async function buildRemoteDownloadPlan(familyId: string) {
+  const family = loadProductionFamilies().find((entry) => entry.id === familyId);
+  if (!family) throw new Error(`unknown_family:${familyId}`);
+  const creds = loadR2Credentials("model-cache-admin.env");
+  const client = createProductionS3Client(creds);
+  try {
+    const skipPaths: string[] = [];
+    const downloadPaths: string[] = [];
+    for (const file of buildProductionManifest(family).files) {
+      if (await remoteObjectExists(client, creds.bucket, file.objectKey)) {
+        await verifyRemoteObject(client, creds.bucket, file);
+        skipPaths.push(file.path);
+      } else {
+        downloadPaths.push(file.path);
+      }
+    }
+    return { schemaVersion: 1, familyId, skipPaths, downloadPaths };
+  } finally {
+    client.destroy();
+  }
+}
+
 export async function publishProductionFamily(familyId: string, localRoot: string, generatedAt = new Date().toISOString()) {
   const family = loadProductionFamilies().find((entry) => entry.id === familyId);
   if (!family) throw new Error(`unknown_family:${familyId}`);
@@ -131,30 +252,29 @@ export async function publishProductionFamily(familyId: string, localRoot: strin
   const manifest = buildProductionManifest(family, generatedAt);
   try {
     for (const file of manifest.files) {
-      const localPath = path.join(localRoot, ...file.path.split("/"));
-      if (statSync(localPath).size !== file.bytes) throw new Error(`local_size_mismatch:${file.path}`);
-      if (await streamSha256(localPath) !== file.sha256) throw new Error(`local_sha256_mismatch:${file.path}`);
       const reusable = await remoteObjectExists(client, creds.bucket, file.objectKey);
       if (reusable) {
         await verifyRemoteObject(client, creds.bucket, file);
+        continue;
       }
-      if (!reusable) {
-        const upload = new Upload({
-          client,
-          params: {
-            Bucket: creds.bucket,
-            Key: file.objectKey,
-            Body: createReadStream(localPath),
-            ContentType: "application/octet-stream",
-            Metadata: { sha256: file.sha256, family: family.id, role: file.role },
-          },
-          queueSize: 4,
-          partSize: 128 * 1024 * 1024,
-          leavePartsOnError: true,
-        });
-        await upload.done();
-        await verifyRemoteObject(client, creds.bucket, file);
-      }
+      const localPath = path.join(localRoot, ...file.path.split("/"));
+      if (statSync(localPath).size !== file.bytes) throw new Error(`local_size_mismatch:${file.path}`);
+      if (await streamSha256(localPath) !== file.sha256) throw new Error(`local_sha256_mismatch:${file.path}`);
+      const upload = new Upload({
+        client,
+        params: {
+          Bucket: creds.bucket,
+          Key: file.objectKey,
+          Body: createReadStream(localPath),
+          ContentType: "application/octet-stream",
+          Metadata: { sha256: file.sha256, family: family.id, role: file.role },
+        },
+        queueSize: 4,
+        partSize: 128 * 1024 * 1024,
+        leavePartsOnError: true,
+      });
+      await upload.done();
+      await verifyRemoteObject(client, creds.bucket, file);
     }
     const manifestPayload = `${JSON.stringify(manifest, null, 2)}\n`;
     const current = buildCurrentPointer(family, manifest);
@@ -238,6 +358,12 @@ async function main() {
     const localRoot = process.argv[4];
     if (!familyId || !localRoot) throw new Error("usage: production-model-cache.ts publish-local <family-id> <local-root>");
     console.log(JSON.stringify(await publishProductionFamily(familyId, localRoot)));
+  } else if (command === "deduplicate") {
+    console.log(JSON.stringify(await inventoryAndDeduplicateProductionObjects(process.argv.includes("--copy")), null, 2));
+  } else if (command === "download-plan") {
+    const familyId = process.argv[3];
+    if (!familyId) throw new Error("usage: production-model-cache.ts download-plan <family-id>");
+    console.log(JSON.stringify(await buildRemoteDownloadPlan(familyId), null, 2));
   } else if (command === "verify-readonly") {
     const familyId = process.argv[3];
     if (!familyId) throw new Error("usage: production-model-cache.ts verify-readonly <family-id>");

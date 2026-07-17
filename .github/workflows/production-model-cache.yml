@@ -16,8 +16,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  deduplicate:
+    name: Inventory and deduplicate existing R2 objects
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      MODEL_CACHE_REGION: auto
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Reuse or server-side copy exact SHA and size matches
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsx scripts/model-cache/production-model-cache.ts deduplicate --copy | tee "$RUNNER_TEMP/deduplication-report.json"
+          {
+            echo '```json'
+            cat "$RUNNER_TEMP/deduplication-report.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   cache:
     name: Cache and publish ${{ matrix.family }}
+    needs: deduplicate
     runs-on: ubuntu-latest
     timeout-minutes: 75
     strategy:
@@ -58,8 +87,10 @@ jobs:
         run: |
           npm ci --ignore-scripts
           python -m pip install --disable-pip-version-check "huggingface_hub[hf_xet]"
+      - name: Plan downloads after verified R2 reuse
+        run: npx tsx scripts/model-cache/production-model-cache.ts download-plan "${{ matrix.family }}" > "$RUNNER_TEMP/download-plan.json"
       - name: Download locked files in parallel and verify full SHA
-        run: python scripts/model-cache/production-cache-download.py --family "${{ matrix.family }}" --output "$RUNNER_TEMP/model"
+        run: python scripts/model-cache/production-cache-download.py --family "${{ matrix.family }}" --output "$RUNNER_TEMP/model" --download-plan "$RUNNER_TEMP/download-plan.json"
       - name: Multipart upload, verify objects, publish manifest, publish current last
         run: npx tsx scripts/model-cache/production-model-cache.ts publish-local "${{ matrix.family }}" "$RUNNER_TEMP/model"
 

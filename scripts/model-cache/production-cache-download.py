@@ -98,16 +98,33 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--family", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--download-plan")
     args = parser.parse_args()
     registry = json.loads(pathlib.Path("comfy-runtime/production-model-registry.json").read_text(encoding="utf-8"))
     family = next((item for item in registry["families"] if item["id"] == args.family), None)
     if not family:
         raise RuntimeError("unknown_family")
+    skip_paths = set()
+    if args.download_plan:
+        plan = json.loads(pathlib.Path(args.download_plan).read_text(encoding="utf-8"))
+        if plan.get("schemaVersion") != 1 or plan.get("familyId") != family["id"]:
+            raise RuntimeError("download_plan_identity_mismatch")
+        skip_paths = set(plan.get("skipPaths", []))
+        known_paths = {item["path"] for item in family["objects"]}
+        if not skip_paths.issubset(known_paths):
+            raise RuntimeError("download_plan_unknown_path")
     output = pathlib.Path(args.output)
+    selected = [item for item in family["objects"] if item["path"] not in skip_paths]
+    print(json.dumps({
+        "familyId": family["id"],
+        "skippedVerifiedR2Objects": len(skip_paths),
+        "downloadObjects": len(selected),
+        "downloadBytes": sum(int(item["bytes"]) for item in selected),
+    }))
     with concurrent.futures.ThreadPoolExecutor(max_workers=int(family["parallelDownloads"])) as pool:
         futures = [
             pool.submit(download, item["source"], output / item["path"], int(item["bytes"]), item["sha256"])
-            for item in family["objects"]
+            for item in selected
         ]
         for future in concurrent.futures.as_completed(futures):
             future.result()

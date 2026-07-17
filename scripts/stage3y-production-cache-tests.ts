@@ -10,11 +10,15 @@ const workflow = YAML.parse(read(".github/workflows/production-model-cache.yml")
 assert.deepEqual(workflow.on.push.branches, ["codex/phase-3h-flux-parallel"]);
 assert.deepEqual(workflow.on.push.paths, [".github/stage3y-cache-trigger.json"]);
 assert.equal(workflow.concurrency["cancel-in-progress"], false);
+assert.equal(workflow.jobs.deduplicate["timeout-minutes"], 15);
+assert.equal(workflow.jobs.cache.needs, "deduplicate");
 assert.equal(workflow.jobs.cache["timeout-minutes"], 75);
 assert.equal(workflow.jobs.cache.strategy["fail-fast"], false);
 assert.deepEqual(workflow.jobs.cache.strategy.matrix.family, ["ultrareal-flux1-dev-fp8", "wan22-remix-14b-i2v-fp8"]);
 assert.deepEqual(workflow.jobs["final-readonly-verification"].needs, "cache");
 assert.match(read(".github/workflows/production-model-cache.yml"), /publish-local/);
+assert.match(read(".github/workflows/production-model-cache.yml"), /deduplicate --copy/);
+assert.match(read(".github/workflows/production-model-cache.yml"), /download-plan/);
 assert.match(read(".github/workflows/production-model-cache.yml"), /verify-readonly ultrareal-flux1-dev-fp8/);
 assert.match(read(".github/workflows/production-model-cache.yml"), /verify-readonly wan22-remix-14b-i2v-fp8/);
 assert.ok(!read(".github/workflows/production-model-cache.yml").includes("upload-artifact"));
@@ -30,9 +34,9 @@ for (const family of loadProductionFamilies()) {
 }
 
 const downloader = read("scripts/model-cache/production-cache-download.py");
-for (const marker of ["ThreadPoolExecutor", "hf_hub_download", "HF_TOKEN", ".part", "sha256", "parallelDownloads"]) assert.ok(downloader.includes(marker));
+for (const marker of ["ThreadPoolExecutor", "hf_hub_download", "HF_TOKEN", ".part", "sha256", "parallelDownloads", "skipPaths", "--download-plan"]) assert.ok(downloader.includes(marker));
 const publisher = read("scripts/model-cache/production-model-cache.ts");
-for (const marker of ["new Upload", "partSize", "leavePartsOnError", "Metadata: { sha256", "Range: \"bytes=0-0\"", "IfNoneMatch: \"*\"", "DeleteObjectCommand", "remoteObjectExists"]) assert.ok(publisher.includes(marker));
+for (const marker of ["new Upload", "partSize", "leavePartsOnError", "Metadata: { sha256", "Range: \"bytes=0-0\"", "IfNoneMatch: \"*\"", "DeleteObjectCommand", "remoteObjectExists", "CopyObjectCommand", "ListObjectsV2Command", "bytesAvoided"]) assert.ok(publisher.includes(marker));
 const restoreBundle = read("scripts/model-cache/production-restore-bundle.ts");
 for (const marker of ["minimumFreeDiskBytes", "objectPathMapping", "parallelDownloads"]) assert.ok(restoreBundle.includes(marker));
 const studio = read("src/components/LocalCreationStudio.tsx");

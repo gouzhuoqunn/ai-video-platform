@@ -92,7 +92,8 @@ assert.ok(RESTORE_CONTROLLER_POLICY.forbidden.includes("R2 admin credentials on 
 
 const workflowYaml = text(".github/workflows/production-model-cache.yml");
 const parsedWorkflow = YAML.parse(workflowYaml);
-assert.deepEqual(Object.keys(parsedWorkflow.jobs), ["cache", "final-readonly-verification"]);
+assert.deepEqual(Object.keys(parsedWorkflow.jobs), ["deduplicate", "cache", "final-readonly-verification"]);
+assert.equal(parsedWorkflow.jobs.cache.needs, "deduplicate");
 assert.equal(parsedWorkflow.jobs.cache.strategy.matrix.family.length, 2);
 assert.match(workflowYaml, /timeout-minutes: 75/);
 assert.match(workflowYaml, /CIVITAI_API_TOKEN/);
@@ -105,4 +106,4 @@ assert.ok(!studio.toLowerCase().includes("nsfw"));
 const stage3w = text("scripts/stage3w-wan-retry-session.ts");
 for (const guarantee of ["ffmpeg", "ffprobe", "stage3w-browser.mp4.part", "thumbnail"]) assert.ok(stage3w.includes(guarantee));
 
-console.log(JSON.stringify({ ok: true, auditModels: 2, auditedVersions: 18, productionFamilies: 2, gpuProfiles: 4, credentialGate: "blocked_without_hf_token" }));
+console.log(JSON.stringify({ ok: true, auditModels: 2, auditedVersions: 18, productionFamilies: 2, gpuProfiles: 4, credentialGate: "requires_civitai_and_hf" }));
