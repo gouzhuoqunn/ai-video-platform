@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import threading
 import time
 import urllib.request
@@ -119,7 +120,22 @@ def run(bundle_path: pathlib.Path) -> None:
             atomic_json(progress_path, state)
 
     root = pathlib.Path(bundle["destinationRoot"])
+    root.mkdir(parents=True, exist_ok=True)
+    required_free = int(bundle["minimumFreeDiskBytes"])
+    available_free = shutil.disk_usage(root).free
+    if available_free < required_free:
+        raise RuntimeError(f"insufficient_free_disk:{available_free}:{required_free}")
     atomic_json(progress_path, state)
+    heartbeat_stop = threading.Event()
+
+    def heartbeat() -> None:
+        while not heartbeat_stop.wait(HEARTBEAT_SECONDS):
+            with lock:
+                state["heartbeatAt"] = time.time()
+                atomic_json(progress_path, state)
+
+    heartbeat_thread = threading.Thread(target=heartbeat, name="restore-heartbeat", daemon=True)
+    heartbeat_thread.start()
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=int(bundle["parallelDownloads"])) as pool:
             futures = []
@@ -139,6 +155,9 @@ def run(bundle_path: pathlib.Path) -> None:
         state["failedAt"] = time.time()
         atomic_json(progress_path, state)
         raise
+    finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2)
 
 
 if __name__ == "__main__":

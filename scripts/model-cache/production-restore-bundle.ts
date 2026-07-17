@@ -20,6 +20,9 @@ export function buildRestoreBundle(familyId: string, expiresSeconds = 7200) {
     parallelDownloads: family.parallelDownloads,
     destinationRoot: "/workspace/ComfyUI/models",
     progressPath: `/workspace/logs/restore-${familyId}.json`,
+    restoreBytes: family.restoreBytes,
+    minimumFreeDiskBytes: family.restoreBytes + 10 * 1024 ** 3,
+    objectPathMapping: Object.fromEntries(manifest.files.map((file) => [file.objectKey, `/workspace/ComfyUI/models/${file.path}`])),
   };
 }
 

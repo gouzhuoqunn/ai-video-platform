@@ -1,5 +1,10 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { createReadStream, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
+import { loadR2Credentials, type R2Credentials } from "./r2-presign";
 
 export type ProductionObject = {
   role: string;
@@ -44,12 +49,13 @@ export function buildProductionManifest(family: ProductionFamily, generatedAt = 
 }
 
 export function buildCurrentPointer(family: ProductionFamily, manifest: ProductionManifest) {
+  const manifestPayload = `${JSON.stringify(manifest, null, 2)}\n`;
   return {
     schemaVersion: 1,
     familyId: family.id,
     revision: family.revision,
     manifestKey: `${family.r2Prefix}/manifests/${family.revision}.json`,
-    manifestSha256Required: true,
+    manifestSha256: createHash("sha256").update(manifestPayload).digest("hex"),
     publishedAt: manifest.generatedAt,
   };
 }
@@ -74,7 +80,142 @@ export function assertProductionCredentialGate(env = process.env) {
   return token;
 }
 
-if (process.argv[1]?.endsWith("production-model-cache.ts")) {
+function createProductionS3Client(creds: R2Credentials) {
+  return new S3Client({
+    region: creds.region || "auto",
+    endpoint: creds.endpoint,
+    forcePathStyle: true,
+    maxAttempts: 4,
+    requestHandler: new NodeHttpHandler({ connectionTimeout: 15_000, socketTimeout: 10 * 60_000 }),
+    credentials: { accessKeyId: creds.accessKeyId, secretAccessKey: creds.secretAccessKey },
+  });
+}
+
+async function streamSha256(filePath: string) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
+
+async function bodyBuffer(body: unknown) {
+  if (!body || typeof body !== "object" || !("transformToByteArray" in body)) throw new Error("r2_response_body_missing");
+  return Buffer.from(await (body as { transformToByteArray(): Promise<Uint8Array> }).transformToByteArray());
+}
+
+async function verifyRemoteObject(client: S3Client, bucket: string, file: ProductionManifest["files"][number]) {
+  const head = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: file.objectKey }));
+  if (head.ContentLength !== file.bytes) throw new Error(`r2_size_mismatch:${file.objectKey}`);
+  if (head.Metadata?.sha256 !== file.sha256) throw new Error(`r2_sha_metadata_mismatch:${file.objectKey}`);
+  const first = await client.send(new GetObjectCommand({ Bucket: bucket, Key: file.objectKey, Range: "bytes=0-0" }));
+  const last = await client.send(new GetObjectCommand({ Bucket: bucket, Key: file.objectKey, Range: `bytes=${file.bytes - 1}-${file.bytes - 1}` }));
+  if ((await bodyBuffer(first.Body)).length !== 1 || (await bodyBuffer(last.Body)).length !== 1) throw new Error(`r2_range_probe_failed:${file.objectKey}`);
+}
+
+async function remoteObjectExists(client: S3Client, bucket: string, key: string) {
+  try {
+    await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+    return true;
+  } catch (error) {
+    const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+    if (status === 404) return false;
+    throw error;
+  }
+}
+
+export async function publishProductionFamily(familyId: string, localRoot: string, generatedAt = new Date().toISOString()) {
+  const family = loadProductionFamilies().find((entry) => entry.id === familyId);
+  if (!family) throw new Error(`unknown_family:${familyId}`);
+  assertProductionCredentialGate();
+  const creds = loadR2Credentials("model-cache-admin.env");
+  const client = createProductionS3Client(creds);
+  const manifest = buildProductionManifest(family, generatedAt);
+  try {
+    for (const file of manifest.files) {
+      const localPath = path.join(localRoot, ...file.path.split("/"));
+      if (statSync(localPath).size !== file.bytes) throw new Error(`local_size_mismatch:${file.path}`);
+      if (await streamSha256(localPath) !== file.sha256) throw new Error(`local_sha256_mismatch:${file.path}`);
+      const reusable = await remoteObjectExists(client, creds.bucket, file.objectKey);
+      if (reusable) {
+        await verifyRemoteObject(client, creds.bucket, file);
+      }
+      if (!reusable) {
+        const upload = new Upload({
+          client,
+          params: {
+            Bucket: creds.bucket,
+            Key: file.objectKey,
+            Body: createReadStream(localPath),
+            ContentType: "application/octet-stream",
+            Metadata: { sha256: file.sha256, family: family.id, role: file.role },
+          },
+          queueSize: 4,
+          partSize: 128 * 1024 * 1024,
+          leavePartsOnError: true,
+        });
+        await upload.done();
+        await verifyRemoteObject(client, creds.bucket, file);
+      }
+    }
+    const manifestPayload = `${JSON.stringify(manifest, null, 2)}\n`;
+    const current = buildCurrentPointer(family, manifest);
+    const manifestKey = current.manifestKey;
+    if (!await remoteObjectExists(client, creds.bucket, manifestKey)) {
+      await client.send(new PutObjectCommand({ Bucket: creds.bucket, Key: manifestKey, Body: manifestPayload, ContentType: "application/json", Metadata: { sha256: current.manifestSha256 } }));
+    }
+    const manifestRead = await client.send(new GetObjectCommand({ Bucket: creds.bucket, Key: manifestKey }));
+    if (createHash("sha256").update(await bodyBuffer(manifestRead.Body)).digest("hex") !== current.manifestSha256) throw new Error(`manifest_verify_failed:${family.id}`);
+    const currentPayload = `${JSON.stringify(current, null, 2)}\n`;
+    if (!await remoteObjectExists(client, creds.bucket, family.currentKey)) {
+      await client.send(new PutObjectCommand({ Bucket: creds.bucket, Key: family.currentKey, Body: currentPayload, ContentType: "application/json" }));
+    }
+    const currentRead = await client.send(new GetObjectCommand({ Bucket: creds.bucket, Key: family.currentKey }));
+    const publishedCurrent = JSON.parse((await bodyBuffer(currentRead.Body)).toString("utf8")) as typeof current;
+    if (publishedCurrent.familyId !== family.id || publishedCurrent.revision !== family.revision || publishedCurrent.manifestSha256 !== current.manifestSha256) throw new Error(`current_verify_failed:${family.id}`);
+    return { familyId: family.id, manifestKey, currentKey: family.currentKey, totalSizeBytes: manifest.totalSizeBytes, objectCount: manifest.files.length };
+  } finally {
+    client.destroy();
+  }
+}
+
+async function expectDenied(operation: () => Promise<unknown>, label: string) {
+  try {
+    await operation();
+  } catch (error) {
+    const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+    if (status === 401 || status === 403) return;
+    throw error;
+  }
+  throw new Error(`readonly_boundary_allowed:${label}`);
+}
+
+export async function verifyProductionReadonly(familyId: string, verifyBoundary = true) {
+  const family = loadProductionFamilies().find((entry) => entry.id === familyId);
+  if (!family) throw new Error(`unknown_family:${familyId}`);
+  const creds = loadR2Credentials("model-cache-readonly.env");
+  const client = createProductionS3Client(creds);
+  try {
+    const currentRead = await client.send(new GetObjectCommand({ Bucket: creds.bucket, Key: family.currentKey }));
+    const current = JSON.parse((await bodyBuffer(currentRead.Body)).toString("utf8")) as ReturnType<typeof buildCurrentPointer>;
+    if (current.familyId !== family.id || current.revision !== family.revision) throw new Error(`current_identity_mismatch:${family.id}`);
+    const manifestRead = await client.send(new GetObjectCommand({ Bucket: creds.bucket, Key: current.manifestKey }));
+    const manifestBytes = await bodyBuffer(manifestRead.Body);
+    if (createHash("sha256").update(manifestBytes).digest("hex") !== current.manifestSha256) throw new Error(`manifest_sha256_mismatch:${family.id}`);
+    const manifest = JSON.parse(manifestBytes.toString("utf8")) as ProductionManifest;
+    if (manifest.familyId !== family.id || manifest.totalSizeBytes !== family.restoreBytes) throw new Error(`manifest_identity_mismatch:${family.id}`);
+    for (const file of manifest.files) await verifyRemoteObject(client, creds.bucket, file);
+    if (verifyBoundary) {
+      const probeKey = `${family.r2Prefix}/boundary-probe/stage3y-denied`;
+      await expectDenied(() => client.send(new PutObjectCommand({ Bucket: creds.bucket, Key: probeKey, Body: "denied" })), "write");
+      await expectDenied(() => client.send(new PutObjectCommand({ Bucket: creds.bucket, Key: family.currentKey, Body: "denied", IfNoneMatch: "*" })), "overwrite");
+      await expectDenied(() => client.send(new DeleteObjectCommand({ Bucket: creds.bucket, Key: probeKey })), "delete");
+    }
+    return { familyId: family.id, cacheReady: true, currentKey: family.currentKey, manifestKey: current.manifestKey, totalSizeBytes: manifest.totalSizeBytes, objectCount: manifest.files.length, readonlyBoundary: verifyBoundary };
+  } finally {
+    client.destroy();
+  }
+}
+
+async function main() {
   const command = process.argv[2] ?? "plan";
   const families = loadProductionFamilies();
   if (command === "credential-gate") {
@@ -92,7 +233,23 @@ if (process.argv[1]?.endsWith("production-model-cache.ts")) {
     writeFileSync(path.join(output, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
     writeFileSync(path.join(output, "current.json"), `${JSON.stringify(current, null, 2)}\n`, "utf8");
     console.log(JSON.stringify({ manifestKey: current.manifestKey, currentKey: family.currentKey }));
+  } else if (command === "publish-local") {
+    const familyId = process.argv[3];
+    const localRoot = process.argv[4];
+    if (!familyId || !localRoot) throw new Error("usage: production-model-cache.ts publish-local <family-id> <local-root>");
+    console.log(JSON.stringify(await publishProductionFamily(familyId, localRoot)));
+  } else if (command === "verify-readonly") {
+    const familyId = process.argv[3];
+    if (!familyId) throw new Error("usage: production-model-cache.ts verify-readonly <family-id>");
+    console.log(JSON.stringify(await verifyProductionReadonly(familyId, true)));
   } else {
     throw new Error(`unsupported_command:${command}`);
   }
+}
+
+if (process.argv[1]?.endsWith("production-model-cache.ts")) {
+  void main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
 }

@@ -1,10 +1,11 @@
 {
   "schemaVersion": 1,
   "credentialGate": {
-    "requiredSecret": "CIVITAI_API_TOKEN",
-    "presentAtAudit": false,
+    "requiredSecrets": ["CIVITAI_API_TOKEN", "HF_TOKEN"],
+    "civitaiTokenPresent": true,
+    "hfTokenPresent": false,
     "downloadOrDispatchAllowed": false,
-    "reason": "CIVITAI_API_TOKEN is absent locally, in the process environment, and in GitHub Actions secrets."
+    "reason": "The locked FLUX VAE returned HTTP 401 and HF_TOKEN is absent locally and in GitHub Actions secrets."
   },
   "hardwarePolicy": {
     "providers": ["clore"],
@@ -24,7 +25,7 @@
       "displayName": "Image UltraReal Flux FP8",
       "adultModel": false,
       "defaultProduction": true,
-      "status": "metadata_locked_token_blocked",
+      "status": "metadata_locked_aux_auth_blocked",
       "r2Prefix": "production/models/ultrareal-flux1-dev-fp8",
       "currentKey": "production/models/ultrareal-flux1-dev-fp8/current.json",
       "revision": "civitai-1413133-file-1320644",
@@ -44,7 +45,7 @@
       "displayName": "Video Wan 2.2 Remix 14B FP8",
       "adultModel": true,
       "defaultProduction": true,
-      "status": "metadata_locked_token_blocked",
+      "status": "metadata_locked_aux_auth_blocked",
       "r2Prefix": "production/models/wan22-remix-14b-i2v-fp8",
       "currentKey": "production/models/wan22-remix-14b-i2v-fp8/current.json",
       "revision": "civitai-2770795-2771407-v3",
