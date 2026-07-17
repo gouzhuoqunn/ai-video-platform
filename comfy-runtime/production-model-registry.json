@@ -65,10 +65,10 @@
     }
   ],
   "profiles": [
-    { "id": "ultrareal-flux1-dev-fp8-rtx4090", "familyId": "ultrareal-flux1-dev-fp8", "gpuClass": "rtx4090", "workflow": "comfy-runtime/workflows/production/ultrareal-flux1-dev-fp8-rtx4090-api.json" },
-    { "id": "ultrareal-flux1-dev-fp8-rtx5090", "familyId": "ultrareal-flux1-dev-fp8", "gpuClass": "rtx5090", "workflow": "comfy-runtime/workflows/production/ultrareal-flux1-dev-fp8-rtx5090-api.json" },
-    { "id": "wan22-remix-14b-i2v-fp8-rtx4090", "familyId": "wan22-remix-14b-i2v-fp8", "gpuClass": "rtx4090", "workflow": "comfy-runtime/workflows/production/wan22-remix-14b-i2v-fp8-rtx4090-api.json", "width": 832, "height": 480, "frames": 33 },
-    { "id": "wan22-remix-14b-i2v-fp8-rtx5090", "familyId": "wan22-remix-14b-i2v-fp8", "gpuClass": "rtx5090", "workflow": "comfy-runtime/workflows/production/wan22-remix-14b-i2v-fp8-rtx5090-api.json", "width": 1280, "height": 704, "frames": 41 }
+    { "id": "ultrareal-flux1-dev-fp8-rtx4090", "familyId": "ultrareal-flux1-dev-fp8", "gpuClass": "rtx4090", "workflow": "comfy-runtime/workflows/production/ultrareal-flux1-dev-fp8-rtx4090-api.json", "capabilities": ["text_only"] },
+    { "id": "ultrareal-flux1-dev-fp8-rtx5090", "familyId": "ultrareal-flux1-dev-fp8", "gpuClass": "rtx5090", "workflow": "comfy-runtime/workflows/production/ultrareal-flux1-dev-fp8-rtx5090-api.json", "capabilities": ["text_only"] },
+    { "id": "wan22-remix-14b-i2v-fp8-rtx4090", "familyId": "wan22-remix-14b-i2v-fp8", "gpuClass": "rtx4090", "workflow": "comfy-runtime/workflows/production/wan22-remix-14b-i2v-fp8-rtx4090-api.json", "capabilities": ["first_frame_text"], "width": 832, "height": 480, "frames": 33 },
+    { "id": "wan22-remix-14b-i2v-fp8-rtx5090", "familyId": "wan22-remix-14b-i2v-fp8", "gpuClass": "rtx5090", "workflow": "comfy-runtime/workflows/production/wan22-remix-14b-i2v-fp8-rtx5090-api.json", "capabilities": ["first_frame_text"], "width": 1280, "height": 704, "frames": 41 }
   ],
   "legacy": [
     { "modelProfile": "flux2-klein-4b", "status": "legacy_verified", "defaultProduction": false, "preserveCache": true },

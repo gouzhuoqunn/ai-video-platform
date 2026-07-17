@@ -5,6 +5,7 @@ import wanRemixProductionApi from "../../../comfy-runtime/workflows/production/w
 
 export type WorkflowKey = "image_t2i" | "video_ti2v" | "video_i2v" | "video_flf2v";
 export type WorkflowOrigin = "official" | "community";
+export type WorkflowCapability = "first_frame_text" | "first_last_frame" | "text_only";
 
 export type WorkflowParameter = "prompt" | "negative_prompt" | "seed" | "width" | "height" | "frames";
 
@@ -19,6 +20,7 @@ export type WorkflowTemplate = {
   parameter_nodes: Partial<Record<WorkflowParameter, { node: string; input: string }>>;
   template: Record<string, unknown>;
   execution_status?: "api_executable_when_models_present" | "subgraph_registration_required" | "mock_second_round_placeholder";
+  capabilities: WorkflowCapability[];
 };
 
 export type WorkflowInputs = Partial<Record<WorkflowParameter, string | number>>;
@@ -41,6 +43,7 @@ export const WORKFLOW_TEMPLATES: Record<WorkflowKey, WorkflowTemplate> = {
     },
     template: ultraRealProductionApi as Record<string, unknown>,
     execution_status: "api_executable_when_models_present",
+    capabilities: ["text_only"],
   },
   video_ti2v: {
     key: "video_ti2v",
@@ -60,6 +63,7 @@ export const WORKFLOW_TEMPLATES: Record<WorkflowKey, WorkflowTemplate> = {
     },
     template: wan22Ti2v5bApi as Record<string, unknown>,
     execution_status: "api_executable_when_models_present",
+    capabilities: ["text_only"],
   },
   video_i2v: {
     key: "video_i2v",
@@ -79,6 +83,7 @@ export const WORKFLOW_TEMPLATES: Record<WorkflowKey, WorkflowTemplate> = {
     },
     template: wanRemixProductionApi as Record<string, unknown>,
     execution_status: "api_executable_when_models_present",
+    capabilities: ["first_frame_text"],
   },
   video_flf2v: {
     key: "video_flf2v",
@@ -104,6 +109,7 @@ export const WORKFLOW_TEMPLATES: Record<WorkflowKey, WorkflowTemplate> = {
       save_video: { class_type: "SaveVideo", inputs: { frames: ["sampler", 0] } },
     },
     execution_status: "mock_second_round_placeholder",
+    capabilities: ["first_last_frame"],
   },
 };
 
@@ -111,6 +117,7 @@ export function validateWorkflowTemplate(workflow: WorkflowTemplate) {
   const errors: string[] = [];
   if (!workflow.key) errors.push("workflow key is required");
   if (!workflow.version) errors.push("workflow version is required");
+  if (!workflow.capabilities.length) errors.push("workflow capability metadata is required");
   if (workflow.api_format !== "comfy_api_json") errors.push("workflow API format must be comfy_api_json");
   if (!workflow.output_node || !(workflow.output_node in workflow.template)) errors.push("output node is missing from template");
   const promptMapping = workflow.parameter_nodes.prompt;

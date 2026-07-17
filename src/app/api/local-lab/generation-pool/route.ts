@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
   const payload = await request.json().catch(() => ({})) as Payload;
   if (payload.action === "create") {
     const prompt = String(payload.prompt ?? "").trim();
-    const jobForm = payload.jobForm ?? (payload.generationType === "image" ? "image_only" : "video_from_generated_image");
+    const jobForm = (payload.jobForm ?? (payload.generationType === "image" ? "image_only" : "video_from_generated_image")) as Exclude<GenerationJobForm, "long_video_segment">;
     if (!["image_only", "video_from_generated_image", "video_from_existing_image"].includes(jobForm) || !prompt || prompt.length > 2000) return NextResponse.json({ error: "任务字段无效。" }, { status: 400 });
     const safety = validateProductionPrompt(prompt);
     if (!safety.allowed) return NextResponse.json({ error: safety.reason, code: safety.code }, { status: 400 });

@@ -30,6 +30,8 @@ export type ProductionReadiness = {
   gpu_inference_verified: boolean;
   normal_ui_pipeline_implemented: boolean;
   normal_ui_pipeline_gpu_verified: boolean;
+  long_video_pipeline_implemented: boolean;
+  long_video_pipeline_gpu_verified: boolean;
   daily_use_release_candidate: boolean;
   production_ready: boolean;
   nextAcceptance: string;
@@ -45,7 +47,13 @@ export function loadProductionVerification(filePath = PRODUCTION_VERIFICATION_PA
 
 export function loadProductionReadiness(filePath = PRODUCTION_READINESS_PATH): ProductionReadiness {
   const value = JSON.parse(readFileSync(filePath, "utf8")) as ProductionReadiness;
-  if (value.schemaVersion !== 1 || value.production_ready !== false || value.normal_ui_pipeline_gpu_verified !== false) throw new Error("production_readiness_semantics_invalid");
+  if (
+    value.schemaVersion !== 1
+    || value.production_ready !== false
+    || value.normal_ui_pipeline_gpu_verified !== false
+    || value.long_video_pipeline_implemented !== true
+    || value.long_video_pipeline_gpu_verified !== false
+  ) throw new Error("production_readiness_semantics_invalid");
   return value;
 }
 
@@ -68,7 +76,7 @@ export function productionReadinessGate(modelProfile: string, gpuClass?: string)
 
 export type EstimableTask = {
   generationType: "image" | "video";
-  jobForm?: "image_only" | "video_from_generated_image" | "video_from_existing_image";
+  jobForm?: "image_only" | "video_from_generated_image" | "video_from_existing_image" | "long_video_segment";
 };
 
 function range(valueMs: number, low = 0.8, high = 1.3) {

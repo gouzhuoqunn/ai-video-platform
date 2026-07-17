@@ -12,11 +12,11 @@ import {
   type GroupableProductionTask,
 } from "./production-pipeline";
 import { PRODUCTION_GPU_CLASSES, PRODUCTION_IMAGE_MODEL, PRODUCTION_VIDEO_MODEL, productionModelSummary } from "./production-models";
-import { loadSchedulerPolicy } from "./scheduler-policy";
+import { loadSchedulerPolicy, rankTasksForLoadedSession } from "./scheduler-policy";
 
 export type GenerationType = "image" | "video";
 export type GenerationPriority = "normal" | "immediate";
-export type GenerationJobForm = "image_only" | "video_from_generated_image" | "video_from_existing_image";
+export type GenerationJobForm = "image_only" | "video_from_generated_image" | "video_from_existing_image" | "long_video_segment";
 export type GenerationContentMode = "production" | "legacy_debug";
 export type GenerationTaskStatus =
   | "pending_confirmation"
@@ -78,6 +78,8 @@ export type GenerationTask = {
   currentAttemptId: string;
   attempts: GenerationAttempt[];
   outputMetadata: Record<string, string | number | boolean | null>;
+  longVideoProjectId: string | null;
+  longVideoSegmentIndex: number | null;
 };
 
 export type RejectedHost = { serverId: string; reasons: string[]; rejectedAt: string };
@@ -91,6 +93,8 @@ export type PersistedProductionSession = {
   estimatedRemainingMinutes: number;
   shutdownMode: "immediate" | "after_current" | null;
   automaticShutdownAt: string | null;
+  activeLongVideoProjectId?: string | null;
+  consecutiveLongVideoSegments?: number;
   updatedAt: string;
 };
 
@@ -218,6 +222,8 @@ function normalizeTask(task: Partial<GenerationTask> & Pick<GenerationTask, "id"
     currentAttemptId: attemptId,
     attempts: task.attempts?.length ? task.attempts : [{ id: attemptId, number: 1, status: "pending", resumeBoundary: "pending_confirmation", createdAt, completedAt: null, errorClass: null }],
     outputMetadata: task.outputMetadata ?? {},
+    longVideoProjectId: task.longVideoProjectId ?? null,
+    longVideoSegmentIndex: Number.isInteger(task.longVideoSegmentIndex) ? Number(task.longVideoSegmentIndex) : null,
   };
 }
 
@@ -260,7 +266,7 @@ export function createGenerationTask(input: Partial<GenerationTask> & Pick<Gener
 }
 
 export type NormalJobInput = {
-  jobForm: GenerationJobForm;
+  jobForm: Exclude<GenerationJobForm, "long_video_segment">;
   prompt: string;
   negativePrompt?: string;
   seed?: number | null;
@@ -433,7 +439,7 @@ function eligibleGroups(state: GenerationPoolState, type: GenerationType) {
     const key = [task.modelProfile, task.modelRevision, [...task.gpuPreference].sort().join("+"), task.width, task.height, task.frames ?? 1, task.contentMode].join("|");
     groups.set(key, [...(groups.get(key) ?? []), task]);
   }
-  return [...groups.values()].map((items) => items.sort((left, right) => left.priority === right.priority ? Date.parse(left.createdAt) - Date.parse(right.createdAt) : left.priority === "immediate" ? -1 : 1));
+  return [...groups.values()].map((items) => rankTasksForLoadedSession(items, state.scheduler.session));
 }
 
 function waitedLongEnough(task: GenerationTask, at: number, maximumWaitMinutes: number) {

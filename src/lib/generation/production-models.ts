@@ -24,7 +24,7 @@ type ProductionFamily = {
 type ProductionRegistry = {
   schemaVersion: 1;
   families: ProductionFamily[];
-  profiles: Array<{ id: string; familyId: string; gpuClass: string; workflow: string; width?: number; height?: number; frames?: number }>;
+  profiles: Array<{ id: string; familyId: string; gpuClass: string; workflow: string; capabilities: Array<"first_frame_text" | "first_last_frame" | "text_only">; width?: number; height?: number; frames?: number }>;
 };
 
 export function loadProductionModelRegistry(filePath = path.join(process.cwd(), "comfy-runtime", "production-model-registry.json")) {
@@ -48,5 +48,6 @@ export function productionModelSummary() {
     sharedBytes: family.sharedBytes,
     revision: family.revision,
     gpuProfiles: [...PRODUCTION_GPU_CLASSES],
+    workflowCapabilities: [...new Set(loadProductionModelRegistry().profiles.filter((profile) => profile.familyId === family.id).flatMap((profile) => profile.capabilities))],
   }]));
 }
