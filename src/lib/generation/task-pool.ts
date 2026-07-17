@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { getCloreDeploymentHold } from "../../../scripts/clore/deployment-hold";
-import { modelAvailabilityGate } from "./model-availability";
+import { modelAvailabilityGate, type ModelAvailabilityRegistry } from "./model-availability";
 import { PRODUCTION_GPU_CLASSES, PRODUCTION_IMAGE_MODEL, PRODUCTION_VIDEO_MODEL, productionModelSummary } from "./production-models";
 
 export type GenerationType = "image" | "video";
@@ -173,14 +173,14 @@ export function setGenerationTaskStatus(taskIds: string[], status: GenerationTas
   return writeGenerationPool(state, filePath);
 }
 
-export function armSpecificGenerationBatch(taskIds: string[], batchId: string, filePath = GENERATION_POOL_PATH) {
+export function armSpecificGenerationBatch(taskIds: string[], batchId: string, filePath = GENERATION_POOL_PATH, availabilityRegistry?: ModelAvailabilityRegistry) {
   if (!/^[A-Za-z0-9_-]{3,120}$/.test(batchId)) throw new Error("固定批次编号格式无效。");
   const state = readGenerationPool(filePath);
   const uniqueIds = [...new Set(taskIds)];
   const tasks = uniqueIds.map((id) => state.tasks.find((task) => task.id === id)).filter(Boolean) as GenerationTask[];
   if (tasks.length !== uniqueIds.length || tasks.length === 0) throw new Error("固定批次任务不存在或为空。");
   for (const task of tasks) {
-    const gate = modelAvailabilityGate(task.modelProfile);
+    const gate = modelAvailabilityGate(task.modelProfile, availabilityRegistry);
     if (!gate.allowed || !gate.model?.restoreReady) throw new Error(gate.reason);
     if (["completed", "failed", "cancelled"].includes(task.status)) throw new Error(`任务 ${task.id} 已结束，不能重新武装。`);
   }

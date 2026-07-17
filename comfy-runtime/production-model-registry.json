@@ -5,7 +5,7 @@
     "civitaiTokenPresent": true,
     "hfTokenPresent": true,
     "downloadOrDispatchAllowed": true,
-    "reason": "All locked Civitai and Hugging Face objects, including the FLUX VAE, returned authorized download responses. Stage 3Z cache run 29559576967 failed before downloads because the 6.7GB UMT5 requires multipart server-side copy."
+    "reason": "All locked sources are authorized and the 6.7GB UMT5 is safely shared by immutable R2 key. Stage 4A cache run 29563486550 failed before downloads because its fixed 40GiB ephemeral-runner disk guard exceeded the available space on both hosted runners."
   },
   "hardwarePolicy": {
     "providers": ["clore"],

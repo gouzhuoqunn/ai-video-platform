@@ -1,6 +1,6 @@
 {
-  "stage": "3Z",
-  "requestedAt": "2026-07-17T06:12:00Z",
-  "reason": "HF access authorized and exact R2 deduplication preflight passed",
+  "stage": "4A",
+  "requestedAt": "2026-07-17T07:30:26Z",
+  "reason": "Shared-object manifest, retention references, exact source access, and multipart-copy probe passed",
   "maxActualRuns": 1
 }

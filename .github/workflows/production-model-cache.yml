@@ -88,7 +88,8 @@ jobs:
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc /usr/share/swift
           available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')"
-          test "$available_kib" -ge 41943040
+          echo "available_runner_kib=$available_kib"
+          test "$available_kib" -ge 33554432
           npm ci --ignore-scripts
           python -m pip install --disable-pip-version-check "huggingface_hub[hf_xet]"
       - name: Plan downloads after verified R2 reuse

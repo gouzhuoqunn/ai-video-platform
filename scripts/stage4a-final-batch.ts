@@ -8,6 +8,7 @@ import {
   upsertGenerationTasks,
   type GenerationTask,
 } from "../src/lib/generation/task-pool";
+import type { ModelAvailabilityRegistry } from "../src/lib/generation/model-availability";
 
 export const STAGE4A_BATCH_ID = "stage4a-final-production";
 export const STAGE4A_IMAGE_TASK_ID = "stage4a-final-image-ultrareal-20260717";
@@ -64,7 +65,7 @@ function finalTasks(existing: GenerationTask[]) {
   ];
 }
 
-export function prepareStage4AFinalBatch(filePath?: string) {
+export function prepareStage4AFinalBatch(filePath?: string, availabilityRegistry?: ModelAvailabilityRegistry) {
   if (!getCloreDeploymentHold().enabled || !getRunPodDeploymentHold().enabled) throw new Error("provider_holds_must_remain_enabled");
   const current = readGenerationPool(filePath);
   const existing = STAGE4A_TASK_IDS.map((id) => current.tasks.find((task) => task.id === id)).filter(Boolean) as GenerationTask[];
@@ -74,7 +75,7 @@ export function prepareStage4AFinalBatch(filePath?: string) {
   }
   const tasks = finalTasks(current.tasks);
   upsertGenerationTasks(tasks, filePath);
-  const state = armSpecificGenerationBatch([...STAGE4A_TASK_IDS], STAGE4A_BATCH_ID, filePath);
+  const state = armSpecificGenerationBatch([...STAGE4A_TASK_IDS], STAGE4A_BATCH_ID, filePath, availabilityRegistry);
   return { prepared: true, reused: existing.length > 0, completed: false, paidExecutionAuthorized: false, state };
 }
 

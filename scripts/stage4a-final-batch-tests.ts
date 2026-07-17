@@ -4,10 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { prepareStage4AFinalBatch, STAGE4A_BATCH_ID, STAGE4A_IMAGE_TASK_ID, STAGE4A_TASK_IDS, STAGE4A_VIDEO_TASK_ID } from "./stage4a-final-batch";
 import { generationPoolSummary } from "../src/lib/generation/task-pool";
+import { loadModelAvailabilityRegistry } from "../src/lib/generation/model-availability";
 
 const file = path.join(mkdtempSync(path.join(os.tmpdir(), "stage4a-final-batch-")), "pool.json");
-const first = prepareStage4AFinalBatch(file);
-const second = prepareStage4AFinalBatch(file);
+const availability = loadModelAvailabilityRegistry();
+availability.models = availability.models.map((model) => ["ultrareal-flux1-dev-fp8", "wan22-remix-14b-i2v-fp8"].includes(model.modelProfile)
+  ? { ...model, cached: true, restoreReady: true }
+  : model);
+const first = prepareStage4AFinalBatch(file, availability);
+const second = prepareStage4AFinalBatch(file, availability);
 assert.equal(first.prepared, true);
 assert.equal(first.paidExecutionAuthorized, false);
 assert.equal(second.reused, true);
