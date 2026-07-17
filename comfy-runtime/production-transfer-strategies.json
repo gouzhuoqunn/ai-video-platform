@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "defaultChunkBytes": 268435456,
+  "maximumStreamingTempBytes": 805306368,
+  "objects": [
+    { "familyId": "ultrareal-flux1-dev-fp8", "path": "diffusion_models/ultrarealFineTune_v4_fp8.safetensors", "strategy": "ranged-stream" },
+    { "familyId": "ultrareal-flux1-dev-fp8", "path": "text_encoders/clip_l.safetensors", "strategy": "ranged-stream" },
+    { "familyId": "ultrareal-flux1-dev-fp8", "path": "text_encoders/t5xxl_fp8_e4m3fn_scaled.safetensors", "strategy": "ranged-stream" },
+    { "familyId": "ultrareal-flux1-dev-fp8", "path": "vae/ae.safetensors", "strategy": "ranged-stream" },
+    { "familyId": "wan22-remix-14b-i2v-fp8", "path": "diffusion_models/wan22RemixT2VI2V_i2vHighV30.safetensors", "strategy": "ranged-stream" },
+    { "familyId": "wan22-remix-14b-i2v-fp8", "path": "diffusion_models/wan22RemixT2VI2V_i2vLowV30.safetensors", "strategy": "ranged-stream" },
+    { "familyId": "wan22-remix-14b-i2v-fp8", "path": "vae/wan_2.1_vae.safetensors", "strategy": "ranged-stream" }
+  ],
+  "sharedObjects": [
+    {
+      "familyId": "wan22-remix-14b-i2v-fp8",
+      "path": "text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "strategy": "shared-r2-reference",
+      "sourceFamilyId": "wan22-ti2v-5b",
+      "bytes": 6735906897,
+      "sha256": "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68"
+    }
+  ]
+}

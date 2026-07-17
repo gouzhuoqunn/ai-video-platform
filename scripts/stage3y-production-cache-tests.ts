@@ -10,16 +10,16 @@ const workflow = YAML.parse(read(".github/workflows/production-model-cache.yml")
 assert.deepEqual(workflow.on.push.branches, ["codex/phase-3h-flux-parallel"]);
 assert.deepEqual(workflow.on.push.paths, [".github/stage3y-cache-trigger.json"]);
 assert.equal(workflow.concurrency["cancel-in-progress"], false);
-assert.equal(workflow.jobs.deduplicate["timeout-minutes"], 15);
-assert.equal(workflow.jobs.cache.needs, "deduplicate");
-assert.equal(workflow.jobs.cache["timeout-minutes"], 75);
-assert.equal(workflow.jobs.cache.strategy["fail-fast"], false);
-assert.deepEqual(workflow.jobs.cache.strategy.matrix.family, ["ultrareal-flux1-dev-fp8", "wan22-remix-14b-i2v-fp8"]);
-assert.deepEqual(workflow.jobs["final-readonly-verification"].needs, "cache");
-assert.match(read(".github/workflows/production-model-cache.yml"), /publish-local/);
+assert.equal(workflow.jobs.inventory["timeout-minutes"], 5);
+assert.equal(workflow.jobs["image-object"].strategy.matrix.include, "${{ fromJSON(needs.source-probes.outputs.image_matrix) }}");
+assert.equal(workflow.jobs["video-object"].strategy.matrix.include, "${{ fromJSON(needs.source-probes.outputs.video_matrix) }}");
+assert.deepEqual(workflow.jobs["publish-image"].needs, ["inventory", "image-object"]);
+assert.deepEqual(workflow.jobs["publish-video"].needs, ["inventory", "video-object"]);
+assert.deepEqual(workflow.jobs["final-readonly-verification"].needs, ["publish-image", "publish-video"]);
+assert.match(read(".github/workflows/production-model-cache.yml"), /publish-r2/);
 assert.match(read(".github/workflows/production-model-cache.yml"), /production-model-cache\.ts deduplicate/);
 assert.ok(!read(".github/workflows/production-model-cache.yml").includes("deduplicate --copy"));
-assert.match(read(".github/workflows/production-model-cache.yml"), /download-plan/);
+assert.match(read(".github/workflows/production-model-cache.yml"), /production-object-stream\.ts stream/);
 assert.match(read(".github/workflows/production-model-cache.yml"), /verify-readonly ultrareal-flux1-dev-fp8/);
 assert.match(read(".github/workflows/production-model-cache.yml"), /verify-readonly wan22-remix-14b-i2v-fp8/);
 assert.ok(!read(".github/workflows/production-model-cache.yml").includes("upload-artifact"));
@@ -43,4 +43,4 @@ for (const marker of ["minimumFreeDiskBytes", "objectPathMapping", "parallelDown
 const studio = read("src/components/LocalCreationStudio.tsx");
 for (const label of ["Image UltraReal Flux FP8", "Video Wan 2.2 Remix 14B FP8", "自动选择", "RTX 4090", "RTX 5090", "发布未完成"]) assert.ok(studio.includes(label));
 
-console.log(JSON.stringify({ ok: true, cacheDag: "two_parallel_families_then_final_readonly_verify", publishOrder: "objects_manifest_current", noArtifacts: true }));
+console.log(JSON.stringify({ ok: true, cacheDag: "seven_parallel_objects_then_family_publication_then_readonly", publishOrder: "objects_manifest_current", noArtifacts: true }));

@@ -623,6 +623,74 @@ export async function publishProductionFamily(familyId: string, localRoot: strin
   }
 }
 
+export async function publishProductionFamilyFromR2(familyId: string, generatedAt = new Date().toISOString()) {
+  const family = loadProductionFamilies().find((entry) => entry.id === familyId);
+  if (!family) throw new Error(`unknown_family:${familyId}`);
+  const creds = loadR2Credentials("model-cache-admin.env");
+  const client = createProductionS3Client(creds);
+  try {
+    const manifest = await resolveProductionManifest(client, creds.bucket, family, generatedAt);
+    for (const file of manifest.files) {
+      if (!await remoteObjectExists(client, creds.bucket, file.objectKey)) {
+        throw new Error(`production_object_missing:${family.id}:${file.path}`);
+      }
+      await verifyRemoteObject(client, creds.bucket, file);
+    }
+    const retentionReferences = await publishSharedRetentionReferences(client, creds.bucket, family, manifest);
+    const manifestPayload = `${JSON.stringify(manifest, null, 2)}\n`;
+    const current = buildCurrentPointer(family, manifest);
+    if (!await remoteObjectExists(client, creds.bucket, current.manifestKey)) {
+      await client.send(new PutObjectCommand({
+        Bucket: creds.bucket,
+        Key: current.manifestKey,
+        Body: manifestPayload,
+        ContentType: "application/json",
+        Metadata: { sha256: current.manifestSha256 },
+      }));
+    }
+    const manifestRead = await client.send(new GetObjectCommand({
+      Bucket: creds.bucket,
+      Key: current.manifestKey,
+    }));
+    if (createHash("sha256").update(await bodyBuffer(manifestRead.Body)).digest("hex") !== current.manifestSha256) {
+      throw new Error(`manifest_verify_failed:${family.id}`);
+    }
+    const currentPayload = `${JSON.stringify(current, null, 2)}\n`;
+    if (!await remoteObjectExists(client, creds.bucket, family.currentKey)) {
+      await client.send(new PutObjectCommand({
+        Bucket: creds.bucket,
+        Key: family.currentKey,
+        Body: currentPayload,
+        ContentType: "application/json",
+      }));
+    }
+    const currentRead = await client.send(new GetObjectCommand({
+      Bucket: creds.bucket,
+      Key: family.currentKey,
+    }));
+    const publishedCurrent = JSON.parse((await bodyBuffer(currentRead.Body)).toString("utf8")) as typeof current;
+    if (
+      publishedCurrent.familyId !== family.id
+      || publishedCurrent.revision !== family.revision
+      || publishedCurrent.manifestSha256 !== current.manifestSha256
+    ) throw new Error(`current_verify_failed:${family.id}`);
+    return {
+      familyId: family.id,
+      manifestKey: current.manifestKey,
+      currentKey: family.currentKey,
+      totalSizeBytes: manifest.totalSizeBytes,
+      objectCount: manifest.files.length,
+      sharedObjectCount: manifest.files.filter((file) => file.shared).length,
+      sharedBytes: manifest.files.filter((file) => file.shared).reduce((total, file) => total + file.bytes, 0),
+      retentionReferences,
+      publicationSource: "verified-r2-objects",
+      currentPublishedLast: true,
+    };
+  } finally {
+    client.destroy();
+  }
+}
+
 async function expectDenied(operation: () => Promise<unknown>, label: string) {
   try {
     await operation();
@@ -743,6 +811,10 @@ async function main() {
     const localRoot = process.argv[4];
     if (!familyId || !localRoot) throw new Error("usage: production-model-cache.ts publish-local <family-id> <local-root>");
     console.log(JSON.stringify(await publishProductionFamily(familyId, localRoot)));
+  } else if (command === "publish-r2") {
+    const familyId = process.argv[3];
+    if (!familyId) throw new Error("usage: production-model-cache.ts publish-r2 <family-id>");
+    console.log(JSON.stringify(await publishProductionFamilyFromR2(familyId)));
   } else if (command === "deduplicate") {
     console.log(JSON.stringify(await inventoryAndDeduplicateProductionObjects(), null, 2));
   } else if (command === "multipart-copy-probe") {

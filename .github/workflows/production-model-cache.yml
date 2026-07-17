@@ -1,4 +1,4 @@
-name: Stage 3Y production model cache
+name: Stage 4B production model cache
 
 on:
   workflow_dispatch:
@@ -15,17 +15,24 @@ concurrency:
   group: production-model-cache-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+  R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+  R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+  R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+  MODEL_CACHE_REGION: auto
+
 jobs:
-  deduplicate:
-    name: Inventory and deduplicate existing R2 objects
+  source-probes:
+    name: Validate source strategies and R2 multipart abort
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    outputs:
+      image_matrix: ${{ steps.strategy.outputs.image_matrix }}
+      video_matrix: ${{ steps.strategy.outputs.video_matrix }}
     env:
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-      MODEL_CACHE_REGION: auto
+      CIVITAI_API_TOKEN: ${{ secrets.CIVITAI_API_TOKEN }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,83 +40,126 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --ignore-scripts
-      - name: Resolve exact shared R2 references and retention plan
+      - name: Tiny authenticated Range, redirect, and nonzero-resume probes
+        run: npx tsx scripts/model-cache/production-object-stream.ts probe-sources "$RUNNER_TEMP/source-strategies.json"
+      - name: Multipart upload and abort probe
+        run: npx tsx scripts/model-cache/production-object-stream.ts multipart-abort-probe
+      - name: Emit verified per-object matrices
+        id: strategy
         shell: bash
         run: |
-          set -euo pipefail
-          npx tsx scripts/model-cache/production-model-cache.ts deduplicate | tee "$RUNNER_TEMP/deduplication-report.json"
-          {
-            echo '```json'
-            cat "$RUNNER_TEMP/deduplication-report.json"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          node -e 'const fs=require("fs"); const report=require(process.argv[1]); fs.appendFileSync(process.env.GITHUB_OUTPUT, `image_matrix=${JSON.stringify(report.imageMatrix)}\nvideo_matrix=${JSON.stringify(report.videoMatrix)}\n`)' "$RUNNER_TEMP/source-strategies.json"
 
-  cache:
-    name: Cache and publish ${{ matrix.family }}
-    needs: deduplicate
+  inventory:
+    name: Verify shared-object and retention plan
     runs-on: ubuntu-latest
-    timeout-minutes: 75
-    strategy:
-      fail-fast: false
-      matrix:
-        family:
-          - ultrareal-flux1-dev-fp8
-          - wan22-remix-14b-i2v-fp8
-    env:
-      CIVITAI_API_TOKEN: ${{ secrets.CIVITAI_API_TOKEN }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-      MODEL_CACHE_REGION: auto
-      HF_XET_HIGH_PERFORMANCE: "1"
-      HF_HUB_DOWNLOAD_TIMEOUT: "120"
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - uses: actions/setup-python@v5
+      - run: npm ci --ignore-scripts
+      - name: Resolve exact immutable R2 references
+        run: npx tsx scripts/model-cache/production-model-cache.ts deduplicate
+
+  image-object:
+    name: Image object · ${{ matrix.logical_object_key }}
+    runs-on: ubuntu-latest
+    needs: source-probes
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.source-probes.outputs.image_matrix) }}
+    env:
+      CIVITAI_API_TOKEN: ${{ secrets.CIVITAI_API_TOKEN }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          python-version: "3.12"
-      - name: Exact credential gate
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "${CIVITAI_API_TOKEN:-}"
-          test -n "${HF_TOKEN:-}"
-          test -n "${R2_ACCESS_KEY_ID:-}"
-          test -n "${R2_SECRET_ACCESS_KEY:-}"
-          test -n "${R2_ACCOUNT_ID:-}"
-          test -n "${R2_BUCKET_NAME:-}"
-      - name: Install bounded tooling
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc /usr/share/swift
-          available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')"
-          echo "available_runner_kib=$available_kib"
-          test "$available_kib" -ge 33554432
-          npm ci --ignore-scripts
-          python -m pip install --disable-pip-version-check "huggingface_hub[hf_xet]"
-      - name: Plan downloads after verified R2 reuse
-        run: npx tsx scripts/model-cache/production-model-cache.ts download-plan "${{ matrix.family }}" > "$RUNNER_TEMP/download-plan.json"
-      - name: Download locked files in parallel and verify full SHA
-        run: python scripts/model-cache/production-cache-download.py --family "${{ matrix.family }}" --output "$RUNNER_TEMP/model" --download-plan "$RUNNER_TEMP/download-plan.json"
-      - name: Multipart upload, verify objects, publish manifest, publish current last
-        run: npx tsx scripts/model-cache/production-model-cache.ts publish-local "${{ matrix.family }}" "$RUNNER_TEMP/model"
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Stream one image object to R2
+        run: >-
+          npx tsx scripts/model-cache/production-object-stream.ts stream
+          ultrareal-flux1-dev-fp8
+          "${{ matrix.logical_object_key }}"
+          "${{ matrix.strategy }}"
+
+  video-object:
+    name: Video object · ${{ matrix.logical_object_key }}
+    runs-on: ubuntu-latest
+    needs: source-probes
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.source-probes.outputs.video_matrix) }}
+    env:
+      CIVITAI_API_TOKEN: ${{ secrets.CIVITAI_API_TOKEN }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Stream one video object to R2
+        run: >-
+          npx tsx scripts/model-cache/production-object-stream.ts stream
+          wan22-remix-14b-i2v-fp8
+          "${{ matrix.logical_object_key }}"
+          "${{ matrix.strategy }}"
+
+  publish-image:
+    name: Publish image manifest and current
+    needs:
+      - inventory
+      - image-object
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Verify all four objects and publish current last
+        run: npx tsx scripts/model-cache/production-model-cache.ts publish-r2 ultrareal-flux1-dev-fp8
+
+  publish-video:
+    name: Publish video retention, manifest, and current
+    needs:
+      - inventory
+      - video-object
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Verify unique and shared objects, then publish current last
+        run: npx tsx scripts/model-cache/production-model-cache.ts publish-r2 wan22-remix-14b-i2v-fp8
 
   final-readonly-verification:
     name: Verify both production families through readonly R2
-    needs: cache
+    needs:
+      - publish-image
+      - publish-video
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 7
     env:
-      R2_READONLY_ACCESS_KEY_ID: ${{ secrets.R2_READONLY_ACCESS_KEY_ID }}
-      R2_READONLY_SECRET_ACCESS_KEY: ${{ secrets.R2_READONLY_SECRET_ACCESS_KEY }}
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-      MODEL_CACHE_REGION: auto
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_READONLY_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_READONLY_SECRET_ACCESS_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -119,5 +169,5 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Verify image current, manifest, objects, ranges, and readonly boundary
         run: npx tsx scripts/model-cache/production-model-cache.ts verify-readonly ultrareal-flux1-dev-fp8
-      - name: Verify video current, manifest, objects, ranges, and readonly boundary
+      - name: Verify video current, manifest, objects, ranges, retention, and readonly boundary
         run: npx tsx scripts/model-cache/production-model-cache.ts verify-readonly wan22-remix-14b-i2v-fp8

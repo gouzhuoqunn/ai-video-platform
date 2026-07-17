@@ -49,11 +49,11 @@ for (const marker of [
 ]) assert.ok(cache.includes(marker), marker);
 
 const workflow = YAML.parse(read(".github/workflows/production-model-cache.yml"));
-assert.equal(workflow.jobs.cache.needs, "deduplicate");
-assert.equal(workflow.jobs.cache["timeout-minutes"], 75);
-assert.equal(workflow.jobs.cache.strategy["fail-fast"], false);
-assert.deepEqual(workflow.jobs.cache.strategy.matrix.family, [image.id, video.id]);
-assert.equal(workflow.jobs["final-readonly-verification"].needs, "cache");
+assert.equal(workflow.jobs["image-object"].strategy.matrix.include, "${{ fromJSON(needs.source-probes.outputs.image_matrix) }}");
+assert.equal(workflow.jobs["video-object"].strategy.matrix.include, "${{ fromJSON(needs.source-probes.outputs.video_matrix) }}");
+assert.deepEqual(workflow.jobs["publish-image"].needs, ["inventory", "image-object"]);
+assert.deepEqual(workflow.jobs["publish-video"].needs, ["inventory", "video-object"]);
+assert.deepEqual(workflow.jobs["final-readonly-verification"].needs, ["publish-image", "publish-video"]);
 assert.ok(!read(".github/workflows/production-model-cache.yml").includes("upload-artifact"));
 assert.ok(!read(".github/workflows/production-model-cache.yml").includes("deduplicate --copy"));
 

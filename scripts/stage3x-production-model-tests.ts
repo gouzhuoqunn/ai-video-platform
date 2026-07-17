@@ -93,12 +93,14 @@ assert.ok(RESTORE_CONTROLLER_POLICY.forbidden.includes("R2 admin credentials on 
 
 const workflowYaml = text(".github/workflows/production-model-cache.yml");
 const parsedWorkflow = YAML.parse(workflowYaml);
-assert.deepEqual(Object.keys(parsedWorkflow.jobs), ["deduplicate", "cache", "final-readonly-verification"]);
-assert.equal(parsedWorkflow.jobs.cache.needs, "deduplicate");
-assert.equal(parsedWorkflow.jobs.cache.strategy.matrix.family.length, 2);
+assert.deepEqual(Object.keys(parsedWorkflow.jobs), ["source-probes", "inventory", "image-object", "video-object", "publish-image", "publish-video", "final-readonly-verification"]);
+assert.equal(parsedWorkflow.jobs["image-object"].needs, "source-probes");
+assert.equal(parsedWorkflow.jobs["video-object"].needs, "source-probes");
+assert.deepEqual(parsedWorkflow.jobs["publish-image"].needs, ["inventory", "image-object"]);
+assert.deepEqual(parsedWorkflow.jobs["publish-video"].needs, ["inventory", "video-object"]);
 assert.match(workflowYaml, /timeout-minutes: 75/);
 assert.match(workflowYaml, /CIVITAI_API_TOKEN/);
-assert.match(workflowYaml, /hf_xet/);
+assert.match(workflowYaml, /production-object-stream\.ts stream/);
 assert.ok(!workflowYaml.includes("upload-artifact"));
 const studio = text("src/components/LocalCreationStudio.tsx");
 for (const label of ["Image UltraReal Flux FP8", "Video Wan 2.2 Remix 14B FP8", "自动选择", "RTX 4090", "RTX 5090"]) assert.ok(studio.includes(label));
