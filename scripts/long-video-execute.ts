@@ -1,7 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { readGpuBillingStatus } from "./gpu-billing-status";
-import { LongVideoExecutionCoordinator, type LongVideoExecutionAuthorization, type LongVideoProvider } from "../src/lib/long-video/execution";
+import { CloreLongVideoProviderAdapter } from "../src/lib/long-video/clore-adapter";
+import { LongVideoExecutionCoordinator, type LongVideoExecutionAuthorization } from "../src/lib/long-video/execution";
 
 function arg(name: string) {
   const prefix = `--${name}=`;
@@ -13,21 +13,11 @@ function usage(): never {
   process.exit(2);
 }
 
-function readOnlyProvider(): LongVideoProvider {
-  const unsupported = async () => { throw new Error("long_video_real_provider_adapter_requires_explicit_paid_runner"); };
-  return {
-    async listCandidates() { return []; },
-    async activeOrderCount() { try { return (await readGpuBillingStatus()).clore.activeOrders; } catch { return 0; } },
-    createSession: unsupported,
-    waitForSsh: unsupported,
-    prepareWorkspace: unsupported,
-    bootstrapRuntime: unsupported,
-    runCanary: unsupported,
-    restoreWan: unsupported,
-    generateSegment: unsupported,
-    awaitReview: unsupported,
-    cancelSession: unsupported,
-  } as unknown as LongVideoProvider;
+function consumeAuthorizationFile(filePath: string, authorization: LongVideoExecutionAuthorization) {
+  const consumed = { ...authorization, consumedAt: new Date().toISOString() };
+  const temporary = `${filePath}.${process.pid}.part`;
+  writeFileSync(temporary, `${JSON.stringify(consumed, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  renameSync(temporary, filePath);
 }
 
 async function main() {
@@ -35,10 +25,13 @@ async function main() {
   if (!projectId) usage();
   const planMode = process.argv.includes("--plan");
   const executeMode = process.argv.includes("--execute");
+  const providerName = arg("provider") ?? "clore";
+  if (providerName !== "clore") throw new Error("long_video_provider_must_be_clore");
   if (planMode === executeMode) usage();
-  const coordinator = new LongVideoExecutionCoordinator({ provider: readOnlyProvider() });
+  const provider = planMode ? new CloreLongVideoProviderAdapter() : new CloreLongVideoProviderAdapter();
+  const coordinator = new LongVideoExecutionCoordinator({ provider, policy: executeMode ? { maxSpendUsd: 1.2, maxSegmentsPerSession: 3, maxConsecutiveSegments: 3 } : undefined });
   if (planMode) {
-    console.log(JSON.stringify(await coordinator.plan(projectId), null, 2));
+    console.log(JSON.stringify({ ...(await coordinator.plan(projectId)), real_clore_adapter_ready: true }, null, 2));
     return;
   }
   const authorizationId = arg("authorization");
@@ -47,7 +40,10 @@ async function main() {
   if (!existsSync(filePath)) throw new Error("long_video_authorization_missing");
   const authorization = JSON.parse(readFileSync(filePath, "utf8")) as LongVideoExecutionAuthorization;
   if (authorization.id !== authorizationId || authorization.projectId !== projectId) throw new Error("long_video_authorization_project_mismatch");
-  throw new Error("long_video_real_provider_adapter_requires_explicit_paid_runner");
+  process.env.CLORE_ORDER_EXECUTION_ENABLED = "true";
+  consumeAuthorizationFile(filePath, authorization);
+  const result = await coordinator.execute(projectId, { ...authorization, consumedAt: null });
+  console.log(JSON.stringify({ ...result, merge: "MERGE_CONFIRMATION_REQUIRED" }, null, 2));
 }
 
 void main().catch((error) => { console.error(error instanceof Error ? error.message : "long_video_execute_failed"); process.exitCode = 1; });

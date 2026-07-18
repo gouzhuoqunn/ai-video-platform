@@ -16,6 +16,7 @@ import {
   markLongVideoMergeStarted,
   commitLongVideoMerge,
   completeLongVideoSegmentCleanup,
+  deleteLongVideoProjectTasks,
   prepareLongVideoSegmentAttempt,
   recordLongVideoSegmentOutput,
   reviewLongVideoSegment,
@@ -237,6 +238,10 @@ export class LongVideoExecutionCoordinator {
     validateAuthorization(projectId, authorization, this.policy, started);
     const plan = await this.plan(projectId);
     if (!plan.real_project_plan_ready) throw new Error(`long_video_plan_blocked:${plan.blockers.join(",")}`);
+    // The project creation flow leaves a boundary task in the generation pool.
+    // Direct real-session execution owns the full sequence, so remove that
+    // stale task before provisioning to prevent a second scheduler attempt.
+    deleteLongVideoProjectTasks(project);
     const consumed = readConsumedAuthorizations(this.authorizationLedgerPath);
     if (consumed.includes(authorization.id)) throw new Error("long_video_authorization_consumed");
     if (this.readSession()?.active) throw new Error("long_video_active_session_exists");
@@ -250,12 +255,20 @@ export class LongVideoExecutionCoordinator {
       active: true, createdAt: started.toISOString(), updatedAt: started.toISOString(),
     };
     atomicWrite(this.authorizationLedgerPath, { schemaVersion: 1, ids: [...consumed, authorization.id], updatedAt: started.toISOString() });
-    authorization.consumedAt = started.toISOString();
     this.saveSession(session);
     let providerSession: LongVideoProviderSession | null = null;
     try {
       await this.transition(project, "provisioning");
-      providerSession = await this.provider.createSession({ projectId, authorization, candidate: candidates[0] });
+      let createError: unknown = null;
+      for (const candidate of candidates.slice(0, 2)) {
+        try {
+          providerSession = await this.provider.createSession({ projectId, authorization, candidate });
+          break;
+        } catch (error) {
+          createError = error;
+        }
+      }
+      if (!providerSession) throw createError instanceof Error ? createError : new Error("long_video_provider_session_create_failed");
       session.providerSessionId = providerSession.sessionId; session.orderId = providerSession.orderId; session.serverId = providerSession.serverId; session.updatedAt = this.now().toISOString(); this.saveSession(session);
       await this.provider.waitForSsh(providerSession); session.runtimeState = "ssh_ready"; session.updatedAt = this.now().toISOString(); this.saveSession(session); await this.transition(getLongVideoProject(projectId, this.statePath)!, "ssh_ready");
       await this.provider.prepareWorkspace(providerSession); await this.provider.bootstrapRuntime(providerSession); await this.provider.runCanary(providerSession);

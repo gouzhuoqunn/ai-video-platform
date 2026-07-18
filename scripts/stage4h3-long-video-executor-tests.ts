@@ -72,7 +72,7 @@ const provider = new FakeProvider();
 const authorization: LongVideoExecutionAuthorization = { id: "fake-auth", projectId, provider: "clore", gpuProfile: "rtx4090", oneUse: true, expiresAt: new Date(fakeNow.getTime() + 60_000).toISOString(), maxSpendUsd: 0.75, releaseHold: true };
 const coordinator = new LongVideoExecutionCoordinator({ provider, statePath, sessionPath, libraryDir, now: () => new Date(fakeNow) });
 void (async () => {
-assert.match(readFileSync(path.join(process.cwd(), "src/components/BillingPanel.tsx"), "utf8"), /费用情况/);
+assert.match(readFileSync(path.join(process.cwd(), "src/components/BillingPanel.tsx"), "utf8"), /璧勮垂鎯呭喌/);
 assert.match(readFileSync(path.join(process.cwd(), "src/components/BillingPanel.tsx"), "utf8"), /useEffect/);
 assert.match(readFileSync(path.join(process.cwd(), "src/components/FirstFrameInput.tsx"), "utf8"), /onDrop/);
 assert.match(readFileSync(path.join(process.cwd(), "src/components/FirstFrameInput.tsx"), "utf8"), /onPaste/);
