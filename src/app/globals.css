@@ -1,5 +1,47 @@
 @import "tailwindcss";
 
+.studio-task-grid {
+  grid-template-columns: repeat(1, minmax(0, 1fr));
+}
+
+@media (min-width: 480px) {
+  .studio-task-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 800px) {
+  .studio-shell {
+    grid-template-columns: minmax(0, 1fr) 320px;
+    padding-inline: 12px;
+  }
+
+  .studio-sidebar {
+    position: sticky;
+    top: 60px;
+    align-self: start;
+    height: calc(100vh - 72px);
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+
+  .studio-task-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1100px) {
+  .studio-task-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1366px) {
+  .studio-task-grid {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+  }
+}
+
 :root {
   color-scheme: light;
   background: #f5f0e8;

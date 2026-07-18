@@ -1,10 +1,12 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element */
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FirstFrameInput } from "@/components/FirstFrameInput";
 
 type ImageResult = { sessionId: string; date: string; imageUrl: string };
-type Segment = {
+export type LongVideoSegment = {
   id: string;
   sequenceIndex: number;
   startSecond: number;
@@ -18,7 +20,7 @@ type Segment = {
   attempts: Array<{ id: string; number: number; status: string }>;
   version: number;
 };
-type Project = {
+export type LongVideoProject = {
   id: string;
   title: string;
   overallPrompt: string;
@@ -38,10 +40,10 @@ type Project = {
   version: number;
   createdAt: string;
   updatedAt: string;
-  segments: Segment[];
+  segments: LongVideoSegment[];
 };
 
-type Props = { imageResults: ImageResult[] };
+type Props = { imageResults: ImageResult[]; editorOnly?: boolean };
 const LONG_VIDEO_DRAFT_KEY = "ai-video-platform:long-video-draft:v1";
 type DraftSegment = { sequenceIndex: number; startSecond: number; endSecond: number; prompt: string };
 
@@ -62,17 +64,17 @@ const statusLabels: Record<string, string> = {
   invalidated: "已失效",
 };
 
-function segmentLabel(segment: Pick<Segment, "startSecond" | "endSecond">) {
+function segmentLabel(segment: Pick<LongVideoSegment, "startSecond" | "endSecond">) {
   return `${segment.startSecond + 1}～${segment.endSecond}秒`;
 }
 
-function publicMediaUrl(projectId: string, kind: string, segment?: Segment) {
+export function longVideoPublicMediaUrl(projectId: string, kind: string, segment?: LongVideoSegment) {
   const query = segment ? `?sequence=${segment.sequenceIndex}${segment.selectedAttemptId ? `&attempt=${segment.selectedAttemptId}` : ""}` : "";
   return `/api/local-lab/long-video/${projectId}/media/${kind}${query}`;
 }
 
-export function LongVideoStudio({ imageResults }: Props) {
-  const [projects, setProjects] = useState<Project[]>([]);
+export function LongVideoStudio({ imageResults, editorOnly = false }: Props) {
+  const [projects, setProjects] = useState<LongVideoProject[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [detailId, setDetailId] = useState("");
   const [segmentIndex, setSegmentIndex] = useState(0);
@@ -82,7 +84,7 @@ export function LongVideoStudio({ imageResults }: Props) {
   const [prompts, setPrompts] = useState<string[]>(Array(3).fill(""));
   const [promptArchive, setPromptArchive] = useState<Record<number, string>>({});
   const [focusedDraftIndex, setFocusedDraftIndex] = useState(0);
-  const [firstFrameSource, setFirstFrameSource] = useState<Project["firstFrameSource"]>("existing_image");
+  const [firstFrameSource, setFirstFrameSource] = useState<LongVideoProject["firstFrameSource"]>("existing_image");
   const [existingImageId, setExistingImageId] = useState("");
   const [uploadRef, setUploadRef] = useState("");
   const [videoProfile, setVideoProfile] = useState<"low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090">("low_video_4090");
@@ -105,7 +107,7 @@ export function LongVideoStudio({ imageResults }: Props) {
 
   const refresh = useCallback(async () => {
     const response = await fetch("/api/local-lab/long-video");
-    const payload = await response.json().catch(() => ({})) as { projects?: Project[] };
+    const payload = await response.json().catch(() => ({})) as { projects?: LongVideoProject[] };
     if (!response.ok) return;
     setProjects(payload.projects ?? []);
     setSelectedId((current) => current || payload.projects?.[0]?.id || "");
@@ -171,7 +173,7 @@ export function LongVideoStudio({ imageResults }: Props) {
     try {
       const gpu = videoProfile === "low_video_4090" || videoProfile === "medium_video_4090" ? "rtx4090" : "rtx5090";
       const response = await fetch("/api/local-lab/long-video", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "create", title, overallPrompt, firstFrameSource, firstFrameRef, targetDurationSeconds: duration, segments: draftSegments, gpuPreference: [gpu], resolutionProfile: videoProfile, generationResolution: videoProfile === "low_video_4090" ? "832x480" : "1280x720", finalResolution: videoProfile === "high_video_5090" ? "1920x1080" : videoProfile === "low_video_4090" ? "832x480" : "1280x720" }) });
-      const payload = await response.json().catch(() => ({})) as { project?: Project; error?: string };
+      const payload = await response.json().catch(() => ({})) as { project?: LongVideoProject; error?: string };
       if (!response.ok || !payload.project) { setNotice(payload.error ?? "无法创建长视频项目。"); return; }
       setProjects((current) => [payload.project!, ...current.filter((project) => project.id !== payload.project!.id)]);
       setSelectedId(payload.project.id);
@@ -215,22 +217,22 @@ export function LongVideoStudio({ imageResults }: Props) {
     } finally { setBusy(false); }
   }
 
-  async function patchProject(action: string, segment?: Segment, extra: Record<string, unknown> = {}) {
+  async function patchProject(action: string, segment?: LongVideoSegment, extra: Record<string, unknown> = {}) {
     if (!detailProject || busy) return;
     setBusy(true);
     try {
       const response = await fetch(`/api/local-lab/long-video/${detailProject.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, expectedProjectVersion: detailProject.version, expectedSegmentVersion: segment?.version, sequenceIndex: segment?.sequenceIndex, ...extra }) });
-      const payload = await response.json().catch(() => ({})) as { project?: Project; error?: string };
+      const payload = await response.json().catch(() => ({})) as { project?: LongVideoProject; error?: string };
       if (!response.ok || !payload.project) { setNotice(payload.error ?? "项目状态已改变，请刷新后重试。"); await refresh(); return; }
       setProjects((current) => current.map((project) => project.id === payload.project!.id ? payload.project! : project));
       setNotice(action === "accept" ? "本段已确认，下一段仍需审核或等待 20 秒自动继续。" : action === "regenerate" ? "已保留旧尝试，并阻断所有下游分段。" : action === "pause" ? "项目已暂停，状态和已完成媒体已保存。" : action === "resume" ? "项目已恢复，将从第一段未完成分段继续。" : "项目状态已更新。");
     } finally { setBusy(false); }
   }
 
-  async function savePrompt(project: Project, segment: Segment, value: string) {
+  async function savePrompt(project: LongVideoProject, segment: LongVideoSegment, value: string) {
     if (value === segment.prompt) return;
     const response = await fetch(`/api/local-lab/long-video/${project.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "update_prompt", expectedProjectVersion: project.version, expectedSegmentVersion: segment.version, sequenceIndex: segment.sequenceIndex, prompt: value }) });
-    const payload = await response.json().catch(() => ({})) as { project?: Project; error?: string };
+    const payload = await response.json().catch(() => ({})) as { project?: LongVideoProject; error?: string };
     if (response.ok && payload.project) setProjects((current) => current.map((item) => item.id === project.id ? payload.project! : item));
     else setNotice(payload.error ?? "提示词保存失败，请刷新后重试。");
   }
@@ -250,14 +252,14 @@ export function LongVideoStudio({ imageResults }: Props) {
     setBusy(true);
     try {
       const response = await fetch(`/api/local-lab/long-video/${detailProject.id}/merge`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ expectedProjectVersion: detailProject.version }) });
-      const payload = await response.json().catch(() => ({})) as { project?: Project; error?: string };
+      const payload = await response.json().catch(() => ({})) as { project?: LongVideoProject; error?: string };
       if (!response.ok || !payload.project) { setNotice(payload.error ?? "合并失败，已保留分段媒体。"); return; }
       setProjects((current) => current.map((project) => project.id === payload.project!.id ? payload.project! : project));
       setNotice("长视频已合并并验证；分段媒体仅在最终文件有效后清理。");
     } finally { setBusy(false); }
   }
 
-  async function deleteProject(project: Project) {
+  async function deleteProject(project: LongVideoProject) {
     if (!window.confirm(`确认删除“${project.title}”？已完成媒体也会被安全删除。`)) return;
     const response = await fetch(`/api/local-lab/long-video/${project.id}?version=${project.version}`, { method: "DELETE" });
     const payload = await response.json().catch(() => ({})) as { error?: string };
@@ -270,9 +272,9 @@ export function LongVideoStudio({ imageResults }: Props) {
 
   const cover = useMemo(() => {
     if (!selectedProject) return null;
-    if (selectedProject.status === "completed") return publicMediaUrl(selectedProject.id, "thumbnail");
+    if (selectedProject.status === "completed") return longVideoPublicMediaUrl(selectedProject.id, "thumbnail");
     const segment = selectedProject.segments.find((candidate) => ["awaiting_review", "accepted"].includes(candidate.status) && candidate.selectedAttemptId);
-    return segment ? publicMediaUrl(selectedProject.id, "segment-thumbnail", segment) : null;
+    return segment ? longVideoPublicMediaUrl(selectedProject.id, "segment-thumbnail", segment) : null;
   }, [selectedProject]);
 
   return (
@@ -292,7 +294,7 @@ export function LongVideoStudio({ imageResults }: Props) {
             <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-semibold">分段提示词</h3><p className="text-xs text-stone-500">已填写 {filledDraftCount}/{draftSegments.length} 段；整体提示词只是共享上下文。</p></div><button className="rounded border border-stone-300 bg-white px-2 py-1 text-xs" onClick={fillEmptyDraftPrompts} type="button">填充空白段</button></div>
             {draftSegments.length <= 6 ? <div className="mt-3 grid gap-2 md:grid-cols-2">{draftSegments.map((segment) => <label className="text-sm font-semibold" key={segment.sequenceIndex}>{segment.startSecond + 1}～{segment.endSecond}秒<textarea className="mt-1 min-h-20 w-full rounded-md border border-stone-200 bg-white p-2 font-normal" maxLength={2000} onChange={(event) => changeDraftPrompt(segment.sequenceIndex, event.target.value)} value={segment.prompt} /></label>)}</div> : <div className="mt-3"><div className="flex items-center justify-between gap-2"><button className="rounded border border-stone-300 bg-white px-2 py-1 text-xs" disabled={focusedDraftIndex === 0} onClick={() => setFocusedDraftIndex((current) => current - 1)} type="button">上一段</button><span className="text-xs text-stone-500">第 {focusedDraftIndex + 1}/{draftSegments.length} 段</span><button className="rounded border border-stone-300 bg-white px-2 py-1 text-xs" disabled={focusedDraftIndex === draftSegments.length - 1} onClick={() => setFocusedDraftIndex((current) => current + 1)} type="button">下一段</button></div><label className="mt-2 block text-sm font-semibold">{draftSegments[focusedDraftIndex].startSecond + 1}～{draftSegments[focusedDraftIndex].endSecond}秒<textarea className="mt-1 min-h-24 w-full rounded-md border border-stone-200 bg-white p-2 font-normal" maxLength={2000} onChange={(event) => changeDraftPrompt(focusedDraftIndex, event.target.value)} value={draftSegments[focusedDraftIndex].prompt} /></label></div>}
           </div>
-          <div className="space-y-2 text-sm"><label className="font-semibold">首帧来源<select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setFirstFrameSource(event.target.value as Project["firstFrameSource"])} value={firstFrameSource}><option value="upload">上传首帧图片</option><option value="existing_image">选择已验证图片</option><option value="pure_prompt">纯提示词生成首帧</option></select></label>
+          <div className="space-y-2 text-sm"><label className="font-semibold">首帧来源<select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setFirstFrameSource(event.target.value as LongVideoProject["firstFrameSource"])} value={firstFrameSource}><option value="upload">上传首帧图片</option><option value="existing_image">选择已验证图片</option><option value="pure_prompt">纯提示词生成首帧</option></select></label>
             {firstFrameSource !== "pure_prompt" ? <FirstFrameInput existingImages={imageResults} selectedExistingId={firstFrameSource === "existing_image" ? existingImageId : ""} onSelectExisting={(id) => { setExistingImageId(id); setUploadRef(""); setFirstFrameSource("existing_image"); }} onFile={uploadFirstFrame} onRemove={() => { setUploadRef(""); }} disabled={busy} /> : null}
           </div>
         </div>
@@ -301,15 +303,15 @@ export function LongVideoStudio({ imageResults }: Props) {
 
       {notice ? <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">{notice}</p> : null}
 
-      <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
+      {!editorOnly ? <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
         <div className="flex items-center justify-between"><div><h2 className="text-lg font-bold">长视频项目</h2><p className="text-sm text-stone-500">已完成分段 {completedCount}/{detailProject?.totalSegments ?? 0} · 无 GPU 订单时仅保存任务状态。</p></div><span className="text-xs text-stone-500">{projects.length} 个项目</span></div>
-        {projects.length === 0 ? <p className="mt-4 rounded-md bg-[#faf8f4] px-3 py-4 text-sm text-stone-500">还没有长视频项目。</p> : <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{projects.map((project) => <article className={`rounded-lg border p-3 ${selectedId === project.id ? "border-stone-900 bg-[#faf8f4]" : "border-stone-200"}`} key={project.id}><button className="w-full text-left" onClick={() => { setSelectedId(project.id); setDetailId(project.id); setSegmentIndex(Math.min(project.nextSegmentIndex, project.totalSegments - 1)); }} type="button"><div className="aspect-video overflow-hidden rounded-md bg-stone-100">{project.status === "completed" ? <video className="h-full w-full object-cover" muted playsInline src={publicMediaUrl(project.id, "video")} /> : cover && selectedId === project.id ? <img alt="长视频封面" className="h-full w-full object-cover" src={cover} /> : <div className="flex h-full items-center justify-center text-sm text-stone-500">待生成分段</div>}</div><div className="mt-3 flex items-center justify-between gap-2"><p className="font-semibold">{project.title}</p><span className="rounded border border-stone-200 px-2 py-1 text-xs">{statusLabels[project.status] ?? project.status}</span></div><p className="mt-1 text-xs text-stone-500">{project.targetDurationSeconds}秒 · {project.segments.filter((segment) => segment.status === "accepted").length}/{project.totalSegments}段 · 会话 {project.estimate.likelySessions.min}–{project.estimate.likelySessions.max}</p></button><div className="mt-3 flex flex-wrap gap-2"><button className="rounded border border-stone-300 px-2 py-1 text-xs" onClick={() => { setDetailId(project.id); setSegmentIndex(Math.min(project.nextSegmentIndex, project.totalSegments - 1)); }} type="button">查看详情</button>{project.status === "paused" ? <button className="rounded border border-emerald-300 px-2 py-1 text-xs text-emerald-700" onClick={() => { setDetailId(project.id); void patchProject("resume"); }} type="button">继续</button> : null}<button className="rounded border border-rose-200 px-2 py-1 text-xs text-rose-700" onClick={() => void deleteProject(project)} type="button">删除</button></div></article>)}</div>}
-      </section>
+        {projects.length === 0 ? <p className="mt-4 rounded-md bg-[#faf8f4] px-3 py-4 text-sm text-stone-500">还没有长视频项目。</p> : <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{projects.map((project) => <article className={`rounded-lg border p-3 ${selectedId === project.id ? "border-stone-900 bg-[#faf8f4]" : "border-stone-200"}`} key={project.id}><button className="w-full text-left" onClick={() => { setSelectedId(project.id); setDetailId(project.id); setSegmentIndex(Math.min(project.nextSegmentIndex, project.totalSegments - 1)); }} type="button"><div className="aspect-video overflow-hidden rounded-md bg-stone-100">{project.status === "completed" ? <video className="h-full w-full object-cover" muted playsInline src={longVideoPublicMediaUrl(project.id, "video")} /> : cover && selectedId === project.id ? <img alt="长视频封面" className="h-full w-full object-cover" src={cover} /> : <div className="flex h-full items-center justify-center text-sm text-stone-500">待生成分段</div>}</div><div className="mt-3 flex items-center justify-between gap-2"><p className="font-semibold">{project.title}</p><span className="rounded border border-stone-200 px-2 py-1 text-xs">{statusLabels[project.status] ?? project.status}</span></div><p className="mt-1 text-xs text-stone-500">{project.targetDurationSeconds}秒 · {project.segments.filter((segment) => segment.status === "accepted").length}/{project.totalSegments}段 · 会话 {project.estimate.likelySessions.min}–{project.estimate.likelySessions.max}</p></button><div className="mt-3 flex flex-wrap gap-2"><button className="rounded border border-stone-300 px-2 py-1 text-xs" onClick={() => { setDetailId(project.id); setSegmentIndex(Math.min(project.nextSegmentIndex, project.totalSegments - 1)); }} type="button">查看详情</button>{project.status === "paused" ? <button className="rounded border border-emerald-300 px-2 py-1 text-xs text-emerald-700" onClick={() => { setDetailId(project.id); void patchProject("resume"); }} type="button">继续</button> : null}<button className="rounded border border-rose-200 px-2 py-1 text-xs text-rose-700" onClick={() => void deleteProject(project)} type="button">删除</button></div></article>)}</div>}
+      </section> : null}
 
-      {detailProject ? <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm"><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-bold">{detailProject.title}</h2><p className="text-sm text-stone-500">{statusLabels[detailProject.status] ?? detailProject.status} · 预计 {detailProject.estimate.totalMinutes.min}–{detailProject.estimate.totalMinutes.max} 分钟 · 约 ${detailProject.estimate.projectedComputeUsd.min.toFixed(2)}–${detailProject.estimate.projectedComputeUsd.max.toFixed(2)}</p></div><div className="flex flex-wrap gap-2">{["pending_confirmation", "paused"].includes(detailProject.status) ? <button className="rounded-md bg-stone-900 px-3 py-2 text-sm font-bold text-white" onClick={() => void patchProject(detailProject.status === "paused" ? "resume" : "confirm")} type="button">{detailProject.status === "paused" ? "继续长视频" : "确认生成"}</button> : null}{detailProject.status === "awaiting_merge_confirmation" ? <button className="rounded-md bg-emerald-700 px-3 py-2 text-sm font-bold text-white" onClick={() => void mergeProject()} type="button">确认合并长视频</button> : null}{!["completed", "cancelled", "paused"].includes(detailProject.status) ? <button className="rounded-md border border-stone-300 px-3 py-2 text-sm" onClick={() => void patchProject("pause", currentSegment ?? undefined)} type="button">暂停长视频</button> : null}<button className="rounded-md border border-rose-200 px-3 py-2 text-sm text-rose-700" onClick={() => void deleteProject(detailProject)} type="button">删除项目</button></div></div>
-        {detailProject.status === "completed" ? <div className="mt-4 overflow-hidden rounded-md bg-black"><video className="max-h-[520px] w-full" controls playsInline poster={publicMediaUrl(detailProject.id, "thumbnail")} src={publicMediaUrl(detailProject.id, "video")} /></div> : null}
+      {!editorOnly && detailProject ? <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm"><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-bold">{detailProject.title}</h2><p className="text-sm text-stone-500">{statusLabels[detailProject.status] ?? detailProject.status} · 预计 {detailProject.estimate.totalMinutes.min}–{detailProject.estimate.totalMinutes.max} 分钟 · 约 ${detailProject.estimate.projectedComputeUsd.min.toFixed(2)}–${detailProject.estimate.projectedComputeUsd.max.toFixed(2)}</p></div><div className="flex flex-wrap gap-2">{["pending_confirmation", "paused"].includes(detailProject.status) ? <button className="rounded-md bg-stone-900 px-3 py-2 text-sm font-bold text-white" onClick={() => void patchProject(detailProject.status === "paused" ? "resume" : "confirm")} type="button">{detailProject.status === "paused" ? "继续长视频" : "确认生成"}</button> : null}{detailProject.status === "awaiting_merge_confirmation" ? <button className="rounded-md bg-emerald-700 px-3 py-2 text-sm font-bold text-white" onClick={() => void mergeProject()} type="button">确认合并长视频</button> : null}{!["completed", "cancelled", "paused"].includes(detailProject.status) ? <button className="rounded-md border border-stone-300 px-3 py-2 text-sm" onClick={() => void patchProject("pause", currentSegment ?? undefined)} type="button">暂停长视频</button> : null}<button className="rounded-md border border-rose-200 px-3 py-2 text-sm text-rose-700" onClick={() => void deleteProject(detailProject)} type="button">删除项目</button></div></div>
+        {detailProject.status === "completed" ? <div className="mt-4 overflow-hidden rounded-md bg-black"><video className="max-h-[520px] w-full" controls playsInline poster={longVideoPublicMediaUrl(detailProject.id, "thumbnail")} src={longVideoPublicMediaUrl(detailProject.id, "video")} /></div> : null}
         <div className="mt-4 grid gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900 sm:grid-cols-5"><span>执行器：已就绪</span><span>显卡：RTX 4090</span><span>分段：{detailProject.totalSegments}</span><span>预计恢复一次 Wan 模型</span><span>等待真实验收</span></div>
-        <div className="mt-4 grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]"><div className="max-h-[440px] space-y-2 overflow-y-auto pr-1">{detailProject.segments.map((segment) => <button className={`w-full rounded-md border px-3 py-2 text-left text-sm ${segment.sequenceIndex === segmentIndex ? "border-stone-900 bg-[#faf8f4]" : "border-stone-200"}`} key={segment.id} onClick={() => setSegmentIndex(segment.sequenceIndex)} type="button"><div className="flex items-center justify-between gap-2"><span className="font-semibold">{segmentLabel(segment)}</span><span className="text-xs text-stone-500">{statusLabels[segment.status] ?? segment.status}</span></div><p className="mt-1 line-clamp-2 text-xs text-stone-500">{segment.prompt || detailProject.overallPrompt || "未填写分段提示词"}</p></button>)}</div><div>{currentSegment ? <><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-semibold">当前分段：{segmentLabel(currentSegment)}</p><p className="text-xs text-stone-500">尝试 {currentSegment.attemptsCount} 次 · 下一个分段 {currentSegment.sequenceIndex + 1}/{detailProject.totalSegments}</p></div><div className="flex gap-2"><button className="rounded border border-stone-300 px-2 py-1 text-xs" onClick={() => { const previous = detailProject.segments[currentSegment.sequenceIndex - 1]; changeSegmentPrompt(previous?.prompt ?? detailProject.overallPrompt); }} type="button">复制上一段</button><button className="rounded border border-stone-300 px-2 py-1 text-xs" onClick={() => changeSegmentPrompt("")} type="button">清空</button></div></div><textarea className="mt-3 min-h-24 w-full rounded-md border border-stone-200 bg-[#faf8f4] p-3" maxLength={2000} onChange={(event) => changeSegmentPrompt(event.target.value)} value={currentSegment.prompt} /><div className="mt-3 flex flex-wrap items-center justify-between gap-2"><div className="flex gap-2"><button className="rounded border border-stone-300 px-2 py-1 text-sm disabled:opacity-40" disabled={segmentIndex === 0} onClick={() => setSegmentIndex((current) => current - 1)} type="button">上一段</button><button className="rounded border border-stone-300 px-2 py-1 text-sm disabled:opacity-40" disabled={segmentIndex >= detailProject.totalSegments - 1} onClick={() => setSegmentIndex((current) => current + 1)} type="button">下一段</button></div><span className="text-xs text-stone-500">提示词自动保存 · 版本 {currentSegment.version}</span></div>{currentSegment.selectedAttemptId && ["awaiting_review", "accepted"].includes(currentSegment.status) ? <div className="mt-4 overflow-hidden rounded-md bg-black"><video className="max-h-80 w-full" controls playsInline src={publicMediaUrl(detailProject.id, "segment-video", currentSegment)} /></div> : <div className="mt-4 rounded-md bg-[#faf8f4] px-3 py-8 text-center text-sm text-stone-500">本段媒体尚未保存。</div>}{currentSegment.status === "awaiting_review" ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3"><p className="font-semibold">审核倒计时：{reviewSeconds} 秒</p><p className="mt-1 text-xs text-stone-600">倒计时由服务端截止时间控制；关闭浏览器也会在到期后自动接受。</p><div className="mt-3 flex flex-wrap gap-2"><button className="rounded-md bg-emerald-700 px-3 py-2 text-sm font-bold text-white" disabled={busy} onClick={() => void patchProject("accept", currentSegment)} type="button">确认并继续</button><button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold" disabled={busy} onClick={() => void patchProject("regenerate", currentSegment)} type="button">重新生成本段</button><button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold" disabled={busy} onClick={() => void patchProject("pause", currentSegment)} type="button">暂停长视频</button></div></div> : null}{["accepted", "invalidated"].includes(currentSegment.status) && currentSegment.sequenceIndex < detailProject.nextSegmentIndex ? <button className="mt-3 rounded-md border border-rose-200 px-3 py-2 text-sm text-rose-700" onClick={() => { if (window.confirm("重新生成这一段会使所有后续分段失效，是否继续？")) void patchProject("regenerate", currentSegment); }} type="button">重新生成本段并失效后续</button> : null}</> : null}</div></div><p className="mt-4 rounded-md bg-stone-50 px-3 py-2 text-xs text-stone-600">{detailProject.estimate.creationFeeCaveat}</p></section> : null}
+        <div className="mt-4 grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]"><div className="max-h-[440px] space-y-2 overflow-y-auto pr-1">{detailProject.segments.map((segment) => <button className={`w-full rounded-md border px-3 py-2 text-left text-sm ${segment.sequenceIndex === segmentIndex ? "border-stone-900 bg-[#faf8f4]" : "border-stone-200"}`} key={segment.id} onClick={() => setSegmentIndex(segment.sequenceIndex)} type="button"><div className="flex items-center justify-between gap-2"><span className="font-semibold">{segmentLabel(segment)}</span><span className="text-xs text-stone-500">{statusLabels[segment.status] ?? segment.status}</span></div><p className="mt-1 line-clamp-2 text-xs text-stone-500">{segment.prompt || detailProject.overallPrompt || "未填写分段提示词"}</p></button>)}</div><div>{currentSegment ? <><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-semibold">当前分段：{segmentLabel(currentSegment)}</p><p className="text-xs text-stone-500">尝试 {currentSegment.attemptsCount} 次 · 下一个分段 {currentSegment.sequenceIndex + 1}/{detailProject.totalSegments}</p></div><div className="flex gap-2"><button className="rounded border border-stone-300 px-2 py-1 text-xs" onClick={() => { const previous = detailProject.segments[currentSegment.sequenceIndex - 1]; changeSegmentPrompt(previous?.prompt ?? detailProject.overallPrompt); }} type="button">复制上一段</button><button className="rounded border border-stone-300 px-2 py-1 text-xs" onClick={() => changeSegmentPrompt("")} type="button">清空</button></div></div><textarea className="mt-3 min-h-24 w-full rounded-md border border-stone-200 bg-[#faf8f4] p-3" maxLength={2000} onChange={(event) => changeSegmentPrompt(event.target.value)} value={currentSegment.prompt} /><div className="mt-3 flex flex-wrap items-center justify-between gap-2"><div className="flex gap-2"><button className="rounded border border-stone-300 px-2 py-1 text-sm disabled:opacity-40" disabled={segmentIndex === 0} onClick={() => setSegmentIndex((current) => current - 1)} type="button">上一段</button><button className="rounded border border-stone-300 px-2 py-1 text-sm disabled:opacity-40" disabled={segmentIndex >= detailProject.totalSegments - 1} onClick={() => setSegmentIndex((current) => current + 1)} type="button">下一段</button></div><span className="text-xs text-stone-500">提示词自动保存 · 版本 {currentSegment.version}</span></div>{currentSegment.selectedAttemptId && ["awaiting_review", "accepted"].includes(currentSegment.status) ? <div className="mt-4 overflow-hidden rounded-md bg-black"><video className="max-h-80 w-full" controls playsInline src={longVideoPublicMediaUrl(detailProject.id, "segment-video", currentSegment)} /></div> : <div className="mt-4 rounded-md bg-[#faf8f4] px-3 py-8 text-center text-sm text-stone-500">本段媒体尚未保存。</div>}{currentSegment.status === "awaiting_review" ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3"><p className="font-semibold">审核倒计时：{reviewSeconds} 秒</p><p className="mt-1 text-xs text-stone-600">倒计时由服务端截止时间控制；关闭浏览器也会在到期后自动接受。</p><div className="mt-3 flex flex-wrap gap-2"><button className="rounded-md bg-emerald-700 px-3 py-2 text-sm font-bold text-white" disabled={busy} onClick={() => void patchProject("accept", currentSegment)} type="button">确认并继续</button><button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold" disabled={busy} onClick={() => void patchProject("regenerate", currentSegment)} type="button">重新生成本段</button><button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold" disabled={busy} onClick={() => void patchProject("pause", currentSegment)} type="button">暂停长视频</button></div></div> : null}{["accepted", "invalidated"].includes(currentSegment.status) && currentSegment.sequenceIndex < detailProject.nextSegmentIndex ? <button className="mt-3 rounded-md border border-rose-200 px-3 py-2 text-sm text-rose-700" onClick={() => { if (window.confirm("重新生成这一段会使所有后续分段失效，是否继续？")) void patchProject("regenerate", currentSegment); }} type="button">重新生成本段并失效后续</button> : null}</> : null}</div></div><p className="mt-4 rounded-md bg-stone-50 px-3 py-2 text-xs text-stone-600">{detailProject.estimate.creationFeeCaveat}</p></section> : null}
     </div>
   );
 }

@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element */
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import type { User } from "@supabase/supabase-js";
@@ -9,7 +11,7 @@ import { requestSignedVideoUrl } from "@/lib/video-jobs/signed-url";
 import { videoJobStatusLabels } from "@/types/video-config";
 import type { SignedVideoResponse, VideoJob, VideoJobStatus } from "@/types/video-jobs";
 import { normalizeStudioMode, normalizeVideoSubmode, STUDIO_MODE_STORAGE_KEY, VIDEO_SUBMODE_STORAGE_KEY, type OrdinaryStudioMode, type StudioMode } from "@/lib/local-lab/studio-mode";
-import { LongVideoStudio } from "@/components/LongVideoStudio";
+import { LongVideoStudio, longVideoPublicMediaUrl, type LongVideoProject } from "@/components/LongVideoStudio";
 import { BillingPanel } from "@/components/BillingPanel";
 import { FirstFrameInput } from "@/components/FirstFrameInput";
 
@@ -93,7 +95,7 @@ type PoolTask = {
   priority: "normal" | "immediate";
   status: PoolTaskStatus;
   createdAt: string;
-  jobForm: "image_only" | "video_from_generated_image" | "video_from_existing_image";
+  jobForm: "image_only" | "video_from_generated_image" | "video_from_existing_image" | "long_video_segment" | "long_video_first_frame";
   inputImageJobId: string | null;
   generationNumber: number;
   width: number;
@@ -159,12 +161,6 @@ const schedulerStateLabels: Record<string, string> = {
   idle: "空闲", batch_ready: "批次已就绪", market_watching: "正在观察市场", candidate_found: "已找到候选",
   order_pending: "等待创建订单", session_active: "显卡会话运行中", draining: "正在排空", cleanup_pending: "等待清理", completed: "已完成", blocked_by_provider: "平台阻塞",
 };
-const sessionPhaseLabels: Record<string, string> = {
-  no_provider_order: "没有显卡订单", order_provisioning: "正在准备显卡", ssh_ready: "主机已连接",
-  runtime_ready: "运行环境已就绪", restore_running: "正在恢复图片模型", image_inference_running: "正在生成图片",
-  image_completed: "图片已保存", video_restore_running: "正在恢复视频模型", video_inference_running: "正在生成视频",
-  media_conversion_running: "正在下载并转码", cleanup_pending: "正在清理并退租",
-};
 const autorentStatusLabels: Record<AutorentRequest["status"], string> = {
   waiting: "等待中", searching: "寻找显卡", candidate_found: "已找到候选", provisioning: "正在部署", assigned: "已分配", failed: "失败", cancelled: "已取消",
 };
@@ -177,11 +173,6 @@ function formatMoney(value: number | null | undefined) {
 
 function formatNumber(value: number | null | undefined, suffix = "") {
   return typeof value === "number" ? `${Number(value.toFixed(3))}${suffix}` : "未知";
-}
-
-function formatDateTime(value: string | null | undefined) {
-  if (!value) return "尚未记录";
-  return new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
 }
 
 function safePromptPreview(prompt: string) {
@@ -236,6 +227,25 @@ function parsePrice(value: string) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function qualityBadge(width: number, height: number) {
+  if (width >= 1920 || height >= 1920) return "高";
+  if (width >= 1280 || height >= 720) return "中";
+  return "低";
+}
+
+function longVideoCardClass(project: LongVideoProject) {
+  if (project.status === "failed") return "border-rose-200 bg-rose-50";
+  if (project.gpuPreference.length === 1 && project.gpuPreference[0] === "rtx5090") return "border-emerald-200 bg-emerald-50";
+  if (project.gpuPreference.length === 1 && project.gpuPreference[0] === "rtx4090") return "border-sky-200 bg-sky-50";
+  return "border-stone-200 bg-stone-100";
+}
+
+function imageResultQuality(metadata: Record<string, unknown> | null) {
+  const width = Number(metadata?.final_width ?? metadata?.width ?? metadata?.generation_width ?? 0);
+  const height = Number(metadata?.final_height ?? metadata?.height ?? metadata?.generation_height ?? 0);
+  return qualityBadge(width, height);
+}
+
 export function LocalCreationStudio() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const [user, setUser] = useState<User | null>(null);
@@ -274,6 +284,11 @@ export function LocalCreationStudio() {
   const [existingImageJobId, setExistingImageJobId] = useState("");
   const [uploadedFirstFrameRef, setUploadedFirstFrameRef] = useState("");
   const [showBilling, setShowBilling] = useState(false);
+  const [longVideoProjects, setLongVideoProjects] = useState<LongVideoProject[]>([]);
+  const [selectedLongVideoId, setSelectedLongVideoId] = useState("");
+  const [selectedLongSegmentIndex, setSelectedLongSegmentIndex] = useState(0);
+  const [selectedVideoKind, setSelectedVideoKind] = useState<"short" | "long">("short");
+  const [clockNow, setClockNow] = useState(0);
 
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
   const localResultForSelected = selectedJob ? localResults.find((result) => result.jobId === selectedJob.id) : null;
@@ -283,7 +298,7 @@ export function LocalCreationStudio() {
   const activeAutorent = autorentRequests.find((request) => !["assigned", "failed", "cancelled"].includes(request.status));
   const selectedImage = imageResults.find((result) => result.sessionId === selectedImageId) ?? imageResults[0] ?? null;
   const ordinaryMode: OrdinaryStudioMode = mode === "long_video" ? "video" : mode;
-  const modePoolTasks = mode === "long_video" ? [] : pool?.tasks.filter((task) => task.generationType === ordinaryMode) ?? [];
+  const modePoolTasks = pool?.tasks.filter((task) => task.generationType === ordinaryMode && !["long_video_segment", "long_video_first_frame"].includes(task.jobForm)) ?? [];
   const selectedPoolTask = selectedPoolTaskIds.length ? (pool?.tasks.find((task) => task.id === selectedPoolTaskIds[0]) ?? null) : null;
   const selectedPoolFamily = selectedPoolTask?.generationType ?? null;
   const selectedPoolGpu = selectedPoolTask?.gpuPreference.length === 1 ? selectedPoolTask.gpuPreference[0] : null;
@@ -299,6 +314,32 @@ export function LocalCreationStudio() {
   const previewVideoResult = localResultForSelected ?? poolVideoResult;
   const showingPoolVideo = Boolean(poolVideoResult && previewVideoResult?.jobId === poolVideoResult.jobId && !localResultForSelected);
   const mainVideoUrl = previewVideoResult?.videoUrl ?? (selectedJob ? signedVideos[selectedJob.id]?.signedUrl : null);
+  const selectedLongVideo = longVideoProjects.find((project) => project.id === selectedLongVideoId) ?? longVideoProjects[0] ?? null;
+  const acceptedLongSegments = selectedLongVideo?.segments.filter((segment) => ["accepted", "awaiting_review"].includes(segment.status) && segment.selectedAttemptId) ?? [];
+  const latestAcceptedLongSegment = acceptedLongSegments.at(-1) ?? null;
+  const selectedLongSegment = selectedLongVideo?.segments[selectedLongSegmentIndex] ?? latestAcceptedLongSegment;
+  const playableLongSegment = selectedLongSegment?.selectedAttemptId && ["accepted", "awaiting_review"].includes(selectedLongSegment.status) ? selectedLongSegment : latestAcceptedLongSegment;
+  const longVideoPreviewUrl = selectedLongVideo
+    ? selectedLongVideo.finalVideoRef
+      ? longVideoPublicMediaUrl(selectedLongVideo.id, "video")
+      : playableLongSegment
+        ? longVideoPublicMediaUrl(selectedLongVideo.id, "segment-video", playableLongSegment)
+        : null
+    : null;
+  const activeVideoUrl = selectedVideoKind === "long" ? longVideoPreviewUrl : mainVideoUrl;
+  const pending4090 = pool?.tasks.filter((task) => task.gpuPreference.length === 1 && task.gpuPreference[0] === "rtx4090" && !["completed", "failed", "cancelled"].includes(task.status)).length ?? 0;
+  const pending5090 = pool?.tasks.filter((task) => task.gpuPreference.length === 1 && task.gpuPreference[0] === "rtx5090" && !["completed", "failed", "cancelled"].includes(task.status)).length ?? 0;
+  const idleCancelSeconds = pool?.session?.automaticShutdownAt && clockNow
+    ? Math.max(0, Math.ceil((Date.parse(pool.session.automaticShutdownAt) - clockNow) / 1000))
+    : 120;
+  const activeQueue = pool?.tasks.filter((task) => !["completed", "cancelled"].includes(task.status)) ?? [];
+  const simplifiedSessionStatus = activeQueue.some((task) => ["failed"].includes(task.status))
+    ? "失败"
+    : activeQueue.some((task) => ["generating", "generating_image", "generating_video", "downloading_transcoding", "syncing"].includes(task.status))
+      ? "生成中"
+      : activeQueue.length
+        ? "排队"
+        : "已完成";
 
   const priceGate = useMemo(() => {
     const min = parsePrice(minPrice);
@@ -374,6 +415,14 @@ export function LocalCreationStudio() {
     if (response.ok && payload) setPool(payload);
   }, []);
 
+  const refreshLongVideos = useCallback(async () => {
+    const response = await fetch("/api/local-lab/long-video");
+    const payload = await response.json().catch(() => ({})) as { projects?: LongVideoProject[] };
+    if (!response.ok) return;
+    setLongVideoProjects(payload.projects ?? []);
+    setSelectedLongVideoId((current) => current || payload.projects?.[0]?.id || "");
+  }, []);
+
   const refreshClore = useCallback(async () => {
     const useVisualMock = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("visual_mock") === "1";
     const [candidateResponse, sessionResponse, autorentResponse] = await Promise.all([
@@ -395,12 +444,13 @@ export function LocalCreationStudio() {
   }, []);
 
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
     // Hydration starts from the same deterministic snapshot as the server.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     // Legacy contract: setMode(normalizeStudioMode(window.localStorage.getItem(STUDIO_MODE_STORAGE_KEY)))
     const storedMode = normalizeStudioMode(window.localStorage.getItem(STUDIO_MODE_STORAGE_KEY));
     setMode(storedMode);
     setVideoSubmode(normalizeVideoSubmode(window.localStorage.getItem(VIDEO_SUBMODE_STORAGE_KEY) ?? storedMode));
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
   useEffect(() => {
@@ -420,14 +470,14 @@ export function LocalCreationStudio() {
       if (!mounted) return;
       setUser(data.user);
       setNotice("本地实验模式已就绪。自动调度仅使用Clore，并受任务与候选安全门控制。");
-      await Promise.all([refreshJobs(data.user), refreshResults(), refreshImageResults(), refreshClore(), refreshPool()]);
+      await Promise.all([refreshJobs(data.user), refreshResults(), refreshImageResults(), refreshClore(), refreshPool(), refreshLongVideos()]);
     }
 
     void restore();
     return () => {
       mounted = false;
     };
-  }, [refreshClore, refreshImageResults, refreshJobs, refreshPool, refreshResults, supabase]);
+  }, [refreshClore, refreshImageResults, refreshJobs, refreshLongVideos, refreshPool, refreshResults, supabase]);
 
   function selectMode(next: StudioMode) {
     setMode(next);
@@ -452,9 +502,15 @@ export function LocalCreationStudio() {
       void refreshImageResults();
       void refreshClore();
       void refreshPool();
+      void refreshLongVideos();
     }, 5000);
     return () => window.clearInterval(interval);
-  }, [refreshClore, refreshImageResults, refreshJobs, refreshPool, refreshResults]);
+  }, [refreshClore, refreshImageResults, refreshJobs, refreshLongVideos, refreshPool, refreshResults]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setClockNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     if (!selectedJob || selectedJob.status !== "succeeded" || localResultForSelected?.videoUrl || signedVideos[selectedJob.id]) return;
@@ -654,7 +710,7 @@ export function LocalCreationStudio() {
   return (
     <main className="min-h-screen bg-[#f5f0e8] text-stone-900" data-studio-mode={mode}>
       <header className="sticky top-0 z-30 border-b border-stone-200 bg-[#f5f0e8]/95 px-3 py-2 backdrop-blur">
-        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2">
+        <div className="flex w-full flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <p className="hidden text-xs font-semibold uppercase tracking-wide text-emerald-700 sm:block">local_lab</p>
             <div className="flex flex-wrap gap-1 rounded-md border border-stone-200 bg-white p-1 text-sm font-semibold">
@@ -680,19 +736,19 @@ export function LocalCreationStudio() {
         </div>
       </header>
 
-      {showBilling ? <div className="mx-auto max-w-7xl px-5 py-6"><BillingPanel onClose={() => setShowBilling(false)} /></div> : <div className="mx-auto grid max-w-[1600px] gap-4 px-3 py-4 lg:grid-cols-[minmax(0,1fr)_300px]">
-        <section className="space-y-5">{mode === "long_video" ? <LongVideoStudio imageResults={imageResults} /> : <>
-          <div className="overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
-            <div className="aspect-video bg-[#1f1f1f]">
+      <div className="studio-shell grid w-full gap-3 px-2 py-3">
+        <section className="min-w-0 space-y-3">
+          {showBilling ? <BillingPanel onClose={() => setShowBilling(false)} /> : <>
+          <div className="studio-unified-preview overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
+            <div className="flex h-[42vh] min-h-64 max-h-[480px] items-center justify-center bg-[#1f1f1f]">
               {mode === "image" && selectedImage ? (
-                // eslint-disable-next-line @next/next/no-img-element
                 <img alt="生成图片预览" className="h-full w-full bg-black object-contain" src={selectedImage.imageUrl} />
-              ) : mode === "video" && mainVideoUrl ? (
-                <video className="h-full w-full bg-black object-contain" controls playsInline src={mainVideoUrl} />
+              ) : mode !== "image" && activeVideoUrl ? (
+                <video className="h-full w-full bg-black object-contain" controls playsInline src={activeVideoUrl} />
               ) : (
                 <div className="flex h-full flex-col items-center justify-center px-6 text-center text-stone-100">
-                  <p className="text-sm font-semibold text-stone-400">{mode === "image" ? (pendingImage?.status === "pending" ? "等待真实GPU" : "未选择图片") : selectedJob ? videoJobStatusLabels[selectedJob.status] : "未选择任务"}</p>
-                  <h2 className="mt-3 text-2xl font-bold">{mode === "image" ? "暂无可预览图片" : selectedJob ? generationLabel(selectedJob) : "暂无可播放视频"}</h2>
+                  <p className="text-sm font-semibold text-stone-400">{mode === "image" ? (pendingImage?.status === "pending" ? "等待真实GPU" : "未选择图片") : selectedVideoKind === "long" && selectedLongVideo ? "长视频尚未完成" : selectedJob ? videoJobStatusLabels[selectedJob.status] : "未选择任务"}</p>
+                  <h2 className="mt-2 text-xl font-bold">{mode === "image" ? "暂无可预览图片" : selectedVideoKind === "long" ? "暂无可播放长视频分段" : selectedJob ? generationLabel(selectedJob) : "暂无可播放视频"}</h2>
                   <p className="mt-2 max-w-xl text-sm text-stone-400">
                     {mode === "image"
                       ? "首张FLUX图片任务保留在任务池，受控Clore会话就绪后执行。"
@@ -710,14 +766,25 @@ export function LocalCreationStudio() {
                 </div>
               )}
             </div>
-            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-stone-200 bg-[#faf8f4] px-4 py-3 text-sm">
+            {mode !== "image" && selectedVideoKind === "long" && selectedLongVideo ? <div className="flex gap-2 overflow-x-auto border-t border-stone-800 bg-stone-950 px-2 py-2" data-testid="long-video-segment-strip">
+              {selectedLongVideo.segments.map((segment) => {
+                const playable = Boolean(segment.selectedAttemptId && ["accepted", "awaiting_review"].includes(segment.status));
+                return <button className={`w-24 shrink-0 overflow-hidden rounded border text-left ${segment.sequenceIndex === selectedLongSegment?.sequenceIndex ? "border-emerald-400" : "border-stone-700"}`} disabled={!playable} key={segment.id} onClick={() => setSelectedLongSegmentIndex(segment.sequenceIndex)} type="button">
+                  <div className="aspect-video bg-stone-800">{playable ? <img alt={`分段 ${segment.sequenceIndex + 1}`} className="h-full w-full object-cover" src={longVideoPublicMediaUrl(selectedLongVideo.id, "segment-thumbnail", segment)} /> : null}</div>
+                  <span className="block px-1 py-1 text-[10px] text-stone-200">第 {segment.sequenceIndex + 1} 段 · {segment.status === "accepted" ? "已完成" : "待处理"}</span>
+                </button>;
+              })}
+            </div> : null}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-stone-200 bg-[#faf8f4] px-3 py-2 text-sm">
               <div>
-                <p className="font-semibold">{mode === "image" ? (selectedImage?.sessionId ?? pendingImage?.sessionId ?? "首张FLUX图片") : showingPoolVideo && poolVideoTask ? safePromptPreview(poolVideoTask.prompt) : selectedJob ? safePromptPreview(selectedJob.prompt) : "选择任务后会在这里显示"}</p>
-                <p className="text-stone-500">{mode === "image" ? (selectedImage ? "图片已完成并保存到本地" : "图片任务等待受控Clore调度") : showingPoolVideo ? "任务池视频已完成并保存到本地" : selectedJob ? `${videoJobStatusLabels[selectedJob.status]} · ${etaText(selectedJob, jobs)}` : "未生成任务需要确认或立即生成后才会进入队列"}</p>
+                <p className="font-semibold">{mode === "image" ? (selectedImage?.sessionId ?? pendingImage?.sessionId ?? "首张FLUX图片") : selectedVideoKind === "long" && selectedLongVideo ? selectedLongVideo.title : showingPoolVideo && poolVideoTask ? safePromptPreview(poolVideoTask.prompt) : selectedJob ? safePromptPreview(selectedJob.prompt) : "选择任务后会在这里显示"}</p>
+                <p className="text-stone-500">{mode === "image" ? (selectedImage ? "图片已完成并保存到本地" : "图片任务等待受控Clore调度") : selectedVideoKind === "long" && selectedLongVideo ? `${selectedLongVideo.segments.filter((segment) => segment.status === "accepted").length}/${selectedLongVideo.totalSegments} 段已完成` : showingPoolVideo ? "任务池视频已完成并保存到本地" : selectedJob ? `${videoJobStatusLabels[selectedJob.status]} · ${etaText(selectedJob, jobs)}` : "未生成任务需要确认或立即生成后才会进入队列"}</p>
               </div>
               <span className="rounded-md border border-stone-200 bg-white px-3 py-2 text-xs text-stone-600">短期签名播放 · 本地结果优先</span>
             </div>
           </div>
+
+          {mode === "long_video" ? <LongVideoStudio editorOnly imageResults={imageResults} /> : <>
 
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <div className="flex items-center justify-between gap-3">
@@ -821,18 +888,18 @@ export function LocalCreationStudio() {
             ) : null}
             {mode === "video" && poolVideoResult?.thumbnailUrl && poolVideoResult.videoUrl ? (
               <div className="mt-3 flex items-center gap-3 rounded-md border border-stone-200 bg-[#faf8f4] p-2">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img alt="任务池视频缩略图" className="h-16 w-28 rounded object-cover" src={poolVideoResult.thumbnailUrl} />
                 <div><p className="text-sm font-semibold">任务池视频已同步</p><p className="text-xs text-stone-500">刷新页面或重启应用后仍可播放本地 MP4。</p></div>
               </div>
             ) : null}
           </section>
+          </>}
 
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-bold">{mode === "image" ? "图片任务" : "视频任务"}</h2>
-                <p className="text-sm text-stone-500">{mode === "image" ? "显示待执行首图任务和已保存图片。" : "点击任务切换主播放器；勾选任务后可批量操作。"}</p>
+                <p className="text-sm text-stone-500">{mode === "image" ? "仅显示图片族任务和已保存图片。" : "短视频与长视频共享本任务区；上方开关只改变创建表单。"}</p>
               </div>
               {mode === "video" ? <div className="flex flex-wrap gap-2 text-sm">
                 {(["all", "pending_confirmation", "queued", "processing", "succeeded", "failed"] as const).map((status) => (
@@ -876,28 +943,27 @@ export function LocalCreationStudio() {
               </button>
             </div> : null}
 
-            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="studio-task-grid mt-3 grid grid-cols-1 gap-1.5 min-[480px]:grid-cols-2 min-[800px]:grid-cols-4 min-[1100px]:grid-cols-6 min-[1366px]:grid-cols-8" data-testid="shared-task-gallery">
               {modePoolTasks.map((task) => {
                 const queuePosition = queuedPoolTasks.findIndex((candidate) => candidate.id === task.id);
                 const estimate = task.generationType === "image" ? pool?.costEstimate?.imageInference : pool?.costEstimate?.videoInference;
                 return (
-                  <article className={`rounded-lg border p-3 ${task.status === "failed" ? "border-rose-200 bg-rose-50" : task.gpuPreference.includes("rtx5090") && task.gpuPreference.length === 1 ? "border-emerald-200 bg-emerald-50" : task.gpuPreference.includes("rtx4090") && task.gpuPreference.length === 1 ? "border-sky-200 bg-sky-50" : "border-stone-200 bg-stone-100"}`} key={`pool-${task.id}`}>
-                    <div className="flex items-center justify-between gap-2">
-                      <label className="flex items-center gap-2 font-semibold"><input aria-label={`选择任务 ${task.id}`} checked={selectedPoolTaskIds.includes(task.id)} disabled={!poolTaskSelectable(task)} onChange={() => setSelectedPoolTaskIds((current) => current.includes(task.id) ? current.filter((id) => id !== task.id) : [...current, task.id])} type="checkbox" />{task.generationNumber === 1 ? (task.generationType === "image" ? "图片" : "视频") : task.generationNumber === 2 ? "二次生成" : `${task.generationNumber}次生成`}</label>
-                      <span className="rounded-md border border-stone-200 bg-[#faf8f4] px-2 py-1 text-xs">{poolStatusLabels[task.status]}</span>
+                  <article className={`min-w-0 rounded-md border p-1.5 text-[11px] ${task.status === "failed" ? "border-rose-200 bg-rose-50" : task.gpuPreference.includes("rtx5090") && task.gpuPreference.length === 1 ? "border-emerald-200 bg-emerald-50" : task.gpuPreference.includes("rtx4090") && task.gpuPreference.length === 1 ? "border-sky-200 bg-sky-50" : "border-stone-200 bg-stone-100"}`} key={`pool-${task.id}`}>
+                    <div className="aspect-video overflow-hidden rounded bg-stone-200">
+                      <div className="flex h-full items-center justify-center text-stone-500">{task.generationType === "image" ? "图片预览" : "视频预览"}</div>
                     </div>
-                    <p className="mt-2 text-sm font-semibold leading-5">{safePromptPreview(task.prompt)}</p>
-                    <p className="mt-2 text-xs text-stone-500">{task.generationType === "image" ? "UltraReal Flux FP8" : "Wan 2.2 Remix 14B FP8"} · {task.width}×{task.height}{task.frames ? ` · ${task.frames}帧` : ""}</p>
-                    <p className="mt-1 break-all text-xs text-stone-500">来源图片：{task.inputImageJobId ?? "无"} · {queuePosition >= 0 ? `队列第 ${queuePosition + 1} 位` : "不在等待队列"} · 约 {estimate?.minMinutes ?? 1}–{estimate?.maxMinutes ?? 1} 分钟</p>
-                    <div className="mt-3 flex flex-wrap gap-1.5">
-                      {task.status === "pending_confirmation" ? <button className="rounded bg-stone-900 px-2 py-1.5 text-xs font-bold text-white" onClick={() => void runPoolAction("confirm", [task.id])} type="button">确认生成</button> : null}
-                      {task.status === "pending_confirmation" ? <button className="rounded bg-emerald-700 px-2 py-1.5 text-xs font-bold text-white" onClick={() => void runPoolAction("immediate", [task.id])} type="button">立即生成</button> : null}
-                      {task.status === "failed" ? <button className="rounded border border-stone-300 px-2 py-1.5 text-xs font-semibold" onClick={() => void runPoolAction("retry", [task.id])} type="button">重试失败步骤</button> : null}
-                      {["completed", "failed", "cancelled"].includes(task.status) ? <button className="rounded border border-stone-300 px-2 py-1.5 text-xs font-semibold" onClick={() => void runPoolAction("regenerate", [task.id])} type="button">重新生成</button> : null}
-                      {!["completed", "cancelled", "failed"].includes(task.status) ? <button className="rounded border border-stone-300 px-2 py-1.5 text-xs font-semibold" onClick={() => void runPoolAction("cancel", [task.id])} type="button">取消</button> : null}
-                      {!["provisioning", "restoring_image_model", "generating_image", "unloading_image_model", "restoring_video_model", "generating_video", "downloading_transcoding"].includes(task.status) ? <button className="rounded border border-rose-200 px-2 py-1.5 text-xs font-semibold text-rose-700" onClick={() => void runPoolAction("delete", [task.id])} type="button">删除</button> : null}
+                    <div className="mt-1.5 flex items-center justify-between gap-1">
+                      <label className="flex min-w-0 items-center gap-1 font-semibold"><input aria-label={`选择任务 ${task.id}`} checked={selectedPoolTaskIds.includes(task.id)} disabled={!poolTaskSelectable(task)} onChange={() => setSelectedPoolTaskIds((current) => current.includes(task.id) ? current.filter((id) => id !== task.id) : [...current, task.id])} type="checkbox" /><span className="truncate">{task.generationType === "image" ? "图片" : "短视频"}</span></label>
+                      <span className="rounded border border-stone-200 bg-white/80 px-1 py-0.5 font-bold">{qualityBadge(task.width, task.height)}</span>
                     </div>
-                    <details className="mt-2 text-xs text-stone-500"><summary className="cursor-pointer">详细信息</summary><p className="mt-1 break-all">任务 {task.id}</p><p>尝试 {task.attempts.at(-1)?.number ?? 1} · {task.priority === "immediate" ? "立即" : "普通"} · 修订 {task.modelRevision}</p></details>
+                    <p className="mt-1 font-semibold">{poolStatusLabels[task.status]}</p>
+                    <p className="mt-1 line-clamp-2 min-h-8 leading-4">{task.prompt}</p>
+                    <p className="mt-1 truncate text-stone-500">{task.width}×{task.height} · {queuePosition >= 0 ? `队列 ${queuePosition + 1}` : `${estimate?.minMinutes ?? 1}–${estimate?.maxMinutes ?? 1} 分钟`}</p>
+                    <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-1">
+                      <details className="text-stone-600"><summary className="cursor-pointer">查看详情</summary><p className="mt-1 break-all">任务 {task.id}</p></details>
+                      {["completed", "failed", "cancelled"].includes(task.status) ? <button className="font-semibold text-stone-700" onClick={() => void runPoolAction("regenerate", [task.id])} type="button">重新生成</button> : null}
+                      {!["provisioning", "restoring_image_model", "generating_image", "unloading_image_model", "restoring_video_model", "generating_video", "downloading_transcoding"].includes(task.status) ? <button className="font-semibold text-rose-700" onClick={() => void runPoolAction("delete", [task.id])} type="button">删除</button> : null}
+                    </div>
                   </article>
                 );
               })}
@@ -910,46 +976,74 @@ export function LocalCreationStudio() {
                     </article>
                   ) : null}
                   {imageResults.map((image) => (
-                    <article className={`rounded-lg border p-3 ${selectedImage?.sessionId === image.sessionId ? "border-stone-900 bg-[#faf8f4]" : "border-stone-200"}`} key={image.sessionId}>
-                      <button className="aspect-square w-full overflow-hidden rounded-md bg-stone-100" onClick={() => setSelectedImageId(image.sessionId)} type="button">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img alt="已完成图片" className="h-full w-full object-cover" src={image.imageUrl} />
+                    <article className={`min-w-0 rounded-md border border-emerald-200 bg-emerald-50 p-1.5 text-[11px] ${selectedImage?.sessionId === image.sessionId ? "ring-1 ring-stone-900" : ""}`} key={image.sessionId}>
+                      <button className="aspect-video w-full overflow-hidden rounded bg-stone-100" onClick={() => setSelectedImageId(image.sessionId)} type="button">
+                        <img alt="已完成图片" className="h-full w-full object-contain" src={image.imageUrl} />
                       </button>
-                      <p className="mt-3 break-all text-sm font-semibold">{image.sessionId}</p><p className="mt-1 text-xs text-stone-500">{image.date} · 已完成</p>
+                      <div className="mt-1.5 flex items-center justify-between"><strong>图片</strong><span className="rounded border border-emerald-200 bg-white px-1 py-0.5 font-bold">{imageResultQuality(image.metadata)}</span></div>
+                      <p className="mt-1 font-semibold">已完成</p>
+                      <p className="mt-1 line-clamp-2 min-h-8 break-all leading-4">{String(image.metadata?.prompt ?? image.sessionId)}</p>
+                      <div className="mt-1.5 flex flex-wrap gap-x-2"><button className="font-semibold" onClick={() => setSelectedImageId(image.sessionId)} type="button">查看详情</button><button className="font-semibold text-rose-700" onClick={() => setNotice("验收图片已锁定；本阶段不会删除已接受媒体。")} type="button">删除</button><button className="font-semibold" onClick={() => setNotice("验收图片已复用；本阶段不会重新生成。")} type="button">重新生成</button></div>
                     </article>
                   ))}
                 </>
-              ) : visibleJobs.map((job) => {
+              ) : <>{visibleJobs.map((job) => {
                 const localResult = localResults.find((result) => result.jobId === job.id);
                 const selectable = job.status === "pending_confirmation" || job.status === "queued" || job.status === "failed" || job.status === "canceled" || job.status === "succeeded";
                 return (
-                  <article className={`relative rounded-lg border p-3 ${selectedJobId === job.id ? "border-stone-900 bg-[#faf8f4]" : "border-stone-200 bg-white"}`} key={job.id}>
-                    <div className="flex items-center justify-between gap-2">
-                      <label className="flex items-center gap-2 text-sm font-semibold">
-                        <input checked={selectedJobIds.includes(job.id)} className="h-4 w-4" disabled={!selectable} onChange={() => toggleSelected(job.id)} type="checkbox" />
-                        {generationLabel(job)}
-                      </label>
-                      <span className={`rounded-md border px-2 py-1 text-xs ${statusBadgeClass(job.status)}`}>{videoJobStatusLabels[job.status]}</span>
-                    </div>
-                    <button className="mt-3 aspect-video w-full overflow-hidden rounded-md bg-stone-100 text-left" onClick={() => setSelectedJobId(job.id)} type="button">
+                  <article className={`relative min-w-0 rounded-md border p-1.5 text-[11px] ${job.status === "failed" ? "border-rose-200 bg-rose-50" : "border-sky-200 bg-sky-50"} ${selectedVideoKind === "short" && selectedJobId === job.id ? "ring-1 ring-stone-900" : ""}`} key={job.id}>
+                    <button className="aspect-video w-full overflow-hidden rounded bg-stone-100 text-left" onClick={() => { setSelectedJobId(job.id); setSelectedVideoKind("short"); }} type="button">
                       {localResult?.thumbnailUrl ? (
-                        // eslint-disable-next-line @next/next/no-img-element
                         <img alt="任务封面" className="h-full w-full object-cover" src={localResult.thumbnailUrl} />
                       ) : (
-                        <div className="flex h-full items-center justify-center px-3 text-center text-sm text-stone-500">{etaText(job, jobs)}</div>
+                        <div className="flex h-full items-center justify-center px-1 text-center text-stone-500">{etaText(job, jobs)}</div>
                       )}
                     </button>
-                    <p className="mt-3 text-sm font-semibold leading-5">{safePromptPreview(job.prompt)}</p>
-                    <p className="mt-2 text-xs text-stone-500">{formatDateTime(job.created_at)} · {job.priority === "urgent" ? "加急" : "普通"} · {etaText(job, jobs)}</p>
+                    <div className="mt-1.5 flex items-center justify-between gap-1">
+                      <label className="flex min-w-0 items-center gap-1 font-semibold">
+                        <input checked={selectedJobIds.includes(job.id)} className="h-4 w-4" disabled={!selectable} onChange={() => toggleSelected(job.id)} type="checkbox" />
+                        <span className="truncate">短视频</span>
+                      </label>
+                      <span className="rounded border border-sky-200 bg-white px-1 py-0.5 font-bold">低</span>
+                    </div>
+                    <p className={`mt-1 font-semibold ${statusBadgeClass(job.status)}`}>{videoJobStatusLabels[job.status]}</p>
+                    <p className="mt-1 line-clamp-2 min-h-8 leading-4">{job.prompt}</p>
+                    <div className="mt-1.5 flex flex-wrap gap-x-2"><button className="font-semibold" onClick={() => { setSelectedJobId(job.id); setSelectedVideoKind("short"); }} type="button">查看详情</button><button className="font-semibold text-rose-700" onClick={() => void runBatch("delete", "auto", [job.id])} type="button">删除</button><button className="font-semibold" onClick={() => void runBatch("regenerate", "auto", [job.id])} type="button">重新生成</button></div>
                   </article>
                 );
               })}
+              {longVideoProjects.map((project) => {
+                const segment = [...project.segments].reverse().find((candidate) => candidate.selectedAttemptId && ["accepted", "awaiting_review"].includes(candidate.status)) ?? null;
+                const quality = project.finalVideoRef ? "高" : project.gpuPreference[0] === "rtx5090" ? "中" : "低";
+                return <article className={`min-w-0 rounded-md border p-1.5 text-[11px] ${longVideoCardClass(project)} ${selectedVideoKind === "long" && selectedLongVideo?.id === project.id ? "ring-1 ring-stone-900" : ""}`} key={`long-${project.id}`}>
+                  <button className="aspect-video w-full overflow-hidden rounded bg-stone-200" onClick={() => { setSelectedLongVideoId(project.id); setSelectedVideoKind("long"); setSelectedLongSegmentIndex(segment?.sequenceIndex ?? 0); }} type="button">
+                    {project.finalThumbnailRef ? <img alt="长视频缩略图" className="h-full w-full object-cover" src={longVideoPublicMediaUrl(project.id, "thumbnail")} /> : segment ? <img alt="长视频分段缩略图" className="h-full w-full object-cover" src={longVideoPublicMediaUrl(project.id, "segment-thumbnail", segment)} /> : <span className="flex h-full items-center justify-center text-stone-500">待生成</span>}
+                  </button>
+                  <div className="mt-1.5 flex items-center justify-between"><strong>长视频</strong><span className="rounded border border-stone-200 bg-white/80 px-1 py-0.5 font-bold">{quality}</span></div>
+                  <p className="mt-1 font-semibold">{project.status === "failed" ? "失败" : project.status === "completed" ? "已完成" : project.status === "generating" ? "生成中" : "排队"}</p>
+                  <p className="mt-1 line-clamp-2 min-h-8 leading-4">{project.overallPrompt || project.segments[0]?.prompt || project.title}</p>
+                  <div className="mt-1.5 flex flex-wrap gap-x-2"><button className="font-semibold" onClick={() => { setSelectedLongVideoId(project.id); setSelectedVideoKind("long"); }} type="button">查看详情</button><button className="font-semibold text-rose-700" onClick={() => setNotice("请在长视频项目详情中确认后删除。")} type="button">删除</button><button className="font-semibold" onClick={() => setNotice(project.segments[0]?.status === "accepted" ? "已接受的第 0 段保持不可变；只允许从下一未完成段续作。" : "请在长视频详情中选择可重新生成的分段。")} type="button">重新生成</button></div>
+                </article>;
+              })}</>}
             </div>
           </section>
         </>}
         </section>
 
-        <aside className="space-y-4 lg:sticky lg:top-24 lg:self-start">
+        <aside className="studio-sidebar space-y-3" data-testid="permanent-gpu-sidebar">
+          <section className="rounded-lg border border-stone-200 bg-white p-3 shadow-sm">
+            <div className="flex items-center justify-between gap-2"><h2 className="font-bold">GPU 与任务</h2><span className={`rounded px-2 py-1 text-xs font-semibold ${session?.orderId ? "bg-emerald-50 text-emerald-800" : "bg-stone-100 text-stone-700"}`}>{session?.orderId ? `当前正在租用 ${session.serverId?.includes("5090") ? "RTX 5090" : "GPU"}` : "当前未租用显卡"}</span></div>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+              <div className="rounded border border-sky-200 bg-sky-50 p-2"><strong>RTX 4090</strong><p>{pending4090} 个待处理</p></div>
+              <div className="rounded border border-emerald-200 bg-emerald-50 p-2"><strong>RTX 5090</strong><p>{pending5090} 个待处理</p></div>
+            </div>
+            <div className="mt-2 rounded border border-stone-200 bg-[#faf8f4] p-2 text-xs">
+              {selectedPoolTaskIds.length ? <><strong>已选 {selectedPoolTaskIds.length} 个兼容任务</strong><p className="mt-1">{selectedPoolFamily === "image" ? "图片" : "视频"} · {selectedPoolGpu?.toUpperCase()}</p></> : <><strong>尚未选择兼容任务</strong><p className="mt-1 text-stone-500">侧栏会一直保留；选择同一任务族和 GPU 档位后可手动开始。</p></>}
+            </div>
+            <button className="mt-2 w-full rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-300" disabled={isBatching || !selectedPoolGpu || selectedPoolTaskIds.length === 0} onClick={() => void runPoolAction("immediate", selectedPoolTaskIds)} type="button">开始任务并租用显卡</button>
+            <p className="mt-2 text-xs text-stone-600">寻机状态：{activeAutorent ? autorentStatusLabels[activeAutorent.status] : "未启动"} · 队列：{simplifiedSessionStatus}</p>
+            <p className="mt-1 text-xs font-semibold text-stone-700">无任务 {idleCancelSeconds} 秒后自动退租</p>
+          </section>
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <h2 className="text-lg font-bold">GPU 价格筛选</h2>
             <div className="mt-3 grid grid-cols-2 gap-2">
@@ -999,11 +1093,11 @@ export function LocalCreationStudio() {
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <h2 className="text-lg font-bold">当前会话与自动退租</h2>
             <div className="mt-3 space-y-1 text-sm text-stone-600">
-              <p>阶段：{pool?.session ? sessionPhaseLabels[pool.session.phase] ?? "正在恢复会话" : "没有活动会话"}</p>
+              <p>状态：{pool?.session ? simplifiedSessionStatus : "没有活动会话"}</p>
               <p>活动任务：{pool?.session?.activeTaskIds.length ?? 0}</p>
               <p>预计剩余：{pool?.session?.estimatedRemainingMinutes ?? 0} 分钟</p>
               <p>当前约花费：${(pool?.session?.approximateSpendUsd ?? 0).toFixed(2)}</p>
-              <p>自动关机倒计时：{pool?.session?.automaticShutdownAt ? formatDateTime(pool.session.automaticShutdownAt) : "最终任务后立即开始清理"}</p>
+              <p>空闲自动退租：{idleCancelSeconds} 秒（固定 120 秒）</p>
             </div>
             <div className="mt-3 grid gap-2">
               <button className="rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white" onClick={() => void requestShutdown("immediate")} type="button">立即停止并退租</button>
@@ -1032,7 +1126,7 @@ export function LocalCreationStudio() {
             </div>
           </section>
         </aside>
-      </div>}
+      </div>
 
       {pendingGpuChoice ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/50 p-4" onClick={() => setPendingGpuChoice(null)}>
