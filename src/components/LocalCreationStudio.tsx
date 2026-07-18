@@ -10,6 +10,8 @@ import { videoJobStatusLabels } from "@/types/video-config";
 import type { SignedVideoResponse, VideoJob, VideoJobStatus } from "@/types/video-jobs";
 import { normalizeStudioMode, STUDIO_MODE_STORAGE_KEY, type OrdinaryStudioMode, type StudioMode } from "@/lib/local-lab/studio-mode";
 import { LongVideoStudio } from "@/components/LongVideoStudio";
+import { BillingPanel } from "@/components/BillingPanel";
+import { FirstFrameInput } from "@/components/FirstFrameInput";
 
 type JobCounts = Partial<Record<VideoJobStatus, number>>;
 
@@ -268,6 +270,8 @@ export function LocalCreationStudio() {
   const [videoSource, setVideoSource] = useState<"generated" | "existing">("generated");
   const [videoProfile, setVideoProfile] = useState<"wan_4090" | "wan_5090">("wan_4090");
   const [existingImageJobId, setExistingImageJobId] = useState("");
+  const [uploadedFirstFrameRef, setUploadedFirstFrameRef] = useState("");
+  const [showBilling, setShowBilling] = useState(false);
 
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
   const localResultForSelected = selectedJob ? localResults.find((result) => result.jobId === selectedJob.id) : null;
@@ -428,6 +432,17 @@ export function LocalCreationStudio() {
       .catch((error) => setNotice(error instanceof Error ? error.message : "获取临时播放链接失败。"));
   }, [localResultForSelected?.videoUrl, selectedJob, signedVideos]);
 
+  async function uploadFirstFrame(file: File) {
+    const form = new FormData();
+    form.set("file", file);
+    const response = await fetch("/api/local-lab/long-video/uploads", { method: "POST", body: form });
+    const payload = await response.json().catch(() => ({})) as { ref?: string; uploadId?: string; error?: string };
+    if (!response.ok || !payload.ref) { setNotice(payload.error ?? "首帧上传失败。"); return; }
+    setUploadedFirstFrameRef(payload.ref);
+    setVideoSource("existing");
+    setNotice("首帧已上传并选择为视频输入。");
+  }
+
   async function submitPrompt(startMode: "pending" | "immediate" = "pending") {
     if (!supabase || !user || isSubmitting) return;
     const trimmedPrompt = prompt.trim();
@@ -448,7 +463,7 @@ export function LocalCreationStudio() {
         return;
       }
       const jobForm = mode === "image" ? "image_only" : videoSource === "existing" ? "video_from_existing_image" : "video_from_generated_image";
-      const sourceImageId = existingImageJobId || selectedImage?.sessionId || "";
+      const sourceImageId = uploadedFirstFrameRef || existingImageJobId || selectedImage?.sessionId || "";
       if (jobForm === "video_from_existing_image" && !sourceImageId) {
         setNotice("请先选择一张已经保存的本地图片。");
         return;
@@ -625,6 +640,7 @@ export function LocalCreationStudio() {
             <Link className="rounded-md border border-stone-200 bg-white px-3 py-2 font-semibold text-stone-700" href="/generate/5090">
               5090
             </Link>
+            <button className="rounded-md border border-stone-300 bg-white px-3 py-2 font-semibold" onClick={() => setShowBilling((current) => !current)} type="button">费用情况</button>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? `图片 ${imageResults.length}` : mode === "long_video" ? "长视频项目" : `未生成 ${counts.pending_confirmation ?? 0}`}</span>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? `图片任务 ${pendingImage?.status === "pending" ? 1 : 0}` : mode === "long_video" ? "分段审核 20 秒" : `排队 ${counts.queued ?? 0}`}</span>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">GPU {session?.orderId ? "运行中" : "无"}</span>
@@ -634,7 +650,7 @@ export function LocalCreationStudio() {
         </div>
       </header>
 
-      {mode === "long_video" ? <div className="mx-auto max-w-7xl px-5 py-6"><LongVideoStudio imageResults={imageResults} /></div> : <div className="mx-auto grid max-w-7xl gap-5 px-5 py-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+      {showBilling ? <div className="mx-auto max-w-7xl px-5 py-6"><BillingPanel onClose={() => setShowBilling(false)} /></div> : mode === "long_video" ? <div className="mx-auto max-w-7xl px-5 py-6"><LongVideoStudio imageResults={imageResults} /></div> : <div className="mx-auto grid max-w-7xl gap-5 px-5 py-6 lg:grid-cols-[minmax(0,1fr)_380px]">
         <section className="space-y-5">
           <div className="overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
             <div className="aspect-video bg-[#1f1f1f]">
@@ -721,14 +737,7 @@ export function LocalCreationStudio() {
                   </label>
                 </>
               )}
-              {mode === "video" && videoSource === "existing" ? (
-                <label className="text-sm font-semibold text-stone-700 sm:col-span-2">已有图片
-                  <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setExistingImageJobId(event.target.value)} value={existingImageJobId || selectedImage?.sessionId || ""}>
-                    <option value="">请选择本地图片</option>
-                    {imageResults.map((image) => <option key={image.sessionId} value={image.sessionId}>{image.date} · {image.sessionId}</option>)}
-                  </select>
-                </label>
-              ) : null}
+              {mode === "video" && videoSource === "existing" ? <div className="sm:col-span-2"><FirstFrameInput existingImages={imageResults} selectedExistingId={existingImageJobId || selectedImage?.sessionId || ""} onSelectExisting={(id) => { setExistingImageJobId(id); setUploadedFirstFrameRef(""); }} onFile={uploadFirstFrame} onRemove={() => { setUploadedFirstFrameRef(""); }} /></div> : null}
               <label className="text-sm font-semibold text-stone-700">种子
                 <input className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" inputMode="numeric" onChange={(event) => setSeed(event.target.value)} placeholder="留空自动生成" value={seed} />
               </label>

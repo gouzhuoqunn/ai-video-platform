@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FirstFrameInput } from "@/components/FirstFrameInput";
 
 type ImageResult = { sessionId: string; date: string; imageUrl: string };
 type Segment = {
@@ -84,7 +85,6 @@ export function LongVideoStudio({ imageResults }: Props) {
   const [firstFrameSource, setFirstFrameSource] = useState<Project["firstFrameSource"]>("existing_image");
   const [existingImageId, setExistingImageId] = useState("");
   const [uploadRef, setUploadRef] = useState("");
-  const [uploadUrl, setUploadUrl] = useState("");
   const [gpu, setGpu] = useState<"auto" | "rtx4090" | "rtx5090">("auto");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -205,7 +205,7 @@ export function LongVideoStudio({ imageResults }: Props) {
       const payload = await response.json().catch(() => ({})) as { ref?: string; url?: string; error?: string };
       if (!response.ok || !payload.ref) { setNotice(payload.error ?? "首帧上传失败。"); return; }
       setUploadRef(payload.ref);
-      setUploadUrl(payload.url ?? "");
+      setFirstFrameSource("upload");
       setNotice("首帧已安全保存，可用于创建项目。");
     } finally { setBusy(false); }
   }
@@ -288,12 +288,10 @@ export function LongVideoStudio({ imageResults }: Props) {
             {draftSegments.length <= 6 ? <div className="mt-3 grid gap-2 md:grid-cols-2">{draftSegments.map((segment) => <label className="text-sm font-semibold" key={segment.sequenceIndex}>{segment.startSecond + 1}～{segment.endSecond}秒<textarea className="mt-1 min-h-20 w-full rounded-md border border-stone-200 bg-white p-2 font-normal" maxLength={2000} onChange={(event) => changeDraftPrompt(segment.sequenceIndex, event.target.value)} value={segment.prompt} /></label>)}</div> : <div className="mt-3"><div className="flex items-center justify-between gap-2"><button className="rounded border border-stone-300 bg-white px-2 py-1 text-xs" disabled={focusedDraftIndex === 0} onClick={() => setFocusedDraftIndex((current) => current - 1)} type="button">上一段</button><span className="text-xs text-stone-500">第 {focusedDraftIndex + 1}/{draftSegments.length} 段</span><button className="rounded border border-stone-300 bg-white px-2 py-1 text-xs" disabled={focusedDraftIndex === draftSegments.length - 1} onClick={() => setFocusedDraftIndex((current) => current + 1)} type="button">下一段</button></div><label className="mt-2 block text-sm font-semibold">{draftSegments[focusedDraftIndex].startSecond + 1}～{draftSegments[focusedDraftIndex].endSecond}秒<textarea className="mt-1 min-h-24 w-full rounded-md border border-stone-200 bg-white p-2 font-normal" maxLength={2000} onChange={(event) => changeDraftPrompt(focusedDraftIndex, event.target.value)} value={draftSegments[focusedDraftIndex].prompt} /></label></div>}
           </div>
           <div className="space-y-2 text-sm"><label className="font-semibold">首帧来源<select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setFirstFrameSource(event.target.value as Project["firstFrameSource"])} value={firstFrameSource}><option value="upload">上传首帧图片</option><option value="existing_image">选择已验证图片</option><option value="pure_prompt">纯提示词生成首帧</option></select></label>
-            {firstFrameSource === "existing_image" ? <select className="w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setExistingImageId(event.target.value)} value={existingImageId}><option value="">选择本地图片</option>{imageResults.map((image) => <option key={image.sessionId} value={image.sessionId}>{image.date} · {image.sessionId}</option>)}</select> : null}
-            {firstFrameSource === "upload" ? <label className="block rounded-md border border-dashed border-stone-300 bg-[#faf8f4] px-3 py-2 text-center text-xs"><input accept="image/png,image/jpeg,image/webp" className="hidden" disabled={busy} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadFirstFrame(file); }} type="file" />{uploadRef ? "已选择首帧，可重新上传" : "点击选择 PNG/JPEG/WebP（20MB内）"}</label> : null}
-            {uploadUrl ? <img alt="上传的首帧预览" className="h-20 w-full rounded object-contain bg-black" src={uploadUrl} /> : null}
+            {firstFrameSource !== "pure_prompt" ? <FirstFrameInput existingImages={imageResults} selectedExistingId={firstFrameSource === "existing_image" ? existingImageId : ""} onSelectExisting={(id) => { setExistingImageId(id); setUploadRef(""); setFirstFrameSource("existing_image"); }} onFile={uploadFirstFrame} onRemove={() => { setUploadRef(""); }} disabled={busy} /> : null}
           </div>
         </div>
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-3"><label className="text-sm font-semibold">GPU<select className="ml-2 rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setGpu(event.target.value as typeof gpu)} value={gpu}><option value="auto">自动选择</option><option value="rtx4090">RTX 4090</option><option value="rtx5090">RTX 5090</option></select></label><button className="rounded-md bg-stone-900 px-4 py-3 text-sm font-bold text-white disabled:bg-stone-400" disabled={busy} onClick={() => void createProject()} type="button">{busy ? "处理中..." : "创建长视频项目"}</button></div>
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3"><label className="text-sm font-semibold">GPU<select className="ml-2 rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setGpu(event.target.value as typeof gpu)} value={gpu}><option value="auto">自动选择</option><option value="rtx4090">RTX 4090</option><option value="rtx5090">RTX 5090</option></select></label><button className="rounded-md bg-stone-900 px-4 py-3 text-sm font-bold text-white disabled:bg-stone-400" disabled={!canCreate} onClick={() => void createProject()} type="button">{busy ? "处理中..." : "创建长视频项目"}</button></div>
       </section>
 
       {notice ? <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">{notice}</p> : null}

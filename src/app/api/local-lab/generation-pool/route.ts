@@ -16,6 +16,7 @@ import {
 } from "@/lib/generation/task-pool";
 import { validateProductionPrompt } from "@/lib/generation/production-prompt-safety";
 import { listLocalImageResults } from "@/lib/local-lab/local-results";
+import { longVideoUploadExists } from "@/lib/long-video/uploads";
 
 type Payload = {
   action?: "create" | "sync" | "confirm" | "immediate" | "cancel" | "delete" | "retry" | "regenerate" | "arm" | "shutdown";
@@ -53,7 +54,7 @@ export async function POST(request: NextRequest) {
     const safety = validateProductionPrompt(prompt);
     if (!safety.allowed) return NextResponse.json({ error: safety.reason, code: safety.code }, { status: 400 });
     const existingImageId = String(payload.existingImageJobId ?? "");
-    const existingImageVerified = jobForm !== "video_from_existing_image" || listLocalImageResults().some((image) => image.sessionId === existingImageId);
+    const existingImageVerified = jobForm !== "video_from_existing_image" || listLocalImageResults().some((image) => image.sessionId === existingImageId) || longVideoUploadExists(existingImageId);
     try {
       const tasks = createNormalJobSet({
         jobForm,
