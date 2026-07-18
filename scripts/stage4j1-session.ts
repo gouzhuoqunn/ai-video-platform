@@ -17,16 +17,16 @@ const batchPath = path.join(process.cwd(), ".secrets", "stage4j1-batch.json");
 const authDir = path.join(process.cwd(), ".secrets", "long-video-authorizations");
 const libraryDir = "D:\\AI-Video-Library";
 const ffmpeg = (require("@ffmpeg-installer/ffmpeg") as { path: string }).path;
-const batch = JSON.parse(readFileSync(batchPath, "utf8")) as { batchId: string; resolutionNonce: string; imageJobs: string[]; longVideoProjectId: string };
+const batch = JSON.parse(readFileSync(batchPath, "utf8")) as { batchId: string; resolutionNonce: string; imageJobs: string[]; longVideoProjectId: string; video: { negativePrompt: string; seed: number } };
 const resolution = readDeploymentResolution();
 if (!getCloreDeploymentHold().enabled) throw new Error("clore_hold_must_remain_enabled_before_batch_execution");
 if (!validateDeploymentResolution(resolution, batch.batchId, batch.resolutionNonce).valid) throw new Error("resolved_batch_record_invalid");
-const authorization: LongVideoExecutionAuthorization = { id: randomUUID(), projectId: batch.longVideoProjectId, batchId: batch.batchId, resolutionNonce: batch.resolutionNonce, provider: "clore", gpuProfile: "rtx5090", oneUse: true, expiresAt: new Date(Date.now() + 300 * 60_000).toISOString(), maxSpendUsd: 3, releaseHold: true, maxActiveOrders: 1, maxPreSshAttempts: 1, wallClockMinutes: 300, drainingAtMinutes: 270, maxSegments: 2, maxOrders: 1, maxHourlyUsd: 0.65, allowedTaskIds: [...batch.imageJobs, batch.longVideoProjectId] };
+const authorization: LongVideoExecutionAuthorization = { id: randomUUID(), projectId: batch.longVideoProjectId, batchId: batch.batchId, resolutionNonce: batch.resolutionNonce, provider: "clore", gpuProfile: "rtx5090", oneUse: true, expiresAt: new Date(Date.now() + 300 * 60_000).toISOString(), maxSpendUsd: 3, walletDeltaCapUsd: 3, releaseHold: true, maxActiveOrders: 1, maxPreSshAttempts: 1, wallClockMinutes: 300, drainingAtMinutes: 270, maxSegments: 2, maxOrders: 1, maxHourlyUsd: 0.65, orderType: "on-demand", noReplacementOrder: true, allowedTaskIds: [...batch.imageJobs, batch.longVideoProjectId] };
 const authorizationPath = path.join(authDir, `${authorization.id}.json`);
 writeFileSync(authorizationPath, `${JSON.stringify(authorization, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
 
 try {
-const adapter = new CloreLongVideoProviderAdapter({ libraryDir });
+const adapter = new CloreLongVideoProviderAdapter({ libraryDir, videoNegativePrompt: batch.video.negativePrompt, videoSeedBase: batch.video.seed });
 const preflight = await adapter.listCandidates();
 const candidate = preflight.find((item) => item.gpuProfile === "rtx5090" && item.hourlyUsd <= 0.65);
 if (!candidate) throw new Error("no_compliant_rtx5090_under_065");
@@ -43,11 +43,11 @@ try {
   const imageA = pool.tasks.find((task) => task.id === batch.imageJobs[0]);
   const imageB = pool.tasks.find((task) => task.id === batch.imageJobs[1]);
   if (!imageA || !imageB) throw new Error("prepared_image_tasks_missing");
-  const generatedA = await adapter.generateImage({ session, taskId: imageA.id, prompt: imageA.prompt, width: 1536, height: 1024, seed: imageA.seed });
+  const generatedA = await adapter.generateImage({ session, taskId: imageA.id, prompt: imageA.prompt, negativePrompt: imageA.negativePrompt, width: 1536, height: 1024, seed: imageA.seed });
   const pixelsA = validatePngPixels(readFileSync(generatedA.localPath));
   const archivedA = archiveFluxFirstImage({ sourcePng: generatedA.localPath, sessionId: imageA.id, workflow: generatedA.workflow as never, metadata: { width: 1536, height: 1024, seed: imageA.seed, batch: 1, gpuProfile: "rtx5090", quality: "medium", performance: "faster", inferenceDurationMs: generatedA.result.elapsed_ms ?? null, outputFormat: "png" }, evidence: { restore: imageRestore, remote: generatedA.result, pixels: pixelsA } });
   setGenerationTaskStatus([imageA.id], "completed", { outputPath: archivedA.outputPath, outputSha256: archivedA.sha256, width: 1536, height: 1024, imagePreserved: true, inferenceVerified: true, gpuProfile: "rtx5090", quality: "medium" });
-  const generatedB = await adapter.generateImage({ session, taskId: imageB.id, prompt: imageB.prompt, width: 1536, height: 1536, seed: imageB.seed });
+  const generatedB = await adapter.generateImage({ session, taskId: imageB.id, prompt: imageB.prompt, negativePrompt: imageB.negativePrompt, width: 1536, height: 1536, seed: imageB.seed });
   const finalB = path.join(path.dirname(generatedB.localPath), `${imageB.id}-2048.png`);
   const scaled = spawnSync(ffmpeg, ["-y", "-i", generatedB.localPath, "-vf", "scale=2048:2048:flags=lanczos", "-frames:v", "1", finalB], { encoding: "utf8", timeout: 300_000 });
   if (scaled.status !== 0 || !existsSync(finalB)) throw new Error("high_image_scaling_failed");

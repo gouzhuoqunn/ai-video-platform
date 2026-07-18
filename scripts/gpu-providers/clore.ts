@@ -130,7 +130,8 @@ export class CloreProvider implements GpuProvider {
           ]);
           if (latestOrders.some((order) => order.active)) throw new Error("An active Clore order appeared before create_order.");
           const latest = findBootstrapImageCandidates(latestMarketplace, config).find((value) => value.serverId === candidate.serverId);
-          if (!latest || latest.effectivePriceUsdPerHour === null || latest.effectivePriceUsdPerHour > 0.7) throw new Error("Selected Clore host price or compliance changed before create_order.");
+          const maximumHourlyUsd = /5090/i.test(input.candidate.gpuType ?? "") ? 0.65 : 0.7;
+          if (!latest || latest.effectivePriceUsdPerHour === null || latest.effectivePriceUsdPerHour > maximumHourlyUsd) throw new Error("Selected Clore host price or compliance changed before create_order.");
           if ((latest.projectedFirstImageCostUsd ?? Infinity) > 2.5) throw new Error("Projected Clore session changed above 2.50 USD before create_order.");
           if (latestWallet.availableUsdBalance === null || latestWallet.availableUsdBalance - (latest.projectedFirstImageCostUsd ?? 0) < 1) throw new Error("Clore wallet reserve changed before create_order.");
           if (input.cloreProfile === "clore_key_only" || input.cloreProfile === "clore_key_with_password_fallback") {

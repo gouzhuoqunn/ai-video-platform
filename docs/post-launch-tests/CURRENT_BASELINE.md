@@ -21,3 +21,12 @@
 - Future password fallback is order-bound, explicit in `ssh_password`, key-first, one-attempt, authorized_keys-repair-only, and deleted during cleanup.
 - Prepared batch remains two RTX5090 image jobs plus one two-segment 10-second project; duplicates `0`, short-video jobs `0`.
 - `stage4j2:plan` passes with provider mutations `0` and paid execution unauthorized. Read-only provider status remains Clore `0`, RunPod `0/0`, both holds `true`, no remote watchdog/process/create lock. All still-valid Stage 4J.1 authorization files were revoked and the local watchdog task was disabled.
+# Stage 4J.3 checkpoint (2026-07-19)
+
+- Branch baseline was `codex/stage4g1-long-video-prompts` at `baeb5f8c4866f8379ecdee8f2e3955dc6db9b3e1`; backup ref `backup/stage4j3-final-5090-20260719-005911` preserves it. Main was not touched.
+- The one authorized paid order is consumed and canceled. Clore order `1962381`, RTX5090 server `85138`, exact endpoint `root@n1.de.clorecloud.net:1439`, On-Demand base `$0.31125/hour`; wallet `$11.24 -> $10.72` (`$0.52` delta).
+- RTX5090/Blackwell passed: capability `12.0`, `sm_120`, Torch `2.7.1+cu128`, CUDA `12.8`, Triton `3.3.1`, real CUDA/Triton operations, required nodes, controller/ComfyUI, ffmpeg/ffprobe, RAM, VRAM, and disk.
+- The two prepared images are completed and local: `1536x1024` medium SHA `c79c99476486fdcd83dbdc0cb7e90e2961ebdda85fe556a1c1a10be2558e6078`; derived `2048x2048` high-final SHA `d3b12a75c5b30086f2dec902d4d9e7e38f8418a8436c64cbca97d765623b32ac`.
+- Project `a6cbf8c1-f158-4583-8f40-fa524dddd9d1` is truthfully `failed`, `nextSegmentIndex=1`. Segment 0 is accepted with exactly one attempt and a preserved 1280x720/81-frame/16fps/5.0625-second MP4; segment 1 has zero attempts. No 10-second master or 1080P final exists.
+- The detached remote workflow return fix is implemented and offline-tested, but no second paid order was created. A future task requires fresh explicit authorization to resume segment 1 only; it must not regenerate segment 0 automatically.
+- Current readiness: RTX5090 hardware and both image levels verified; final 720P long video, 1080P final, tail-frame chain, daily-use closure, and production readiness remain false.

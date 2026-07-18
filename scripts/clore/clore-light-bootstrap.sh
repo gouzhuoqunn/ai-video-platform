@@ -3,6 +3,7 @@ set -euo pipefail
 
 ACTION="${1:-prepare}"
 ARCHIVE="${2:-/workspace/runtime-overlay.tgz}"
+GPU_PROFILE="${3:-rtx4090}"
 RUNTIME_DIR=/workspace/runtime-overlay
 COMFY_DIR=/workspace/ai-runtime/ComfyUI
 VENV_DIR=/workspace/ai-runtime/venv
@@ -21,6 +22,7 @@ docker_available() {
 }
 
 prepare_native() {
+  local profile="${1:-rtx4090}"
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
     pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
@@ -39,7 +41,10 @@ prepare_native() {
   git -C "$COMFY_DIR" checkout --detach "$COMFY_COMMIT"
   python3 -m venv --system-site-packages "$VENV_DIR"
   "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
-  if ! "$VENV_DIR/bin/python" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' >/dev/null 2>&1; then
+  if [ "$profile" = rtx5090 ]; then
+    "$VENV_DIR/bin/python" -m pip install --upgrade --force-reinstall --index-url https://download.pytorch.org/whl/cu128 \
+      'torch==2.7.1' 'torchvision==0.22.1' 'torchaudio==2.7.1'
+  elif ! "$VENV_DIR/bin/python" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' >/dev/null 2>&1; then
     "$VENV_DIR/bin/python" -m pip install --index-url https://download.pytorch.org/whl/cu124 'torch==2.6.0' 'torchvision==0.21.0' 'torchaudio==2.6.0'
   fi
   "$VENV_DIR/bin/python" -m pip install -r "$COMFY_DIR/requirements.txt" -r "$RUNTIME_DIR/requirements.lock"
@@ -47,12 +52,13 @@ prepare_native() {
 }
 
 prepare() {
+  local profile="${1:-rtx4090}"
   prepare_overlay
-  if docker_available; then
+  if [ "$profile" != rtx5090 ] && docker_available; then
     docker pull "$FIXED_IMAGE"
     printf 'docker\n' > /workspace/ai-runtime/bootstrap-mode
   else
-    prepare_native
+    prepare_native "$profile"
   fi
   cat /workspace/ai-runtime/bootstrap-mode
 }
@@ -89,7 +95,7 @@ stop_runtime() {
 }
 
 case "$ACTION" in
-  prepare) prepare ;;
+  prepare) prepare "$GPU_PROFILE" ;;
   start) start_runtime "$@" ;;
   stop) stop_runtime ;;
   *) echo "usage: clore-light-bootstrap.sh prepare|start|stop" >&2; exit 64 ;;

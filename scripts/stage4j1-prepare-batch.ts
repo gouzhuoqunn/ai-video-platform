@@ -45,7 +45,7 @@ const record = {
   imageJobs: [imageA.id, imageB.id], longVideoProjectId: project.id, videoSegmentCount: prepared.totalSegments,
   videoBoundaryTaskId: segmentTaskId, gpuClass: "rtx5090", imageA: { width: imageA.width, height: imageA.height, seed: imageA.seed, quality: "medium", performance: "faster" },
   imageB: { width: imageB.width, height: imageB.height, seed: imageB.seed, quality: "high", finalization: "upscale_or_refinement_expected" },
-  video: { generationWidth: 1280, generationHeight: 720, finalWidth: 1920, finalHeight: 1080, frames: 81, fps: 16, audio: false, segmentPrompts: SEGMENT_PROMPTS, negativePrompt: NEGATIVE, firstFrameRef: `image:${imageA.id}` },
+  video: { generationWidth: 1280, generationHeight: 720, finalWidth: 1920, finalHeight: 1080, frames: 81, fps: 16, seed: 50902001, audio: false, segmentPrompts: SEGMENT_PROMPTS, negativePrompt: NEGATIVE, firstFrameRef: `image:${imageA.id}` },
   tasksSelected: armed.scheduler.selectedTaskIds, preparedAt: new Date().toISOString(), paidExecutionAuthorized: false,
 };
 writeJson(record);

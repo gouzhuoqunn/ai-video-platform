@@ -670,7 +670,7 @@ export function LocalCreationStudio() {
             <Link className="rounded-md border border-stone-200 bg-white px-2 py-1.5 font-semibold text-stone-700" href="/generate/5090">
               5090
             </Link>
-            <button className="rounded-md border border-stone-300 bg-white px-2 py-1.5 font-semibold" data-testid="billing-toggle" onClick={() => setShowBilling((current) => !current)} type="button">璧勮垂鎯呭喌</button>
+            <button aria-label="资费情况" className="rounded-md border border-stone-300 bg-white px-2 py-1.5 font-semibold" data-testid="billing-toggle" onClick={() => setShowBilling((current) => !current)} type="button">资费情况</button>
             <span className="rounded-md border border-stone-200 bg-white px-2 py-1.5" data-mode={mode} data-testid="studio-status">{mode === "image" ? `图片 ${imageResults.length}` : mode === "long_video" ? "长视频项目" : `未生成 ${counts.pending_confirmation ?? 0}`}</span>
             <span className="rounded-md border border-stone-200 bg-white px-2 py-1.5">GPU {session?.orderId ? "运行中" : "未租用"}</span>
             <span className="rounded-md border border-stone-200 bg-white px-2 py-1.5">{mode === "image" ? "UltraReal" : "Wan 2.2"}</span>

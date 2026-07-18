@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-07-18T00:00:00.000Z",
+  "updatedAt": "2026-07-18T18:50:06.985Z",
   "model_cache_ready": true,
   "gpu_inference_verified": true,
   "normal_ui_pipeline_implemented": true,
@@ -12,6 +12,14 @@
   "rtx4090_profile_preserved": true,
   "rtx5090_profile_implemented": true,
   "rtx5090_plan_ready": true,
-  "rtx5090_gpu_verified": false,
-  "nextAcceptance": "Complete one 15-second existing-first-frame long-video project (three Wan segments) through UI review and confirmed merge, with one Clore order and a 0.75 USD session spend limit."
+  "rtx5090_gpu_verified": true,
+  "rtx5090_image_medium_verified": true,
+  "rtx5090_image_high_final_verified": true,
+  "rtx5090_long_video_720p_verified": false,
+  "rtx5090_long_video_1080p_final_verified": false,
+  "long_video_tail_frame_chain_verified": false,
+  "windows_launcher_verified": true,
+  "daily_use_ready": false,
+  "project_closed_for_personal_use": false,
+  "nextAcceptance": "A future task needs fresh explicit paid authorization to resume only segment 1 with the detached workflow return fix, then verify the SHA tail-frame chain, 720P merge, 1080P finalization, and browser playback. Do not regenerate segment 0 or create an order automatically."
 }

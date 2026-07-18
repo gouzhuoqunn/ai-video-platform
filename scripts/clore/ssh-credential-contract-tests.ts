@@ -130,6 +130,26 @@ try {
   assert.equal(repairAuthorizedKeysText(repaired, identityA.normalizedPublicKey), repaired);
   const readinessSource = readFileSync(path.join(process.cwd(), "scripts", "clore", "order-readiness.ts"), "utf8");
   assert.equal((readinessSource.match(/const password = passwordSsh/g) ?? []).length, 1);
+  const providerSource = readFileSync(path.join(process.cwd(), "scripts", "gpu-providers", "clore.ts"), "utf8");
+  assert.match(providerSource, /\/5090\/i\.test\(input\.candidate\.gpuType \?\? ""\) \? 0\.65 : 0\.7/);
+  const bootstrapSource = readFileSync(path.join(process.cwd(), "scripts", "clore", "clore-light-bootstrap.sh"), "utf8");
+  assert.match(bootstrapSource, /\[ "\$profile" = rtx5090 \]/);
+  assert.match(bootstrapSource, /download\.pytorch\.org\/whl\/cu128/);
+  assert.match(bootstrapSource, /'torch==2\.7\.1'/);
+  const watchdogSource = readFileSync(path.join(process.cwd(), "scripts", "clore", "watchdog-remote.ts"), "utf8");
+  assert.match(watchdogSource, /getArg\("draining-at-minutes"\)/);
+  const sessionSource = readFileSync(path.join(process.cwd(), "scripts", "stage4j1-session.ts"), "utf8");
+  for (const contract of [
+    /maxOrders: 1/,
+    /maxActiveOrders: 1/,
+    /maxPreSshAttempts: 1/,
+    /maxHourlyUsd: 0\.65/,
+    /walletDeltaCapUsd: 3/,
+    /wallClockMinutes: 300/,
+    /drainingAtMinutes: 270/,
+    /orderType: "on-demand"/,
+    /noReplacementOrder: true/,
+  ]) assert.match(sessionSource, contract);
 
   const plan = buildStage4J2FinalRetryPlan();
   assert.equal(plan.provider_mutations, 0);
@@ -149,6 +169,10 @@ try {
     password_fallback_requires_payload_configuration: true,
     synthetic_authorized_keys_repair_passed: true,
     order_scoped_known_hosts_preserved: true,
+    rtx5090_revalidation_cap_usd_per_hour: 0.65,
+    rtx5090_torch_profile: "2.7.1+cu128",
+    watchdog_draining_at_minutes_supported: true,
+    one_order_authorization_contract: true,
     plan_provider_mutations: 0,
     key_material_printed: false,
   }, null, 2));

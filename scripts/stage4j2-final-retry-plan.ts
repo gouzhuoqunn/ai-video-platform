@@ -29,6 +29,9 @@ type PreparedBatch = {
     finalWidth: number;
     finalHeight: number;
     frames: number;
+    fps: number;
+    seed: number;
+    negativePrompt: string;
     segmentPrompts: string[];
   };
   tasksSelected: string[];
@@ -89,7 +92,10 @@ export function buildStage4J2FinalRetryPlan() {
     batch.video.generationHeight === 720 &&
     batch.video.finalWidth === 1920 &&
     batch.video.finalHeight === 1080 &&
-    batch.video.frames === 81,
+    batch.video.frames === 81 &&
+    batch.video.fps === 16 &&
+    batch.video.seed === 50902001 &&
+    batch.video.negativePrompt.trim().length > 0
   );
   const preparedBatchReused = Boolean(
     batch.batchId === "stage4j1-final-5090-20260718" &&

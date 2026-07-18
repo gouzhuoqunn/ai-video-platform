@@ -34,6 +34,18 @@ export type ProductionReadiness = {
   long_video_pipeline_gpu_verified: boolean;
   daily_use_release_candidate: boolean;
   production_ready: boolean;
+  rtx4090_profile_preserved: boolean;
+  rtx5090_profile_implemented: boolean;
+  rtx5090_plan_ready: boolean;
+  rtx5090_gpu_verified: boolean;
+  rtx5090_image_medium_verified: boolean;
+  rtx5090_image_high_final_verified: boolean;
+  rtx5090_long_video_720p_verified: boolean;
+  rtx5090_long_video_1080p_final_verified: boolean;
+  long_video_tail_frame_chain_verified: boolean;
+  windows_launcher_verified: boolean;
+  daily_use_ready: boolean;
+  project_closed_for_personal_use: boolean;
   nextAcceptance: string;
 };
 
@@ -53,6 +65,14 @@ export function loadProductionReadiness(filePath = PRODUCTION_READINESS_PATH): P
     || value.normal_ui_pipeline_gpu_verified !== false
     || value.long_video_pipeline_implemented !== true
     || value.long_video_pipeline_gpu_verified !== false
+    || value.rtx4090_profile_preserved !== true
+    || value.rtx5090_profile_implemented !== true
+    || value.rtx5090_gpu_verified !== true
+    || value.rtx5090_long_video_720p_verified !== false
+    || value.rtx5090_long_video_1080p_final_verified !== false
+    || value.long_video_tail_frame_chain_verified !== false
+    || value.daily_use_ready !== false
+    || value.project_closed_for_personal_use !== false
   ) throw new Error("production_readiness_semantics_invalid");
   return value;
 }

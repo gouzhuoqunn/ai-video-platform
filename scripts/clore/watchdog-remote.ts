@@ -68,8 +68,10 @@ async function arm() {
   }
 
   const requestedDeadlineMinutes = Number(getArg("hard-deadline-minutes") ?? execution.hardSessionLimitMinutes);
+  const requestedDrainingMinutes = Number(getArg("draining-at-minutes") ?? Math.max(1, requestedDeadlineMinutes - 10));
   const requestedHardBudgetUsd = Number(getArg("hard-budget-usd") ?? execution.firstSessionMaxBudgetUsd);
   if (!Number.isFinite(requestedDeadlineMinutes) || requestedDeadlineMinutes <= 0 || requestedDeadlineMinutes > execution.hardSessionLimitMinutes) throw new Error("Watchdog hard deadline is invalid or exceeds the configured safety limit.");
+  if (!Number.isFinite(requestedDrainingMinutes) || requestedDrainingMinutes <= 0 || requestedDrainingMinutes >= requestedDeadlineMinutes) throw new Error("Watchdog draining time must be positive and earlier than the hard deadline.");
   if (!Number.isFinite(requestedHardBudgetUsd) || requestedHardBudgetUsd <= 0 || requestedHardBudgetUsd > execution.firstSessionMaxBudgetUsd) throw new Error("Watchdog hard budget is invalid or exceeds the configured safety limit.");
   const now = new Date();
   const state: WatchdogArmState = {
@@ -81,7 +83,7 @@ async function arm() {
     currency: "USD-Blockchain",
     startingBalanceUsd: wallet.availableUsdBalance,
     armedAt: now.toISOString(),
-    drainingAt: addMinutes(now, Math.max(1, requestedDeadlineMinutes - 10)).toISOString(),
+    drainingAt: addMinutes(now, requestedDrainingMinutes).toISOString(),
     hardDeadlineAt: addMinutes(now, requestedDeadlineMinutes).toISOString(),
     hardBudgetUsd: requestedHardBudgetUsd,
     budgetSafetyUsd: 0.25,

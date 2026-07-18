@@ -93,7 +93,7 @@ async function runScenario(scenario: Scenario, index: number) {
       const billingBefore = requests.filter((url) => url.includes("/api/local-lab/billing")).length;
       assert.equal(billingBefore, 0);
       const billingTitle = await evaluate(`document.querySelector('[data-testid="billing-toggle"]')?.textContent`);
-      assert.equal(billingTitle, "璧勮垂鎯呭喌");
+      assert.equal(billingTitle, "资费情况");
       await evaluate(`document.querySelector('[data-testid="billing-toggle"]')?.click()`);
       await waitFor(async () => requests.some((url) => url.includes("/api/local-lab/billing")) ? true : null);
       assert.equal(requests.filter((url) => url.includes("/api/local-lab/billing")).length, 1);

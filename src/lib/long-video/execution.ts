@@ -44,6 +44,9 @@ export type LongVideoExecutionAuthorization = {
   allowedTaskIds?: string[];
   maxHourlyUsd?: number;
   maxOrders?: 1;
+  orderType?: "on-demand";
+  noReplacementOrder?: true;
+  walletDeltaCapUsd?: number;
 };
 
 export type LongVideoExecutionPolicy = {
@@ -215,6 +218,8 @@ function validateAuthorization(projectId: string, authorization: LongVideoExecut
   if (authorization.consumedAt) throw new Error("long_video_authorization_consumed");
   if (Date.parse(authorization.expiresAt) <= now.getTime()) throw new Error("long_video_authorization_expired");
   if (authorization.maxSpendUsd > policy.maxSpendUsd) throw new Error("long_video_authorization_spend_cap_exceeded");
+  if (authorization.walletDeltaCapUsd !== undefined && authorization.walletDeltaCapUsd > authorization.maxSpendUsd) throw new Error("long_video_authorization_wallet_cap_exceeded");
+  if (authorization.orderType !== undefined && authorization.orderType !== "on-demand") throw new Error("long_video_authorization_order_type_invalid");
 }
 
 export class LongVideoExecutionCoordinator {

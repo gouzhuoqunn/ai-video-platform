@@ -52,3 +52,24 @@ Final dry-run flags:
 The prepared batch is unchanged: one `1536x1024` image, one derived `2048x2048` image, one 10-second long-video project, two five-second prompts, and no short-video job. One final paid RTX5090 retry is credential-contract ready, but it is not currently authorized; it still requires a fresh user decision and one-use authorization.
 
 Validation passed: Stage 4J.2 credential fixtures, final retry plan, Stage 3R readiness, Clore execution fixtures, Stage 4H.6 SSH/adapter checks, Stage 4H.5 resume preservation, TypeScript, targeted lint, secret scan, and the Next production build. Full-repository lint remains blocked by pre-existing errors in unrelated Stage 3X/4J.1/UI files; no new error was reported in the Stage 4J.2 changed-file lint.
+# Stage 4J.3 paid RTX5090 acceptance result
+
+Date: 2026-07-19 local / 2026-07-18 UTC
+
+Result: **partial acceptance; daily-use closure not complete**.
+
+- Billing mojibake was fixed to literal UTF-8 `资费情况` in the visible button, panel heading, and accessibility labels. The three launcher filenames are genuine Chinese names.
+- The prepared batch was reused with duplicate jobs `0`: two RTX5090 images, one two-segment 10-second long-video project, two five-second prompts, and no short-video task.
+- Exactly one Clore order was created: `1962381`, server `85138`, On-Demand RTX5090, exact endpoint `root@n1.de.clorecloud.net:1439`, base `$0.31125/hour`. Wallet moved `$11.24 -> $10.72`; delta `$0.52`.
+- Canonical key-only SSH succeeded on its first attempt. The one-use password was not used. Order-scoped known-hosts and one-use password state were removed during cleanup.
+- Blackwell passed with capability `12.0`, about 32GB VRAM, Torch `2.7.1+cu128`, CUDA `12.8`, Triton `3.3.1`, `sm_120`, real CUDA/Triton operations, required UltraReal/Wan nodes, ComfyUI/controller, ffmpeg/ffprobe, RAM, and disk.
+- UltraReal restored once. The native 1536x1024 medium image SHA is `c79c99476486fdcd83dbdc0cb7e90e2961ebdda85fe556a1c1a10be2558e6078`. The high image used a 1536x1536 base plus deterministic Lanczos finalization to 2048x2048; final SHA is `d3b12a75c5b30086f2dec902d4d9e7e38f8418a8436c64cbca97d765623b32ac`.
+- Image models were unloaded and CUDA cache cleared before Wan. Wan restored once.
+- Segment 0 ran exactly once. Its rescued source WebM SHA is `ae8b6431b80145ddb6738e8a7ed2608a1c3d1d24889ea58f5518edc129dd6867`. The preserved MP4 is 1280x720, 81 frames, 16fps, 5.0625 seconds, SHA `4d72d09d12f2bf7a40e6ab49f29cc963e002bcab3d3ec2046126aef2307758d9`; last-frame SHA is `6260f7149b352bb4f337d8ce9a63f16f169e28c61e11052590e653e342cfb77a`.
+- The completed remote runner left its long SSH channel open. After the remote output was SHA-verified and rescued, the stuck local SSH process was ended; the coordinator received empty JSON, classified `video_remote_runner_failed:invalid_runner_json`, and did not submit segment 1. Segment 1 attempts remain `0`.
+- The only order was canceled at `2026-07-18T18:38:33.633Z`. No second order was created. The runner now uses detached single submission plus atomic short-poll result retrieval, covered by an offline focused test.
+- There is no segment-1 result, tail-frame chain, 10-second 720P master, 1080P final, or final-video browser result. Browser checks instead truthfully validated both images and rescued segment 0: Range `206`, seeking, refresh persistence, right sidebar, no hydration errors, and no provider mutation.
+- `启动平台.cmd` Restart was exercised once with zero active authorizations before and after.
+- Two final provider reads confirmed Clore orders `0`, RunPod Pods/volumes `0/0`, both holds `true`, no watchdog/watcher/create lock, no active authorization, and no order-scoped credential state. Focused tests, secret scan, TypeScript, and the Next build passed; broad lint, historical CI, RTX4090/short-video/RunPod tests, R2 publication, and commercial-release tests were skipped by scope.
+- Final flags: `rtx4090_profile_preserved=true`, `rtx5090_profile_implemented=true`, `rtx5090_gpu_verified=true`, `rtx5090_image_medium_verified=true`, `rtx5090_image_high_final_verified=true`, `windows_launcher_verified=true`, `rtx5090_long_video_720p_verified=false`, `rtx5090_long_video_1080p_final_verified=false`, `long_video_tail_frame_chain_verified=false`, `daily_use_ready=false`, `project_closed_for_personal_use=false`, `production_ready=false`.
+- `MANUAL_HANDOFF_REQUIRED`: no Blackwell repair handoff is required. Completion handoff is required because the current paid authorization is consumed; only a future explicit authorization may resume segment 1 with the fixed detached return path. It must not regenerate segment 0 or create an order automatically.

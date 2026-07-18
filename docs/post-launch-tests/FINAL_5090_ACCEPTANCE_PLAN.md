@@ -7,3 +7,10 @@
 停止条件：Runtime/显卡不匹配、任一模型恢复校验失败、OOM/持续错误、输出尺寸或尾帧链不合格、费用接近上限、出现第二订单、SSH 端点不一致、媒体同步失败。停止时先保留媒体和证据，再取消唯一订单。
 
 本计划不授权执行、不包含密钥、不会自动创建订单；实际执行必须由新的单次授权显式绑定 RTX 5090 和项目。
+# Stage 4J.3 plan disposition
+
+The final plan was executed once under the user's one-order authorization. Order `1962381` completed the Blackwell gate, both image jobs, image-model unload, one Wan restore, and segment 0. The plan stopped before segment 1 because the already-completed remote runner did not close its original SSH channel and no result JSON returned to the coordinator.
+
+The order was canceled at `2026-07-18T18:38:33.633Z`; no replacement order is allowed in this task. The authorization is consumed. This document does not authorize future billing.
+
+The prepared project is preserved at `nextSegmentIndex=1`: segment 0 is accepted with one attempt and segment 1 has zero attempts. Any future completion requires a new explicit authorization and must resume segment 1 only, preserve the segment-0 SHA evidence, and use the detached result-return implementation. Until that future work succeeds, the 10-second 720P master, 1080P final, tail-frame SHA chain, daily-use closure, and production readiness remain unverified.

@@ -6,3 +6,8 @@
 # Deferred after Stage 4J.1
 
 - Re-run the prepared RTX5090 batch only after a fresh one-use authorization and verified password/key parity for the exact returned Clore endpoint. The next operator must not create a second order in the current authorization and must preserve the two image tasks plus the two-segment project.
+# Deferred after Stage 4J.3
+
+- The current one-order authorization is consumed. Do not create another Clore order automatically or reuse any Stage 4J.3 authorization.
+- A future task may proceed only after a new explicit paid authorization. It should resume project `a6cbf8c1-f158-4583-8f40-fa524dddd9d1` at segment 1, preserve accepted segment 0 and its last-frame SHA, exercise the detached result-return fix, generate exactly one remaining segment, then verify the tail-frame chain, 720P merge, deterministic 1080P finalization, browser playback, Range/seeking, and cleanup.
+- RTX4090, short-video, RunPod fallback, broad lint, historical CI, R2 publication, and commercial-release work remain deferred.
