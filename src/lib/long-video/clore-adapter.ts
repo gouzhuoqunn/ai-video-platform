@@ -346,7 +346,7 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     if (this.videoNegativePrompt) workflow["7"].inputs = { ...(workflow["7"].inputs ?? {}), text: this.videoNegativePrompt };
     workflow["8"].inputs = { ...(workflow["8"].inputs ?? {}), width: input.session.gpuProfile === "rtx5090" ? 1280 : 832, height: input.session.gpuProfile === "rtx5090" ? 720 : 480, length: 81, batch_size: 1 };
     workflow["11"].inputs = { ...(workflow["11"].inputs ?? {}), noise_seed: this.videoSeedBase + input.sequenceIndex };
-    const result = runRemoteComfyWorkflow({ target, workflow, clientId: `lv-${input.attemptId.slice(0, 12)}`, kind: "video", timeoutSeconds: 90 * 60 });
+    const result = runRemoteComfyWorkflow({ target, workflow, clientId: `lv-${input.attemptId.slice(0, 12)}`, kind: "video", timeoutSeconds: 90 * 60, executionId: input.attemptId });
     const temporaryDir = path.join(os.tmpdir(), `long-video-${input.attemptId}`);
     mkdirSync(temporaryDir, { recursive: true });
     const downloaded = downloadRemoteRunnerOutputPersistent(target, result, temporaryDir);

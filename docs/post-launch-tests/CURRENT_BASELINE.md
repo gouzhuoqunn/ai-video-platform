@@ -30,3 +30,13 @@
 - Project `a6cbf8c1-f158-4583-8f40-fa524dddd9d1` is truthfully `failed`, `nextSegmentIndex=1`. Segment 0 is accepted with exactly one attempt and a preserved 1280x720/81-frame/16fps/5.0625-second MP4; segment 1 has zero attempts. No 10-second master or 1080P final exists.
 - The detached remote workflow return fix is implemented and offline-tested, but no second paid order was created. A future task requires fresh explicit authorization to resume segment 1 only; it must not regenerate segment 0 automatically.
 - Current readiness: RTX5090 hardware and both image levels verified; final 720P long video, 1080P final, tail-frame chain, daily-use closure, and production readiness remain false.
+
+# Stage 4J.4 checkpoint (2026-07-19, zero cost)
+
+- Start HEAD was `55e7ab5d5e69f41a85ae0564033a40d7f5bb4318`; backup ref is `backup/stage4j4-before-layout-runner-fix-20260719-033915`. Main was not touched.
+- Studio desktop layout is now flexible-main plus permanent 320px independently scrolling sidebar. Preview is 42vh with a 480px cap. Task columns are 8/6/4/2/1 at the documented responsive boundaries.
+- Image mode contains only image tasks. Video mode contains short-video tasks and long-video projects together; the short/long switch changes only the creation editor, and every video selection updates the shared preview.
+- Runner completion/status/result are separate bounded channels. The real detached PID, atomic JSON, exit code, terminal marker, completion sentinel, and deterministic attempt ID support recovery without a duplicate attempt.
+- Final partial boundary is unchanged: image jobs `d3573f65-1400-4a27-9bcf-4ff6f8f34273` and `8cdc12f3-cc75-43dc-ae49-423071389f07` are reused; project `a6cbf8c1-f158-4583-8f40-fa524dddd9d1` remains failed at `nextSegmentIndex=1`; segment 0 attempt `b94faa26-e434-4c38-a67c-bacbb3bd51a6` is accepted; segment 1 `554adaa8-fc5f-40c3-a02b-331eabcd23c8` has zero attempts.
+- Current plan flags remain `image_jobs_to_generate=0`, `segment_0_inference_required=false`, `video_segments_to_generate=1`, `expected_provider_orders=1`, and `paid_execution_authorized=false`. Proposed future wallet cap is `$1.25`.
+- Stage 4J.4 provider mutations and spend are zero. Expected zero-resource state remains Clore `0`, RunPod `0/0`, both holds `true`, no authorization, create lock, watchdog, or watcher.

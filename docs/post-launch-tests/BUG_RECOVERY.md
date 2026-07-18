@@ -9,3 +9,8 @@
 7. SSH、SCP、Runtime 和清理必须复用同一 canonical identity、订单级 known-hosts、`IdentitiesOnly=yes` 和禁用的 SSH agent；任一组件身份不同都应停止。
 8. 密码只能在该订单 payload 明确包含同一一次性 `ssh_password` 时尝试一次。密码成功后只用于修复 canonical authorized_keys，并且必须再次通过 key-only 登录才能继续。
 9. `Permission denied (publickey,password)` 要记录发生阶段。本次阶段是 workspace contract 的公钥认证拒绝；不能误写成 TCP、host-key 或泛化 SSH 故障。
+10. 远程推理不得依赖一个一直打开的 SSH shell 返回最终 JSON。启动命令必须记录真实 PID，并把 stdin/stdout/stderr 全部从父 SSH 通道重定向。
+11. 远程结果顺序固定为：原子写 `result.json`、原子写 exit code、原子写 terminal marker；短状态命令只返回一次可解析完成哨兵，JSON 必须由单独的有界命令读取。
+12. 如果 terminal marker 已存在但本地读取 JSON 中断，保留 job 目录。用同一个 durable attempt UUID 重入时只读取原结果，不能创建新尝试或再次提交推理。
+13. 空状态响应、非零远程退出、结果读取中断和有界超时是四种不同错误，不能都折叠为 `invalid_runner_json`。
+14. 恢复循环从 `nextSegmentIndex` 开始；已接受 segment 直接跳过。`generating` segment 若已有 `running` attempt，必须复用该 attempt ID。

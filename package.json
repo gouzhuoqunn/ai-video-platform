@@ -124,6 +124,8 @@
     "stage4j3:browser:test": "tsx scripts/stage4j3-browser-check.ts",
     "stage4j4:studio:test": "tsx scripts/stage4j4-studio-layout-tests.ts",
     "stage4j4:browser:test": "tsx scripts/stage4j4-browser-check.ts",
+    "stage4j4:runner:test": "tsx scripts/stage4j4-runner-channel-tests.ts",
+    "stage4j4:resume-plan:test": "tsx scripts/stage4j4-video-resume-plan-tests.ts",
     "clore:support:acknowledge": "tsx scripts/clore/support-acknowledgement.ts",
     "clore:deployment:operator-retry": "tsx scripts/clore/operator-retry-override.ts",
     "generation:stage3o:prepare": "tsx scripts/stage3o-batch.ts",

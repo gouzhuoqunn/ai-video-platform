@@ -10,13 +10,14 @@ const commands = buildDetachedRemoteWorkflowCommands({
   timeoutSeconds: 1800,
 });
 
-assert.match(commands.launch, /nohup setsid sh -c/);
-assert.match(commands.launch, /<\/dev\/null >\/dev\/null 2>&1 & echo launched$/);
-assert.match(commands.launch, /--kind video --timeout-seconds 1800 --poll-seconds 2/);
-assert.match(commands.launch, /result\.json\.part/);
-assert.match(commands.launch, /mv -f .*result\.json\.part .*result\.json/);
-assert.match(commands.poll, /__RUNNING__/);
-assert.match(commands.poll, /cat .*result\.json/);
+assert.match(commands.launch, /setsid sh -c/);
+assert.match(commands.launch, /<\/dev\/null >\/dev\/null 2>&1 & pid=\$!/);
+assert.match(commands.launch, /__REMOTE_JOB_STARTED__/);
+assert.match(commands.launch, /__REMOTE_JOB_RESUMED__/);
+assert.match(commands.poll, /__REMOTE_JOB_RUNNING__/);
+assert.match(commands.poll, /__REMOTE_JOB_COMPLETE__/);
+assert.doesNotMatch(commands.poll, /cat .*result\.json/);
+assert.match(commands.fetchResult, /cat .*result\.json/);
 assert.match(commands.stop, /kill -TERM -- -"\$pid"/);
 assert.doesNotMatch(commands.launch, /known_hosts|IdentityAgent|ssh-agent/i);
 
@@ -31,4 +32,4 @@ assert.throws(
   /remote_runner_nonce_invalid/,
 );
 
-console.log("Stage 4J.3 detached workflow tests passed.");
+console.log("Stage 4J.3 detached workflow compatibility tests passed.");

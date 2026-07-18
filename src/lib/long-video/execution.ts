@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import path from "node:path";
 import { createRequire } from "node:module";
 import { loadProductionVerification } from "@/lib/generation/production-pipeline";
-import { buildLongVideoAttemptPaths, buildLongVideoProjectPaths, cleanupLongVideoSegmentMedia, loadLongVideoLibraryDir, mergeLongVideoProjectMedia, persistLongVideoSegmentMedia, probeLongVideoMedia } from "@/lib/long-video/media";
+import { buildLongVideoProjectPaths, cleanupLongVideoSegmentMedia, loadLongVideoLibraryDir, mergeLongVideoProjectMedia, persistLongVideoSegmentMedia, probeLongVideoMedia } from "@/lib/long-video/media";
 import {
   LONG_VIDEO_SESSION_POLICY,
   type LongVideoProject,
@@ -263,7 +263,7 @@ export class LongVideoExecutionCoordinator {
     if (current && !blackwellAcceptance && current.totalSegments !== 3) blockers.push("expected_three_segments");
     if (!sourceValid) blockers.push("existing_source_invalid");
     if (resumeExistingProject && !preservedSegmentZero.valid) blockers.push("preserved_segment_zero_invalid");
-    if (resumeExistingProject && segmentsToGenerate.length !== 2) blockers.push("resume_expected_two_segments");
+    if (resumeExistingProject && segmentsToGenerate.length !== current!.totalSegments - resumeFromSegment!) blockers.push("resume_segment_boundary_mismatch");
     if (!promptsDistinct) blockers.push("segment_prompts_not_distinct");
     const activeOrderCount = await this.provider.activeOrderCount();
     if (activeOrderCount !== 0) blockers.push("active_provider_order_exists");
@@ -383,8 +383,16 @@ export class LongVideoExecutionCoordinator {
         if (segment.status === "accepted") continue;
         const inputFrameRef = segment.inputFrameRef ?? (index === 0 ? current.firstFrameRef : null);
         if (!inputFrameRef) throw new Error("long_video_input_frame_missing");
-        const attempt = prepareLongVideoSegmentAttempt({ projectId, sequenceIndex: index, expectedProjectVersion: current.version, expectedSegmentVersion: segment.version, now: this.now(), filePath: this.statePath });
-        session.currentSegmentIndex = index; session.currentAttemptId = attempt.segments[index].attempts.at(-1)?.id ?? null; session.updatedAt = this.now().toISOString(); this.saveSession(session);
+        const recoverableAttempt = segment.status === "generating"
+          ? [...segment.attempts].reverse().find((candidate) => candidate.status === "running")
+          : null;
+        const attempt = recoverableAttempt
+          ? current
+          : prepareLongVideoSegmentAttempt({ projectId, sequenceIndex: index, expectedProjectVersion: current.version, expectedSegmentVersion: segment.version, now: this.now(), filePath: this.statePath });
+        session.currentSegmentIndex = index;
+        session.currentAttemptId = recoverableAttempt?.id ?? attempt.segments[index].attempts.at(-1)?.id ?? null;
+        session.updatedAt = this.now().toISOString();
+        this.saveSession(session);
         const previousSegment = index > 0 ? current.segments[index - 1] : null;
         const previousAttempt = previousSegment?.attempts.find((candidate) => candidate.id === previousSegment.selectedAttemptId) ?? null;
         const previousLastFrameSha256 = typeof previousAttempt?.evidenceSummary.lastFrameSha256 === "string" ? previousAttempt.evidenceSummary.lastFrameSha256 : null;

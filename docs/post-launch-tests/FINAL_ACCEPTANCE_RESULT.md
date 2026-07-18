@@ -73,3 +73,22 @@ Result: **partial acceptance; daily-use closure not complete**.
 - Two final provider reads confirmed Clore orders `0`, RunPod Pods/volumes `0/0`, both holds `true`, no watchdog/watcher/create lock, no active authorization, and no order-scoped credential state. Focused tests, secret scan, TypeScript, and the Next build passed; broad lint, historical CI, RTX4090/short-video/RunPod tests, R2 publication, and commercial-release tests were skipped by scope.
 - Final flags: `rtx4090_profile_preserved=true`, `rtx5090_profile_implemented=true`, `rtx5090_gpu_verified=true`, `rtx5090_image_medium_verified=true`, `rtx5090_image_high_final_verified=true`, `windows_launcher_verified=true`, `rtx5090_long_video_720p_verified=false`, `rtx5090_long_video_1080p_final_verified=false`, `long_video_tail_frame_chain_verified=false`, `daily_use_ready=false`, `project_closed_for_personal_use=false`, `production_ready=false`.
 - `MANUAL_HANDOFF_REQUIRED`: no Blackwell repair handoff is required. Completion handoff is required because the current paid authorization is consumed; only a future explicit authorization may resume segment 1 with the fixed detached return path. It must not regenerate segment 0 or create an order automatically.
+
+## Stage 4J.4 zero-cost correction and exact resume boundary
+
+Date: 2026-07-19
+
+Result: **non-billable layout/runner correction complete; one paid segment remains**.
+
+- No provider mutation, paid authorization, real SSH, model restore, inference, image regeneration, segment-0 regeneration, or accepted-media change occurred.
+- Read-only wallet verification remained `$10.72` before and after Stage 4J.4; Stage 4J.4 wallet delta was `$0.00`.
+- The permanent sidebar failure was caused by the billing and long-video branches replacing the entire two-column workspace. A single shared shell now keeps a 320px independently scrolling sidebar mounted in every mode and billing/detail state.
+- The preview changed from an unconstrained 16:9 block to one 42vh, maximum-480px `object-contain` frame. The gallery changed from about three desktop columns to 8 columns at 1366px and wider, 6 at 1100px, 4 at 800px, then 2/1.
+- Short- and long-video creation editors remain distinct, but both task families now share one video history and preview. Selecting a long project exposes its accepted segment strip.
+- The exact Stage 4J.3 cause was descriptor inheritance by a remote descendant of the original blocking SSH command. Inference completed, but the SSH output pipe never reached EOF; local timeout termination produced an empty JSON classification.
+- The fixed contract separates launch, status sentinel, result fetch, stop, and cleanup. It records the real PID/job UUID, atomically publishes JSON/exit/terminal files, redirects all descriptors, preserves nonzero exit codes, distinguishes timeout from empty status, and resumes a completed deterministic attempt after local result-read interruption without resubmission.
+- Accepted image hashes remain `c79c99476486fdcd83dbdc0cb7e90e2961ebdda85fe556a1c1a10be2558e6078` and `d3b12a75c5b30086f2dec902d4d9e7e38f8418a8436c64cbca97d765623b32ac`.
+- Accepted segment-0 MP4 SHA remains `4d72d09d12f2bf7a40e6ab49f29cc963e002bcab3d3ec2046126aef2307758d9`; last-frame SHA remains `6260f7149b352bb4f337d8ce9a63f16f169e28c61e11052590e653e342cfb77a`. Segment 1 attempts remain `0`.
+- `FINAL_VIDEO_RESUME_PLAN.md` is plan-only: zero image jobs, no UltraReal, one Wan restore, one segment-1 inference, immediate cancel, local 720P merge and 1080P derivation. It proposes 120 minutes, draining at 105, expected `$0.35–$0.80`, hard wallet-delta cap `$1.25`, and `paid_execution_authorized=false`.
+- Browser acceptance passed at 1366x768 and 1920x1080 with sidebar width 320px, preview heights about 323px/454px, eight columns, no horizontal overflow, `资费情况`, segment strip, no hydration error, and no automatic provider action.
+- Daily-use closure remains incomplete only because segment 1, the tail-frame chain, 720P master, and 1080P final do not yet exist. `production_ready=false`.
