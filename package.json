@@ -182,6 +182,7 @@
     "studio:mode:test": "tsx scripts/studio-mode-tests.ts",
     "generation:comfy-source:test": "tsx scripts/comfy-source-audit-tests.ts",
     "generation:4090-plan:test": "tsx scripts/rtx4090-baseline-plan-tests.ts",
+    "generation:5090:profile:test": "tsx scripts/rtx5090-profile-tests.ts",
     "generation:benchmark-schema:test": "tsx scripts/benchmark-schema-tests.ts",
     "check:stage-two-five": "npm run generation:architecture:test && npm run generation:metadata:test && npm run generation:runtime:test && npm run generation:workflow:test && npm run generation:workflow-assets:test && npm run generation:comfy-source:test && npm run generation:4090-plan:test && npm run generation:benchmark-schema:test && npm run runtime-image:test && npm run model-cache:test && npm run lint && npm run typecheck && npm run secret:scan && npm run build",
     "cost:session": "tsx scripts/cost/session-cost.ts",

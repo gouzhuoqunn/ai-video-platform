@@ -59,6 +59,7 @@ tsconfig.tsbuildinfo
 .secrets/model-cache-seed-state.json
 .secrets/model-cache-state.json
 .secrets/runtime-image-state.json
+.secrets/launcher/
 /scripts/clore/*.local.json
 /workspace/jobs/
 /workspace/models/

@@ -9,5 +9,9 @@
   "long_video_pipeline_gpu_verified": false,
   "daily_use_release_candidate": true,
   "production_ready": false,
+  "rtx4090_profile_preserved": true,
+  "rtx5090_profile_implemented": true,
+  "rtx5090_plan_ready": true,
+  "rtx5090_gpu_verified": false,
   "nextAcceptance": "Complete one 15-second existing-first-frame long-video project (three Wan segments) through UI review and confirmed merge, with one Clore order and a 0.75 USD session spend limit."
 }

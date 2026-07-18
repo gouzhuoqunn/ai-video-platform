@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "rtx5090-blackwell-nonpaid",
+  "gpuClass": "rtx5090",
+  "verified": false,
+  "preserve": ["rtx4090-verified", "Torch 2.6.0+cu124"],
+  "runtime": { "cuda": "12.8", "torch": "2.7.1+cu128", "triton": "3.3.x" },
+  "capabilities": {
+    "mediumImage": { "generation": "1536x1024", "final": "1536x1024", "strategy": "native_expected" },
+    "highImage": { "generation": "1536x1536", "final": "2048x2048", "strategy": "upscale_or_refinement_expected" },
+    "mediumLongVideo": { "generation": "1280x720", "final": "1280x720", "strategy": "native_expected" },
+    "highLongVideo": { "generation": "1280x720", "final": "1920x1080", "strategy": "upscale_or_refinement_expected" }
+  },
+  "readiness": { "hardwareDetected": false, "runtimeCompatible": false, "native2048Verified": false, "native1080Verified": false, "paidSessionCompleted": false }
+}
