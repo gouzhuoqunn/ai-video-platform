@@ -37,10 +37,12 @@ export function assertGpuTarget(target: GpuTarget) {
 export function sshCommand(target: GpuTarget, command: string, timeoutMs = 60_000) {
   return spawnSync("ssh", [
     "-i", target.sshKeyPath,
+    ...(target.knownHostsPath ? ["-o", `UserKnownHostsFile=${target.knownHostsPath}`] : []),
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "PasswordAuthentication=no",
     "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=15",
+    "-T",
     "-p", String(target.port),
     `${target.username}@${target.host}`,
     command,
@@ -50,6 +52,7 @@ export function sshCommand(target: GpuTarget, command: string, timeoutMs = 60_00
 export function scpFile(target: GpuTarget, localPath: string, remotePath: string, timeoutMs = 120_000) {
   return spawnSync("scp", [
     "-i", target.sshKeyPath,
+    ...(target.knownHostsPath ? ["-o", `UserKnownHostsFile=${target.knownHostsPath}`] : []),
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "PasswordAuthentication=no",
     "-o", "BatchMode=yes",
@@ -64,6 +67,7 @@ export function scpFromRemote(target: GpuTarget, remotePath: string, localPath: 
   if (!remotePath.startsWith("/workspace/") || /[\r\n]/.test(remotePath)) throw new Error("Refusing unsafe remote download path.");
   return spawnSync("scp", [
     "-i", target.sshKeyPath,
+    ...(target.knownHostsPath ? ["-o", `UserKnownHostsFile=${target.knownHostsPath}`] : []),
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "PasswordAuthentication=no",
     "-o", "BatchMode=yes",

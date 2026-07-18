@@ -1,0 +1,16 @@
+{
+  "deployed_before_key_injection": {
+    "id": "fixture-order-1",
+    "si": "fixture-server-1",
+    "expired": false,
+    "mon_container": 2,
+    "pub_cluster": ["proxy.example.invalid"],
+    "tcp_ports": ["22:2442"]
+  },
+  "stderr": {
+    "key_not_injected": "root@proxy.example.invalid: Permission denied (publickey).",
+    "host_key_changed": "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! Host key verification failed.",
+    "transport_timeout": "Connection timed out during banner exchange",
+    "connection_reset": "kex_exchange_identification: read: Connection reset by peer"
+  }
+}

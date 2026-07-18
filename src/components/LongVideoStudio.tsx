@@ -89,6 +89,7 @@ export function LongVideoStudio({ imageResults }: Props) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [now, setNow] = useState(0);
+  const [draftRestored, setDraftRestored] = useState(false);
   const promptTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const promptKey = useRef("");
   const promptDirty = useRef(false);
@@ -135,18 +136,21 @@ export function LongVideoStudio({ imageResults }: Props) {
   useEffect(() => {
     try {
       const saved = JSON.parse(window.localStorage.getItem(LONG_VIDEO_DRAFT_KEY) ?? "null") as { title?: string; overallPrompt?: string; duration?: number; prompts?: string[] } | null;
-      if (!saved) return;
-      if (saved.title) setTitle(saved.title);
-      if (typeof saved.overallPrompt === "string") setOverallPrompt(saved.overallPrompt);
-      if (typeof saved.duration === "number" && saved.duration >= 5 && saved.duration <= 300 && saved.duration % 5 === 0) setDuration(saved.duration);
-      if (Array.isArray(saved.prompts)) { setPrompts(saved.prompts); setPromptArchive(Object.fromEntries(saved.prompts.map((prompt, index) => [index, prompt]))); }
+      if (saved) {
+        if (saved.title) setTitle(saved.title);
+        if (typeof saved.overallPrompt === "string") setOverallPrompt(saved.overallPrompt);
+        if (typeof saved.duration === "number" && saved.duration >= 5 && saved.duration <= 300 && saved.duration % 5 === 0) setDuration(saved.duration);
+        if (Array.isArray(saved.prompts)) { setPrompts(saved.prompts); setPromptArchive(Object.fromEntries(saved.prompts.map((prompt, index) => [index, prompt]))); }
+      }
     } catch { /* ignore malformed local draft */ }
+    setDraftRestored(true);
     /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
   useEffect(() => {
+    if (!draftRestored) return;
     window.localStorage.setItem(LONG_VIDEO_DRAFT_KEY, JSON.stringify({ title, overallPrompt, duration, prompts: draftSegments.map((segment) => segment.prompt) }));
-  }, [title, overallPrompt, duration, draftSegments]);
+  }, [title, overallPrompt, duration, draftSegments, draftRestored]);
 
   async function createProject() {
     if (busy) return;
@@ -278,7 +282,7 @@ export function LongVideoStudio({ imageResults }: Props) {
           <span className="rounded-md bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">{"长视频将分段生成，可能跨多次显卡会话续作。"}</span>
         </div>
         <div className="mt-4 grid gap-3 md:grid-cols-[180px_220px_minmax(0,1fr)_220px]">
-          <label className="text-sm font-semibold">项目标题<input className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" maxLength={120} onChange={(event) => setTitle(event.target.value)} value={title} /></label>
+          <label className="text-sm font-semibold">项目标题<input className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" data-testid="long-video-title" maxLength={120} onChange={(event) => setTitle(event.target.value)} value={title} /></label>
           <label className="text-sm font-semibold">总时长
             <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => changeDuration(Number(event.target.value))} value={duration}>{Array.from({ length: 60 }, (_, index) => (index + 1) * 5).map((value) => <option key={value} value={value}>{value} 秒 · {value / 5} 段</option>)}</select>
           </label>

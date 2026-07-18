@@ -46,6 +46,7 @@ export function FirstFrameInput({ existingImages, selectedExistingId, onSelectEx
       <p className="text-sm font-semibold">{title}</p>
       <div
         className={`rounded-md border border-dashed p-3 text-sm ${dragging ? "border-emerald-500 bg-emerald-50" : "border-stone-300 bg-[#faf8f4]"}`}
+        data-testid="first-frame-dropzone"
         onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
         onDragOver={(event) => event.preventDefault()}
         onDragLeave={() => setDragging(false)}

@@ -10,6 +10,7 @@ export type GpuTarget = {
   sshKeyPath: string;
   gpuProfile: GpuProfile;
   runtimeDigest: string;
+  knownHostsPath?: string;
 };
 
 export type ProviderCredentialInspection = {

@@ -7,6 +7,7 @@ import { loadCloreExecutionConfig } from "../clore/execution-config";
 import { readLiveMarketplace, readLiveOrdersSummary, readWalletSummary } from "../clore/live";
 import { readActiveOrder } from "../clore/order-state";
 import { getPrivateKeyPath } from "../clore/ssh-client";
+import { cleanupOrderKnownHosts, orderKnownHostsPath } from "../clore/ssh-readiness-policy";
 import { findBootstrapImageCandidates } from "../clore/bootstrap-image-profile";
 import { buildCreateOrderBody, buildKeyOnlyCreateOrderBody, buildManualParityCreateOrderBody, createCloreOrder } from "../clore/order-execution";
 import { cancelCloreOrder } from "../clore/cancel-execution";
@@ -40,7 +41,7 @@ function loadTarget(): GpuTarget {
   const input = JSON.parse(readFileSync(TARGET_PATH, "utf8")) as Partial<GpuTarget> & { user?: string };
   const active = readActiveOrder();
   const profile = input.gpuProfile ?? active?.gpu_profile ?? "rtx4090";
-  return assertGpuTarget({ provider: "clore", host: String(input.host ?? ""), port: Number(input.port), username: String(input.username ?? input.user ?? "root"), sshKeyPath: String(input.sshKeyPath ?? getPrivateKeyPath()), gpuProfile: profile, runtimeDigest: String(input.runtimeDigest ?? FIXED_RUNTIME_DIGEST) });
+  return assertGpuTarget({ provider: "clore", host: String(input.host ?? ""), port: Number(input.port), username: String(input.username ?? input.user ?? "root"), sshKeyPath: String(input.sshKeyPath ?? getPrivateKeyPath()), gpuProfile: profile, runtimeDigest: String(input.runtimeDigest ?? FIXED_RUNTIME_DIGEST), knownHostsPath: typeof input.knownHostsPath === "string" ? input.knownHostsPath : active?.order_id ? orderKnownHostsPath(active.order_id) : undefined });
 }
 
 function mapCandidate(candidate: ReturnType<typeof findBootstrapImageCandidates>[number]): GpuCandidate {
@@ -161,9 +162,7 @@ export class CloreProvider implements GpuProvider {
       const issues = [...output.matchAll(/"issue"\s*:\s*"([^"]+)"/g)];
       throw new Error(issues.at(-1)?.[1] ?? `clore_ssh_readiness_failed:${output.trim().slice(-500)}`);
     }
-    const target = loadTarget();
-    if (sshCommand(target, "true").status !== 0) throw new Error("clore_ssh_failed");
-    return target;
+    return loadTarget();
   }
 
   async stopSession() { /* Runtime is stopped over SSH by the first-image orchestrator. */ }
@@ -171,9 +170,13 @@ export class CloreProvider implements GpuProvider {
   async terminateSession(session: GpuSession) {
     const active = readActiveOrder();
     if (!active || active.order_id !== session.id) return;
-    await cancelCloreOrder({ config: loadCloreConfig(), execution: loadCloreExecutionConfig(), orderId: session.id, processingJobs: 0, uploading: false, finalVideoUploaded: true, issue: "stage3m_session_complete" });
-    clearManualParitySecrets();
-    rmSync(TARGET_PATH, { force: true });
+    try {
+      await cancelCloreOrder({ config: loadCloreConfig(), execution: loadCloreExecutionConfig(), orderId: session.id, processingJobs: 0, uploading: false, finalVideoUploaded: true, issue: "stage3m_session_complete" });
+    } finally {
+      clearManualParitySecrets();
+      cleanupOrderKnownHosts(session.id);
+      rmSync(TARGET_PATH, { force: true });
+    }
   }
 
   async getBilling(session: GpuSession) {

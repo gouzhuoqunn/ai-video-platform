@@ -258,7 +258,7 @@ export function LocalCreationStudio() {
   const [filter, setFilter] = useState<"all" | VideoJobStatus>("all");
   const [minPrice, setMinPrice] = useState("0");
   const [maxPrice, setMaxPrice] = useState("0.70");
-  const [mode, setMode] = useState<StudioMode>(() => typeof window === "undefined" ? "video" : normalizeStudioMode(window.localStorage.getItem(STUDIO_MODE_STORAGE_KEY)));
+  const [mode, setMode] = useState<StudioMode>("video");
   const [imageResults, setImageResults] = useState<ImageResult[]>([]);
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [selectedImageId, setSelectedImageId] = useState("");
@@ -381,6 +381,12 @@ export function LocalCreationStudio() {
     }
     if (sessionResponse.ok) setSession(sessionPayload);
     if (autorentResponse.ok) setAutorentRequests(autorentPayload.requests ?? []);
+  }, []);
+
+  useEffect(() => {
+    // Hydration starts from the same deterministic snapshot as the server.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMode(normalizeStudioMode(window.localStorage.getItem(STUDIO_MODE_STORAGE_KEY)));
   }, []);
 
   useEffect(() => {
@@ -623,14 +629,14 @@ export function LocalCreationStudio() {
   }
 
   return (
-    <main className="min-h-screen bg-[#f5f0e8] text-stone-900">
+    <main className="min-h-screen bg-[#f5f0e8] text-stone-900" data-studio-mode={mode}>
       <header className="sticky top-0 z-30 border-b border-stone-200 bg-[#f5f0e8]/95 px-5 py-4 backdrop-blur">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">local_lab</p>
             <h1 className="text-2xl font-bold">本地创作台</h1>
             <div className="mt-2 flex flex-wrap gap-1 rounded-md border border-stone-200 bg-white p-1 text-sm font-semibold">
-              {(["image", "video", "long_video"] as const).map((item) => <button className={`rounded px-3 py-1.5 ${mode === item ? "bg-stone-900 text-white" : "text-stone-600"}`} key={item} onClick={() => selectMode(item)} type="button">{item === "image" ? "图片" : item === "video" ? "视频" : "长视频"}</button>)}
+              {(["image", "video", "long_video"] as const).map((item) => <button aria-pressed={mode === item} className={`rounded px-3 py-1.5 ${mode === item ? "bg-stone-900 text-white" : "text-stone-600"}`} data-mode={item} key={item} onClick={() => selectMode(item)} type="button">{item === "image" ? "图片" : item === "video" ? "视频" : "长视频"}</button>)}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -640,8 +646,8 @@ export function LocalCreationStudio() {
             <Link className="rounded-md border border-stone-200 bg-white px-3 py-2 font-semibold text-stone-700" href="/generate/5090">
               5090
             </Link>
-            <button className="rounded-md border border-stone-300 bg-white px-3 py-2 font-semibold" onClick={() => setShowBilling((current) => !current)} type="button">费用情况</button>
-            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? `图片 ${imageResults.length}` : mode === "long_video" ? "长视频项目" : `未生成 ${counts.pending_confirmation ?? 0}`}</span>
+            <button className="rounded-md border border-stone-300 bg-white px-3 py-2 font-semibold" data-testid="billing-toggle" onClick={() => setShowBilling((current) => !current)} type="button">璧勮垂鎯呭喌</button>
+            <span className="rounded-md border border-stone-200 bg-white px-3 py-2" data-mode={mode} data-testid="studio-status">{mode === "image" ? `图片 ${imageResults.length}` : mode === "long_video" ? "长视频项目" : `未生成 ${counts.pending_confirmation ?? 0}`}</span>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? `图片任务 ${pendingImage?.status === "pending" ? 1 : 0}` : mode === "long_video" ? "分段审核 20 秒" : `排队 ${counts.queued ?? 0}`}</span>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">GPU {session?.orderId ? "运行中" : "无"}</span>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? "Image UltraReal Flux FP8" : mode === "long_video" ? "Long Video Wan Remix I2V" : "Video Wan 2.2 Remix 14B FP8"}</span>

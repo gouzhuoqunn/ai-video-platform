@@ -45,7 +45,7 @@ export function getPublicKeyPath(configuredPath?: string) {
   return configuredPath ?? `${getPrivateKeyPath()}.pub`;
 }
 
-export function buildSshArgs(target: SshTarget, command: string, options: { requirePrivateKey?: boolean } = {}) {
+export function buildSshArgs(target: SshTarget, command: string, options: { requirePrivateKey?: boolean; knownHostsPath?: string; connectTimeoutSeconds?: number } = {}) {
   const privateKeyPath = getPrivateKeyPath();
   if (options.requirePrivateKey !== false && !existsSync(privateKeyPath)) {
     throw new Error("Dedicated Clore SSH private key is missing.");
@@ -60,11 +60,16 @@ export function buildSshArgs(target: SshTarget, command: string, options: { requ
     "-i",
     privateKeyPath,
     "-o",
-    `UserKnownHostsFile=${CLORE_KNOWN_HOSTS_PATH}`,
+    `UserKnownHostsFile=${options.knownHostsPath ?? CLORE_KNOWN_HOSTS_PATH}`,
     "-o",
     "StrictHostKeyChecking=accept-new",
     "-o",
     "PasswordAuthentication=no",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    `ConnectTimeout=${Math.min(15, Math.max(1, options.connectTimeoutSeconds ?? 15))}`,
+    "-T",
     "-p",
     String(target.port),
     `${target.user}@${target.host}`,
