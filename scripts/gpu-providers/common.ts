@@ -1,7 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import net from "node:net";
 import { spawnSync } from "node:child_process";
+import path from "node:path";
 import type { GpuTarget } from "./types";
+import { deriveCanonicalSshIdentity } from "../clore/ssh-identity";
+import { getPrivateKeyPath } from "../clore/ssh-client";
 
 export const FIXED_RUNTIME_DIGEST = "ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:187a7eb304075863dbd3f7a1b527530a06783ad8ea0fec5e51e2b9725d1bf137";
 
@@ -34,48 +37,77 @@ export function assertGpuTarget(target: GpuTarget) {
   return target;
 }
 
-export function sshCommand(target: GpuTarget, command: string, timeoutMs = 60_000) {
-  return spawnSync("ssh", [
-    "-i", target.sshKeyPath,
+function resolvedTransportIdentity(target: GpuTarget) {
+  if (target.provider !== "clore" || target.sshCredentialSource !== "canonical_clore_project_key") {
+    return target.sshKeyPath;
+  }
+  const identity = deriveCanonicalSshIdentity(getPrivateKeyPath());
+  if (
+    path.resolve(target.sshKeyPath) !== identity.privateKeyPath ||
+    target.sshIdentityFingerprint !== identity.fingerprint
+  ) {
+    throw new Error("clore_ssh_target_identity_mismatch");
+  }
+  if (!target.knownHostsPath) throw new Error("clore_order_scoped_known_hosts_required");
+  return identity.privateKeyPath;
+}
+
+function deterministicTransportOptions(target: GpuTarget) {
+  return [
     ...(target.knownHostsPath ? ["-o", `UserKnownHostsFile=${target.knownHostsPath}`] : []),
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "PasswordAuthentication=no",
+    "-o", "KbdInteractiveAuthentication=no",
+    "-o", "PreferredAuthentications=publickey",
+    "-o", "IdentitiesOnly=yes",
+    "-o", "IdentityAgent=none",
     "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=15",
+  ];
+}
+
+export function buildSshCommandArgs(target: GpuTarget, command: string) {
+  return [
+    "-i", resolvedTransportIdentity(target),
+    ...deterministicTransportOptions(target),
     "-T",
     "-p", String(target.port),
     `${target.username}@${target.host}`,
     command,
-  ], { encoding: "utf8", timeout: timeoutMs });
+  ];
 }
 
-export function scpFile(target: GpuTarget, localPath: string, remotePath: string, timeoutMs = 120_000) {
-  return spawnSync("scp", [
-    "-i", target.sshKeyPath,
-    ...(target.knownHostsPath ? ["-o", `UserKnownHostsFile=${target.knownHostsPath}`] : []),
-    "-o", "StrictHostKeyChecking=accept-new",
-    "-o", "PasswordAuthentication=no",
-    "-o", "BatchMode=yes",
-    "-o", "ConnectTimeout=15",
+export function buildScpToRemoteArgs(target: GpuTarget, localPath: string, remotePath: string) {
+  return [
+    "-i", resolvedTransportIdentity(target),
+    ...deterministicTransportOptions(target),
     "-P", String(target.port),
     localPath,
     `${target.username}@${target.host}:${remotePath}`,
-  ], { encoding: "utf8", timeout: timeoutMs });
+  ];
+}
+
+export function buildScpFromRemoteArgs(target: GpuTarget, remotePath: string, localPath: string) {
+  return [
+    "-i", resolvedTransportIdentity(target),
+    ...deterministicTransportOptions(target),
+    "-P", String(target.port),
+    `${target.username}@${target.host}:${remotePath}`,
+    localPath,
+  ];
+}
+
+export function sshCommand(target: GpuTarget, command: string, timeoutMs = 60_000) {
+  return spawnSync("ssh", buildSshCommandArgs(target, command), { encoding: "utf8", timeout: timeoutMs });
+}
+
+export function scpFile(target: GpuTarget, localPath: string, remotePath: string, timeoutMs = 120_000) {
+  return spawnSync("scp", buildScpToRemoteArgs(target, localPath, remotePath), { encoding: "utf8", timeout: timeoutMs });
 }
 
 export function scpFromRemote(target: GpuTarget, remotePath: string, localPath: string, timeoutMs = 120_000) {
   if (!remotePath.startsWith("/workspace/") || /[\r\n]/.test(remotePath)) throw new Error("Refusing unsafe remote download path.");
-  return spawnSync("scp", [
-    "-i", target.sshKeyPath,
-    ...(target.knownHostsPath ? ["-o", `UserKnownHostsFile=${target.knownHostsPath}`] : []),
-    "-o", "StrictHostKeyChecking=accept-new",
-    "-o", "PasswordAuthentication=no",
-    "-o", "BatchMode=yes",
-    "-o", "ConnectTimeout=15",
-    "-P", String(target.port),
-    `${target.username}@${target.host}:${remotePath}`,
-    localPath,
-  ], { encoding: "utf8", timeout: timeoutMs });
+  return spawnSync("scp", buildScpFromRemoteArgs(target, remotePath, localPath), { encoding: "utf8", timeout: timeoutMs });
 }
 
 export async function tcpReachable(host: string, port: number, timeoutMs = 10_000) {

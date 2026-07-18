@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { buildKeyOnlyCreateOrderBody, buildManualParityCreateOrderBody, assertCreateOrderBodySafe } from "./order-execution";
 import { parseCloreOrder, parseSshCommand, readinessIssue } from "./order-readiness-parser";
+import { syntheticEd25519PublicKey } from "./ssh-test-fixture";
 
 const fixture = JSON.parse(readFileSync(path.join(process.cwd(), "scripts", "clore", "fixtures", "stage3r-real-orders.sanitized.json"), "utf8"));
 const closed = parseCloreOrder(fixture.manual_golden);
@@ -25,7 +26,7 @@ assert.deepEqual(parseSshCommand("ssh root@n1.msk.cloreai.ru -p 1584"), { host: 
 assert.deepEqual(parseSshCommand("ssh -p 1584 root@n1.msk.cloreai.ru"), { host: "n1.msk.cloreai.ru", port: 1584, user: "root" });
 assert.equal(parseSshCommand("ssh root@n1.msk.clore.ai -p nope"), null);
 
-const parityBody = buildManualParityCreateOrderBody({ serverId: "12345", currency: "USD-Blockchain", sshPassword: "S3r-0123456789abcdefAa7", sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockPublicKeyForStage3SOnly0000000000 test" });
+const parityBody = buildManualParityCreateOrderBody({ serverId: "12345", currency: "USD-Blockchain", sshPassword: "S3r-0123456789abcdefAa7", sshPublicKey: syntheticEd25519PublicKey("stage3r-parity") });
 assertCreateOrderBodySafe(parityBody);
 assert.deepEqual(Object.keys(parityBody).sort(), ["autossh_entrypoint", "currency", "image", "ports", "renting_server", "ssh_key", "ssh_password", "type"]);
 assert.equal(parityBody.image, "cloreai/jupyter:ubuntu24.04-v2");
@@ -35,14 +36,15 @@ assert.match(parityBody.ssh_key ?? "", /^ssh-ed25519 /);
 assert.equal(parityBody.required_price, undefined);
 assert.equal(parityBody.autossh_entrypoint, true);
 
-const keyOnlyBody = buildKeyOnlyCreateOrderBody({ serverId: "29167", currency: "USD-Blockchain", sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockPublicKeyForStage3TOnly0000000000 test", requiredPriceForApi: 5.5 });
+const keyOnlyBody = buildKeyOnlyCreateOrderBody({ serverId: "29167", currency: "USD-Blockchain", sshPublicKey: syntheticEd25519PublicKey("stage3r-key-only"), requiredPriceForApi: 5.5 });
 assertCreateOrderBodySafe(keyOnlyBody);
 assert.deepEqual(Object.keys(keyOnlyBody).sort(), ["autossh_entrypoint", "currency", "image", "ports", "renting_server", "required_price", "ssh_key", "type"]);
 assert.equal(keyOnlyBody.ssh_password, undefined); assert.equal(keyOnlyBody.env, undefined); assert.equal(keyOnlyBody.command, undefined); assert.equal(keyOnlyBody.required_price, 5.5);
 
 const readinessSource = readFileSync(path.join(process.cwd(), "scripts", "clore", "order-readiness.ts"), "utf8");
 assert.ok(readinessSource.includes('ssh-keygen", ["-R", endpoint'), "a reused Clore proxy endpoint must refresh its scoped known-host entry");
-assert.ok(readinessSource.includes("const existingKey = keySsh"), "key auth must be accepted when autossh disables password auth");
-assert.ok(readinessSource.includes("ssh_auth: { passwordAuthSucceeded, keyInstalled, keyAuthSucceeded }"), "sanitized SSH authentication evidence must be persisted");
+assert.ok(readinessSource.includes("awaitOrderSshReadiness"), "key authentication must be attempted before password fallback");
+assert.ok(readinessSource.includes("passwordFallbackAvailableForOrder"), "password fallback must require exact order payload configuration");
+assert.ok(readinessSource.includes("ssh_auth: { passwordAuthSucceeded, keyInstalled, keyAuthSucceeded"), "sanitized SSH authentication evidence must be persisted");
 
 console.log("Stage 3R real-order parsing, exact SSH endpoint extraction, readiness categories, and manual-parity payload passed.");

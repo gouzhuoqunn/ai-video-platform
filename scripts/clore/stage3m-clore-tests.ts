@@ -3,8 +3,9 @@ import { readFileSync } from "node:fs";
 import { buildCreateOrderBody, assertCreateOrderBodySafe } from "./order-execution";
 import { CLORE_LIGHT_BOOTSTRAP_IMAGE, CLORE_LIGHT_BOOTSTRAP_PROFILE, verifyCloreLightBootstrapImage } from "./public-image";
 import { buildRuntimeOverlay } from "../runtime-overlay";
+import { syntheticEd25519PublicKey } from "./ssh-test-fixture";
 
-const body = buildCreateOrderBody({ serverId: "12345", image: CLORE_LIGHT_BOOTSTRAP_IMAGE, currency: "USD-Blockchain", sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockPublicKeyForStage3MOnly0000000000 test", maxPriceUsdPerHour: 0.5, requiredPriceForApi: 12, bootstrapProfile: CLORE_LIGHT_BOOTSTRAP_PROFILE });
+const body = buildCreateOrderBody({ serverId: "12345", image: CLORE_LIGHT_BOOTSTRAP_IMAGE, currency: "USD-Blockchain", sshPublicKey: syntheticEd25519PublicKey("stage3m"), maxPriceUsdPerHour: 0.5, requiredPriceForApi: 12, bootstrapProfile: CLORE_LIGHT_BOOTSTRAP_PROFILE });
 assertCreateOrderBodySafe(body);
 assert.equal(body.type, "on-demand");
 assert.equal(body.autossh_entrypoint, true);

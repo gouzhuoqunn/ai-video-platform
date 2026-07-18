@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import crypto from "node:crypto";
 import { cloreRequest, sleep } from "./client";
 import { COMFY_RUNTIME_IMAGE, DEFAULT_DOCKER_IMAGE, PROJECT_TAG } from "./config";
@@ -15,6 +14,12 @@ import { assertWatchdogsReadyForCreate } from "./watchdog-preflight";
 import { assertCloreDeploymentAllowed } from "./deployment-hold";
 import { CLORE_LIGHT_BOOTSTRAP_IMAGE, CLORE_LIGHT_BOOTSTRAP_PROFILE } from "./public-image";
 import type { GpuProfile } from "../gpu-providers/types";
+import {
+  assertPublicKeyMatchesCanonicalIdentity,
+  buildSanitizedSshCredentialSummary,
+  parseNormalizedOpenSshPublicKey,
+} from "./ssh-identity";
+import { ensureValidatedProjectSshKey } from "./ssh-key-validation";
 
 export type LoadedCloreConfig = ReturnType<typeof loadCloreConfig>;
 
@@ -113,6 +118,10 @@ export function buildKeyOnlyCreateOrderBody(input: { serverId: string; currency:
   return { currency: input.currency, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, renting_server: Number(input.serverId), type: "on-demand", ports: { "22": "tcp" }, ssh_key: input.sshPublicKey, required_price: input.requiredPriceForApi, autossh_entrypoint: true };
 }
 
+export function buildKeyWithPasswordFallbackCreateOrderBody(input: { serverId: string; currency: string; sshPassword: string; sshPublicKey: string; requiredPriceForApi: number }): CreateOrderRequest {
+  return { currency: input.currency, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, renting_server: Number(input.serverId), type: "on-demand", ports: { "22": "tcp" }, ssh_password: input.sshPassword, ssh_key: input.sshPublicKey, required_price: input.requiredPriceForApi, autossh_entrypoint: true };
+}
+
 export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
   const serialized = JSON.stringify(body);
   if (/CLORE_API_KEY|SUPABASE_SECRET_KEY|SUPABASE_SERVICE_ROLE_KEY|GPU_WORKER_PASSWORD|LOCAL_LAB_PASSWORD/i.test(serialized)) {
@@ -127,22 +136,32 @@ export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
   const fixedRuntime = body.image === COMFY_RUNTIME_IMAGE && /@sha256:[a-f0-9]{64}$/.test(body.image);
   const lightBootstrap = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.env?.RUNTIME_BOOTSTRAP_PROFILE === CLORE_LIGHT_BOOTSTRAP_PROFILE;
   const manualParity = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.ssh_password !== undefined && body.env === undefined && body.command === undefined && body.required_price === undefined && body.autossh_entrypoint === true;
+  const passwordFallback = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.ssh_password !== undefined && body.env === undefined && body.command === undefined && body.required_price !== undefined && body.autossh_entrypoint === true;
   const keyOnly = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.ssh_password === undefined && body.env === undefined && body.command === undefined && body.required_price !== undefined && body.autossh_entrypoint === true;
-  if (!fixedRuntime && !lightBootstrap && !manualParity && !keyOnly) throw new Error("Clore order image must be the pinned Runtime or an approved light bootstrap profile.");
+  if (!fixedRuntime && !lightBootstrap && !manualParity && !passwordFallback && !keyOnly) throw new Error("Clore order image must be the pinned Runtime or an approved light bootstrap profile.");
   const ports = Object.keys(body.ports);
   if (body.ports["22"] !== "tcp" || body.ports["8188"] !== undefined || ports.some((port) => !["22", "8080"].includes(port)) || ports.filter((port) => body.ports[port] === "http").length > 1) {
     throw new Error("Order must expose SSH and at most one HTTP port; ComfyUI 8188 is forbidden.");
   }
-  if ((lightBootstrap || manualParity || keyOnly) && ports.length !== 1) {
+  if ((lightBootstrap || manualParity || passwordFallback || keyOnly) && ports.length !== 1) {
     throw new Error("clore_light_bootstrap exposes SSH only.");
   }
-  if (!body.ssh_key || !/^ssh-ed25519\s+[A-Za-z0-9+/=]+(?:\s+.*)?$/.test(body.ssh_key) || /private key|-----begin/i.test(body.ssh_key)) {
-    throw new Error("Order must contain a non-empty SSH public key only.");
+  try {
+    const parsed = parseNormalizedOpenSshPublicKey(body.ssh_key ?? "");
+    if (body.ssh_key !== parsed.normalizedPublicKey) throw new Error("not_normalized");
   }
-  if (manualParity && !/^[A-Za-z0-9\s\-=.@+/]{20,32}$/.test(body.ssh_password ?? "")) throw new Error("clore_manual_parity requires a temporary strong SSH password.");
+  catch { throw new Error("Order must contain one normalized non-empty OpenSSH public key, not a path or malformed text."); }
+  if ((manualParity || passwordFallback) && !/^[A-Za-z0-9\s\-=.@+/]{20,32}$/.test(body.ssh_password ?? "")) throw new Error("Clore password fallback requires a temporary strong SSH password.");
   if (!manualParity && (!Number.isFinite(body.required_price) || (body.required_price ?? 0) <= 0)) {
     throw new Error("Order required_price must be a positive locked candidate price.");
   }
+}
+
+export function assertCreateOrderUsesCanonicalIdentity(body: CreateOrderRequest) {
+  const identity = ensureValidatedProjectSshKey();
+  if (!body.ssh_key) throw new Error("create_order_ssh_key_missing");
+  assertPublicKeyMatchesCanonicalIdentity(body.ssh_key, identity);
+  return buildSanitizedSshCredentialSummary(body.ssh_key, identity);
 }
 
 export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) {
@@ -227,12 +246,14 @@ export async function createCloreOrder(input: {
   sessionMetadata?: { gpuType: string; gpuProfile: GpuProfile; bootstrapImage: string };
   beforeCreateRequest?: () => Promise<void> | void;
   afterCreateRequestAttempt?: () => Promise<void> | void;
+  resolvedBatchRelease?: boolean;
 }) {
-  assertCloreDeploymentAllowed();
+  assertCloreDeploymentAllowed({ resolvedBatchRelease: input.resolvedBatchRelease });
   if (!input.execution.enabled) {
     throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false.");
   }
   assertCreateOrderBodySafe(input.requestBody);
+  if (!input.request) assertCreateOrderUsesCanonicalIdentity(input.requestBody);
   const lock = acquireOrderCreateLock(input.requestId ?? crypto.randomUUID());
   try {
     if (readActiveOrder()) {
@@ -240,6 +261,7 @@ export async function createCloreOrder(input: {
     }
     await sleep(5000);
     await input.beforeCreateRequest?.();
+    if (!input.request) assertCreateOrderUsesCanonicalIdentity(input.requestBody);
     let response: unknown;
     try {
       response = input.request
@@ -335,7 +357,7 @@ export async function prepareCreateOrderFromLive(input: {
     execution: input.execution,
     verifyWatchdogs: () => assertWatchdogsReadyForCreate(input.serverId),
   });
-  const publicKey = readFileSync(input.config.sshPublicKeyPath ?? "", "utf8").split(/\r?\n/)[0].trim();
+  const publicKey = ensureValidatedProjectSshKey().normalizedPublicKey;
   const requestBody = buildCreateOrderBody({
     serverId: input.serverId,
     image: input.config.dockerImage,

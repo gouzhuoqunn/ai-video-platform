@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { deriveCanonicalSshIdentity } from "./ssh-identity";
 
 export const CLORE_KNOWN_HOSTS_PATH = path.join(process.cwd(), ".secrets", "clore-known-hosts");
 const PRIVATE_KEY_NAME = "clore_ai_video_worker_ed25519";
@@ -46,7 +47,9 @@ export function getPublicKeyPath(configuredPath?: string) {
 }
 
 export function buildSshArgs(target: SshTarget, command: string, options: { requirePrivateKey?: boolean; knownHostsPath?: string; connectTimeoutSeconds?: number } = {}) {
-  const privateKeyPath = getPrivateKeyPath();
+  const privateKeyPath = options.requirePrivateKey === false
+    ? getPrivateKeyPath()
+    : deriveCanonicalSshIdentity(getPrivateKeyPath()).privateKeyPath;
   if (options.requirePrivateKey !== false && !existsSync(privateKeyPath)) {
     throw new Error("Dedicated Clore SSH private key is missing.");
   }
@@ -65,6 +68,14 @@ export function buildSshArgs(target: SshTarget, command: string, options: { requ
     "StrictHostKeyChecking=accept-new",
     "-o",
     "PasswordAuthentication=no",
+    "-o",
+    "KbdInteractiveAuthentication=no",
+    "-o",
+    "PreferredAuthentications=publickey",
+    "-o",
+    "IdentitiesOnly=yes",
+    "-o",
+    "IdentityAgent=none",
     "-o",
     "BatchMode=yes",
     "-o",

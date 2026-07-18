@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { assertNoSecretOutput } from "./client";
 import { loadCloreConfig, PROJECT_TAG } from "./config";
 import { loadCloreExecutionConfig } from "./execution-config";
@@ -9,6 +8,7 @@ import { findBootstrapImageCandidates, summarizeBootstrapImageCandidate } from "
 import { inspectSshPublicKey } from "./ssh";
 import { assertCloreDeploymentAllowed } from "./deployment-hold";
 import { CLORE_LIGHT_BOOTSTRAP_IMAGE, CLORE_LIGHT_BOOTSTRAP_PROFILE, loadVerifiedCloreLightBootstrapImage } from "./public-image";
+import { ensureValidatedProjectSshKey } from "./ssh-key-validation";
 
 function argument(name: string) {
   const inline = process.argv.find((value) => value.startsWith(`--${name}=`));
@@ -44,7 +44,7 @@ async function main() {
   const publicKey = inspectSshPublicKey(config.sshPublicKeyPath ?? "");
   if (!publicKey.exists || !publicKey.formatValid) throw new Error("Dedicated SSH public key is invalid.");
   await assertWatchdogsReadyForCreate(serverId);
-  const key = readFileSync(config.sshPublicKeyPath ?? "", "utf8").split(/\r?\n/)[0].trim();
+  const key = ensureValidatedProjectSshKey().normalizedPublicKey;
   const request = buildCreateOrderBody({
     serverId,
     image: CLORE_LIGHT_BOOTSTRAP_IMAGE,

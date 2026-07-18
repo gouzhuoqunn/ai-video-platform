@@ -6,10 +6,9 @@ import { loadCloreConfig } from "../clore/config";
 import { loadCloreExecutionConfig } from "../clore/execution-config";
 import { readLiveMarketplace, readLiveOrdersSummary, readWalletSummary } from "../clore/live";
 import { readActiveOrder } from "../clore/order-state";
-import { getPrivateKeyPath } from "../clore/ssh-client";
 import { cleanupOrderKnownHosts, orderKnownHostsPath } from "../clore/ssh-readiness-policy";
 import { findBootstrapImageCandidates } from "../clore/bootstrap-image-profile";
-import { buildCreateOrderBody, buildKeyOnlyCreateOrderBody, buildManualParityCreateOrderBody, createCloreOrder } from "../clore/order-execution";
+import { buildCreateOrderBody, buildKeyOnlyCreateOrderBody, buildKeyWithPasswordFallbackCreateOrderBody, buildManualParityCreateOrderBody, createCloreOrder } from "../clore/order-execution";
 import { cancelCloreOrder } from "../clore/cancel-execution";
 import { assertWatchdogsReadyForCreate } from "../clore/watchdog-preflight";
 import { CLORE_LIGHT_BOOTSTRAP_IMAGE, CLORE_LIGHT_BOOTSTRAP_PROFILE, loadVerifiedCloreLightBootstrapImage } from "../clore/public-image";
@@ -17,6 +16,7 @@ import { assertGpuTarget, FIXED_RUNTIME_DIGEST, sshCommand } from "./common";
 import type { CreateSessionInput, GpuCandidate, GpuProvider, GpuSession, GpuTarget } from "./types";
 import { clearManualParitySecrets, createManualParityState, updateManualParityState } from "../clore/manual-parity";
 import { ensureValidatedProjectSshKey } from "../clore/ssh-key-validation";
+import { assertResolvedBatchRelease } from "../clore/deployment-resolution";
 
 const CLORE_ENV = path.join(process.cwd(), ".secrets", "clore.env");
 const TARGET_PATH = path.join(process.cwd(), ".secrets", "clore-ssh-target.json");
@@ -41,7 +41,8 @@ function loadTarget(): GpuTarget {
   const input = JSON.parse(readFileSync(TARGET_PATH, "utf8")) as Partial<GpuTarget> & { user?: string };
   const active = readActiveOrder();
   const profile = input.gpuProfile ?? active?.gpu_profile ?? "rtx4090";
-  return assertGpuTarget({ provider: "clore", host: String(input.host ?? ""), port: Number(input.port), username: String(input.username ?? input.user ?? "root"), sshKeyPath: String(input.sshKeyPath ?? getPrivateKeyPath()), gpuProfile: profile, runtimeDigest: String(input.runtimeDigest ?? FIXED_RUNTIME_DIGEST), knownHostsPath: typeof input.knownHostsPath === "string" ? input.knownHostsPath : active?.order_id ? orderKnownHostsPath(active.order_id) : undefined });
+  const identity = ensureValidatedProjectSshKey();
+  return assertGpuTarget({ provider: "clore", host: String(input.host ?? ""), port: Number(input.port), username: String(input.username ?? input.user ?? "root"), sshKeyPath: identity.privateKeyPath, sshCredentialSource: "canonical_clore_project_key", sshIdentityFingerprint: identity.fingerprint, gpuProfile: profile, runtimeDigest: String(input.runtimeDigest ?? FIXED_RUNTIME_DIGEST), knownHostsPath: typeof input.knownHostsPath === "string" ? input.knownHostsPath : active?.order_id ? orderKnownHostsPath(active.order_id) : undefined });
 }
 
 function mapCandidate(candidate: ReturnType<typeof findBootstrapImageCandidates>[number]): GpuCandidate {
@@ -83,7 +84,10 @@ export class CloreProvider implements GpuProvider {
 
   async createSession(input: CreateSessionInput): Promise<GpuSession> {
     if (input.dryRun) throw new Error("Clore real session creation is not called during dry-run.");
-    if (getCloreDeploymentHold().enabled) throw new Error("CLORE_DEPLOYMENT_HOLD=true: refusing Clore session creation.");
+    if (getCloreDeploymentHold().enabled) {
+      if (!input.resolvedBatchRelease) throw new Error("CLORE_DEPLOYMENT_HOLD=true: refusing Clore session creation.");
+      assertResolvedBatchRelease(input.resolvedBatchRelease);
+    }
     const config = loadCloreConfig();
     const execution = loadCloreExecutionConfig();
     if (!execution.enabled) throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false.");
@@ -100,41 +104,50 @@ export class CloreProvider implements GpuProvider {
     const manifest = await loadVerifiedCloreLightBootstrapImage();
     await assertWatchdogsReadyForCreate(candidate.serverId);
     const keyValidation = ensureValidatedProjectSshKey();
-    const parity = input.cloreProfile === "clore_manual_parity" ? createManualParityState(candidate.serverId) : null;
-    const key = readFileSync(keyValidation.publicKeyPath, "utf8").split(/\r?\n/)[0].trim();
+    const parity = input.cloreProfile === "clore_manual_parity" || input.cloreProfile === "clore_key_with_password_fallback" ? createManualParityState(candidate.serverId) : null;
+    const key = keyValidation.normalizedPublicKey;
     const requiredPriceForApi = candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null ? candidate.priceOriginalAmount : candidate.priceUsdPerHour ?? 0;
     const request = parity
-      ? buildManualParityCreateOrderBody({ serverId: candidate.serverId, currency: config.rentalCurrency, sshPassword: parity.sshPassword, sshPublicKey: key })
+      ? input.cloreProfile === "clore_key_with_password_fallback"
+        ? buildKeyWithPasswordFallbackCreateOrderBody({ serverId: candidate.serverId, currency: config.rentalCurrency, sshPassword: parity.sshPassword, sshPublicKey: key, requiredPriceForApi })
+        : buildManualParityCreateOrderBody({ serverId: candidate.serverId, currency: config.rentalCurrency, sshPassword: parity.sshPassword, sshPublicKey: key })
       : input.cloreProfile === "clore_key_only"
         ? buildKeyOnlyCreateOrderBody({ serverId: candidate.serverId, currency: config.rentalCurrency, sshPublicKey: key, requiredPriceForApi })
         : buildCreateOrderBody({ serverId: candidate.serverId, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, currency: config.rentalCurrency, sshPublicKey: key, maxPriceUsdPerHour: candidate.priceUsdPerHour ?? 0, requiredPriceForApi, bootstrapProfile: CLORE_LIGHT_BOOTSTRAP_PROFILE });
-    const created = await createCloreOrder({
-      config,
-      execution,
-      candidate,
-      requestBody: request,
-      sessionMetadata: { gpuType: candidate.gpu, gpuProfile: candidate.runtimeGpuProfile, bootstrapImage: `${manifest.image}@${manifest.digest}` },
-      beforeCreateRequest: async () => {
-        const [latestOrders, latestWallet, latestMarketplace] = await Promise.all([
-          readLiveOrdersSummary(config, { forceRefresh: true }),
-          readWalletSummary(config, { forceRefresh: true }),
-          readLiveMarketplace(config, { forceRefresh: true }),
-        ]);
-        if (latestOrders.some((order) => order.active)) throw new Error("An active Clore order appeared before create_order.");
-        const latest = findBootstrapImageCandidates(latestMarketplace, config).find((value) => value.serverId === candidate.serverId);
-        if (!latest || latest.effectivePriceUsdPerHour === null || latest.effectivePriceUsdPerHour > 0.7) throw new Error("Selected Clore host price or compliance changed before create_order.");
-        if ((latest.projectedFirstImageCostUsd ?? Infinity) > 2.5) throw new Error("Projected Clore session changed above 2.50 USD before create_order.");
-        if (latestWallet.availableUsdBalance === null || latestWallet.availableUsdBalance - (latest.projectedFirstImageCostUsd ?? 0) < 1) throw new Error("Clore wallet reserve changed before create_order.");
-        if (input.cloreProfile === "clore_key_only") {
-          const freshRequiredPrice = latest.priceOriginalCurrency === "USD" && latest.priceOriginalUnit === "day" && latest.priceOriginalAmount !== null ? latest.priceOriginalAmount : latest.priceUsdPerHour;
-          if (freshRequiredPrice === null || !Number.isFinite(freshRequiredPrice) || freshRequiredPrice <= 0) throw new Error("Fresh Clore marketplace price is unavailable.");
-          request.required_price = freshRequiredPrice;
-        }
-        await input.beforeCreateRequest?.();
-      },
-      afterCreateRequestAttempt: input.afterCreateRequestAttempt,
-    });
-    if (parity) updateManualParityState({ orderId: created.order_id });
+    let created;
+    try {
+      created = await createCloreOrder({
+        config,
+        execution,
+        candidate,
+        requestBody: request,
+        sessionMetadata: { gpuType: candidate.gpu, gpuProfile: candidate.runtimeGpuProfile, bootstrapImage: `${manifest.image}@${manifest.digest}` },
+        beforeCreateRequest: async () => {
+          const [latestOrders, latestWallet, latestMarketplace] = await Promise.all([
+            readLiveOrdersSummary(config, { forceRefresh: true }),
+            readWalletSummary(config, { forceRefresh: true }),
+            readLiveMarketplace(config, { forceRefresh: true }),
+          ]);
+          if (latestOrders.some((order) => order.active)) throw new Error("An active Clore order appeared before create_order.");
+          const latest = findBootstrapImageCandidates(latestMarketplace, config).find((value) => value.serverId === candidate.serverId);
+          if (!latest || latest.effectivePriceUsdPerHour === null || latest.effectivePriceUsdPerHour > 0.7) throw new Error("Selected Clore host price or compliance changed before create_order.");
+          if ((latest.projectedFirstImageCostUsd ?? Infinity) > 2.5) throw new Error("Projected Clore session changed above 2.50 USD before create_order.");
+          if (latestWallet.availableUsdBalance === null || latestWallet.availableUsdBalance - (latest.projectedFirstImageCostUsd ?? 0) < 1) throw new Error("Clore wallet reserve changed before create_order.");
+          if (input.cloreProfile === "clore_key_only" || input.cloreProfile === "clore_key_with_password_fallback") {
+            const freshRequiredPrice = latest.priceOriginalCurrency === "USD" && latest.priceOriginalUnit === "day" && latest.priceOriginalAmount !== null ? latest.priceOriginalAmount : latest.priceUsdPerHour;
+            if (freshRequiredPrice === null || !Number.isFinite(freshRequiredPrice) || freshRequiredPrice <= 0) throw new Error("Fresh Clore marketplace price is unavailable.");
+            request.required_price = freshRequiredPrice;
+          }
+          await input.beforeCreateRequest?.();
+        },
+        afterCreateRequestAttempt: input.afterCreateRequestAttempt,
+        resolvedBatchRelease: Boolean(input.resolvedBatchRelease),
+      });
+    } catch (error) {
+      if (parity) clearManualParitySecrets();
+      throw error;
+    }
+    if (parity) updateManualParityState({ orderId: created.order_id, passwordConfiguredInPayload: request.ssh_password === parity.sshPassword });
     const session = await this.getSession(created.order_id);
     if (!session) throw new Error("clore_session_state_missing_after_create");
     return session;

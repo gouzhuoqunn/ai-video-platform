@@ -1,7 +1,7 @@
 import "server-only";
 
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getGpuProvider } from "../../../scripts/gpu-providers";
@@ -11,9 +11,9 @@ import { getCloreDeploymentHold, setCloreDeploymentHold } from "../../../scripts
 import { readLocalWatchdogArmState } from "../../../scripts/clore/watchdog-io";
 import { buildRuntimeOverlay } from "../../../scripts/runtime-overlay";
 import { prepareRemoteWorkspace, verifyWorkspaceRoundtrip } from "../../../scripts/clore/remote-workspace";
-import { installDetachedWorker, inspectRemoteJob, launchDetachedJob, waitForDetachedJob } from "../../../scripts/clore/detached-remote-job";
+import { installDetachedWorker, launchDetachedJob, waitForDetachedJob } from "../../../scripts/clore/detached-remote-job";
 import { buildRestoreBundle } from "../../../scripts/model-cache/production-restore-bundle";
-import { installRemoteComfyRunner, runRemoteComfyProbe, runRemoteComfyWorkflow, downloadRemoteRunnerOutputPersistent, removeRemoteRunnerOutput, type RemoteRunnerResult } from "../../../scripts/comfy-remote-runner";
+import { installRemoteComfyRunner, runRemoteComfyProbe, runRemoteComfyWorkflow, downloadRemoteRunnerOutputPersistent, removeRemoteRunnerOutput } from "../../../scripts/comfy-remote-runner";
 import { findLocalImageResultFile } from "@/lib/local-lab/local-results";
 import { buildLongVideoProjectPaths } from "@/lib/long-video/media";
 import { getLongVideoProject, processExpiredLongVideoReviews } from "@/lib/long-video/store";
@@ -32,9 +32,10 @@ function sha256File(filePath: string) { return createHash("sha256").update(readF
 
 function mapCandidate(candidate: GpuCandidate): LongVideoProviderCandidate {
   const gpu = candidate.gpuType.toLowerCase();
-  if (!gpu.includes("4090") || candidate.interruptible || candidate.hourlyUsd === null) throw new Error("clore_candidate_not_rtx4090");
-  if (candidate.minimumRamGb < 32 || candidate.containerDiskGb < 200 || candidate.hourlyUsd > 0.7) throw new Error("clore_candidate_policy_rejected");
-  return { serverId: candidate.id, gpuProfile: "rtx4090", hourlyUsd: candidate.hourlyUsd, vramGb: candidate.vramGb };
+  const gpuProfile = gpu.includes("5090") ? "rtx5090" : gpu.includes("4090") ? "rtx4090" : null;
+  if (!gpuProfile || candidate.interruptible || candidate.hourlyUsd === null) throw new Error("clore_candidate_not_supported_gpu");
+  if (candidate.minimumRamGb < 32 || candidate.containerDiskGb < 200 || candidate.hourlyUsd > (gpuProfile === "rtx5090" ? 0.65 : 0.7)) throw new Error("clore_candidate_policy_rejected");
+  return { serverId: candidate.id, gpuProfile, hourlyUsd: candidate.hourlyUsd, vramGb: candidate.vramGb };
 }
 
 export class CloreLongVideoProviderAdapter implements LongVideoProvider {
@@ -81,29 +82,30 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     const gpuSession = await this.gpu.getSession(session.orderId);
     if (!gpuSession) throw new Error("clore_bound_order_missing");
     const target = gpuSession.target ?? await this.gpu.waitForSsh(gpuSession, 10 * 60_000);
-    const candidate: GpuCandidate = { id: session.serverId, gpuType: "NVIDIA GeForce RTX 4090", priority: 0, vramGb: 24, gpuCount: 1, minimumRamGb: 32, containerDiskGb: 200, volumeGb: 0, hourlyUsd: session.gpuProfile === "rtx4090" ? 0.7 : null, interruptible: false };
+    const candidate: GpuCandidate = { id: session.serverId, gpuType: `NVIDIA GeForce ${session.gpuProfile === "rtx5090" ? "RTX 5090" : "RTX 4090"}`, priority: 0, vramGb: session.gpuProfile === "rtx5090" ? 32 : 24, gpuCount: 1, minimumRamGb: 32, containerDiskGb: 200, volumeGb: 0, hourlyUsd: session.gpuProfile === "rtx5090" ? 0.65 : 0.7, interruptible: false };
     const value = { gpu: this.gpu, gpuSession, target, candidate, projectId: session.sessionId };
     this.contexts.set(session.sessionId, value);
     return value;
   }
 
   async createSession(input: { projectId: string; authorization: LongVideoExecutionAuthorization; candidate: LongVideoProviderCandidate }) {
-    if (input.authorization.projectId !== input.projectId || input.authorization.gpuProfile !== "rtx4090") throw new Error("clore_project_authorization_mismatch");
+    if (input.authorization.projectId !== input.projectId || !["rtx4090", "rtx5090"].includes(input.authorization.gpuProfile)) throw new Error("clore_project_authorization_mismatch");
     if (await this.activeOrderCount() !== 0) throw new Error("clore_active_order_limit");
     if (this.contexts.size > 0) throw new Error("clore_adapter_session_already_bound");
     if (getCloreDeploymentHold().enabled && !input.authorization.releaseHold) throw new Error("clore_hold_requires_explicit_authorization");
-    if (getCloreDeploymentHold().enabled) setCloreDeploymentHold(false, `long_video:${input.projectId}`);
+    if (input.authorization.gpuProfile === "rtx5090" && (!input.authorization.batchId || !input.authorization.resolutionNonce)) throw new Error("clore_resolved_batch_authorization_missing");
+    if (getCloreDeploymentHold().enabled && input.authorization.gpuProfile === "rtx4090") setCloreDeploymentHold(false, `long_video:${input.projectId}`);
     const candidates = await this.gpu.listCandidates();
     const candidate = candidates.find((value) => value.id === input.candidate.serverId);
     if (!candidate) throw new Error("clore_selected_candidate_missing");
     const sessionId = `lv-${input.projectId.slice(0, 8)}-${randomUUID().slice(0, 8)}`;
     let created: GpuSession | null = null;
     try {
-      created = await this.gpu.createSession({ sessionId, candidate, sshPublicKey: "managed-by-clore-provider", bootstrapImage: FIXED_RUNTIME_DIGEST, dryRun: false, cloreProfile: "clore_key_only" });
+      created = await this.gpu.createSession({ sessionId, candidate, sshPublicKey: "managed-by-clore-provider", bootstrapImage: FIXED_RUNTIME_DIGEST, dryRun: false, cloreProfile: "clore_key_with_password_fallback", resolvedBatchRelease: input.authorization.gpuProfile === "rtx5090" ? { batchId: input.authorization.batchId!, resolutionNonce: input.authorization.resolutionNonce!, gpuProfile: "rtx5090" } : undefined });
       if (!created.target && !created.id) throw new Error("clore_session_binding_invalid");
       const target = created.target ?? await this.gpu.waitForSsh(created, 10 * 60_000);
       this.contexts.set(sessionId, { gpu: this.gpu, gpuSession: created, target, candidate, projectId: input.projectId });
-      return { sessionId, orderId: created.id, serverId: candidate.id, gpuProfile: "rtx4090" as const, host: target.host, port: target.port };
+      return { sessionId, orderId: created.id, serverId: candidate.id, gpuProfile: input.authorization.gpuProfile, host: target.host, port: target.port };
     } catch (error) {
       if (created) {
         try { await this.gpu.terminateSession(created); } catch { /* cleanup is retried by the outer session path */ }
@@ -128,7 +130,7 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     requireOk(scpFile(target, overlay.outputPath, "/workspace/runtime-overlay.tgz", 5 * 60_000), "clore_overlay_upload_failed");
     requireOk(scpFile(target, script, "/workspace/clore-light-bootstrap.sh", 2 * 60_000), "clore_bootstrap_upload_failed");
     requireOk(sshCommand(target, "sed -i 's/\\r$//' /workspace/clore-light-bootstrap.sh; chmod 700 /workspace/clore-light-bootstrap.sh; /workspace/clore-light-bootstrap.sh prepare /workspace/runtime-overlay.tgz", 55 * 60_000), "clore_runtime_prepare_failed");
-    requireOk(sshCommand(target, "/workspace/clore-light-bootstrap.sh start rtx4090", 90_000), "clore_runtime_start_failed");
+    requireOk(sshCommand(target, `/workspace/clore-light-bootstrap.sh start ${session.gpuProfile}`, 90_000), "clore_runtime_start_failed");
     const deadline = Date.now() + 8 * 60_000;
     while (Date.now() < deadline) {
       const health = sshCommand(target, "curl -fsS http://127.0.0.1:8080/healthz >/dev/null && curl -fsS http://127.0.0.1:8188/system_stats >/dev/null && curl -fsS http://127.0.0.1:8188/object_info >/dev/null", 30_000);
@@ -136,7 +138,9 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
       await sleep(5_000);
     }
     requireOk(sshCommand(target, "curl -fsS http://127.0.0.1:8080/healthz >/dev/null; curl -fsS http://127.0.0.1:8188/system_stats >/dev/null; curl -fsS http://127.0.0.1:8188/object_info >/dev/null", 30_000), "clore_runtime_health_failed");
-    requireOk(sshCommand(target, "mode=$(cat /workspace/ai-runtime/bootstrap-mode); if [ \"$mode\" = docker ]; then docker exec stage3m-comfy-runtime python3 -c 'import torch,triton;assert torch.cuda.is_available();print(torch.__version__,triton.__version__)'; else /workspace/ai-runtime/venv/bin/python -c 'import torch,triton;assert torch.cuda.is_available();print(torch.__version__,triton.__version__)'; fi", 180_000), "clore_cuda_probe_failed");
+    const python = "import torch,triton;assert torch.cuda.is_available();name=torch.cuda.get_device_name(0);cap=torch.cuda.get_device_capability(0);arch=torch.cuda.get_arch_list();x=torch.arange(4096,device=\"cuda\");assert int((x*x).sum().item())>0;print({\"gpu\":name,\"capability\":cap,\"arches\":arch,\"torch\":torch.__version__,\"cuda\":torch.version.cuda,\"triton\":triton.__version__});";
+    const gate = session.gpuProfile === "rtx5090" ? `${python}assert \"RTX 5090\" in name;assert cap==(12,0);assert \"sm_120\" in arch` : python;
+    requireOk(sshCommand(target, `mode=$(cat /workspace/ai-runtime/bootstrap-mode); if [ "$mode" = docker ]; then docker exec stage3m-comfy-runtime python3 -c '${gate}'; else /workspace/ai-runtime/venv/bin/python -c '${gate}'; fi`, 180_000), "clore_cuda_probe_failed");
     installRemoteComfyRunner(target);
     runRemoteComfyProbe(target);
   }
@@ -149,6 +153,35 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     if (launched.returnedMs > 15_000) throw new Error("clore_canary_launch_timeout");
     const result = await waitForDetachedJob(target, jobId, 120_000);
     if (!result.reachable || result.state?.phase !== "completed") throw new Error("clore_canary_failed");
+  }
+
+  async restoreImage(session: LongVideoProviderSession) {
+    const { target } = await this.context(session);
+    return this.restoreFamily(target, "ultrareal-flux1-dev-fp8");
+  }
+
+  async generateImage(input: { session: LongVideoProviderSession; taskId: string; prompt: string; width: number; height: number; seed: number }) {
+    const { target } = await this.context(input.session);
+    const workflowPath = path.join(process.cwd(), "comfy-runtime", "workflows", "production", `ultrareal-flux1-dev-fp8-${input.session.gpuProfile}-api.json`);
+    const workflow = JSON.parse(readFileSync(workflowPath, "utf8")) as Record<string, { inputs?: Record<string, unknown> }>;
+    workflow["3"].inputs = { ...(workflow["3"].inputs ?? {}), text: input.prompt };
+    workflow["6"].inputs = { ...(workflow["6"].inputs ?? {}), width: input.width, height: input.height, batch_size: 1 };
+    workflow["7"].inputs = { ...(workflow["7"].inputs ?? {}), seed: input.seed };
+    const result = runRemoteComfyWorkflow({ target, workflow, clientId: `img-${input.taskId.slice(0, 12)}`, kind: "image", timeoutSeconds: 60 * 60 });
+    const remote = String(result.staged_path ?? "");
+    if (!remote.startsWith("/workspace/runtime-tools/results/")) throw new Error("clore_image_remote_path_invalid");
+    const local = path.join(os.tmpdir(), `stage4j1-${input.taskId}.png`);
+    const partial = `${local}.part`;
+    rmSync(partial, { force: true });
+    requireOk(scpFromRemote(target, remote, partial, 30 * 60_000), "clore_image_download_failed");
+    renameSync(partial, local);
+    removeRemoteRunnerOutput(target, result);
+    return { localPath: local, workflow, result };
+  }
+
+  async unloadImage(session: LongVideoProviderSession) {
+    const { target } = await this.context(session);
+    requireOk(sshCommand(target, "curl -fsS -X POST -H 'Content-Type: application/json' -d '{\"unload_models\":true,\"free_memory\":true}' http://127.0.0.1:8188/free >/dev/null; mode=$(cat /workspace/ai-runtime/bootstrap-mode); if [ \"$mode\" = docker ]; then docker exec stage3m-comfy-runtime python3 -c 'import gc,torch;gc.collect();torch.cuda.empty_cache()'; else /workspace/ai-runtime/venv/bin/python -c 'import gc,torch;gc.collect();torch.cuda.empty_cache()'; fi", 180_000), "clore_image_unload_failed");
   }
 
   private async restoreFamily(target: GpuTarget, family: string) {
@@ -201,11 +234,11 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     const remoteName = `long-video-${input.attemptId}.png`;
     requireOk(sshCommand(target, "mkdir -p /workspace/comfy-input", 30_000), "clore_comfy_input_dir_failed");
     requireOk(scpFile(target, source, `/workspace/comfy-input/${remoteName}`, 10 * 60_000), "clore_input_upload_failed");
-    const workflowPath = path.join(process.cwd(), "comfy-runtime", "workflows", "production", "wan22-remix-14b-i2v-fp8-rtx4090-api.json");
+    const workflowPath = path.join(process.cwd(), "comfy-runtime", "workflows", "production", `wan22-remix-14b-i2v-fp8-${input.session.gpuProfile}-api.json`);
     const workflow = JSON.parse(readFileSync(workflowPath, "utf8")) as Record<string, { inputs?: Record<string, unknown> }>;
     workflow["5"].inputs = { ...(workflow["5"].inputs ?? {}), image: remoteName };
     workflow["6"].inputs = { ...(workflow["6"].inputs ?? {}), text: input.prompt };
-    workflow["8"].inputs = { ...(workflow["8"].inputs ?? {}), width: 832, height: 480, length: 81, batch_size: 1 };
+    workflow["8"].inputs = { ...(workflow["8"].inputs ?? {}), width: input.session.gpuProfile === "rtx5090" ? 1280 : 832, height: input.session.gpuProfile === "rtx5090" ? 720 : 480, length: 81, batch_size: 1 };
     workflow["11"].inputs = { ...(workflow["11"].inputs ?? {}), noise_seed: createLongVideoSeed() };
     const result = runRemoteComfyWorkflow({ target, workflow, clientId: `lv-${input.attemptId.slice(0, 12)}`, kind: "video", timeoutSeconds: 90 * 60 });
     const temporaryDir = path.join(os.tmpdir(), `long-video-${input.attemptId}`);

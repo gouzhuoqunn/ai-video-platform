@@ -21,9 +21,9 @@ export function getCloreDeploymentHold(): HoldState {
   }
 }
 
-export function assertCloreDeploymentAllowed() {
+export function assertCloreDeploymentAllowed(options: { resolvedBatchRelease?: boolean } = {}) {
   const hold = getCloreDeploymentHold();
-  if (hold.enabled) throw new Error("CLORE_DEPLOYMENT_HOLD=true: Clore deployment is paused pending platform investigation.");
+  if (hold.enabled && options.resolvedBatchRelease !== true) throw new Error("CLORE_DEPLOYMENT_HOLD=true: Clore deployment is paused pending platform investigation.");
 }
 
 export function setCloreDeploymentHold(enabled: boolean, reason = "platform_deployment_incident") {

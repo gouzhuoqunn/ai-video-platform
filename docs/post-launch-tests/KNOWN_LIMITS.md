@@ -5,3 +5,6 @@
 - 1080P 视频可能采用 720P 生成加放大、H.264/yuv420p/faststart 最终化。
 - 同时最多一个活动 GPU 订单；图片和视频不能进入同一执行批次。
 - 创建任务不会租用 GPU；租用必须由用户在兼容任务批次上明确点击确认。
+# Stage 4J.1 observed limit
+
+- The first paid RTX5090 acceptance could create and cancel one bounded Clore order, but the selected host rejected both SSH authentication methods before workspace preparation. RTX5090 runtime and media acceptance therefore remain unverified.

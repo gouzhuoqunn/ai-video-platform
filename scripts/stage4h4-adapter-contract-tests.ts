@@ -38,7 +38,7 @@ try {
   const gpu = new FakeGpuProvider();
   const adapter = new CloreLongVideoProviderAdapter({ gpu, activeOrderReader: async () => 0 });
   const candidates = await adapter.listCandidates();
-  assert.deepEqual(candidates.map((candidate) => candidate.gpuProfile), ["rtx4090"]);
+  assert.deepEqual(candidates.map((candidate) => candidate.gpuProfile), ["rtx4090", "rtx5090"]);
   const watchdogBound = new CloreLongVideoProviderAdapter({ gpu, activeOrderReader: async () => 0, watchdogServerId: "4090-a" });
   assert.deepEqual((await watchdogBound.listCandidates()).map((candidate) => candidate.serverId), ["4090-a"]);
   const authorization = { id: "contract-auth", projectId: "11111111-1111-4111-8111-111111111111", provider: "clore" as const, gpuProfile: "rtx4090" as const, oneUse: true as const, expiresAt: new Date(Date.now() + 60_000).toISOString(), maxSpendUsd: 1.2, releaseHold: true };
@@ -55,7 +55,7 @@ try {
   const source = readFileSync("src/lib/long-video/clore-adapter.ts", "utf8");
   assert.doesNotMatch(source, /stage4[ac]/i);
   assert.doesNotMatch(source, /8fff4d9f|29167|105178/);
-  console.log(JSON.stringify({ ok: true, adapterReady: true, rtx5090Rejected: true, watchdogBoundCandidate: true, oneOrderGuard: true, exactEndpoint: true, sshFailureCleanup: true, historicalIdsAbsent: true }));
+  console.log(JSON.stringify({ ok: true, adapterReady: true, rtx5090Supported: true, watchdogBoundCandidate: true, oneOrderGuard: true, exactEndpoint: true, sshFailureCleanup: true, historicalIdsAbsent: true }));
 } finally {
   setCloreDeploymentHold(previousHold.enabled, previousHold.reason);
 }

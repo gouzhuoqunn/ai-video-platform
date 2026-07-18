@@ -102,7 +102,7 @@ export function createLongVideoSegmentTask(project: LongVideoProject, sequenceIn
     modelProfile: PRODUCTION_VIDEO_MODEL,
     modelRevision: verification.videoModel.revision,
     width: project.gpuPreference[0] === "rtx5090" ? 1280 : 832,
-    height: project.gpuPreference[0] === "rtx5090" ? 704 : 480,
+    height: project.gpuPreference[0] === "rtx5090" ? 720 : 480,
     frames: LONG_VIDEO_SEGMENT_SECONDS * 16 + 1,
     fps: 16,
     priority: "immediate",
@@ -217,18 +217,18 @@ export function updateLongVideoProjectGpuPreference(
   gpuPreference: Array<"rtx4090" | "rtx5090">,
   options: { statePath?: string; poolPath?: string } = {},
 ) {
-  if (gpuPreference.length !== 1 || gpuPreference[0] !== "rtx4090") throw new Error("娴嬭瘯楠屾敹椤圭洰鍙厑璁?RTX4090");
+  if (gpuPreference.length !== 1 || !["rtx4090", "rtx5090"].includes(gpuPreference[0])) throw new Error("gpu_preference_must_be_single_supported_profile");
   const statePath = options.statePath ?? LONG_VIDEO_STATE_PATH;
   const project = mutateProject(projectId, expectedVersion, (current) => {
     if (current.status !== "waiting_for_gpu") throw new Error("椤圭洰蹇呴』澶勪簬 waiting_for_gpu");
-    current.gpuPreference = ["rtx4090"];
+    current.gpuPreference = [gpuPreference[0]];
   }, statePath);
   const poolPath = isolatedPoolPath(statePath, options.poolPath);
   const pool = readGenerationPool(poolPath);
   let changed = false;
   for (const task of pool.tasks) {
     if (task.longVideoProjectId !== projectId || !["waiting_for_batch", "pending_confirmation", "waiting_for_gpu"].includes(task.status)) continue;
-    task.gpuPreference = ["rtx4090"];
+    task.gpuPreference = [gpuPreference[0]];
     changed = true;
   }
   if (changed) writeGenerationPool(pool, poolPath);

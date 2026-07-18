@@ -27,7 +27,7 @@ export type LongVideoExecutionAuthorization = {
   id: string;
   projectId: string;
   provider: "clore";
-  gpuProfile: "rtx4090";
+  gpuProfile: "rtx4090" | "rtx5090";
   oneUse: true;
   expiresAt: string;
   consumedAt?: string | null;
@@ -39,6 +39,11 @@ export type LongVideoExecutionAuthorization = {
   wallClockMinutes?: number;
   drainingAtMinutes?: number;
   maxSegments?: number;
+  batchId?: string;
+  resolutionNonce?: string;
+  allowedTaskIds?: string[];
+  maxHourlyUsd?: number;
+  maxOrders?: 1;
 };
 
 export type LongVideoExecutionPolicy = {
@@ -58,7 +63,7 @@ export const DEFAULT_LONG_VIDEO_EXECUTION_POLICY: LongVideoExecutionPolicy = {
 };
 
 export type LongVideoProviderCandidate = { serverId: string; gpuProfile: string; hourlyUsd: number; vramGb: number };
-export type LongVideoProviderSession = { sessionId: string; orderId: string; serverId: string; gpuProfile: "rtx4090"; host: string; port: number };
+export type LongVideoProviderSession = { sessionId: string; orderId: string; serverId: string; gpuProfile: "rtx4090" | "rtx5090"; host: string; port: number };
 export type LongVideoSegmentMedia = {
   sourceVideo: string;
   workflow?: unknown;
@@ -91,7 +96,7 @@ export type LongVideoExecutionSession = {
   orderId: string | null;
   providerSessionId: string | null;
   serverId: string | null;
-  gpuProfile: "rtx4090";
+  gpuProfile: "rtx4090" | "rtx5090";
   runtimeState: "not_started" | "provisioning" | "ssh_ready" | "runtime_ready";
   restoreState: "not_started" | "restoring" | "completed";
   restoreRevision: string | null;
@@ -206,7 +211,7 @@ function mergePolicy(value?: Partial<LongVideoExecutionPolicy>): LongVideoExecut
 }
 
 function validateAuthorization(projectId: string, authorization: LongVideoExecutionAuthorization, policy: LongVideoExecutionPolicy, now: Date) {
-  if (!authorization.oneUse || authorization.projectId !== projectId || authorization.provider !== "clore" || authorization.gpuProfile !== "rtx4090") throw new Error("long_video_authorization_mismatch");
+  if (!authorization.oneUse || authorization.projectId !== projectId || authorization.provider !== "clore" || !["rtx4090", "rtx5090"].includes(authorization.gpuProfile)) throw new Error("long_video_authorization_mismatch");
   if (authorization.consumedAt) throw new Error("long_video_authorization_consumed");
   if (Date.parse(authorization.expiresAt) <= now.getTime()) throw new Error("long_video_authorization_expired");
   if (authorization.maxSpendUsd > policy.maxSpendUsd) throw new Error("long_video_authorization_spend_cap_exceeded");
@@ -246,10 +251,11 @@ export class LongVideoExecutionCoordinator {
     const verification = (() => { try { return loadProductionVerification(); } catch { return null; } })();
     const sourceValid = Boolean(current?.firstFrameSource === "existing_image" && current.firstFrameRef && current.segments[0]?.inputFrameRef && (!resumeExistingProject || preservedSegmentZero.valid));
     const prompts = current?.segments.map((segment) => segment.prompt.trim()) ?? [];
-    const promptsDistinct = prompts.length === 3 && new Set(prompts).size === 3 && prompts.every(Boolean);
+    const blackwellAcceptance = Boolean(current && current.gpuPreference.length === 1 && current.gpuPreference[0] === "rtx5090" && current.totalSegments === 2);
+    const promptsDistinct = prompts.length === (blackwellAcceptance ? 2 : 3) && new Set(prompts).size === prompts.length && prompts.every(Boolean);
     if (current && current.status !== "waiting_for_gpu" && !resumeExistingProject) blockers.push("project_not_waiting_for_gpu");
-    if (current && (current.gpuPreference.length !== 1 || current.gpuPreference[0] !== "rtx4090")) blockers.push("gpu_preference_not_rtx4090_only");
-    if (current && current.totalSegments !== 3) blockers.push("expected_three_segments");
+    if (current && !blackwellAcceptance && (current.gpuPreference.length !== 1 || current.gpuPreference[0] !== "rtx4090")) blockers.push("gpu_preference_not_rtx4090_only");
+    if (current && !blackwellAcceptance && current.totalSegments !== 3) blockers.push("expected_three_segments");
     if (!sourceValid) blockers.push("existing_source_invalid");
     if (resumeExistingProject && !preservedSegmentZero.valid) blockers.push("preserved_segment_zero_invalid");
     if (resumeExistingProject && segmentsToGenerate.length !== 2) blockers.push("resume_expected_two_segments");
@@ -322,12 +328,12 @@ export class LongVideoExecutionCoordinator {
     const consumed = readConsumedAuthorizations(this.authorizationLedgerPath);
     if (consumed.includes(authorization.id)) throw new Error("long_video_authorization_consumed");
     if (this.readSession()?.active) throw new Error("long_video_active_session_exists");
-    const candidates = (await this.provider.listCandidates()).filter((candidate) => candidate.gpuProfile === "rtx4090" && candidate.hourlyUsd >= 0 && candidate.hourlyUsd <= 0.7).sort((left, right) => left.hourlyUsd - right.hourlyUsd);
-    if (!candidates.length) throw new Error("long_video_no_rtx4090_candidate");
+    const candidates = (await this.provider.listCandidates()).filter((candidate) => candidate.gpuProfile === authorization.gpuProfile && candidate.hourlyUsd >= 0 && candidate.hourlyUsd <= (authorization.gpuProfile === "rtx5090" ? 0.65 : 0.7)).sort((left, right) => left.hourlyUsd - right.hourlyUsd);
+    if (!candidates.length) throw new Error(`long_video_no_${authorization.gpuProfile}_candidate`);
     if (await this.provider.activeOrderCount() >= this.policy.maxActiveOrders) throw new Error("long_video_active_order_limit");
     const session: LongVideoExecutionSession = {
       schemaVersion: 1, projectId, provider: "clore", authorizationId: authorization.id, orderId: null, providerSessionId: null,
-      serverId: null, gpuProfile: "rtx4090", runtimeState: "not_started", restoreState: "not_started", restoreRevision: null,
+      serverId: null, gpuProfile: authorization.gpuProfile, runtimeState: "not_started", restoreState: "not_started", restoreRevision: null,
       currentSegmentIndex: null, currentAttemptId: null, draining: false, cleanupState: "not_started", approximateSpendUsd: 0,
       resumeReason: plan.resume_existing_project ? "stage4h5_retry_after_idempotent_review_race" : null,
       previousSessionId: this.readSession()?.providerSessionId ?? null,

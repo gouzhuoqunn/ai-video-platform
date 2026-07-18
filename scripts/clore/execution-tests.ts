@@ -4,6 +4,7 @@ import path from "node:path";
 import { COMFY_RUNTIME_IMAGE, loadCloreConfig } from "./config";
 import { loadCloreExecutionConfig } from "./execution-config";
 import { buildCreateOrderBody, createCloreOrder, runCreateOrderPreflight, validateCreatedOrderPricing } from "./order-execution";
+import { syntheticEd25519PublicKey } from "./ssh-test-fixture";
 import { cancelCloreOrder } from "./cancel-execution";
 import { readActiveOrder } from "./order-state";
 import type { RawCloreServer } from "./types";
@@ -140,7 +141,7 @@ async function main() {
       serverId: "120001",
       image: config.dockerImage,
       currency: "USD-Blockchain",
-      sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockPublicKeyForTestsOnly000000000000 test",
+      sshPublicKey: syntheticEd25519PublicKey("execution-tests"),
       maxPriceUsdPerHour: 0.7,
       requiredPriceForApi: 14.99,
     });

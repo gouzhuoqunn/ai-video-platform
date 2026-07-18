@@ -11,6 +11,8 @@ export type GpuTarget = {
   gpuProfile: GpuProfile;
   runtimeDigest: string;
   knownHostsPath?: string;
+  sshCredentialSource?: "canonical_clore_project_key";
+  sshIdentityFingerprint?: string;
 };
 
 export type ProviderCredentialInspection = {
@@ -72,7 +74,8 @@ export type CreateSessionInput = {
   dryRun: boolean;
   beforeCreateRequest?: () => Promise<void> | void;
   afterCreateRequestAttempt?: () => Promise<void> | void;
-  cloreProfile?: "clore_manual_parity" | "clore_key_only";
+  cloreProfile?: "clore_manual_parity" | "clore_key_only" | "clore_key_with_password_fallback";
+  resolvedBatchRelease?: { batchId: string; resolutionNonce: string; gpuProfile: "rtx5090" };
 };
 
 export type BillingSummary = {
