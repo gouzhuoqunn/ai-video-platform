@@ -8,6 +8,7 @@ import {
   resumeLongVideoProject,
   reviewLongVideoSegment,
   updateLongVideoSegmentPrompt,
+  updateLongVideoProjectGpuPreference,
   deleteLongVideoProjectTasks,
 } from "@/lib/long-video/store";
 import { deleteLongVideoUploadRef } from "@/lib/long-video/uploads";
@@ -16,11 +17,12 @@ import { toPublicLongVideoProject } from "@/lib/long-video/domain";
 import { validateProductionPrompt } from "@/lib/generation/production-prompt-safety";
 
 type ActionPayload = {
-  action?: "confirm" | "update_prompt" | "accept" | "regenerate" | "pause" | "resume" | "cancel";
+  action?: "confirm" | "update_prompt" | "update_gpu_preference" | "accept" | "regenerate" | "pause" | "resume" | "cancel";
   expectedProjectVersion?: number;
   expectedSegmentVersion?: number;
   sequenceIndex?: number;
   prompt?: string;
+  gpuPreference?: Array<"rtx4090" | "rtx5090">;
 };
 
 function projectIdFrom(value: string) {
@@ -48,6 +50,7 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ p
     const version = Number(payload.expectedProjectVersion);
     let project;
     if (payload.action === "confirm") project = confirmLongVideoProject(projectId, version);
+    else if (payload.action === "update_gpu_preference") project = updateLongVideoProjectGpuPreference(projectId, version, payload.gpuPreference ?? []);
     else if (payload.action === "resume") project = resumeLongVideoProject(projectId, version);
     else if (payload.action === "cancel") project = cancelLongVideoProject(projectId, version);
     else if (payload.action === "update_prompt") {

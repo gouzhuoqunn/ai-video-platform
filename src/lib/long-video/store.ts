@@ -18,6 +18,8 @@ import {
   GENERATION_POOL_PATH,
   updateGenerationTasks,
   upsertGenerationTasks,
+  readGenerationPool,
+  writeGenerationPool,
   type GenerationTask,
 } from "@/lib/generation/task-pool";
 import { loadProductionVerification } from "@/lib/generation/production-pipeline";
@@ -194,6 +196,30 @@ export function persistLongVideoProject(input: CreateLongVideoProjectInput, file
   const project = createLongVideoProject(input);
   state.projects.push(project);
   writeState(state, filePath);
+  return clone(project);
+}
+
+export function updateLongVideoProjectGpuPreference(
+  projectId: string,
+  expectedVersion: number,
+  gpuPreference: Array<"rtx4090" | "rtx5090">,
+  options: { statePath?: string; poolPath?: string } = {},
+) {
+  if (gpuPreference.length !== 1 || gpuPreference[0] !== "rtx4090") throw new Error("娴嬭瘯楠屾敹椤圭洰鍙厑璁?RTX4090");
+  const statePath = options.statePath ?? LONG_VIDEO_STATE_PATH;
+  const project = mutateProject(projectId, expectedVersion, (current) => {
+    if (current.status !== "waiting_for_gpu") throw new Error("椤圭洰蹇呴』澶勪簬 waiting_for_gpu");
+    current.gpuPreference = ["rtx4090"];
+  }, statePath);
+  const poolPath = isolatedPoolPath(statePath, options.poolPath);
+  const pool = readGenerationPool(poolPath);
+  let changed = false;
+  for (const task of pool.tasks) {
+    if (task.longVideoProjectId !== projectId || !["waiting_for_batch", "pending_confirmation", "waiting_for_gpu"].includes(task.status)) continue;
+    task.gpuPreference = ["rtx4090"];
+    changed = true;
+  }
+  if (changed) writeGenerationPool(pool, poolPath);
   return clone(project);
 }
 
