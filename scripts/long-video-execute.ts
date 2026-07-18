@@ -28,7 +28,7 @@ async function main() {
   const providerName = arg("provider") ?? "clore";
   if (providerName !== "clore") throw new Error("long_video_provider_must_be_clore");
   if (planMode === executeMode) usage();
-  const provider = planMode ? new CloreLongVideoProviderAdapter() : new CloreLongVideoProviderAdapter();
+  const provider = new CloreLongVideoProviderAdapter();
   const coordinator = new LongVideoExecutionCoordinator({ provider, policy: executeMode ? { maxSpendUsd: 1.2, maxSegmentsPerSession: 3, maxConsecutiveSegments: 3 } : undefined });
   if (planMode) {
     console.log(JSON.stringify({ ...(await coordinator.plan(projectId)), real_clore_adapter_ready: true }, null, 2));
@@ -40,6 +40,8 @@ async function main() {
   if (!existsSync(filePath)) throw new Error("long_video_authorization_missing");
   const authorization = JSON.parse(readFileSync(filePath, "utf8")) as LongVideoExecutionAuthorization;
   if (authorization.id !== authorizationId || authorization.projectId !== projectId) throw new Error("long_video_authorization_project_mismatch");
+  const preflight = await coordinator.plan(projectId);
+  if (!preflight.real_project_plan_ready) throw new Error(`long_video_plan_blocked:${preflight.blockers.join(",")}`);
   process.env.CLORE_ORDER_EXECUTION_ENABLED = "true";
   consumeAuthorizationFile(filePath, authorization);
   const result = await coordinator.execute(projectId, { ...authorization, consumedAt: null });
