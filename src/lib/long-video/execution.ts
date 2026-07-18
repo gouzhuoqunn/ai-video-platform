@@ -295,7 +295,12 @@ export class LongVideoExecutionCoordinator {
         const recorded = recordLongVideoSegmentOutput({ projectId, sequenceIndex: index, attemptId: session.currentAttemptId!, expectedProjectVersion: current.version, expectedSegmentVersion: current.segments[index].version, outputVideoRef: persisted.outputVideoRef, sourceWebmRef: persisted.sourceWebmRef, thumbnailRef: persisted.thumbnailRef, lastFrameRef: persisted.lastFrameRef, evidenceSummary: { ...persisted.evidenceSummary, inputFrameSha256: media.inputFrameSha256, previousSegmentId: media.previousSegmentId ?? null, previousAttemptId: media.previousAttemptId ?? null, previousLastFrameSha256: media.previousLastFrameSha256 ?? null }, now: this.now(), filePath: this.statePath });
         const decision = await this.provider.awaitReview({ projectId, sequenceIndex: index, deadline: recorded.segments[index].approvalDeadline! });
         current = getLongVideoProject(projectId, this.statePath)!;
-        const reviewed = reviewLongVideoSegment({ projectId, sequenceIndex: index, action: decision, expectedProjectVersion: current.version, expectedSegmentVersion: current.segments[index].version, now: this.now(), statePath: this.statePath });
+        // The expiry worker can accept the boundary between the provider's
+        // review poll and this write. Treat an already-accepted segment as
+        // the idempotent result instead of submitting a second review action.
+        const reviewed = current.segments[index].status === "accepted"
+          ? current
+          : reviewLongVideoSegment({ projectId, sequenceIndex: index, action: decision, expectedProjectVersion: current.version, expectedSegmentVersion: current.segments[index].version, now: this.now(), statePath: this.statePath });
         if (decision === "pause") { await this.provider.cancelSession(providerSession); session.cleanupState = "completed"; session.active = false; session.updatedAt = this.now().toISOString(); this.saveSession(session); return session; }
         if (decision === "regenerate") { index -= 1; continue; }
         current = reviewed;

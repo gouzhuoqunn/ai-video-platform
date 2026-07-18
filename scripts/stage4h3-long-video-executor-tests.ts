@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { confirmLongVideoProject, getLongVideoProject, persistLongVideoProject } from "../src/lib/long-video/store";
+import { confirmLongVideoProject, getLongVideoProject, persistLongVideoProject, processExpiredLongVideoReviews } from "../src/lib/long-video/store";
 import { buildLongVideoProjectPaths } from "../src/lib/long-video/media";
 import { LongVideoExecutionCoordinator, type LongVideoExecutionAuthorization, type LongVideoProvider, type LongVideoProviderSession } from "../src/lib/long-video/execution";
 
@@ -64,7 +64,7 @@ class FakeProvider implements LongVideoProvider {
     assert.equal(result.status, 0, result.stderr);
     return { sourceVideo, inputFrameSha256: inputSha, previousSegmentId: input.previousSegmentId, previousAttemptId: input.previousAttemptId, previousLastFrameSha256: input.previousLastFrameSha256 };
   }
-  async awaitReview(input: { projectId: string; sequenceIndex: number; deadline: string }) { this.reviewDeadlines.push(input.deadline); assert.equal(Date.parse(input.deadline), fakeNow.getTime() + 20_000); return this.decisions.shift()!; }
+  async awaitReview(input: { projectId: string; sequenceIndex: number; deadline: string }) { this.reviewDeadlines.push(input.deadline); assert.equal(Date.parse(input.deadline), fakeNow.getTime() + 20_000); if (this.reviewDeadlines.length === 1) processExpiredLongVideoReviews(new Date(fakeNow.getTime() + 20_000), statePath); return this.decisions.shift()!; }
   async cancelSession() { this.active = 0; this.cancelCount += 1; }
 }
 
