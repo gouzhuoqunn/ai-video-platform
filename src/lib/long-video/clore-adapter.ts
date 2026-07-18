@@ -8,6 +8,7 @@ import { getGpuProvider } from "../../../scripts/gpu-providers";
 import { FIXED_RUNTIME_DIGEST, scpFile, scpFromRemote, sleep, sshCommand } from "../../../scripts/gpu-providers/common";
 import type { GpuCandidate, GpuProvider, GpuSession, GpuTarget } from "../../../scripts/gpu-providers/types";
 import { getCloreDeploymentHold, setCloreDeploymentHold } from "../../../scripts/clore/deployment-hold";
+import { readLocalWatchdogArmState } from "../../../scripts/clore/watchdog-io";
 import { buildRuntimeOverlay } from "../../../scripts/runtime-overlay";
 import { prepareRemoteWorkspace, verifyWorkspaceRoundtrip } from "../../../scripts/clore/remote-workspace";
 import { installDetachedWorker, inspectRemoteJob, launchDetachedJob, waitForDetachedJob } from "../../../scripts/clore/detached-remote-job";
@@ -44,12 +45,15 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
   private readonly libraryDir: string;
   private readonly statePath: string;
   private readonly activeOrderReader?: () => Promise<number>;
+  private readonly watchdogServerId: string | null;
 
-  constructor(options: { gpu?: GpuProvider; libraryDir?: string; statePath?: string; activeOrderReader?: () => Promise<number> } = {}) {
+  constructor(options: { gpu?: GpuProvider; libraryDir?: string; statePath?: string; activeOrderReader?: () => Promise<number>; watchdogServerId?: string | null } = {}) {
     this.gpu = options.gpu ?? getGpuProvider("clore");
     this.libraryDir = options.libraryDir ?? (process.env.LOCAL_VIDEO_LIBRARY_DIR?.trim() || "D:\\AI-Video-Library");
     this.statePath = options.statePath ?? path.join(process.cwd(), ".secrets", "long-video-state.json");
     this.activeOrderReader = options.activeOrderReader;
+    const watchdog = options.gpu ? null : readLocalWatchdogArmState();
+    this.watchdogServerId = options.watchdogServerId === undefined ? (watchdog?.armed ? watchdog.serverId : null) : options.watchdogServerId;
   }
 
   async inspectProviderState() {
@@ -65,9 +69,10 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
 
   async listCandidates() {
     const candidates = await this.gpu.listCandidates();
-    return candidates.filter((candidate) => {
+    const eligible = candidates.filter((candidate) => {
       try { mapCandidate(candidate); return true; } catch { return false; }
     }).map(mapCandidate).sort((left, right) => left.hourlyUsd - right.hourlyUsd);
+    return this.watchdogServerId ? eligible.filter((candidate) => candidate.serverId === this.watchdogServerId) : eligible;
   }
 
   private async context(session: LongVideoProviderSession) {
