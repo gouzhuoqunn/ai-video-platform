@@ -4,7 +4,7 @@ import { validateProductionPrompt } from "@/lib/generation/production-prompt-saf
 import { listLocalImageResults } from "@/lib/local-lab/local-results";
 import { listLongVideoProjects, persistLongVideoProject } from "@/lib/long-video/store";
 import { persistLongVideoProjectSnapshot } from "@/lib/long-video/media";
-import { toPublicLongVideoProject, type FirstFrameSource } from "@/lib/long-video/domain";
+import { toPublicLongVideoProject, validateLongVideoSegmentDrafts, type FirstFrameSource, type LongVideoSegmentDraft } from "@/lib/long-video/domain";
 import { longVideoUploadExists } from "@/lib/long-video/uploads";
 
 type CreatePayload = {
@@ -14,7 +14,7 @@ type CreatePayload = {
   firstFrameSource?: FirstFrameSource;
   firstFrameRef?: string | null;
   targetDurationSeconds?: number;
-  prompts?: string[];
+  segments?: LongVideoSegmentDraft[];
   gpuPreference?: Array<"rtx4090" | "rtx5090">;
 };
 
@@ -37,8 +37,15 @@ export async function POST(request: NextRequest) {
     const match = firstFrameRef.match(/^image:([A-Za-z0-9_-]{6,120})$/);
     if (!match || !listLocalImageResults().some((image) => image.sessionId === match[1])) return NextResponse.json({ error: "请选择已验证的本地图片。" }, { status: 400 });
   }
-  const prompts = Array.isArray(payload.prompts) ? payload.prompts.map(String) : [];
-  const allPrompts = [String(payload.overallPrompt ?? ""), ...prompts];
+  let segments: LongVideoSegmentDraft[];
+  try {
+    if (!Array.isArray(payload.segments)) throw new Error("请提交完整的分段提示词。");
+    segments = payload.segments.map((segment) => ({ sequenceIndex: Number(segment.sequenceIndex), startSecond: Number(segment.startSecond), endSecond: Number(segment.endSecond), prompt: String(segment.prompt ?? "") }));
+    segments = validateLongVideoSegmentDrafts(Number(payload.targetDurationSeconds), segments);
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "分段提示词无效。" }, { status: 400 });
+  }
+  const allPrompts = [String(payload.overallPrompt ?? ""), ...segments.map((segment) => segment.prompt)];
   const unsafe = allPrompts.map(validateProductionPrompt).find((result) => !result.allowed);
   if (unsafe) return NextResponse.json({ error: unsafe.reason, code: unsafe.code }, { status: 400 });
   try {
@@ -48,7 +55,7 @@ export async function POST(request: NextRequest) {
       firstFrameSource: source,
       firstFrameRef: source === "pure_prompt" ? null : firstFrameRef,
       targetDurationSeconds: Number(payload.targetDurationSeconds),
-      prompts,
+      segments,
       gpuPreference: payload.gpuPreference,
     });
     persistLongVideoProjectSnapshot(project);

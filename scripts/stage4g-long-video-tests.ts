@@ -14,6 +14,7 @@ import {
 } from "../src/lib/long-video/domain";
 import {
   confirmLongVideoProject,
+  createLongVideoSegmentTask,
   getLongVideoProject,
   persistLongVideoProject,
   processExpiredLongVideoReviews,
@@ -94,11 +95,20 @@ try {
   assert.equal(pool.tasks[0].inputImageJobId, "image:verified-local-image");
   assert.equal(pool.tasks[0].frames, 81, "five-second long-video slots require 81 frames at 16fps");
   assert.equal(pool.tasks[0].fps, 16);
+  assert.match(pool.tasks[0].prompt, /Segment 1/);
+  assert.match(pool.tasks[0].prompt, /consistent lighting/);
+  assert.doesNotMatch(pool.tasks[0].prompt, /Segment 2/);
 
   const beforeEdit = project;
   project = updateLongVideoSegmentPrompt(project.id, 1, "A safely persisted second prompt.", project.version, project.segments[1].version, statePath);
   assert.equal(project.segments[1].prompt, "A safely persisted second prompt.");
   assert.throws(() => updateLongVideoSegmentPrompt(project.id, 1, "stale", beforeEdit.version, beforeEdit.segments[1].version, statePath), /version_conflict/);
+  project = { ...project, segments: project.segments.map((segment, index) => index === 1 ? { ...segment, inputFrameRef: "segment:0:last-frame" } : segment) };
+  const secondTask = createLongVideoSegmentTask(project, 1);
+  assert.match(secondTask.prompt, /A safely persisted second prompt/);
+  assert.match(secondTask.prompt, /consistent lighting/);
+  assert.match(secondTask.prompt, /连续/);
+  assert.doesNotMatch(secondTask.prompt, /Segment 1 continues/);
 
   const fakeNow = new Date("2026-07-18T01:00:00Z");
   project = recordLongVideoSegmentOutput({

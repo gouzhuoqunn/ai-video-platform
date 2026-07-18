@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   LONG_VIDEO_REVIEW_SECONDS,
   LONG_VIDEO_SEGMENT_SECONDS,
+  buildLongVideoEffectivePrompt,
   createLongVideoProject,
   createLongVideoSeed,
   firstIncompleteSegment,
@@ -95,7 +96,7 @@ export function createLongVideoSegmentTask(project: LongVideoProject, sequenceIn
     id: jobId,
     generationType: "video",
     jobForm: "long_video_segment",
-    prompt: segment.prompt || project.overallPrompt,
+    prompt: buildLongVideoEffectivePrompt(project.overallPrompt, segment.prompt, sequenceIndex),
     modelProfile: PRODUCTION_VIDEO_MODEL,
     modelRevision: verification.videoModel.revision,
     width: project.gpuPreference[0] === "rtx5090" ? 1280 : 832,
@@ -112,6 +113,9 @@ export function createLongVideoSegmentTask(project: LongVideoProject, sequenceIn
     longVideoSegmentIndex: sequenceIndex,
     outputMetadata: {
       workflowCapability: project.workflowCapability,
+      overallPrompt: project.overallPrompt,
+      segmentPrompt: segment.prompt,
+      segmentSequenceIndex: sequenceIndex,
       inputFrameRef: segment.inputFrameRef,
       reuseLoadedWan: true,
     },

@@ -98,9 +98,17 @@ export type CreateLongVideoProjectInput = {
   firstFrameSource: FirstFrameSource;
   firstFrameRef?: string | null;
   targetDurationSeconds: number;
-  prompts: string[];
+  segments?: LongVideoSegmentDraft[];
+  prompts?: string[];
   gpuPreference?: Array<"rtx4090" | "rtx5090">;
   at?: Date;
+};
+
+export type LongVideoSegmentDraft = {
+  sequenceIndex: number;
+  startSecond: number;
+  endSecond: number;
+  prompt: string;
 };
 
 export const LONG_VIDEO_SESSION_POLICY = {
@@ -125,9 +133,40 @@ export function segmentTimeLabel(segment: Pick<LongVideoSegment, "startSecond" |
   return `${segment.startSecond + 1}～${segment.endSecond}秒`;
 }
 
-export function createSegmentSlots(projectId: string, durationSeconds: number, prompts: string[], at = new Date()) {
+export function buildLongVideoSegmentDrafts(durationSeconds: number, prompts: string[] = []) {
   const total = validateLongVideoDuration(durationSeconds);
-  if (prompts.length !== total) throw new Error(`需要填写 ${total} 段提示词。`);
+  return Array.from({ length: total }, (_, sequenceIndex): LongVideoSegmentDraft => ({
+    sequenceIndex,
+    startSecond: sequenceIndex * LONG_VIDEO_SEGMENT_SECONDS,
+    endSecond: Math.min((sequenceIndex + 1) * LONG_VIDEO_SEGMENT_SECONDS, durationSeconds),
+    prompt: String(prompts[sequenceIndex] ?? "").trim(),
+  }));
+}
+
+export function validateLongVideoSegmentDrafts(durationSeconds: number, drafts: LongVideoSegmentDraft[]) {
+  const total = validateLongVideoDuration(durationSeconds);
+  if (!Array.isArray(drafts) || drafts.length !== total) throw new Error(`需要填写 ${total} 段提示词。`);
+  drafts.forEach((draft, index) => {
+    const expectedStart = index * LONG_VIDEO_SEGMENT_SECONDS;
+    const expectedEnd = Math.min((index + 1) * LONG_VIDEO_SEGMENT_SECONDS, durationSeconds);
+    if (draft.sequenceIndex !== index || draft.startSecond !== expectedStart || draft.endSecond !== expectedEnd) throw new Error("分段索引或时间范围无效。");
+    const prompt = String(draft.prompt ?? "").trim();
+    if (!prompt) throw new Error(`请填写第 ${index + 1} 段提示词。`);
+    if (prompt.length > 2000) throw new Error("单段提示词不能超过 2000 个字符。");
+  });
+  return drafts.map((draft) => ({ ...draft, prompt: draft.prompt.trim() }));
+}
+
+export function buildLongVideoEffectivePrompt(overallPrompt: string, segmentPrompt: string, sequenceIndex: number) {
+  const parts = [overallPrompt.trim(), `本段（第 ${sequenceIndex + 1} 段）动作与画面：${segmentPrompt.trim()}`];
+  if (sequenceIndex > 0) parts.push("保持与上一段的主体、镜头方向、光线和运动连续，自然衔接上一段结尾帧。");
+  return parts.filter(Boolean).join("\n");
+}
+
+export function createSegmentSlots(projectId: string, durationSeconds: number, drafts: LongVideoSegmentDraft[] | string[], at = new Date()) {
+  const normalizedDrafts = drafts.length && typeof drafts[0] === "string" ? buildLongVideoSegmentDrafts(durationSeconds, drafts as string[]) : drafts as LongVideoSegmentDraft[];
+  const validated = validateLongVideoSegmentDrafts(durationSeconds, normalizedDrafts);
+  const total = validated.length;
   const timestamp = at.toISOString();
   return Array.from({ length: total }, (_, index): LongVideoSegment => ({
     id: randomUUID(),
@@ -135,7 +174,7 @@ export function createSegmentSlots(projectId: string, durationSeconds: number, p
     sequenceIndex: index,
     startSecond: index * LONG_VIDEO_SEGMENT_SECONDS,
     endSecond: Math.min((index + 1) * LONG_VIDEO_SEGMENT_SECONDS, durationSeconds),
-    prompt: String(prompts[index] ?? "").trim().slice(0, 2000),
+    prompt: validated[index].prompt.slice(0, 2000),
     status: index === 0 ? "ready" : "pending",
     selectedAttemptId: null,
     inputFrameRef: null,
@@ -195,13 +234,13 @@ export function createLongVideoProject(input: CreateLongVideoProjectInput): Long
   const title = input.title.trim().slice(0, 120);
   const overallPrompt = input.overallPrompt.trim().slice(0, 2000);
   if (!title) throw new Error("请填写长视频标题。");
-  if (!overallPrompt) throw new Error("请填写长视频整体提示词。");
   if (!["upload", "existing_image", "pure_prompt"].includes(input.firstFrameSource)) throw new Error("首帧来源无效。");
   if (input.firstFrameSource !== "pure_prompt" && !input.firstFrameRef) throw new Error("请选择或上传首帧图片。");
   assertOpaqueReference(input.firstFrameRef, "首帧引用");
   const at = input.at ?? new Date();
   const projectId = randomUUID();
-  const segments = createSegmentSlots(projectId, input.targetDurationSeconds, input.prompts, at);
+  const drafts = input.segments ?? buildLongVideoSegmentDrafts(input.targetDurationSeconds, input.prompts ?? []);
+  const segments = createSegmentSlots(projectId, input.targetDurationSeconds, drafts, at);
   segments[0].inputFrameRef = input.firstFrameSource === "pure_prompt" ? null : input.firstFrameRef ?? null;
   const timestamp = at.toISOString();
   return {

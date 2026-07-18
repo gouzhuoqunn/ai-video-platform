@@ -38,17 +38,21 @@ try {
   const uploaded = await json(await uploadRoute.POST(request("/api/local-lab/long-video/uploads", { method: "POST", body: form })));
   assert.match(uploaded.ref, /^upload:[a-f0-9-]{36}$/);
 
-  const created = await json(await projectRoute.POST(request("/api/local-lab/long-video", { method: "POST", body: JSON.stringify({ action: "create", title: "上传首帧 15 秒", overallPrompt: "A continuous safe scene.", firstFrameSource: "upload", firstFrameRef: uploaded.ref, targetDurationSeconds: 15, prompts: ["Part one", "Part two", "Part three"] }) })));
+  const segments15 = ["MARKER-A", "MARKER-B", "MARKER-C"].map((prompt, sequenceIndex) => ({ sequenceIndex, startSecond: sequenceIndex * 5, endSecond: (sequenceIndex + 1) * 5, prompt }));
+  const created = await json(await projectRoute.POST(request("/api/local-lab/long-video", { method: "POST", body: JSON.stringify({ action: "create", title: "上传首帧 15 秒", overallPrompt: "Shared context.", firstFrameSource: "upload", firstFrameRef: uploaded.ref, targetDurationSeconds: 15, segments: segments15 }) })));
   assert.equal(created.provider_authorization_created, false);
   assert.equal(created.credit_charged, false);
   assert.equal(created.create_order_called, false);
   assert.equal(created.project.totalSegments, 3);
   assert.equal(created.project.firstFrameRef, "upload:ready");
+  assert.deepEqual(created.project.segments.map((segment: { prompt: string }) => segment.prompt), ["MARKER-A", "MARKER-B", "MARKER-C"]);
+  const listed = await json(await projectRoute.GET(request("/api/local-lab/long-video")));
+  assert.deepEqual(listed.projects.find((project: { id: string }) => project.id === created.project.id).segments.map((segment: { prompt: string }) => segment.prompt), ["MARKER-A", "MARKER-B", "MARKER-C"]);
   const confirmed = await json(await projectDetailRoute.PATCH(request(`/api/local-lab/long-video/${created.project.id}`, { method: "PATCH", body: JSON.stringify({ action: "confirm", expectedProjectVersion: created.project.version }) }), { params: Promise.resolve({ projectId: created.project.id }) }));
   assert.equal(confirmed.project.status, "waiting_for_gpu");
   assert.equal(readGenerationPool().tasks.filter((task) => task.longVideoProjectId === created.project.id).length, 1);
 
-  const pure = await json(await projectRoute.POST(request("/api/local-lab/long-video", { method: "POST", body: JSON.stringify({ action: "create", title: "纯提示词 10 秒", overallPrompt: "A safe independent first frame.", firstFrameSource: "pure_prompt", targetDurationSeconds: 10, prompts: ["Move gently", "Continue smoothly"] }) })));
+  const pure = await json(await projectRoute.POST(request("/api/local-lab/long-video", { method: "POST", body: JSON.stringify({ action: "create", title: "纯提示词 10 秒", overallPrompt: "A safe independent first frame.", firstFrameSource: "pure_prompt", targetDurationSeconds: 10, segments: ["Move gently", "Continue smoothly"].map((prompt, sequenceIndex) => ({ sequenceIndex, startSecond: sequenceIndex * 5, endSecond: (sequenceIndex + 1) * 5, prompt })) }) })));
   assert.equal(pure.project.totalSegments, 2);
   const pureConfirmed = await json(await projectDetailRoute.PATCH(request(`/api/local-lab/long-video/${pure.project.id}`, { method: "PATCH", body: JSON.stringify({ action: "confirm", expectedProjectVersion: pure.project.version }) }), { params: Promise.resolve({ projectId: pure.project.id }) }));
   assert.equal(readGenerationPool().tasks.filter((task) => task.longVideoProjectId === pure.project.id && task.generationType === "image").length, 1);

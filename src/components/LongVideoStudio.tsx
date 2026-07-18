@@ -41,6 +41,8 @@ type Project = {
 };
 
 type Props = { imageResults: ImageResult[] };
+const LONG_VIDEO_DRAFT_KEY = "ai-video-platform:long-video-draft:v1";
+type DraftSegment = { sequenceIndex: number; startSecond: number; endSecond: number; prompt: string };
 
 const statusLabels: Record<string, string> = {
   pending_confirmation: "待确认",
@@ -77,6 +79,8 @@ export function LongVideoStudio({ imageResults }: Props) {
   const [overallPrompt, setOverallPrompt] = useState("");
   const [duration, setDuration] = useState(15);
   const [prompts, setPrompts] = useState<string[]>(Array(3).fill(""));
+  const [promptArchive, setPromptArchive] = useState<Record<number, string>>({});
+  const [focusedDraftIndex, setFocusedDraftIndex] = useState(0);
   const [firstFrameSource, setFirstFrameSource] = useState<Project["firstFrameSource"]>("existing_image");
   const [existingImageId, setExistingImageId] = useState("");
   const [uploadRef, setUploadRef] = useState("");
@@ -93,6 +97,10 @@ export function LongVideoStudio({ imageResults }: Props) {
   const currentSegment = detailProject?.segments[segmentIndex] ?? null;
   const completedCount = detailProject?.segments.filter((segment) => segment.status === "accepted").length ?? 0;
   const reviewSeconds = currentSegment?.approvalDeadline ? Math.max(0, Math.ceil((Date.parse(currentSegment.approvalDeadline) - now) / 1000)) : 0;
+  const draftSegments = useMemo<DraftSegment[]>(() => Array.from({ length: duration / 5 }, (_, sequenceIndex) => ({ sequenceIndex, startSecond: sequenceIndex * 5, endSecond: Math.min((sequenceIndex + 1) * 5, duration), prompt: promptArchive[sequenceIndex] ?? prompts[sequenceIndex] ?? "" })), [duration, promptArchive, prompts]);
+  const filledDraftCount = draftSegments.filter((segment) => segment.prompt.trim()).length;
+  const firstFrameReady = firstFrameSource === "pure_prompt" || (firstFrameSource === "upload" ? Boolean(uploadRef) : Boolean(existingImageId));
+  const canCreate = !busy && Boolean(title.trim()) && firstFrameReady && filledDraftCount === draftSegments.length;
 
   const refresh = useCallback(async () => {
     const response = await fetch("/api/local-lab/long-video");
@@ -111,6 +119,7 @@ export function LongVideoStudio({ imageResults }: Props) {
   }, [refresh]);
 
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
     const timer = window.setInterval(() => setNow(Date.now()), 250);
     return () => window.clearInterval(timer);
   }, []);
@@ -123,9 +132,30 @@ export function LongVideoStudio({ imageResults }: Props) {
     promptDirty.current = false;
   }, [currentSegment, detailProject]);
 
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(LONG_VIDEO_DRAFT_KEY) ?? "null") as { title?: string; overallPrompt?: string; duration?: number; prompts?: string[] } | null;
+      if (!saved) return;
+      if (saved.title) setTitle(saved.title);
+      if (typeof saved.overallPrompt === "string") setOverallPrompt(saved.overallPrompt);
+      if (typeof saved.duration === "number" && saved.duration >= 5 && saved.duration <= 300 && saved.duration % 5 === 0) setDuration(saved.duration);
+      if (Array.isArray(saved.prompts)) { setPrompts(saved.prompts); setPromptArchive(Object.fromEntries(saved.prompts.map((prompt, index) => [index, prompt]))); }
+    } catch { /* ignore malformed local draft */ }
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(LONG_VIDEO_DRAFT_KEY, JSON.stringify({ title, overallPrompt, duration, prompts: draftSegments.map((segment) => segment.prompt) }));
+  }, [title, overallPrompt, duration, draftSegments]);
+
   async function createProject() {
-    if (!overallPrompt.trim() || busy) {
-      setNotice("请先填写长视频整体提示词。");
+    if (busy) return;
+    if (!canCreate) {
+      setNotice("请先选择首帧并填写全部分段提示词。");
+      return;
+    }
+    if (filledDraftCount !== draftSegments.length) {
+      setNotice(`请填写全部分段提示词（已填写 ${filledDraftCount}/${draftSegments.length} 段）。`);
       return;
     }
     const firstFrameRef = firstFrameSource === "upload" ? uploadRef : firstFrameSource === "existing_image" ? `image:${existingImageId}` : null;
@@ -135,22 +165,35 @@ export function LongVideoStudio({ imageResults }: Props) {
     }
     setBusy(true);
     try {
-      const response = await fetch("/api/local-lab/long-video", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "create", title, overallPrompt, firstFrameSource, firstFrameRef, targetDurationSeconds: duration, prompts, gpuPreference: gpu === "auto" ? ["rtx4090", "rtx5090"] : [gpu] }) });
+      const response = await fetch("/api/local-lab/long-video", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "create", title, overallPrompt, firstFrameSource, firstFrameRef, targetDurationSeconds: duration, segments: draftSegments, gpuPreference: gpu === "auto" ? ["rtx4090", "rtx5090"] : [gpu] }) });
       const payload = await response.json().catch(() => ({})) as { project?: Project; error?: string };
       if (!response.ok || !payload.project) { setNotice(payload.error ?? "无法创建长视频项目。"); return; }
       setProjects((current) => [payload.project!, ...current.filter((project) => project.id !== payload.project!.id)]);
       setSelectedId(payload.project.id);
       setDetailId(payload.project.id);
       setSegmentIndex(0);
+      window.localStorage.removeItem(LONG_VIDEO_DRAFT_KEY);
       setNotice("项目已保存为待确认；不会创建 GPU 订单或扣积分。");
     } finally { setBusy(false); }
   }
 
   function changeDuration(nextDuration: number) {
+    setPromptArchive((current) => ({ ...current, ...Object.fromEntries(prompts.map((prompt, index) => [index, prompt])) }));
     setDuration(nextDuration);
     const nextCount = nextDuration / 5;
-    setPrompts((current) => Array.from({ length: nextCount }, (_, index) => current[index] ?? ""));
+    setPrompts((current) => Array.from({ length: nextCount }, (_, index) => promptArchive[index] ?? current[index] ?? ""));
     setSegmentIndex((current) => Math.min(current, nextCount - 1));
+    setFocusedDraftIndex((current) => Math.min(current, nextCount - 1));
+  }
+
+  function changeDraftPrompt(index: number, value: string) {
+    setPromptArchive((current) => ({ ...current, [index]: value }));
+    setPrompts((current) => current.map((prompt, candidate) => candidate === index ? value : prompt));
+  }
+
+  function fillEmptyDraftPrompts() {
+    if (!overallPrompt.trim()) { setNotice("整体提示词为空，请逐段填写，或先补充整体提示词。"); return; }
+    draftSegments.forEach((segment) => { if (!segment.prompt.trim()) changeDraftPrompt(segment.sequenceIndex, overallPrompt); });
   }
 
   async function uploadFirstFrame(file: File) {
@@ -240,6 +283,10 @@ export function LongVideoStudio({ imageResults }: Props) {
             <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => changeDuration(Number(event.target.value))} value={duration}>{Array.from({ length: 60 }, (_, index) => (index + 1) * 5).map((value) => <option key={value} value={value}>{value} 秒 · {value / 5} 段</option>)}</select>
           </label>
           <label className="text-sm font-semibold">整体提示词<textarea className="mt-1 min-h-24 w-full rounded-md border border-stone-200 bg-[#faf8f4] p-3" maxLength={2000} onChange={(event) => setOverallPrompt(event.target.value)} value={overallPrompt} /></label>
+          <div className="md:col-span-3 rounded-md border border-stone-200 bg-[#faf8f4] p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-semibold">分段提示词</h3><p className="text-xs text-stone-500">已填写 {filledDraftCount}/{draftSegments.length} 段；整体提示词只是共享上下文。</p></div><button className="rounded border border-stone-300 bg-white px-2 py-1 text-xs" onClick={fillEmptyDraftPrompts} type="button">填充空白段</button></div>
+            {draftSegments.length <= 6 ? <div className="mt-3 grid gap-2 md:grid-cols-2">{draftSegments.map((segment) => <label className="text-sm font-semibold" key={segment.sequenceIndex}>{segment.startSecond + 1}～{segment.endSecond}秒<textarea className="mt-1 min-h-20 w-full rounded-md border border-stone-200 bg-white p-2 font-normal" maxLength={2000} onChange={(event) => changeDraftPrompt(segment.sequenceIndex, event.target.value)} value={segment.prompt} /></label>)}</div> : <div className="mt-3"><div className="flex items-center justify-between gap-2"><button className="rounded border border-stone-300 bg-white px-2 py-1 text-xs" disabled={focusedDraftIndex === 0} onClick={() => setFocusedDraftIndex((current) => current - 1)} type="button">上一段</button><span className="text-xs text-stone-500">第 {focusedDraftIndex + 1}/{draftSegments.length} 段</span><button className="rounded border border-stone-300 bg-white px-2 py-1 text-xs" disabled={focusedDraftIndex === draftSegments.length - 1} onClick={() => setFocusedDraftIndex((current) => current + 1)} type="button">下一段</button></div><label className="mt-2 block text-sm font-semibold">{draftSegments[focusedDraftIndex].startSecond + 1}～{draftSegments[focusedDraftIndex].endSecond}秒<textarea className="mt-1 min-h-24 w-full rounded-md border border-stone-200 bg-white p-2 font-normal" maxLength={2000} onChange={(event) => changeDraftPrompt(focusedDraftIndex, event.target.value)} value={draftSegments[focusedDraftIndex].prompt} /></label></div>}
+          </div>
           <div className="space-y-2 text-sm"><label className="font-semibold">首帧来源<select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setFirstFrameSource(event.target.value as Project["firstFrameSource"])} value={firstFrameSource}><option value="upload">上传首帧图片</option><option value="existing_image">选择已验证图片</option><option value="pure_prompt">纯提示词生成首帧</option></select></label>
             {firstFrameSource === "existing_image" ? <select className="w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setExistingImageId(event.target.value)} value={existingImageId}><option value="">选择本地图片</option>{imageResults.map((image) => <option key={image.sessionId} value={image.sessionId}>{image.date} · {image.sessionId}</option>)}</select> : null}
             {firstFrameSource === "upload" ? <label className="block rounded-md border border-dashed border-stone-300 bg-[#faf8f4] px-3 py-2 text-center text-xs"><input accept="image/png,image/jpeg,image/webp" className="hidden" disabled={busy} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadFirstFrame(file); }} type="file" />{uploadRef ? "已选择首帧，可重新上传" : "点击选择 PNG/JPEG/WebP（20MB内）"}</label> : null}
