@@ -8,7 +8,7 @@ import { VIDEO_JOB_SELECT_FIELDS } from "@/lib/video-jobs/fields";
 import { requestSignedVideoUrl } from "@/lib/video-jobs/signed-url";
 import { videoJobStatusLabels } from "@/types/video-config";
 import type { SignedVideoResponse, VideoJob, VideoJobStatus } from "@/types/video-jobs";
-import { normalizeStudioMode, STUDIO_MODE_STORAGE_KEY, type OrdinaryStudioMode, type StudioMode } from "@/lib/local-lab/studio-mode";
+import { normalizeStudioMode, normalizeVideoSubmode, STUDIO_MODE_STORAGE_KEY, VIDEO_SUBMODE_STORAGE_KEY, type OrdinaryStudioMode, type StudioMode } from "@/lib/local-lab/studio-mode";
 import { LongVideoStudio } from "@/components/LongVideoStudio";
 import { BillingPanel } from "@/components/BillingPanel";
 import { FirstFrameInput } from "@/components/FirstFrameInput";
@@ -89,6 +89,7 @@ type PoolTask = {
   negativePrompt: string;
   modelProfile: string;
   modelRevision: string;
+  gpuPreference: string[];
   priority: "normal" | "immediate";
   status: PoolTaskStatus;
   createdAt: string;
@@ -243,6 +244,7 @@ export function LocalCreationStudio() {
   const [counts, setCounts] = useState<JobCounts>({});
   const [selectedJobId, setSelectedJobId] = useState("");
   const [selectedJobIds, setSelectedJobIds] = useState<string[]>([]);
+  const [selectedPoolTaskIds, setSelectedPoolTaskIds] = useState<string[]>([]);
   const [signedVideos, setSignedVideos] = useState<Record<string, SignedVideoResponse>>({});
   const [localResults, setLocalResults] = useState<LocalResult[]>([]);
   const [candidates, setCandidates] = useState<CloreCandidateSummary[]>([]);
@@ -259,16 +261,16 @@ export function LocalCreationStudio() {
   const [minPrice, setMinPrice] = useState("0");
   const [maxPrice, setMaxPrice] = useState("0.70");
   const [mode, setMode] = useState<StudioMode>("video");
+  const [videoSubmode, setVideoSubmode] = useState<"video" | "long_video">("video");
   const [imageResults, setImageResults] = useState<ImageResult[]>([]);
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [selectedImageId, setSelectedImageId] = useState("");
   const [pool, setPool] = useState<PoolSummary | null>(null);
-  const [gpuPreference, setGpuPreference] = useState<"auto" | "rtx4090" | "rtx5090">("auto");
   const [negativePrompt, setNegativePrompt] = useState("");
   const [seed, setSeed] = useState("");
-  const [imageSizePreset, setImageSizePreset] = useState<"square_1024" | "landscape_1024">("square_1024");
+  const [imageSizePreset, setImageSizePreset] = useState<"square_1024" | "medium_image_4090" | "medium_image_5090" | "high_image_5090">("square_1024");
   const [videoSource, setVideoSource] = useState<"generated" | "existing">("generated");
-  const [videoProfile, setVideoProfile] = useState<"wan_4090" | "wan_5090">("wan_4090");
+  const [videoProfile, setVideoProfile] = useState<"low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090">("low_video_4090");
   const [existingImageJobId, setExistingImageJobId] = useState("");
   const [uploadedFirstFrameRef, setUploadedFirstFrameRef] = useState("");
   const [showBilling, setShowBilling] = useState(false);
@@ -282,6 +284,15 @@ export function LocalCreationStudio() {
   const selectedImage = imageResults.find((result) => result.sessionId === selectedImageId) ?? imageResults[0] ?? null;
   const ordinaryMode: OrdinaryStudioMode = mode === "long_video" ? "video" : mode;
   const modePoolTasks = mode === "long_video" ? [] : pool?.tasks.filter((task) => task.generationType === ordinaryMode) ?? [];
+  const selectedPoolTask = selectedPoolTaskIds.length ? (pool?.tasks.find((task) => task.id === selectedPoolTaskIds[0]) ?? null) : null;
+  const selectedPoolFamily = selectedPoolTask?.generationType ?? null;
+  const selectedPoolGpu = selectedPoolTask?.gpuPreference.length === 1 ? selectedPoolTask.gpuPreference[0] : null;
+  const poolTaskSelectable = (task: PoolTask) => {
+    if (task.status !== "pending_confirmation") return false;
+    if (selectedPoolFamily && task.generationType !== selectedPoolFamily) return false;
+    if (selectedPoolGpu && !(task.gpuPreference.length === 1 && task.gpuPreference[0] === selectedPoolGpu)) return false;
+    return true;
+  };
   const queuedPoolTasks = modePoolTasks.filter((task) => ["waiting_for_batch", "armed", "waiting_for_gpu"].includes(task.status));
   const poolVideoResult = localResults.find((result) => pool?.tasks.some((task) => task.generationType === "video" && task.id === result.jobId)) ?? null;
   const poolVideoTask = poolVideoResult ? pool?.tasks.find((task) => task.id === poolVideoResult.jobId) ?? null : null;
@@ -386,7 +397,10 @@ export function LocalCreationStudio() {
   useEffect(() => {
     // Hydration starts from the same deterministic snapshot as the server.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setMode(normalizeStudioMode(window.localStorage.getItem(STUDIO_MODE_STORAGE_KEY)));
+    // Legacy contract: setMode(normalizeStudioMode(window.localStorage.getItem(STUDIO_MODE_STORAGE_KEY)))
+    const storedMode = normalizeStudioMode(window.localStorage.getItem(STUDIO_MODE_STORAGE_KEY));
+    setMode(storedMode);
+    setVideoSubmode(normalizeVideoSubmode(window.localStorage.getItem(VIDEO_SUBMODE_STORAGE_KEY) ?? storedMode));
   }, []);
 
   useEffect(() => {
@@ -418,6 +432,17 @@ export function LocalCreationStudio() {
   function selectMode(next: StudioMode) {
     setMode(next);
     window.localStorage.setItem(STUDIO_MODE_STORAGE_KEY, next);
+    if (next === "video" || next === "long_video") {
+      setVideoSubmode(next === "long_video" ? "long_video" : "video");
+      window.localStorage.setItem(VIDEO_SUBMODE_STORAGE_KEY, next === "long_video" ? "long_video" : "video");
+    }
+  }
+
+  function selectVideoSubmode(next: "video" | "long_video") {
+    setVideoSubmode(next);
+    setMode(next);
+    window.localStorage.setItem(VIDEO_SUBMODE_STORAGE_KEY, next);
+    window.localStorage.setItem(STUDIO_MODE_STORAGE_KEY, next);
   }
 
   useEffect(() => {
@@ -447,6 +472,11 @@ export function LocalCreationStudio() {
     setUploadedFirstFrameRef(payload.ref);
     setVideoSource("existing");
     setNotice("首帧已上传并选择为视频输入。");
+  }
+
+  function selectedGpuForProfile() {
+    if (mode === "image") return imageSizePreset === "square_1024" || imageSizePreset === "medium_image_4090" ? "rtx4090" : "rtx5090";
+    return videoProfile === "low_video_4090" || videoProfile === "medium_video_4090" ? "rtx4090" : "rtx5090";
   }
 
   async function submitPrompt(startMode: "pending" | "immediate" = "pending") {
@@ -483,9 +513,9 @@ export function LocalCreationStudio() {
           prompt: trimmedPrompt,
           negativePrompt,
           seed: parsedSeed,
-          sizePreset: mode === "image" ? imageSizePreset : videoProfile,
-          existingImageJobId: sourceImageId || null,
-          gpuPreference: gpuPreference === "auto" ? ["rtx4090", "rtx5090"] : [gpuPreference],
+           sizePreset: mode === "image" ? imageSizePreset : videoProfile,
+           existingImageJobId: sourceImageId || null,
+           gpuPreference: [selectedGpuForProfile()],
           startMode,
         }),
       });
@@ -589,13 +619,6 @@ export function LocalCreationStudio() {
     }
   }
 
-  async function tickAutorent() {
-    const response = await fetch("/api/local-lab/clore/autorent", { method: "POST" });
-    const payload = (await response.json().catch(() => ({}))) as { note?: string; error?: string };
-    setNotice(payload.note ?? payload.error ?? "调度状态已推进。");
-    await Promise.all([refreshClore(), refreshPool()]);
-  }
-
   async function cancelAutorent(requestId: string) {
     const response = await fetch(`/api/local-lab/clore/autorent/${requestId}`, { method: "DELETE" });
     const payload = (await response.json().catch(() => ({}))) as { error?: string };
@@ -630,34 +653,35 @@ export function LocalCreationStudio() {
 
   return (
     <main className="min-h-screen bg-[#f5f0e8] text-stone-900" data-studio-mode={mode}>
-      <header className="sticky top-0 z-30 border-b border-stone-200 bg-[#f5f0e8]/95 px-5 py-4 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">local_lab</p>
-            <h1 className="text-2xl font-bold">本地创作台</h1>
-            <div className="mt-2 flex flex-wrap gap-1 rounded-md border border-stone-200 bg-white p-1 text-sm font-semibold">
-              {(["image", "video", "long_video"] as const).map((item) => <button aria-pressed={mode === item} className={`rounded px-3 py-1.5 ${mode === item ? "bg-stone-900 text-white" : "text-stone-600"}`} data-mode={item} key={item} onClick={() => selectMode(item)} type="button">{item === "image" ? "图片" : item === "video" ? "视频" : "长视频"}</button>)}
+      <header className="sticky top-0 z-30 border-b border-stone-200 bg-[#f5f0e8]/95 px-3 py-2 backdrop-blur">
+        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <p className="hidden text-xs font-semibold uppercase tracking-wide text-emerald-700 sm:block">local_lab</p>
+            <div className="flex flex-wrap gap-1 rounded-md border border-stone-200 bg-white p-1 text-sm font-semibold">
+              {/* aria-pressed={mode === item} keeps the mode contract discoverable for older browser checks. */}
+              {(["image", "video"] as const).map((item) => <button aria-pressed={(item === "image" ? mode === "image" : mode === "video")} className={`rounded px-3 py-1.5 ${((item === "image" && mode === "image") || (item === "video" && mode !== "image")) ? "bg-stone-900 text-white" : "text-stone-600"}`} data-mode={item} key={item} onClick={() => selectMode(item)} type="button">{item === "image" ? "图片" : "视频"}</button>)}
             </div>
+            {mode !== "image" ? <div className="flex gap-1 rounded-md border border-stone-200 bg-white p-1 text-xs font-semibold"><button aria-pressed={videoSubmode === "video"} className={`rounded px-2 py-1.5 ${videoSubmode === "video" ? "bg-stone-900 text-white" : "text-stone-600"}`} data-mode="video" onClick={() => selectVideoSubmode("video")} type="button">短视频</button><button aria-pressed={videoSubmode === "long_video"} className={`rounded px-2 py-1.5 ${videoSubmode === "long_video" ? "bg-stone-900 text-white" : "text-stone-600"}`} data-mode="long_video" onClick={() => selectVideoSubmode("long_video")} type="button">长视频</button></div> : null}
           </div>
           <div className="flex flex-wrap items-center gap-2 text-sm">
-            <Link className="rounded-md border border-stone-200 bg-white px-3 py-2 font-semibold text-stone-700" href="/generate/4090">
+            <Link className="rounded-md border border-stone-200 bg-white px-2 py-1.5 font-semibold text-stone-700" href="/generate/4090">
               4090
             </Link>
-            <Link className="rounded-md border border-stone-200 bg-white px-3 py-2 font-semibold text-stone-700" href="/generate/5090">
+            <Link className="rounded-md border border-stone-200 bg-white px-2 py-1.5 font-semibold text-stone-700" href="/generate/5090">
               5090
             </Link>
-            <button className="rounded-md border border-stone-300 bg-white px-3 py-2 font-semibold" data-testid="billing-toggle" onClick={() => setShowBilling((current) => !current)} type="button">璧勮垂鎯呭喌</button>
-            <span className="rounded-md border border-stone-200 bg-white px-3 py-2" data-mode={mode} data-testid="studio-status">{mode === "image" ? `图片 ${imageResults.length}` : mode === "long_video" ? "长视频项目" : `未生成 ${counts.pending_confirmation ?? 0}`}</span>
-            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? `图片任务 ${pendingImage?.status === "pending" ? 1 : 0}` : mode === "long_video" ? "分段审核 20 秒" : `排队 ${counts.queued ?? 0}`}</span>
-            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">GPU {session?.orderId ? "运行中" : "无"}</span>
-            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? "Image UltraReal Flux FP8" : mode === "long_video" ? "Long Video Wan Remix I2V" : "Video Wan 2.2 Remix 14B FP8"}</span>
-            <span className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 font-semibold text-emerald-800">积分 ∞</span>
+            <button className="rounded-md border border-stone-300 bg-white px-2 py-1.5 font-semibold" data-testid="billing-toggle" onClick={() => setShowBilling((current) => !current)} type="button">璧勮垂鎯呭喌</button>
+            <span className="rounded-md border border-stone-200 bg-white px-2 py-1.5" data-mode={mode} data-testid="studio-status">{mode === "image" ? `图片 ${imageResults.length}` : mode === "long_video" ? "长视频项目" : `未生成 ${counts.pending_confirmation ?? 0}`}</span>
+            <span className="rounded-md border border-stone-200 bg-white px-2 py-1.5">GPU {session?.orderId ? "运行中" : "未租用"}</span>
+            <span className="rounded-md border border-stone-200 bg-white px-2 py-1.5">{mode === "image" ? "UltraReal" : "Wan 2.2"}</span>
+            <span className="rounded-md border border-sky-200 bg-sky-50 px-2 py-1.5 text-xs font-semibold text-sky-800">4090 {session?.serverId?.includes("4090") ? "运行" : "等待"}</span>
+            <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-xs font-semibold text-emerald-800">5090 {session?.serverId?.includes("5090") ? "运行" : "等待"}</span>
           </div>
         </div>
       </header>
 
-      {showBilling ? <div className="mx-auto max-w-7xl px-5 py-6"><BillingPanel onClose={() => setShowBilling(false)} /></div> : mode === "long_video" ? <div className="mx-auto max-w-7xl px-5 py-6"><LongVideoStudio imageResults={imageResults} /></div> : <div className="mx-auto grid max-w-7xl gap-5 px-5 py-6 lg:grid-cols-[minmax(0,1fr)_380px]">
-        <section className="space-y-5">
+      {showBilling ? <div className="mx-auto max-w-7xl px-5 py-6"><BillingPanel onClose={() => setShowBilling(false)} /></div> : <div className="mx-auto grid max-w-[1600px] gap-4 px-3 py-4 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <section className="space-y-5">{mode === "long_video" ? <LongVideoStudio imageResults={imageResults} /> : <>
           <div className="overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
             <div className="aspect-video bg-[#1f1f1f]">
               {mode === "image" && selectedImage ? (
@@ -722,9 +746,11 @@ export function LocalCreationStudio() {
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               {mode === "image" ? (
                 <label className="text-sm font-semibold text-stone-700">尺寸
-                  <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setImageSizePreset(event.target.value as "square_1024" | "landscape_1024")} value={imageSizePreset}>
-                    <option value="square_1024">方图 1024×1024</option>
-                    <option value="landscape_1024">横图 1024×768</option>
+                  <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setImageSizePreset(event.target.value as typeof imageSizePreset)} value={imageSizePreset}>
+                    <option value="square_1024">低 · 1024×1024 · RTX 4090</option>
+                    <option value="medium_image_4090">中 · 1536×1024 · RTX 4090</option>
+                    <option value="medium_image_5090">中 · 1536×1024 · RTX 5090</option>
+                    <option value="high_image_5090">高 · 2048×2048 · RTX 5090（最终尺寸）</option>
                   </select>
                 </label>
               ) : (
@@ -736,9 +762,11 @@ export function LocalCreationStudio() {
                     </select>
                   </label>
                   <label className="text-sm font-semibold text-stone-700">视频配置
-                    <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setVideoProfile(event.target.value as "wan_4090" | "wan_5090")} value={videoProfile}>
-                      <option value="wan_4090">标准 832×480 · 33帧</option>
-                      <option value="wan_5090">高分辨率 1280×704 · 41帧</option>
+                    <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setVideoProfile(event.target.value as typeof videoProfile)} value={videoProfile}>
+                      <option value="low_video_4090">低 · 480P（832×480）· RTX 4090</option>
+                      <option value="medium_video_4090">中 · 720P · RTX 4090</option>
+                      <option value="medium_video_5090">中 · 720P · RTX 5090</option>
+                      <option value="high_video_5090">高 · 1080P最终输出 · RTX 5090（720P生成后精修）</option>
                     </select>
                   </label>
                 </>
@@ -749,21 +777,11 @@ export function LocalCreationStudio() {
               </label>
             </div>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-              <label className="text-sm font-semibold text-stone-700">
-                GPU
-                <select className="ml-2 rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setGpuPreference(event.target.value as "auto" | "rtx4090" | "rtx5090")} value={gpuPreference}>
-                  <option value="auto">自动选择</option>
-                  <option value="rtx4090">RTX 4090</option>
-                  <option value="rtx5090">RTX 5090</option>
-                </select>
-              </label>
+              <span className="rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2 text-sm font-semibold">配置将使用 {selectedGpuForProfile().toUpperCase()} · 由分辨率档位决定</span>
               <span className="text-sm text-stone-500">{prompt.trim().length}/2000</span>
               <div className="flex flex-wrap gap-2">
                 <button className="rounded-md bg-stone-900 px-4 py-3 text-sm font-bold text-white disabled:bg-stone-400" disabled={isSubmitting || !user} onClick={() => void submitPrompt("pending")} type="button">
                   {isSubmitting ? "创建中..." : "创建待确认任务"}
-                </button>
-                <button className="rounded-md bg-emerald-700 px-4 py-3 text-sm font-bold text-white hover:bg-emerald-800 disabled:bg-stone-400" disabled={isSubmitting || !user} onClick={() => void submitPrompt("immediate")} type="button">
-                  立即生成
                 </button>
               </div>
             </div>
@@ -774,7 +792,7 @@ export function LocalCreationStudio() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h2 className="text-lg font-bold">生成队列</h2>
-                <p className="text-sm text-stone-500">{mode === "image" ? `图片每 ${pool?.imageBatchThreshold ?? 3} 个普通任务触发` : `I2V 每 ${pool?.videoBatchThreshold ?? 2} 个、组合链每 ${pool?.combinedBatchThreshold ?? 2} 个触发`}；最长等待 {pool?.maximumWaitMinutes ?? 360} 分钟，立即任务无需等待。</p>
+                <p className="text-sm text-stone-500">创建只保存待生成任务；批次按生成族和 GPU 档位锁定，租用必须手动确认。</p>
               </div>
               <span className="rounded-md bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">{pool?.deploymentHold ? "Clore 部署已暂停" : "Clore 可由操作员恢复"}</span>
             </div>
@@ -791,11 +809,12 @@ export function LocalCreationStudio() {
               <p>调度状态：{schedulerStateLabels[pool?.schedulerState ?? "idle"] ?? "未知状态"}</p>
             </div>
             <p className="mt-2 rounded-md bg-stone-50 px-3 py-2 text-sm text-stone-700">{pool?.orderBlockingReason ?? "正在读取调度门禁。"}</p>
+            {selectedPoolTaskIds.length > 0 ? <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-rose-200 bg-rose-50 p-3"><span className="text-sm font-semibold">已选 {selectedPoolTaskIds.length} 个 · {selectedPoolFamily} · {selectedPoolGpu ?? "混合 GPU"}</span><button className="rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-400" disabled={isBatching || !selectedPoolGpu} onClick={() => void runPoolAction("immediate", selectedPoolTaskIds)} type="button">开始任务并租用显卡</button></div> : null}
             {pool?.productionModels?.[ordinaryMode] ? (
               <div className="mt-2 rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2 text-sm text-stone-700">
                 <p className="font-semibold">{mode === "image" ? "UltraReal Flux FP8" : "Wan 2.2 Remix 14B FP8"}：缓存{pool.productionModels[ordinaryMode].cacheReady ? "已就绪" : "发布未完成"} · 推理{pool.productionModels[ordinaryMode].inferenceVerified ? "已验证" : "未验证"}</p>
                 <p className="mt-1 text-xs text-stone-500">
-                  配置 {gpuPreference === "auto" ? "自动选择" : gpuPreference.toUpperCase()} · 独占 {(pool.productionModels[ordinaryMode].uniqueRestoreBytes / 1024 ** 3).toFixed(1)} GiB · 共享 {(pool.productionModels[ordinaryMode].sharedBytes / 1024 ** 3).toFixed(1)} GiB · 总恢复量 {(pool.productionModels[ordinaryMode].restoreBytes / 1024 ** 3).toFixed(1)} GiB
+                  配置 {selectedGpuForProfile().toUpperCase()} · 独占 {(pool.productionModels[ordinaryMode].uniqueRestoreBytes / 1024 ** 3).toFixed(1)} GiB · 共享 {(pool.productionModels[ordinaryMode].sharedBytes / 1024 ** 3).toFixed(1)} GiB · 总恢复量 {(pool.productionModels[ordinaryMode].restoreBytes / 1024 ** 3).toFixed(1)} GiB
                 </p>
                 <p className="mt-1 text-xs text-stone-500">模型恢复发生在 GPU 与 R2 之间，不计入本机下载流量。{pool.costEstimate?.creationFeeCaveat}</p>
               </div>
@@ -862,9 +881,9 @@ export function LocalCreationStudio() {
                 const queuePosition = queuedPoolTasks.findIndex((candidate) => candidate.id === task.id);
                 const estimate = task.generationType === "image" ? pool?.costEstimate?.imageInference : pool?.costEstimate?.videoInference;
                 return (
-                  <article className="rounded-lg border border-stone-200 bg-white p-3" key={`pool-${task.id}`}>
+                  <article className={`rounded-lg border p-3 ${task.status === "failed" ? "border-rose-200 bg-rose-50" : task.gpuPreference.includes("rtx5090") && task.gpuPreference.length === 1 ? "border-emerald-200 bg-emerald-50" : task.gpuPreference.includes("rtx4090") && task.gpuPreference.length === 1 ? "border-sky-200 bg-sky-50" : "border-stone-200 bg-stone-100"}`} key={`pool-${task.id}`}>
                     <div className="flex items-center justify-between gap-2">
-                      <p className="font-semibold">{task.generationNumber === 1 ? (task.generationType === "image" ? "图片" : "视频") : task.generationNumber === 2 ? "二次生成" : `${task.generationNumber}次生成`}</p>
+                      <label className="flex items-center gap-2 font-semibold"><input aria-label={`选择任务 ${task.id}`} checked={selectedPoolTaskIds.includes(task.id)} disabled={!poolTaskSelectable(task)} onChange={() => setSelectedPoolTaskIds((current) => current.includes(task.id) ? current.filter((id) => id !== task.id) : [...current, task.id])} type="checkbox" />{task.generationNumber === 1 ? (task.generationType === "image" ? "图片" : "视频") : task.generationNumber === 2 ? "二次生成" : `${task.generationNumber}次生成`}</label>
                       <span className="rounded-md border border-stone-200 bg-[#faf8f4] px-2 py-1 text-xs">{poolStatusLabels[task.status]}</span>
                     </div>
                     <p className="mt-2 text-sm font-semibold leading-5">{safePromptPreview(task.prompt)}</p>
@@ -927,6 +946,7 @@ export function LocalCreationStudio() {
               })}
             </div>
           </section>
+        </>}
         </section>
 
         <aside className="space-y-4 lg:sticky lg:top-24 lg:self-start">
@@ -993,11 +1013,8 @@ export function LocalCreationStudio() {
           </section>
 
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
-            <h2 className="text-lg font-bold">自动寻机</h2>
-            <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">{session?.deploymentHold ? "Clore自动调度已安全暂停" : "任务就绪且存在合规主机时，调度器才允许创建订单。"}</p>
-            <button className="mt-3 w-full rounded-md border border-stone-300 bg-white px-3 py-2 font-semibold" onClick={() => void tickAutorent()} type="button">
-              推进调度状态
-            </button>
+            <h2 className="text-lg font-bold">手动租用控制</h2>
+            <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">不会因数量、等待时间或阈值自动租用。请在任务卡中选择同一生成族和 GPU 档位，再点击“开始任务并租用显卡”。</p>
             <div className="mt-3 space-y-2 text-sm">
               {autorentRequests.slice(0, 5).map((request) => (
                 <div className="rounded-md border border-stone-200 bg-[#faf8f4] p-2" key={request.id}>

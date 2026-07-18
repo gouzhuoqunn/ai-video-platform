@@ -35,25 +35,6 @@ async function assertLocalTester(userId: string) {
   }
 }
 
-async function createAutoRentRequest(input: {
-  supabase: NonNullable<Awaited<ReturnType<typeof createSupabaseServerClient>>>;
-  jobIds: string[];
-  priority: "normal" | "urgent";
-  minEffectiveHourlyUsd: number;
-  maxEffectiveHourlyUsd: number;
-}) {
-  const { data, error } = await input.supabase.rpc("create_gpu_autorent_request", {
-    p_job_ids: input.jobIds,
-    p_priority: input.priority,
-    p_min_effective_hourly_usd: input.minEffectiveHourlyUsd,
-    p_max_effective_hourly_usd: input.maxEffectiveHourlyUsd,
-  });
-  if (error) {
-    return { request: null, error: error.message.split("\n")[0] };
-  }
-  return { request: data, error: null };
-}
-
 async function queuedCount(userId: string) {
   const admin = getSupabaseAdminClient();
   const { count, error } = await admin.from("video_jobs").select("id", { count: "exact", head: true }).eq("user_id", userId).eq("status", "queued").is("deleted_at", null);
@@ -124,11 +105,8 @@ export async function POST(request: NextRequest) {
     if (error) return NextResponse.json({ error: error.message.split("\n")[0] }, { status: 409 });
     const queueSize = await queuedCount(user.id);
     await mirrorVideoJobs(user.id, jobIds, false);
-    const scheduler = shouldArmCloreScheduler({ immediate: false, queuedCount: queueSize, threshold: generationThreshold("video") });
-    const autorent =
-      gpuMode === "current" || !scheduler.schedulerArmed
-        ? { request: null, error: null }
-        : await createAutoRentRequest({ supabase, jobIds, priority: "normal", minEffectiveHourlyUsd, maxEffectiveHourlyUsd });
+    const scheduler = shouldArmCloreScheduler({ immediate: false, queuedCount: queueSize, threshold: generationThreshold("video"), manualOnly: true });
+    const autorent = { request: null, error: null };
     return NextResponse.json({
       action,
       confirmed_count: Array.isArray(data) ? data[0]?.confirmed_count ?? 0 : data?.confirmed_count ?? 0,
@@ -148,12 +126,9 @@ export async function POST(request: NextRequest) {
     const { data, error } = await supabase.rpc("mark_video_jobs_urgent", { p_job_ids: jobIds });
     if (error) return NextResponse.json({ error: error.message.split("\n")[0] }, { status: 409 });
     const queueSize = await queuedCount(user.id);
-    const poolArm = await mirrorVideoJobs(user.id, jobIds, true);
-    const scheduler = shouldArmCloreScheduler({ immediate: true, queuedCount: queueSize, threshold: generationThreshold("video") });
-    const autorent =
-      gpuMode === "current"
-        ? { request: null, error: null }
-        : await createAutoRentRequest({ supabase, jobIds, priority: "urgent", minEffectiveHourlyUsd, maxEffectiveHourlyUsd });
+    await mirrorVideoJobs(user.id, jobIds, false);
+    const scheduler = shouldArmCloreScheduler({ immediate: true, queuedCount: queueSize, threshold: generationThreshold("video"), manualOnly: true });
+    const autorent = { request: null, error: null };
     return NextResponse.json({
       action,
       updated_count: Array.isArray(data) ? data[0]?.updated_count ?? 0 : data?.updated_count ?? 0,
@@ -163,8 +138,9 @@ export async function POST(request: NextRequest) {
       real_clore_create_enabled: process.env.CLORE_AUTORENT_ENABLED === "true",
       create_order_called: false,
       automatic_provider: scheduler.provider,
-      scheduler_armed: scheduler.schedulerArmed,
-      generation_pool_armed: poolArm?.armed ?? false,
+      scheduler_armed: false,
+      manual_only: true,
+      generation_pool_armed: false,
       batch_threshold: generationThreshold("video"),
       queued_count: queueSize,
     });

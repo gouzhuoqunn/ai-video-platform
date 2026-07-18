@@ -85,7 +85,7 @@ export function LongVideoStudio({ imageResults }: Props) {
   const [firstFrameSource, setFirstFrameSource] = useState<Project["firstFrameSource"]>("existing_image");
   const [existingImageId, setExistingImageId] = useState("");
   const [uploadRef, setUploadRef] = useState("");
-  const [gpu, setGpu] = useState<"auto" | "rtx4090" | "rtx5090">("auto");
+  const [videoProfile, setVideoProfile] = useState<"low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090">("low_video_4090");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [now, setNow] = useState(0);
@@ -169,7 +169,8 @@ export function LongVideoStudio({ imageResults }: Props) {
     }
     setBusy(true);
     try {
-      const response = await fetch("/api/local-lab/long-video", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "create", title, overallPrompt, firstFrameSource, firstFrameRef, targetDurationSeconds: duration, segments: draftSegments, gpuPreference: gpu === "auto" ? ["rtx4090", "rtx5090"] : [gpu] }) });
+      const gpu = videoProfile === "low_video_4090" || videoProfile === "medium_video_4090" ? "rtx4090" : "rtx5090";
+      const response = await fetch("/api/local-lab/long-video", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "create", title, overallPrompt, firstFrameSource, firstFrameRef, targetDurationSeconds: duration, segments: draftSegments, gpuPreference: [gpu], resolutionProfile: videoProfile, generationResolution: videoProfile === "low_video_4090" ? "832x480" : "1280x720", finalResolution: videoProfile === "high_video_5090" ? "1920x1080" : videoProfile === "low_video_4090" ? "832x480" : "1280x720" }) });
       const payload = await response.json().catch(() => ({})) as { project?: Project; error?: string };
       if (!response.ok || !payload.project) { setNotice(payload.error ?? "无法创建长视频项目。"); return; }
       setProjects((current) => [payload.project!, ...current.filter((project) => project.id !== payload.project!.id)]);
@@ -286,7 +287,7 @@ export function LongVideoStudio({ imageResults }: Props) {
           <label className="text-sm font-semibold">总时长
             <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => changeDuration(Number(event.target.value))} value={duration}>{Array.from({ length: 60 }, (_, index) => (index + 1) * 5).map((value) => <option key={value} value={value}>{value} 秒 · {value / 5} 段</option>)}</select>
           </label>
-          <label className="text-sm font-semibold">整体提示词<textarea className="mt-1 min-h-24 w-full rounded-md border border-stone-200 bg-[#faf8f4] p-3" maxLength={2000} onChange={(event) => setOverallPrompt(event.target.value)} value={overallPrompt} /></label>
+          <details className="rounded-md border border-stone-200 bg-[#faf8f4] p-3"><summary className="cursor-pointer text-sm font-semibold">可选：整体上下文（折叠）</summary><textarea className="mt-2 min-h-20 w-full rounded-md border border-stone-200 bg-white p-3" maxLength={2000} onChange={(event) => setOverallPrompt(event.target.value)} value={overallPrompt} /></details>
           <div className="md:col-span-3 rounded-md border border-stone-200 bg-[#faf8f4] p-3">
             <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-semibold">分段提示词</h3><p className="text-xs text-stone-500">已填写 {filledDraftCount}/{draftSegments.length} 段；整体提示词只是共享上下文。</p></div><button className="rounded border border-stone-300 bg-white px-2 py-1 text-xs" onClick={fillEmptyDraftPrompts} type="button">填充空白段</button></div>
             {draftSegments.length <= 6 ? <div className="mt-3 grid gap-2 md:grid-cols-2">{draftSegments.map((segment) => <label className="text-sm font-semibold" key={segment.sequenceIndex}>{segment.startSecond + 1}～{segment.endSecond}秒<textarea className="mt-1 min-h-20 w-full rounded-md border border-stone-200 bg-white p-2 font-normal" maxLength={2000} onChange={(event) => changeDraftPrompt(segment.sequenceIndex, event.target.value)} value={segment.prompt} /></label>)}</div> : <div className="mt-3"><div className="flex items-center justify-between gap-2"><button className="rounded border border-stone-300 bg-white px-2 py-1 text-xs" disabled={focusedDraftIndex === 0} onClick={() => setFocusedDraftIndex((current) => current - 1)} type="button">上一段</button><span className="text-xs text-stone-500">第 {focusedDraftIndex + 1}/{draftSegments.length} 段</span><button className="rounded border border-stone-300 bg-white px-2 py-1 text-xs" disabled={focusedDraftIndex === draftSegments.length - 1} onClick={() => setFocusedDraftIndex((current) => current + 1)} type="button">下一段</button></div><label className="mt-2 block text-sm font-semibold">{draftSegments[focusedDraftIndex].startSecond + 1}～{draftSegments[focusedDraftIndex].endSecond}秒<textarea className="mt-1 min-h-24 w-full rounded-md border border-stone-200 bg-white p-2 font-normal" maxLength={2000} onChange={(event) => changeDraftPrompt(focusedDraftIndex, event.target.value)} value={draftSegments[focusedDraftIndex].prompt} /></label></div>}
@@ -295,7 +296,7 @@ export function LongVideoStudio({ imageResults }: Props) {
             {firstFrameSource !== "pure_prompt" ? <FirstFrameInput existingImages={imageResults} selectedExistingId={firstFrameSource === "existing_image" ? existingImageId : ""} onSelectExisting={(id) => { setExistingImageId(id); setUploadRef(""); setFirstFrameSource("existing_image"); }} onFile={uploadFirstFrame} onRemove={() => { setUploadRef(""); }} disabled={busy} /> : null}
           </div>
         </div>
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-3"><label className="text-sm font-semibold">GPU<select className="ml-2 rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setGpu(event.target.value as typeof gpu)} value={gpu}><option value="auto">自动选择</option><option value="rtx4090">RTX 4090</option><option value="rtx5090">RTX 5090</option></select></label><button className="rounded-md bg-stone-900 px-4 py-3 text-sm font-bold text-white disabled:bg-stone-400" disabled={!canCreate} onClick={() => void createProject()} type="button">{busy ? "处理中..." : "创建长视频项目"}</button></div>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3"><label className="text-sm font-semibold">分辨率档位<select className="ml-2 rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setVideoProfile(event.target.value as typeof videoProfile)} value={videoProfile}><option value="low_video_4090">低 · 480P · RTX 4090</option><option value="medium_video_4090">中 · 720P · RTX 4090</option><option value="medium_video_5090">中 · 720P · RTX 5090</option><option value="high_video_5090">高 · 1080P最终输出 · RTX 5090</option></select></label><button className="rounded-md bg-stone-900 px-4 py-3 text-sm font-bold text-white disabled:bg-stone-400" disabled={!canCreate} onClick={() => void createProject()} type="button">{busy ? "处理中..." : "创建长视频项目"}</button></div>
       </section>
 
       {notice ? <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">{notice}</p> : null}

@@ -25,7 +25,7 @@ type Payload = {
   prompt?: string;
   negativePrompt?: string;
   seed?: number | null;
-  sizePreset?: "square_1024" | "landscape_1024" | "wan_4090" | "wan_5090";
+  sizePreset?: "square_1024" | "landscape_1024" | "medium_image_4090" | "medium_image_5090" | "high_image_5090" | "wan_4090" | "wan_5090" | "low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090";
   existingImageJobId?: string | null;
   startMode?: "pending" | "confirm" | "immediate";
   shutdownMode?: "immediate" | "after_current" | "cancel_waiting";

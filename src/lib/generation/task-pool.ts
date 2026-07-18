@@ -270,7 +270,7 @@ export type NormalJobInput = {
   prompt: string;
   negativePrompt?: string;
   seed?: number | null;
-  sizePreset?: "square_1024" | "landscape_1024" | "wan_4090" | "wan_5090";
+  sizePreset?: "square_1024" | "landscape_1024" | "medium_image_4090" | "medium_image_5090" | "high_image_5090" | "wan_4090" | "wan_5090" | "low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090";
   gpuPreference?: string[];
   existingImageJobId?: string | null;
   existingImageVerified?: boolean;
@@ -280,9 +280,13 @@ export type NormalJobInput = {
 
 function preset(value: NormalJobInput["sizePreset"], type: GenerationType) {
   if (type === "image") {
+    if (value === "medium_image_4090" || value === "medium_image_5090") return { width: 1536, height: 1024, frames: null, fps: null };
+    if (value === "high_image_5090") return { width: 2048, height: 2048, frames: null, fps: null };
     if (value === "landscape_1024") return { width: 1024, height: 768, frames: null, fps: null };
     return { width: 1024, height: 1024, frames: null, fps: null };
   }
+  if (value === "low_video_4090") return { width: 832, height: 480, frames: 33, fps: 16 };
+  if (value === "medium_video_4090" || value === "medium_video_5090" || value === "high_video_5090") return { width: 1280, height: 720, frames: 81, fps: 16 };
   if (value === "wan_5090") return { width: 1280, height: 704, frames: 41, fps: 16 };
   return { width: 832, height: 480, frames: 33, fps: 16 };
 }
