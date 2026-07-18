@@ -97,17 +97,20 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     const candidate = candidates.find((value) => value.id === input.candidate.serverId);
     if (!candidate) throw new Error("clore_selected_candidate_missing");
     const sessionId = `lv-${input.projectId.slice(0, 8)}-${randomUUID().slice(0, 8)}`;
-    let created: GpuSession;
+    let created: GpuSession | null = null;
     try {
       created = await this.gpu.createSession({ sessionId, candidate, sshPublicKey: "managed-by-clore-provider", bootstrapImage: FIXED_RUNTIME_DIGEST, dryRun: false, cloreProfile: "clore_key_only" });
+      if (!created.target && !created.id) throw new Error("clore_session_binding_invalid");
+      const target = created.target ?? await this.gpu.waitForSsh(created, 10 * 60_000);
+      this.contexts.set(sessionId, { gpu: this.gpu, gpuSession: created, target, candidate, projectId: input.projectId });
+      return { sessionId, orderId: created.id, serverId: candidate.id, gpuProfile: "rtx4090" as const, host: target.host, port: target.port };
     } catch (error) {
+      if (created) {
+        try { await this.gpu.terminateSession(created); } catch { /* cleanup is retried by the outer session path */ }
+      }
       setCloreDeploymentHold(true, "long_video_create_failed");
       throw error;
     }
-    if (!created.target && !created.id) throw new Error("clore_session_binding_invalid");
-    const target = created.target ?? await this.gpu.waitForSsh(created, 10 * 60_000);
-    this.contexts.set(sessionId, { gpu: this.gpu, gpuSession: created, target, candidate, projectId: input.projectId });
-    return { sessionId, orderId: created.id, serverId: candidate.id, gpuProfile: "rtx4090" as const, host: target.host, port: target.port };
   }
 
   async waitForSsh(session: LongVideoProviderSession) { await this.context(session); }

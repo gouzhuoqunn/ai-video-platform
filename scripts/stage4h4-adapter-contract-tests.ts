@@ -14,17 +14,19 @@ const baseSession: GpuSession = {
 class FakeGpuProvider implements GpuProvider {
   readonly id = "clore" as const;
   createCount = 0;
+  terminateCount = 0;
+  waitFailure = false;
   async inspectCredentials() { return { provider: "clore" as const, credentials_present: true, source: "external" as const, safe_to_query: true }; }
   async getBalance() { return { availableUsd: 10, supported: true }; }
   async listCandidates() { return [
     { id: "4090-a", gpuType: "NVIDIA GeForce RTX 4090", priority: 0, vramGb: 24, gpuCount: 1 as const, minimumRamGb: 64, containerDiskGb: 3000, volumeGb: 0, hourlyUsd: 0.24, interruptible: false as const },
     { id: "5090-b", gpuType: "NVIDIA GeForce RTX 5090", priority: 1, vramGb: 32, gpuCount: 1 as const, minimumRamGb: 64, containerDiskGb: 3000, volumeGb: 0, hourlyUsd: 0.30, interruptible: false as const },
   ]; }
-  async createSession() { this.createCount += 1; return baseSession; }
+  async createSession() { this.createCount += 1; return this.waitFailure ? { ...baseSession, target: null } : baseSession; }
   async getSession() { return baseSession; }
-  async waitForSsh() { return baseSession.target!; }
+  async waitForSsh() { if (this.waitFailure) throw new Error("ssh_probe_failed"); return baseSession.target!; }
   async stopSession() {}
-  async terminateSession() {}
+  async terminateSession() { this.terminateCount += 1; }
   async getBilling() { return { hourlyUsd: 0.24, computeHourly: 0.24, storageHourly: 0, totalHourly: 0.24, projectedSessionTotal: 0.8, elapsedSeconds: 0, estimatedSpendUsd: 0 }; }
   async recoverExistingSession() { return baseSession; }
 }
@@ -42,14 +44,18 @@ try {
   const authorization = { id: "contract-auth", projectId: "11111111-1111-4111-8111-111111111111", provider: "clore" as const, gpuProfile: "rtx4090" as const, oneUse: true as const, expiresAt: new Date(Date.now() + 60_000).toISOString(), maxSpendUsd: 1.2, releaseHold: true };
   const session = await adapter.createSession({ projectId: authorization.projectId, authorization, candidate: candidates[0] });
   assert.equal(gpu.createCount, 1);
+  gpu.waitFailure = true;
+  const failedAdapter = new CloreLongVideoProviderAdapter({ gpu, activeOrderReader: async () => 0 });
+  await assert.rejects(() => failedAdapter.createSession({ projectId: authorization.projectId, authorization, candidate: candidates[0] }), /ssh_probe_failed/);
+  assert.equal(gpu.terminateCount, 1);
   assert.equal(session.host, "exact.returned.example");
   assert.equal(session.port, 1444);
   await assert.rejects(() => adapter.createSession({ projectId: authorization.projectId, authorization, candidate: candidates[0] }), /clore_adapter_session_already_bound/);
-  assert.equal(gpu.createCount, 1);
+  assert.equal(gpu.createCount, 2);
   const source = readFileSync("src/lib/long-video/clore-adapter.ts", "utf8");
   assert.doesNotMatch(source, /stage4[ac]/i);
   assert.doesNotMatch(source, /8fff4d9f|29167|105178/);
-  console.log(JSON.stringify({ ok: true, adapterReady: true, rtx5090Rejected: true, watchdogBoundCandidate: true, oneOrderGuard: true, exactEndpoint: true, historicalIdsAbsent: true }));
+  console.log(JSON.stringify({ ok: true, adapterReady: true, rtx5090Rejected: true, watchdogBoundCandidate: true, oneOrderGuard: true, exactEndpoint: true, sshFailureCleanup: true, historicalIdsAbsent: true }));
 } finally {
   setCloreDeploymentHold(previousHold.enabled, previousHold.reason);
 }
