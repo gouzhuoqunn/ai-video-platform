@@ -131,7 +131,7 @@ export type PoolCandidate = {
   hourlyUsd: number;
 };
 
-export const GENERATION_POOL_PATH = path.join(process.cwd(), ".secrets", "generation-pool-state.json");
+export const GENERATION_POOL_PATH = process.env.GENERATION_POOL_STATE_PATH?.trim() || path.join(process.cwd(), ".secrets", "generation-pool-state.json");
 export const MAX_ACCEPTABLE_HOURLY_USD = 0.7;
 
 const PRODUCTION_MODELS = new Set([PRODUCTION_IMAGE_MODEL, PRODUCTION_VIDEO_MODEL]);

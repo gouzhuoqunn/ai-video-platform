@@ -164,7 +164,8 @@ export function estimateLongVideo(durationSeconds: number, source: FirstFrameSou
   const sessions = Math.max(1, Math.ceil(segmentCount / LONG_VIDEO_SESSION_POLICY.maximumSegmentsPerSession));
   const firstFrameMs = source === "pure_prompt" ? baseline.restores.imageMs + baseline.image.inferenceMs : 0;
   const wanRestoreMs = sessions * baseline.restores.videoMs;
-  const perSegmentMs = baseline.video.inferenceMs + 45_000;
+  const verifiedDurationSeconds = Math.max(0.1, baseline.video.durationSeconds);
+  const perSegmentMs = baseline.video.inferenceMs * (LONG_VIDEO_SEGMENT_SECONDS / verifiedDurationSeconds) + 45_000;
   const totalMs = sessions * 9 * 60_000 + firstFrameMs + wanRestoreMs + segmentCount * perSegmentMs;
   const totalMinutes = minuteRange(totalMs, 0.8, 1.25);
   return {
@@ -256,4 +257,25 @@ export function planLongVideoSession(project: LongVideoProject, options: { elaps
     keepWanLoaded: true,
     generateFirstFrame: project.firstFrameSource === "pure_prompt" && !project.firstFrameRef && start.sequenceIndex === 0,
   };
+}
+
+export function toPublicLongVideoProject(project: LongVideoProject): LongVideoProject {
+  const publicProject = structuredClone(project);
+  publicProject.firstFrameRef = project.firstFrameRef ? `${project.firstFrameSource}:ready` : null;
+  publicProject.finalVideoRef = project.finalVideoRef ? "final:video" : null;
+  publicProject.finalThumbnailRef = project.finalThumbnailRef ? "final:thumbnail" : null;
+  publicProject.segments = project.segments.map((segment) => ({
+    ...structuredClone(segment),
+    inputFrameRef: segment.inputFrameRef ? "frame:ready" : null,
+    outputVideoRef: segment.outputVideoRef ? `segment:${segment.sequenceIndex}:video` : null,
+    lastFrameRef: segment.lastFrameRef ? `segment:${segment.sequenceIndex}:last-frame` : null,
+    attempts: segment.attempts.map((attempt) => ({
+      ...structuredClone(attempt),
+      sourceWebmRef: attempt.sourceWebmRef ? `attempt:${attempt.id}:source` : null,
+      outputVideoRef: attempt.outputVideoRef ? `attempt:${attempt.id}:video` : null,
+      thumbnailRef: attempt.thumbnailRef ? `attempt:${attempt.id}:thumbnail` : null,
+      lastFrameRef: attempt.lastFrameRef ? `attempt:${attempt.id}:last-frame` : null,
+    })),
+  }));
+  return publicProject;
 }

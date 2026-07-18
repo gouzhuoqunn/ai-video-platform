@@ -1,12 +1,15 @@
 import { loadSchedulerPolicy } from "@/lib/generation/scheduler-policy";
 
-export type StudioMode = "image" | "video";
+export type OrdinaryStudioMode = "image" | "video";
+export type StudioMode = OrdinaryStudioMode | "long_video";
 
 export const STUDIO_MODE_STORAGE_KEY = "ai-video-platform:studio-mode";
 export const AUTOMATIC_GPU_PROVIDER = "clore" as const;
 
 export function normalizeStudioMode(value: unknown): StudioMode {
-  return value === "image" ? "image" : "video";
+  if (value === "image") return "image";
+  if (value === "long_video") return "long_video";
+  return "video";
 }
 
 export function batchThreshold(value = process.env.CLORE_AUTORENT_BATCH_THRESHOLD) {

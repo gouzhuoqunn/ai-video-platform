@@ -92,6 +92,8 @@ try {
   assert.equal(pool.tasks[0].longVideoProjectId, project.id);
   assert.equal(pool.tasks[0].longVideoSegmentIndex, 0);
   assert.equal(pool.tasks[0].inputImageJobId, "image:verified-local-image");
+  assert.equal(pool.tasks[0].frames, 81, "five-second long-video slots require 81 frames at 16fps");
+  assert.equal(pool.tasks[0].fps, 16);
 
   const beforeEdit = project;
   project = updateLongVideoSegmentPrompt(project.id, 1, "A safely persisted second prompt.", project.version, project.segments[1].version, statePath);

@@ -8,7 +8,8 @@ import { VIDEO_JOB_SELECT_FIELDS } from "@/lib/video-jobs/fields";
 import { requestSignedVideoUrl } from "@/lib/video-jobs/signed-url";
 import { videoJobStatusLabels } from "@/types/video-config";
 import type { SignedVideoResponse, VideoJob, VideoJobStatus } from "@/types/video-jobs";
-import { normalizeStudioMode, STUDIO_MODE_STORAGE_KEY, type StudioMode } from "@/lib/local-lab/studio-mode";
+import { normalizeStudioMode, STUDIO_MODE_STORAGE_KEY, type OrdinaryStudioMode, type StudioMode } from "@/lib/local-lab/studio-mode";
+import { LongVideoStudio } from "@/components/LongVideoStudio";
 
 type JobCounts = Partial<Record<VideoJobStatus, number>>;
 
@@ -81,7 +82,7 @@ type PendingImage = { sessionId: string; completedStages: string[]; status: "pen
 type PoolTaskStatus = "pending_confirmation" | "waiting_for_batch" | "armed" | "waiting_for_gpu" | "deploying" | "provisioning" | "restoring_models" | "restoring_image_model" | "generating_image" | "unloading_image_model" | "restoring_video_model" | "generating_video" | "downloading_transcoding" | "generating" | "syncing" | "cancel_requested" | "completed" | "failed" | "cancelled";
 type PoolTask = {
   id: string;
-  generationType: StudioMode;
+  generationType: OrdinaryStudioMode;
   prompt: string;
   negativePrompt: string;
   modelProfile: string;
@@ -113,7 +114,7 @@ type PoolSummary = {
   marketMonitoringActive: boolean;
   estimatedMaximumSessionCost: number;
   orderBlockingReason: string;
-  productionModels: Record<StudioMode, ProductionModelSummary>;
+  productionModels: Record<OrdinaryStudioMode, ProductionModelSummary>;
   estimatedSessionDurationMinutes: { minMinutes: number; maxMinutes: number };
   costEstimate: {
     imageRestore: { minMinutes: number; maxMinutes: number };
@@ -255,7 +256,7 @@ export function LocalCreationStudio() {
   const [filter, setFilter] = useState<"all" | VideoJobStatus>("all");
   const [minPrice, setMinPrice] = useState("0");
   const [maxPrice, setMaxPrice] = useState("0.70");
-  const [mode, setMode] = useState<StudioMode>("video");
+  const [mode, setMode] = useState<StudioMode>(() => typeof window === "undefined" ? "video" : normalizeStudioMode(window.localStorage.getItem(STUDIO_MODE_STORAGE_KEY)));
   const [imageResults, setImageResults] = useState<ImageResult[]>([]);
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [selectedImageId, setSelectedImageId] = useState("");
@@ -275,7 +276,8 @@ export function LocalCreationStudio() {
   const selectedPendingCount = selectedJobIds.filter((id) => jobs.find((job) => job.id === id)?.status === "pending_confirmation").length;
   const activeAutorent = autorentRequests.find((request) => !["assigned", "failed", "cancelled"].includes(request.status));
   const selectedImage = imageResults.find((result) => result.sessionId === selectedImageId) ?? imageResults[0] ?? null;
-  const modePoolTasks = pool?.tasks.filter((task) => task.generationType === mode) ?? [];
+  const ordinaryMode: OrdinaryStudioMode = mode === "long_video" ? "video" : mode;
+  const modePoolTasks = mode === "long_video" ? [] : pool?.tasks.filter((task) => task.generationType === ordinaryMode) ?? [];
   const queuedPoolTasks = modePoolTasks.filter((task) => ["waiting_for_batch", "armed", "waiting_for_gpu"].includes(task.status));
   const poolVideoResult = localResults.find((result) => pool?.tasks.some((task) => task.generationType === "video" && task.id === result.jobId)) ?? null;
   const poolVideoTask = poolVideoResult ? pool?.tasks.find((task) => task.id === poolVideoResult.jobId) ?? null : null;
@@ -402,10 +404,6 @@ export function LocalCreationStudio() {
       mounted = false;
     };
   }, [refreshClore, refreshImageResults, refreshJobs, refreshPool, refreshResults, supabase]);
-
-  useEffect(() => {
-    setMode(normalizeStudioMode(window.localStorage.getItem(STUDIO_MODE_STORAGE_KEY)));
-  }, []);
 
   function selectMode(next: StudioMode) {
     setMode(next);
@@ -616,6 +614,9 @@ export function LocalCreationStudio() {
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">local_lab</p>
             <h1 className="text-2xl font-bold">本地创作台</h1>
+            <div className="mt-2 flex flex-wrap gap-1 rounded-md border border-stone-200 bg-white p-1 text-sm font-semibold">
+              {(["image", "video", "long_video"] as const).map((item) => <button className={`rounded px-3 py-1.5 ${mode === item ? "bg-stone-900 text-white" : "text-stone-600"}`} key={item} onClick={() => selectMode(item)} type="button">{item === "image" ? "图片" : item === "video" ? "视频" : "长视频"}</button>)}
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <Link className="rounded-md border border-stone-200 bg-white px-3 py-2 font-semibold text-stone-700" href="/generate/4090">
@@ -624,16 +625,16 @@ export function LocalCreationStudio() {
             <Link className="rounded-md border border-stone-200 bg-white px-3 py-2 font-semibold text-stone-700" href="/generate/5090">
               5090
             </Link>
-            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? `图片 ${imageResults.length}` : `未生成 ${counts.pending_confirmation ?? 0}`}</span>
-            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? `图片任务 ${pendingImage?.status === "pending" ? 1 : 0}` : `排队 ${counts.queued ?? 0}`}</span>
+            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? `图片 ${imageResults.length}` : mode === "long_video" ? "长视频项目" : `未生成 ${counts.pending_confirmation ?? 0}`}</span>
+            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? `图片任务 ${pendingImage?.status === "pending" ? 1 : 0}` : mode === "long_video" ? "分段审核 20 秒" : `排队 ${counts.queued ?? 0}`}</span>
             <span className="rounded-md border border-stone-200 bg-white px-3 py-2">GPU {session?.orderId ? "运行中" : "无"}</span>
-            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? "Image UltraReal Flux FP8" : "Video Wan 2.2 Remix 14B FP8"}</span>
+            <span className="rounded-md border border-stone-200 bg-white px-3 py-2">{mode === "image" ? "Image UltraReal Flux FP8" : mode === "long_video" ? "Long Video Wan Remix I2V" : "Video Wan 2.2 Remix 14B FP8"}</span>
             <span className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 font-semibold text-emerald-800">积分 ∞</span>
           </div>
         </div>
       </header>
 
-      <div className="mx-auto grid max-w-7xl gap-5 px-5 py-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+      {mode === "long_video" ? <div className="mx-auto max-w-7xl px-5 py-6"><LongVideoStudio imageResults={imageResults} /></div> : <div className="mx-auto grid max-w-7xl gap-5 px-5 py-6 lg:grid-cols-[minmax(0,1fr)_380px]">
         <section className="space-y-5">
           <div className="overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
             <div className="aspect-video bg-[#1f1f1f]">
@@ -775,11 +776,11 @@ export function LocalCreationStudio() {
               <p>调度状态：{schedulerStateLabels[pool?.schedulerState ?? "idle"] ?? "未知状态"}</p>
             </div>
             <p className="mt-2 rounded-md bg-stone-50 px-3 py-2 text-sm text-stone-700">{pool?.orderBlockingReason ?? "正在读取调度门禁。"}</p>
-            {pool?.productionModels?.[mode] ? (
+            {pool?.productionModels?.[ordinaryMode] ? (
               <div className="mt-2 rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2 text-sm text-stone-700">
-                <p className="font-semibold">{mode === "image" ? "UltraReal Flux FP8" : "Wan 2.2 Remix 14B FP8"}：缓存{pool.productionModels[mode].cacheReady ? "已就绪" : "发布未完成"} · 推理{pool.productionModels[mode].inferenceVerified ? "已验证" : "未验证"}</p>
+                <p className="font-semibold">{mode === "image" ? "UltraReal Flux FP8" : "Wan 2.2 Remix 14B FP8"}：缓存{pool.productionModels[ordinaryMode].cacheReady ? "已就绪" : "发布未完成"} · 推理{pool.productionModels[ordinaryMode].inferenceVerified ? "已验证" : "未验证"}</p>
                 <p className="mt-1 text-xs text-stone-500">
-                  配置 {gpuPreference === "auto" ? "自动选择" : gpuPreference.toUpperCase()} · 独占 {(pool.productionModels[mode].uniqueRestoreBytes / 1024 ** 3).toFixed(1)} GiB · 共享 {(pool.productionModels[mode].sharedBytes / 1024 ** 3).toFixed(1)} GiB · 总恢复量 {(pool.productionModels[mode].restoreBytes / 1024 ** 3).toFixed(1)} GiB
+                  配置 {gpuPreference === "auto" ? "自动选择" : gpuPreference.toUpperCase()} · 独占 {(pool.productionModels[ordinaryMode].uniqueRestoreBytes / 1024 ** 3).toFixed(1)} GiB · 共享 {(pool.productionModels[ordinaryMode].sharedBytes / 1024 ** 3).toFixed(1)} GiB · 总恢复量 {(pool.productionModels[ordinaryMode].restoreBytes / 1024 ** 3).toFixed(1)} GiB
                 </p>
                 <p className="mt-1 text-xs text-stone-500">模型恢复发生在 GPU 与 R2 之间，不计入本机下载流量。{pool.costEstimate?.creationFeeCaveat}</p>
               </div>
@@ -999,7 +1000,7 @@ export function LocalCreationStudio() {
             </div>
           </section>
         </aside>
-      </div>
+      </div>}
 
       {pendingGpuChoice ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/50 p-4" onClick={() => setPendingGpuChoice(null)}>

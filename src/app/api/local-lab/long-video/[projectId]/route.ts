@@ -8,8 +8,11 @@ import {
   resumeLongVideoProject,
   reviewLongVideoSegment,
   updateLongVideoSegmentPrompt,
+  deleteLongVideoProjectTasks,
 } from "@/lib/long-video/store";
 import { deleteLongVideoUploadRef } from "@/lib/long-video/uploads";
+import { fastDeleteLongVideoProjectMedia, persistLongVideoProjectSnapshot } from "@/lib/long-video/media";
+import { toPublicLongVideoProject } from "@/lib/long-video/domain";
 import { validateProductionPrompt } from "@/lib/generation/production-prompt-safety";
 
 type ActionPayload = {
@@ -30,7 +33,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pro
   if (guard) return guard;
   try {
     const project = getLongVideoProject(projectIdFrom((await context.params).projectId));
-    return project ? NextResponse.json({ project }) : NextResponse.json({ error: "长视频项目不存在。" }, { status: 404 });
+    return project ? NextResponse.json({ project: toPublicLongVideoProject(project) }) : NextResponse.json({ error: "长视频项目不存在。" }, { status: 404 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "读取失败。" }, { status: 400 });
   }
@@ -61,7 +64,8 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ p
         expectedSegmentVersion: Number(payload.expectedSegmentVersion),
       });
     } else return NextResponse.json({ error: "长视频项目操作无效。" }, { status: 400 });
-    return NextResponse.json({ project, create_order_called: false, provider_authorization_created: false, credit_charged: false });
+    persistLongVideoProjectSnapshot(project);
+    return NextResponse.json({ project: toPublicLongVideoProject(project), create_order_called: false, provider_authorization_created: false, credit_charged: false });
   } catch (error) {
     const message = error instanceof Error ? error.message : "长视频项目操作失败。";
     return NextResponse.json({ error: message }, { status: message.includes("version_conflict") ? 409 : 400 });
@@ -75,7 +79,13 @@ export async function DELETE(request: NextRequest, context: { params: Promise<{ 
     const projectId = projectIdFrom((await context.params).projectId);
     const expectedVersion = Number(new URL(request.url).searchParams.get("version"));
     const project = getLongVideoProject(projectId);
+    if (project) {
+      if (project.version !== expectedVersion) throw new Error("long_video_project_version_conflict");
+      const media = fastDeleteLongVideoProjectMedia(project);
+      if (!media.removed) return NextResponse.json({ error: "项目媒体尚未清理完成，请重试。" }, { status: 409 });
+    }
     const deleted = deleteLongVideoProject(projectId, expectedVersion);
+    if (deleted && project) deleteLongVideoProjectTasks(project);
     if (deleted && project?.firstFrameSource === "upload") deleteLongVideoUploadRef(project.firstFrameRef);
     return NextResponse.json({ deleted, create_order_called: false });
   } catch (error) {
