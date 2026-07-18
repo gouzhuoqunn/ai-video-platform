@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import path from "node:path";
 import { createRequire } from "node:module";
 import { loadProductionVerification } from "@/lib/generation/production-pipeline";
-import { cleanupLongVideoSegmentMedia, mergeLongVideoProjectMedia, persistLongVideoSegmentMedia } from "@/lib/long-video/media";
+import { buildLongVideoAttemptPaths, buildLongVideoProjectPaths, cleanupLongVideoSegmentMedia, loadLongVideoLibraryDir, mergeLongVideoProjectMedia, persistLongVideoSegmentMedia, probeLongVideoMedia } from "@/lib/long-video/media";
 import {
   LONG_VIDEO_SESSION_POLICY,
   type LongVideoProject,
@@ -33,6 +33,12 @@ export type LongVideoExecutionAuthorization = {
   consumedAt?: string | null;
   maxSpendUsd: number;
   releaseHold: boolean;
+  maxActiveOrders?: number;
+  maxPreSshAttempts?: number;
+  maxFailedDeploymentSpendUsd?: number;
+  wallClockMinutes?: number;
+  drainingAtMinutes?: number;
+  maxSegments?: number;
 };
 
 export type LongVideoExecutionPolicy = {
@@ -94,6 +100,14 @@ export type LongVideoExecutionSession = {
   draining: boolean;
   cleanupState: "not_started" | "pending" | "completed";
   approximateSpendUsd: number;
+  resumeReason?: string | null;
+  previousSessionId?: string | null;
+  resumeFromSegment?: number;
+  preservedAcceptedSegmentIds?: string[];
+  expectedNewSegmentInferences?: number;
+  maxSegments?: number;
+  wallClockMinutes?: number;
+  drainingAtMinutes?: number;
   active: boolean;
   createdAt: string;
   updatedAt: string;
@@ -125,6 +139,16 @@ export type LongVideoPlan = {
   activeOrderCount: number;
   activeAuthorization: boolean;
   estimatedBudgetUsd: { min: number; max: number };
+  resume_existing_project: boolean;
+  resume_from_segment: number | null;
+  accepted_segments: number[];
+  segments_to_generate: number[];
+  accepted_segments_reused: number;
+  expected_new_segment_inferences: number;
+  expected_wan_restores: number;
+  expected_provider_orders: number;
+  segment0_will_not_regenerate: boolean;
+  segment0_last_frame_sha256: string | null;
   blockers: string[];
 };
 
@@ -148,6 +172,34 @@ function readConsumedAuthorizations(filePath: string) {
 
 function sha256(filePath: string) { return createHash("sha256").update(readFileSync(filePath)).digest("hex"); }
 const require = createRequire(import.meta.url);
+
+function resolveProjectRef(project: LongVideoProject, reference: string, libraryDir: string) {
+  const paths = buildLongVideoProjectPaths(libraryDir, project.createdAt.slice(0, 10), project.id);
+  const resolved = path.resolve(paths.projectDir, reference);
+  const relative = path.relative(path.resolve(paths.projectDir), resolved);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("long_video_project_reference_invalid");
+  return resolved;
+}
+
+function inspectPreservedSegmentZero(project: LongVideoProject, libraryDir: string) {
+  const segment = project.segments[0];
+  const attempt = segment?.selectedAttemptId ? segment.attempts.find((candidate) => candidate.id === segment.selectedAttemptId) : null;
+  if (!segment || segment.status !== "accepted" || !attempt || attempt.status !== "accepted" || !attempt.outputVideoRef || !attempt.lastFrameRef) return { valid: false, lastFrameSha256: null };
+  try {
+    const outputPath = resolveProjectRef(project, attempt.outputVideoRef, libraryDir);
+    const lastFramePath = resolveProjectRef(project, attempt.lastFrameRef, libraryDir);
+    if (!existsSync(outputPath) || !existsSync(lastFramePath) || statSize(outputPath) < 1024 || statSize(lastFramePath) < 100) return { valid: false, lastFrameSha256: null };
+    probeLongVideoMedia(outputPath);
+    const signature = readFileSync(lastFramePath).subarray(0, 8);
+    if (!signature.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return { valid: false, lastFrameSha256: null };
+    const actualSha = sha256(lastFramePath);
+    return { valid: actualSha === attempt.evidenceSummary.lastFrameSha256, lastFrameSha256: actualSha };
+  } catch {
+    return { valid: false, lastFrameSha256: null };
+  }
+}
+
+function statSize(filePath: string) { return readFileSync(filePath).byteLength; }
 
 function mergePolicy(value?: Partial<LongVideoExecutionPolicy>): LongVideoExecutionPolicy {
   return { ...DEFAULT_LONG_VIDEO_EXECUTION_POLICY, ...value, maxActiveOrders: 1 };
@@ -186,14 +238,21 @@ export class LongVideoExecutionCoordinator {
     const blockers: string[] = [];
     if (!project) blockers.push("project_missing");
     const current = project;
+    const acceptedSegments = current?.segments.filter((segment) => segment.status === "accepted").map((segment) => segment.sequenceIndex) ?? [];
+    const resumeFromSegment = current && acceptedSegments.length > 0 && current.nextSegmentIndex > 0 ? current.nextSegmentIndex : null;
+    const resumeExistingProject = Boolean(current && current.status === "failed" && resumeFromSegment !== null && acceptedSegments.length === resumeFromSegment);
+    const segmentsToGenerate = current ? current.segments.filter((segment) => segment.sequenceIndex >= (resumeFromSegment ?? 0) && segment.status !== "accepted").map((segment) => segment.sequenceIndex) : [];
+    const preservedSegmentZero = current ? inspectPreservedSegmentZero(current, this.libraryDir ?? loadLongVideoLibraryDir()) : { valid: false, lastFrameSha256: null };
     const verification = (() => { try { return loadProductionVerification(); } catch { return null; } })();
-    const sourceValid = Boolean(current?.firstFrameSource === "existing_image" && current.firstFrameRef && current.segments[0]?.inputFrameRef);
+    const sourceValid = Boolean(current?.firstFrameSource === "existing_image" && current.firstFrameRef && current.segments[0]?.inputFrameRef && (!resumeExistingProject || preservedSegmentZero.valid));
     const prompts = current?.segments.map((segment) => segment.prompt.trim()) ?? [];
     const promptsDistinct = prompts.length === 3 && new Set(prompts).size === 3 && prompts.every(Boolean);
-    if (current && current.status !== "waiting_for_gpu") blockers.push("project_not_waiting_for_gpu");
+    if (current && current.status !== "waiting_for_gpu" && !resumeExistingProject) blockers.push("project_not_waiting_for_gpu");
     if (current && (current.gpuPreference.length !== 1 || current.gpuPreference[0] !== "rtx4090")) blockers.push("gpu_preference_not_rtx4090_only");
     if (current && current.totalSegments !== 3) blockers.push("expected_three_segments");
     if (!sourceValid) blockers.push("existing_source_invalid");
+    if (resumeExistingProject && !preservedSegmentZero.valid) blockers.push("preserved_segment_zero_invalid");
+    if (resumeExistingProject && segmentsToGenerate.length !== 2) blockers.push("resume_expected_two_segments");
     if (!promptsDistinct) blockers.push("segment_prompts_not_distinct");
     const activeOrderCount = await this.provider.activeOrderCount();
     if (activeOrderCount !== 0) blockers.push("active_provider_order_exists");
@@ -221,27 +280,45 @@ export class LongVideoExecutionCoordinator {
       activeOrderCount,
       activeAuthorization,
       estimatedBudgetUsd: estimate,
+      resume_existing_project: resumeExistingProject,
+      resume_from_segment: resumeFromSegment,
+      accepted_segments: acceptedSegments,
+      segments_to_generate: segmentsToGenerate,
+      accepted_segments_reused: acceptedSegments.length,
+      expected_new_segment_inferences: segmentsToGenerate.length,
+      expected_wan_restores: 1,
+      expected_provider_orders: 1,
+      segment0_will_not_regenerate: resumeExistingProject && !segmentsToGenerate.includes(0),
+      segment0_last_frame_sha256: preservedSegmentZero.lastFrameSha256,
       blockers,
     };
   }
 
   private saveSession(session: LongVideoExecutionSession) { atomicWrite(this.sessionPath, session); }
 
+  private deleteProjectTasks(project: LongVideoProject) {
+    const defaultStatePath = path.resolve(path.join(process.cwd(), ".secrets", "long-video-state.json"));
+    const poolPath = path.resolve(this.statePath) === defaultStatePath ? undefined : `${this.statePath}.pool.json`;
+    deleteLongVideoProjectTasks(project, poolPath);
+  }
+
   private async transition(project: LongVideoProject, status: LongVideoProjectStatus) {
     return setLongVideoExecutionState(project.id, project.version, status, this.statePath);
   }
 
-  async execute(projectId: string, authorization: LongVideoExecutionAuthorization): Promise<LongVideoExecutionSession> {
+  async execute(projectId: string, authorization: LongVideoExecutionAuthorization, options: { resume?: boolean } = {}): Promise<LongVideoExecutionSession> {
     const started = this.now();
     const project = getLongVideoProject(projectId, this.statePath);
     if (!project) throw new Error("project_missing");
     validateAuthorization(projectId, authorization, this.policy, started);
     const plan = await this.plan(projectId);
     if (!plan.real_project_plan_ready) throw new Error(`long_video_plan_blocked:${plan.blockers.join(",")}`);
+    if (plan.resume_existing_project && !options.resume) throw new Error("long_video_resume_flag_required");
+    if (authorization.maxSegments !== undefined && authorization.maxSegments > this.policy.maxSegmentsPerSession) throw new Error("long_video_authorization_segment_cap_exceeded");
     // The project creation flow leaves a boundary task in the generation pool.
     // Direct real-session execution owns the full sequence, so remove that
     // stale task before provisioning to prevent a second scheduler attempt.
-    deleteLongVideoProjectTasks(project);
+    this.deleteProjectTasks(project);
     const consumed = readConsumedAuthorizations(this.authorizationLedgerPath);
     if (consumed.includes(authorization.id)) throw new Error("long_video_authorization_consumed");
     if (this.readSession()?.active) throw new Error("long_video_active_session_exists");
@@ -252,6 +329,14 @@ export class LongVideoExecutionCoordinator {
       schemaVersion: 1, projectId, provider: "clore", authorizationId: authorization.id, orderId: null, providerSessionId: null,
       serverId: null, gpuProfile: "rtx4090", runtimeState: "not_started", restoreState: "not_started", restoreRevision: null,
       currentSegmentIndex: null, currentAttemptId: null, draining: false, cleanupState: "not_started", approximateSpendUsd: 0,
+      resumeReason: plan.resume_existing_project ? "stage4h5_retry_after_idempotent_review_race" : null,
+      previousSessionId: this.readSession()?.providerSessionId ?? null,
+      resumeFromSegment: plan.resume_from_segment ?? 0,
+      preservedAcceptedSegmentIds: plan.accepted_segments.map((index) => project.segments[index].id),
+      expectedNewSegmentInferences: plan.expected_new_segment_inferences,
+      maxSegments: authorization.maxSegments ?? this.policy.maxSegmentsPerSession,
+      wallClockMinutes: authorization.wallClockMinutes ?? 150,
+      drainingAtMinutes: authorization.drainingAtMinutes ?? 135,
       active: true, createdAt: started.toISOString(), updatedAt: started.toISOString(),
     };
     atomicWrite(this.authorizationLedgerPath, { schemaVersion: 1, ids: [...consumed, authorization.id], updatedAt: started.toISOString() });
@@ -260,7 +345,7 @@ export class LongVideoExecutionCoordinator {
     try {
       await this.transition(project, "provisioning");
       let createError: unknown = null;
-      for (const candidate of candidates.slice(0, 2)) {
+      for (const candidate of candidates.slice(0, authorization.maxPreSshAttempts ?? 2)) {
         try {
           providerSession = await this.provider.createSession({ projectId, authorization, candidate });
           break;
@@ -276,8 +361,12 @@ export class LongVideoExecutionCoordinator {
       await this.transition(getLongVideoProject(projectId, this.statePath)!, "restoring_video_model"); session.restoreState = "restoring"; this.saveSession(session);
       const restored = await this.provider.restoreWan(providerSession); session.restoreState = "completed"; session.restoreRevision = restored.revision; session.updatedAt = this.now().toISOString(); this.saveSession(session);
       let current = getLongVideoProject(projectId, this.statePath)!;
+      let generatedThisSession = 0;
+      const hardDeadline = started.getTime() + (authorization.wallClockMinutes ?? 150) * 60_000;
+      const drainAt = started.getTime() + (authorization.drainingAtMinutes ?? 135) * 60_000;
       for (let index = current.nextSegmentIndex; index < current.totalSegments; index += 1) {
-        if (index >= this.policy.maxSegmentsPerSession) { session.draining = true; this.saveSession(session); await this.transition(current, "draining"); break; }
+        if (Date.now() >= hardDeadline) throw new Error("long_video_wall_clock_cap_exceeded");
+        if (generatedThisSession >= (authorization.maxSegments ?? this.policy.maxSegmentsPerSession) || Date.now() >= drainAt) { session.draining = true; this.saveSession(session); await this.transition(current, "draining"); break; }
         current = getLongVideoProject(projectId, this.statePath)!;
         const segment = current.segments[index];
         if (segment.status === "accepted") continue;
@@ -304,9 +393,12 @@ export class LongVideoExecutionCoordinator {
         if (decision === "pause") { await this.provider.cancelSession(providerSession); session.cleanupState = "completed"; session.active = false; session.updatedAt = this.now().toISOString(); this.saveSession(session); return session; }
         if (decision === "regenerate") { index -= 1; continue; }
         current = reviewed;
+        this.deleteProjectTasks(current);
+        if (current.segments[index].status === "accepted") generatedThisSession += 1;
       }
       current = getLongVideoProject(projectId, this.statePath)!;
       if (current.status !== "awaiting_merge_confirmation") await this.transition(current, "awaiting_merge_confirmation");
+      this.deleteProjectTasks(getLongVideoProject(projectId, this.statePath)!);
       await this.provider.cancelSession(providerSession);
       session.cleanupState = "completed"; session.active = false; session.updatedAt = this.now().toISOString(); this.saveSession(session);
       return session;

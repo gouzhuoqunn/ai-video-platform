@@ -148,6 +148,7 @@
     "long-video:execute": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/long-video-execute.ts",
     "stage4h3:fake:test": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/stage4h3-long-video-executor-tests.ts",
     "stage4h4:adapter:test": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/stage4h4-adapter-contract-tests.ts",
+    "stage4h5:resume:test": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/stage4h5-resume-tests.ts",
     "stage4b:multipart-abort:probe": "tsx scripts/model-cache/production-object-stream.ts multipart-abort-probe",
     "stage3r:readiness:test": "tsx scripts/clore/stage3r-readiness-tests.ts",
     "gpu:candidates": "tsx scripts/gpu-candidates.ts",

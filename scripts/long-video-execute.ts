@@ -25,11 +25,12 @@ async function main() {
   if (!projectId) usage();
   const planMode = process.argv.includes("--plan");
   const executeMode = process.argv.includes("--execute");
+  const resumeMode = process.argv.includes("--resume");
   const providerName = arg("provider") ?? "clore";
   if (providerName !== "clore") throw new Error("long_video_provider_must_be_clore");
   if (planMode === executeMode) usage();
   const provider = new CloreLongVideoProviderAdapter();
-  const coordinator = new LongVideoExecutionCoordinator({ provider, policy: executeMode ? { maxSpendUsd: 1.2, maxSegmentsPerSession: 3, maxConsecutiveSegments: 3 } : undefined });
+  const coordinator = new LongVideoExecutionCoordinator({ provider, policy: executeMode ? { maxSpendUsd: resumeMode ? 0.9 : 1.2, maxSegmentsPerSession: resumeMode ? 2 : 3, maxConsecutiveSegments: 3 } : undefined });
   if (planMode) {
     console.log(JSON.stringify({ ...(await coordinator.plan(projectId)), real_clore_adapter_ready: true }, null, 2));
     return;
@@ -42,9 +43,10 @@ async function main() {
   if (authorization.id !== authorizationId || authorization.projectId !== projectId) throw new Error("long_video_authorization_project_mismatch");
   const preflight = await coordinator.plan(projectId);
   if (!preflight.real_project_plan_ready) throw new Error(`long_video_plan_blocked:${preflight.blockers.join(",")}`);
+  if (preflight.resume_existing_project !== resumeMode) throw new Error(resumeMode ? "long_video_resume_not_available" : "long_video_resume_flag_required");
   process.env.CLORE_ORDER_EXECUTION_ENABLED = "true";
   consumeAuthorizationFile(filePath, authorization);
-  const result = await coordinator.execute(projectId, { ...authorization, consumedAt: null });
+  const result = await coordinator.execute(projectId, { ...authorization, consumedAt: null }, { resume: resumeMode });
   console.log(JSON.stringify({ ...result, merge: "MERGE_CONFIRMATION_REQUIRED" }, null, 2));
 }
 

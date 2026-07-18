@@ -382,6 +382,16 @@ export function reviewLongVideoSegment(input: {
 }) {
   const at = input.now ?? new Date();
   const before = clone(readState(input.statePath ?? LONG_VIDEO_STATE_PATH).projects.find((candidate) => candidate.id === input.projectId) ?? null);
+  if (before) {
+    const existing = before.segments[input.sequenceIndex];
+    if (existing?.status === "accepted" && (input.action === "accept" || input.action === "timeout_accept")) {
+      const timerKey = `${input.statePath ?? LONG_VIDEO_STATE_PATH}:${input.projectId}:${input.sequenceIndex}`;
+      const timer = scheduledReviews.get(timerKey);
+      if (timer) clearTimeout(timer);
+      scheduledReviews.delete(timerKey);
+      return before;
+    }
+  }
   const invalidatedTaskIds = input.action === "regenerate" && before
     ? projectTaskIds(before).filter((taskId) => before.segments
       .filter((segment) => segment.sequenceIndex >= input.sequenceIndex)
