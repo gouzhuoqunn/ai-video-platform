@@ -13,6 +13,8 @@ import {
 } from "./domain";
 import {
   createGenerationTask,
+  GENERATION_POOL_PATH,
+  updateGenerationTasks,
   upsertGenerationTasks,
   type GenerationTask,
 } from "@/lib/generation/task-pool";
@@ -20,7 +22,7 @@ import { loadProductionVerification } from "@/lib/generation/production-pipeline
 import { PRODUCTION_IMAGE_MODEL, PRODUCTION_VIDEO_MODEL } from "@/lib/generation/production-models";
 
 export type LongVideoState = { schemaVersion: 1; projects: LongVideoProject[] };
-export const LONG_VIDEO_STATE_PATH = path.join(process.cwd(), ".secrets", "long-video-state.json");
+export const LONG_VIDEO_STATE_PATH = process.env.LONG_VIDEO_STATE_PATH?.trim() || path.join(process.cwd(), ".secrets", "long-video-state.json");
 const scheduledReviews = new Map<string, ReturnType<typeof setTimeout>>();
 
 function timestamp(at = new Date()) { return at.toISOString(); }
@@ -76,6 +78,8 @@ function createFirstFrameTask(project: LongVideoProject): GenerationTask | null 
     status: "waiting_for_batch",
     confirmedAt: timestamp(),
     gpuPreference: project.gpuPreference,
+    longVideoProjectId: project.id,
+    longVideoSegmentIndex: null,
     outputMetadata: { longVideoProjectId: project.id, independentFirstFrameResult: true },
   });
 }
@@ -155,6 +159,20 @@ function isolatedPoolPath(statePath: string, poolPath?: string) {
   return poolPath ?? (statePath === LONG_VIDEO_STATE_PATH ? undefined : `${statePath}.pool.json`);
 }
 
+function projectTaskIds(project: LongVideoProject) {
+  return [...new Set([
+    project.firstFrameJobId,
+    ...project.segments.flatMap((segment) => [segment.generationJobId, ...segment.attempts.map((attempt) => attempt.generationJobId)]),
+  ].filter((value): value is string => Boolean(value)))];
+}
+
+function updateProjectTasks(project: LongVideoProject, action: "cancel" | "delete", poolPath?: string) {
+  const taskIds = projectTaskIds(project);
+  if (!taskIds.length) return 0;
+  updateGenerationTasks(taskIds, action, poolPath ?? GENERATION_POOL_PATH);
+  return taskIds.length;
+}
+
 export function listLongVideoProjects(filePath = LONG_VIDEO_STATE_PATH) {
   processExpiredLongVideoReviews(new Date(), filePath);
   return readState(filePath).projects.map(clone).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -218,6 +236,7 @@ export function recordLongVideoSegmentOutput(input: {
   thumbnailRef: string;
   lastFrameRef: string;
   evidenceSummary?: LongVideoAttempt["evidenceSummary"];
+  attemptId?: string;
   now?: Date;
   expectedProjectVersion: number;
   expectedSegmentVersion: number;
@@ -228,8 +247,10 @@ export function recordLongVideoSegmentOutput(input: {
     const segment = current.segments[input.sequenceIndex];
     if (!segment || segment.version !== input.expectedSegmentVersion) throw new Error("long_video_segment_version_conflict");
     if (!["generating", "ready", "invalidated"].includes(segment.status)) throw new Error("分段当前不能接收新输出。");
+    const attemptId = input.attemptId ?? crypto.randomUUID();
+    if (!/^[a-f0-9-]{36}$/.test(attemptId)) throw new Error("长视频尝试编号无效。");
     const attempt: LongVideoAttempt = {
-      id: crypto.randomUUID(),
+      id: attemptId,
       number: segment.attempts.length + 1,
       generationJobId: segment.generationJobId,
       status: "awaiting_review",
@@ -269,6 +290,12 @@ export function reviewLongVideoSegment(input: {
   poolPath?: string;
 }) {
   const at = input.now ?? new Date();
+  const before = clone(readState(input.statePath ?? LONG_VIDEO_STATE_PATH).projects.find((candidate) => candidate.id === input.projectId) ?? null);
+  const invalidatedTaskIds = input.action === "regenerate" && before
+    ? projectTaskIds(before).filter((taskId) => before.segments
+      .filter((segment) => segment.sequenceIndex >= input.sequenceIndex)
+      .some((segment) => segment.generationJobId === taskId || segment.attempts.some((attempt) => attempt.generationJobId === taskId)))
+    : [];
   const project = mutateProject(input.projectId, input.expectedProjectVersion, (current) => {
     const segment = current.segments[input.sequenceIndex];
     if (!segment || segment.version !== input.expectedSegmentVersion) throw new Error("long_video_review_version_conflict");
@@ -328,8 +355,11 @@ export function reviewLongVideoSegment(input: {
   const timer = scheduledReviews.get(timerKey);
   if (timer) clearTimeout(timer);
   scheduledReviews.delete(timerKey);
+  const poolPath = isolatedPoolPath(input.statePath ?? LONG_VIDEO_STATE_PATH, input.poolPath);
+  if (input.action === "pause") updateProjectTasks(project, "cancel", poolPath);
+  if (input.action === "regenerate" && invalidatedTaskIds.length) updateGenerationTasks(invalidatedTaskIds, "cancel", poolPath ?? GENERATION_POOL_PATH);
   if (input.action !== "pause") {
-    const updated = queueBoundaryTasks(project, isolatedPoolPath(input.statePath ?? LONG_VIDEO_STATE_PATH, input.poolPath));
+    const updated = queueBoundaryTasks(project, poolPath);
     if (updated.length) {
       return mutateProject(project.id, project.version, (current) => {
         const queued = updated.find((task) => task.jobForm === "long_video_segment");
@@ -360,10 +390,85 @@ export function resumeLongVideoProject(projectId: string, expectedVersion: numbe
   }, statePath);
 }
 
-export function cancelLongVideoProject(projectId: string, expectedVersion: number, filePath = LONG_VIDEO_STATE_PATH) {
+export function cancelLongVideoProject(
+  projectId: string,
+  expectedVersion: number,
+  options: { statePath?: string; poolPath?: string } = {},
+) {
+  const statePath = options.statePath ?? LONG_VIDEO_STATE_PATH;
+  const project = mutateProject(projectId, expectedVersion, (current) => {
+    if (current.status === "completed") throw new Error("已完成项目请使用删除。");
+    current.status = "cancelled";
+  }, statePath);
+  updateProjectTasks(project, "cancel", isolatedPoolPath(statePath, options.poolPath));
+  return project;
+}
+
+export function markLongVideoMergeStarted(projectId: string, expectedVersion: number, filePath = LONG_VIDEO_STATE_PATH) {
   return mutateProject(projectId, expectedVersion, (project) => {
-    if (project.status === "completed") throw new Error("已完成项目请使用删除。");
-    project.status = "cancelled";
+    if (project.status !== "awaiting_merge_confirmation" || project.mergeStatus !== "awaiting_confirmation") throw new Error("所有分段确认后才能合并。");
+    if (!project.segments.every((segment) => segment.status === "accepted" && segment.selectedAttemptId && segment.outputVideoRef)) throw new Error("存在未确认或缺少媒体的分段。");
+    project.status = "merging";
+    project.mergeStatus = "merging";
+  }, filePath);
+}
+
+export function commitLongVideoMerge(input: {
+  projectId: string;
+  expectedVersion: number;
+  finalVideoRef: string;
+  finalThumbnailRef: string;
+  actualDurationSeconds: number;
+  filePath?: string;
+}) {
+  return mutateProject(input.projectId, input.expectedVersion, (project) => {
+    if (project.status !== "merging" || project.mergeStatus !== "merging") throw new Error("长视频合并事务已改变。");
+    project.finalVideoRef = input.finalVideoRef;
+    project.finalThumbnailRef = input.finalThumbnailRef;
+    project.mergeStatus = "completed";
+    project.status = "completed";
+    project.cleanupStatus = "pending";
+    project.segments.forEach((segment) => {
+      const attempt = segment.attempts.find((candidate) => candidate.id === segment.selectedAttemptId);
+      if (attempt) attempt.evidenceSummary.actualMergedDurationSeconds = input.actualDurationSeconds;
+    });
+  }, input.filePath ?? LONG_VIDEO_STATE_PATH);
+}
+
+export function completeLongVideoSegmentCleanup(
+  projectId: string,
+  expectedVersion: number,
+  result: { complete: boolean; remainingFiles: number },
+  filePath = LONG_VIDEO_STATE_PATH,
+) {
+  return mutateProject(projectId, expectedVersion, (project) => {
+    if (project.mergeStatus !== "completed" || !project.finalVideoRef || !project.finalThumbnailRef) throw new Error("最终媒体尚未提交，不能清理分段。");
+    project.segmentMediaCleaned = result.complete;
+    project.cleanupStatus = result.complete ? "completed" : "retry";
+    project.segments.forEach((segment) => {
+      if (result.complete) {
+        segment.outputVideoRef = null;
+        segment.lastFrameRef = null;
+        segment.inputFrameRef = segment.sequenceIndex === 0 ? project.firstFrameRef : null;
+      }
+      segment.attempts.forEach((attempt) => {
+        attempt.evidenceSummary.segmentMediaCleaned = result.complete;
+        attempt.evidenceSummary.cleanupRemainingFiles = result.remainingFiles;
+        if (result.complete) {
+          attempt.sourceWebmRef = null;
+          attempt.outputVideoRef = null;
+          attempt.thumbnailRef = null;
+          attempt.lastFrameRef = null;
+        }
+      });
+    });
+  }, filePath);
+}
+
+export function markLongVideoMergeFailed(projectId: string, expectedVersion: number, filePath = LONG_VIDEO_STATE_PATH) {
+  return mutateProject(projectId, expectedVersion, (project) => {
+    project.status = "awaiting_merge_confirmation";
+    project.mergeStatus = "failed";
   }, filePath);
 }
 
@@ -373,8 +478,16 @@ export function deleteLongVideoProject(projectId: string, expectedVersion: numbe
   if (!project) return false;
   if (project.version !== expectedVersion) throw new Error("long_video_project_version_conflict");
   state.projects = state.projects.filter((candidate) => candidate.id !== projectId);
+  if (!state.projects.length) {
+    if (existsSync(filePath)) unlinkSync(filePath);
+    return true;
+  }
   writeState(state, filePath);
   return true;
+}
+
+export function deleteLongVideoProjectTasks(project: LongVideoProject, poolPath = GENERATION_POOL_PATH) {
+  return updateProjectTasks(project, "delete", poolPath);
 }
 
 export function processExpiredLongVideoReviews(at = new Date(), filePath = LONG_VIDEO_STATE_PATH) {

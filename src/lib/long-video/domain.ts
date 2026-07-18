@@ -257,3 +257,24 @@ export function planLongVideoSession(project: LongVideoProject, options: { elaps
     generateFirstFrame: project.firstFrameSource === "pure_prompt" && !project.firstFrameRef && start.sequenceIndex === 0,
   };
 }
+
+export function toPublicLongVideoProject(project: LongVideoProject): LongVideoProject {
+  const publicProject = structuredClone(project);
+  publicProject.firstFrameRef = project.firstFrameRef ? `${project.firstFrameSource}:ready` : null;
+  publicProject.finalVideoRef = project.finalVideoRef ? "final:video" : null;
+  publicProject.finalThumbnailRef = project.finalThumbnailRef ? "final:thumbnail" : null;
+  publicProject.segments = project.segments.map((segment) => ({
+    ...structuredClone(segment),
+    inputFrameRef: segment.inputFrameRef ? "frame:ready" : null,
+    outputVideoRef: segment.outputVideoRef ? `segment:${segment.sequenceIndex}:video` : null,
+    lastFrameRef: segment.lastFrameRef ? `segment:${segment.sequenceIndex}:last-frame` : null,
+    attempts: segment.attempts.map((attempt) => ({
+      ...structuredClone(attempt),
+      sourceWebmRef: attempt.sourceWebmRef ? `attempt:${attempt.id}:source` : null,
+      outputVideoRef: attempt.outputVideoRef ? `attempt:${attempt.id}:video` : null,
+      thumbnailRef: attempt.thumbnailRef ? `attempt:${attempt.id}:thumbnail` : null,
+      lastFrameRef: attempt.lastFrameRef ? `attempt:${attempt.id}:last-frame` : null,
+    })),
+  }));
+  return publicProject;
+}

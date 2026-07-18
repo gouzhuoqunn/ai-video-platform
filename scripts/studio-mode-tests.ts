@@ -3,6 +3,7 @@ import { AUTOMATIC_GPU_PROVIDER, batchThreshold, normalizeStudioMode, shouldArmC
 
 assert.equal(normalizeStudioMode("image"), "image");
 assert.equal(normalizeStudioMode("video"), "video");
+assert.equal(normalizeStudioMode("long_video"), "long_video");
 assert.equal(normalizeStudioMode("bad"), "video");
 assert.match(STUDIO_MODE_STORAGE_KEY, /studio-mode/);
 assert.equal(AUTOMATIC_GPU_PROVIDER, "clore");

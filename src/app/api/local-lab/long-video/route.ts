@@ -3,7 +3,9 @@ import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/rou
 import { validateProductionPrompt } from "@/lib/generation/production-prompt-safety";
 import { listLocalImageResults } from "@/lib/local-lab/local-results";
 import { listLongVideoProjects, persistLongVideoProject } from "@/lib/long-video/store";
-import type { FirstFrameSource } from "@/lib/long-video/domain";
+import { persistLongVideoProjectSnapshot } from "@/lib/long-video/media";
+import { toPublicLongVideoProject, type FirstFrameSource } from "@/lib/long-video/domain";
+import { longVideoUploadExists } from "@/lib/long-video/uploads";
 
 type CreatePayload = {
   action?: "create";
@@ -16,29 +18,10 @@ type CreatePayload = {
   gpuPreference?: Array<"rtx4090" | "rtx5090">;
 };
 
-function safeProject(project: ReturnType<typeof listLongVideoProjects>[number]) {
-  return {
-    ...project,
-    segments: project.segments.map((segment) => ({
-      ...segment,
-      inputFrameRef: segment.inputFrameRef ? "已准备" : null,
-      outputVideoRef: segment.outputVideoRef ? `segment:${segment.sequenceIndex}:video` : null,
-      lastFrameRef: segment.lastFrameRef ? `segment:${segment.sequenceIndex}:last-frame` : null,
-      attempts: segment.attempts.map((attempt) => ({
-        ...attempt,
-        sourceWebmRef: attempt.sourceWebmRef ? `attempt:${attempt.id}:source` : null,
-        outputVideoRef: attempt.outputVideoRef ? `attempt:${attempt.id}:video` : null,
-        thumbnailRef: attempt.thumbnailRef ? `attempt:${attempt.id}:thumbnail` : null,
-        lastFrameRef: attempt.lastFrameRef ? `attempt:${attempt.id}:last-frame` : null,
-      })),
-    })),
-  };
-}
-
 export async function GET(request: NextRequest) {
   const guard = guardLocalLabRequest(request);
   if (guard) return guard;
-  return NextResponse.json({ projects: listLongVideoProjects().map(safeProject) });
+  return NextResponse.json({ projects: listLongVideoProjects().map(toPublicLongVideoProject) });
 }
 
 export async function POST(request: NextRequest) {
@@ -49,7 +32,7 @@ export async function POST(request: NextRequest) {
   const source = payload.firstFrameSource;
   const firstFrameRef = String(payload.firstFrameRef ?? "");
   if (!source || !["upload", "existing_image", "pure_prompt"].includes(source)) return NextResponse.json({ error: "请选择首帧来源。" }, { status: 400 });
-  if (source === "upload" && !/^upload:[a-f0-9-]{36}$/.test(firstFrameRef)) return NextResponse.json({ error: "请先上传有效首帧图片。" }, { status: 400 });
+  if (source === "upload" && (!/^upload:[a-f0-9-]{36}$/.test(firstFrameRef) || !longVideoUploadExists(firstFrameRef))) return NextResponse.json({ error: "请先上传有效首帧图片。" }, { status: 400 });
   if (source === "existing_image") {
     const match = firstFrameRef.match(/^image:([A-Za-z0-9_-]{6,120})$/);
     if (!match || !listLocalImageResults().some((image) => image.sessionId === match[1])) return NextResponse.json({ error: "请选择已验证的本地图片。" }, { status: 400 });
@@ -68,8 +51,9 @@ export async function POST(request: NextRequest) {
       prompts,
       gpuPreference: payload.gpuPreference,
     });
+    persistLongVideoProjectSnapshot(project);
     return NextResponse.json({
-      project: safeProject(project),
+      project: toPublicLongVideoProject(project),
       provider_authorization_created: false,
       credit_charged: false,
       create_order_called: false,
