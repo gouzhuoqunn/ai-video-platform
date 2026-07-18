@@ -8,9 +8,11 @@ export const LONG_VIDEO_NOTICE = "长视频将分段生成，可能跨多次显�
 export type WorkflowCapability = "first_frame_text" | "first_last_frame" | "text_only";
 export type FirstFrameSource = "upload" | "existing_image" | "pure_prompt";
 export type LongVideoProjectStatus =
-  | "pending_confirmation" | "waiting_for_gpu" | "generating" | "awaiting_review"
-  | "paused" | "awaiting_merge_confirmation" | "merging" | "completed" | "cancelled" | "failed";
-export type LongVideoSegmentStatus = "pending" | "ready" | "generating" | "awaiting_review" | "accepted" | "invalidated" | "paused" | "failed";
+  | "pending_confirmation" | "waiting_for_gpu" | "provisioning" | "ssh_ready" | "runtime_ready"
+  | "restoring_video_model" | "generating" | "generating_segment" | "awaiting_review" | "paused"
+  | "draining" | "awaiting_merge_confirmation" | "merging" | "completed" | "failed"
+  | "cleanup_pending" | "canceled" | "cancelled";
+export type LongVideoSegmentStatus = "pending" | "prepared" | "ready" | "generating" | "media_processing" | "awaiting_review" | "accepted" | "rejected" | "invalidated" | "completed" | "paused" | "failed" | "canceled";
 export type LongVideoApprovalState = "not_ready" | "awaiting_review" | "accepted" | "rejected" | "paused" | "timed_out";
 
 export type LongVideoAttempt = {

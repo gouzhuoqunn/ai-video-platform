@@ -199,6 +199,18 @@ export function persistLongVideoProject(input: CreateLongVideoProjectInput, file
   return clone(project);
 }
 
+export function setLongVideoExecutionState(
+  projectId: string,
+  expectedVersion: number,
+  status: LongVideoProject["status"],
+  filePath = LONG_VIDEO_STATE_PATH,
+) {
+  return mutateProject(projectId, expectedVersion, (project) => {
+    project.status = status;
+    if (status === "cleanup_pending") project.cleanupStatus = "pending";
+  }, filePath);
+}
+
 export function updateLongVideoProjectGpuPreference(
   projectId: string,
   expectedVersion: number,
@@ -280,20 +292,28 @@ export function recordLongVideoSegmentOutput(input: {
     if (!["generating", "ready", "invalidated"].includes(segment.status)) throw new Error("分段当前不能接收新输出。");
     const attemptId = input.attemptId ?? crypto.randomUUID();
     if (!/^[a-f0-9-]{36}$/.test(attemptId)) throw new Error("长视频尝试编号无效。");
-    const attempt: LongVideoAttempt = {
+    const prepared = segment.attempts.find((candidate) => candidate.id === attemptId);
+    const attempt: LongVideoAttempt = prepared ?? {
       id: attemptId,
       number: segment.attempts.length + 1,
       generationJobId: segment.generationJobId,
-      status: "awaiting_review",
-      sourceWebmRef: input.sourceWebmRef ?? null,
-      outputVideoRef: input.outputVideoRef,
-      thumbnailRef: input.thumbnailRef,
-      lastFrameRef: input.lastFrameRef,
-      evidenceSummary: input.evidenceSummary ?? {},
+      status: "pending",
+      sourceWebmRef: null,
+      outputVideoRef: null,
+      thumbnailRef: null,
+      lastFrameRef: null,
+      evidenceSummary: {},
       createdAt: timestamp(at),
-      completedAt: timestamp(at),
+      completedAt: null,
     };
-    segment.attempts.push(attempt);
+    attempt.status = "awaiting_review";
+    attempt.sourceWebmRef = input.sourceWebmRef ?? null;
+    attempt.outputVideoRef = input.outputVideoRef;
+    attempt.thumbnailRef = input.thumbnailRef;
+    attempt.lastFrameRef = input.lastFrameRef;
+    attempt.evidenceSummary = input.evidenceSummary ?? {};
+    attempt.completedAt = timestamp(at);
+    if (!prepared) segment.attempts.push(attempt);
     segment.attemptsCount = segment.attempts.length;
     segment.selectedAttemptId = attempt.id;
     segment.outputVideoRef = input.outputVideoRef;
@@ -308,6 +328,46 @@ export function recordLongVideoSegmentOutput(input: {
   }, input.filePath ?? LONG_VIDEO_STATE_PATH, at);
   scheduleLongVideoReview(project.id, input.sequenceIndex, input.filePath ?? LONG_VIDEO_STATE_PATH);
   return project;
+}
+
+export function prepareLongVideoSegmentAttempt(input: {
+  projectId: string;
+  sequenceIndex: number;
+  expectedProjectVersion: number;
+  expectedSegmentVersion: number;
+  attemptId?: string;
+  now?: Date;
+  filePath?: string;
+}) {
+  const at = input.now ?? new Date();
+  const attemptId = input.attemptId ?? crypto.randomUUID();
+  if (!/^[a-f0-9-]{36}$/.test(attemptId)) throw new Error("long_video_attempt_identifier_invalid");
+  return mutateProject(input.projectId, input.expectedProjectVersion, (project) => {
+    const segment = project.segments[input.sequenceIndex];
+    if (!segment || segment.version !== input.expectedSegmentVersion) throw new Error("long_video_segment_version_conflict");
+    if (!["ready", "prepared", "invalidated"].includes(segment.status)) throw new Error("long_video_segment_not_prepared");
+    if (segment.attempts.some((candidate) => candidate.id === attemptId)) throw new Error("long_video_attempt_already_exists");
+    segment.attempts.push({
+      id: attemptId,
+      number: segment.attempts.length + 1,
+      generationJobId: segment.generationJobId,
+      status: "running",
+      sourceWebmRef: null,
+      outputVideoRef: null,
+      thumbnailRef: null,
+      lastFrameRef: null,
+      evidenceSummary: {},
+      createdAt: timestamp(at),
+      completedAt: null,
+    });
+    segment.attemptsCount = segment.attempts.length;
+    segment.status = "generating";
+    segment.approvalState = "not_ready";
+    segment.approvalDeadline = null;
+    segment.version += 1;
+    segment.updatedAt = timestamp(at);
+    project.status = "generating_segment";
+  }, input.filePath ?? LONG_VIDEO_STATE_PATH, at);
 }
 
 export function reviewLongVideoSegment(input: {
