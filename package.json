@@ -124,6 +124,8 @@
     "stage4j3:detached:test": "tsx scripts/stage4j3-detached-workflow-tests.ts",
     "stage4j3:browser:test": "tsx scripts/stage4j3-browser-check.ts",
     "stage4j8:browser:test": "cross-env STAGE4J8_FINAL=true tsx scripts/stage4j3-browser-check.ts",
+    "stage4j9:queue-session:test": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/stage4j9-queue-session-tests.ts",
+    "stage4j9:browser:test": "tsx scripts/stage4j9-browser-check.ts",
     "stage4j4:studio:test": "tsx scripts/stage4j4-studio-layout-tests.ts",
     "stage4j4:browser:test": "tsx scripts/stage4j4-browser-check.ts",
     "stage4j4:runner:test": "tsx scripts/stage4j4-runner-channel-tests.ts",

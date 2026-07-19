@@ -44,3 +44,12 @@ Stage 4J.8 completed the remaining throughput-qualified RTX 5090 long-video resu
 - `MANUAL_HANDOFF_REQUIRED=false`
 
 Remaining deferred work is limited to optional scope: RTX 4090/short-video revalidation, RunPod fallback, broad historical CI/lint cleanup, public deployment, multi-user hardening, R2 publication, and commercial release testing.
+
+## 2026-07-19 non-billable queue/session extension
+
+- The personal-use closure above remains valid and accepted media is unchanged.
+- Image and video queues are counted independently; short and long video share the video family. Blue RTX4090 and green RTX5090 tasks can be confirmed together within one family, while execution selects only one GPU queue at a time.
+- Confirmation is now queue-only. Manual rental, provider cancellation, and generation execution are separate actions. Rental remains default-off and bound to a one-time nonce, risk acceptance, exact server/price text, selected family/GPU, and exact confirmed task IDs.
+- The persisted global session separates rented GPU, deployed model family, and activity. One rented GPU runs one family at a time; generation can stop while keeping the GPU, a compatible same-order family switch can follow, and a different GPU class is blocked until retirement.
+- Stop starts the 120-second idle countdown; resumed deployment/work clears it. Manual and idle-expiry retirement share one safe controller cancellation path.
+- Focused mock/controller and browser fixture checks passed with zero provider mutations, zero spend, zero hydration errors, and the permanent sidebar/final gallery preserved. `production_ready=false` remains unchanged.

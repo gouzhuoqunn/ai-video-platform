@@ -50,3 +50,11 @@
 - Paid result: one successful order, one create request, one Wan restore, one segment-1 inference, no replacement. Wallet `$10.31 -> $9.82`, delta `$0.49`.
 - Final zero state: Clore `0`, RunPod `0/0`, both holds `true`, no active authorization/lock/watchdog/watcher/temporary credential state.
 - Personal daily-use closure is complete. `production_ready=false` remains deliberate because commercial/public deployment and broad release validation are out of scope.
+
+# Stage 4J.9 queue and reusable-session baseline (2026-07-19, zero cost)
+
+- Start branch/HEAD: `codex/stage4g1-long-video-prompts` at `315ac207191b168c23b8b5a8c507e0e779faaf59`; backup ref: `backup/before-queue-model-family-session-20260719-231824`. Main remains untouched.
+- Confirmation is queue-only and has one visible action, `确认生成`. Image/video counts are independent; short and long video share the video counts. RTX4090/RTX5090 cards may be selected and confirmed together within one family, then execution selects exactly one GPU queue at a time.
+- The persisted session has explicit rented-GPU, deployed-family, and activity fields. One rented GPU runs one model family at a time. Safe stop preserves the GPU/order and starts a 120-second idle-retire deadline; the same compatible GPU/order can switch model family after stop. Provider cancellation remains separate and uses one controller path.
+- Rental is still manual and default-off. Nonce/risk/exact server-plus-price confirmation is bound to the selected family/GPU/task IDs. No threshold or refresh action can rent a GPU.
+- Offline/controller and browser fixture checks passed with provider mutations `0`, hydration errors `0`, and no accepted-media changes. Personal-use closure remains valid; `production_ready=false`.

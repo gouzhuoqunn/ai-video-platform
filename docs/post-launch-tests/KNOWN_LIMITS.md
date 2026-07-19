@@ -22,3 +22,10 @@
 - The 2048×2048 image remains a derived high-final result, not a native 2048×2048 inference.
 - Personal local daily use is ready. `production_ready=false` still applies to public/commercial release, multi-user scale, RunPod fallback, broad historical CI/lint cleanup, and public cloud deployment.
 - The one-active-order rule remains. Real rental still requires explicit task-bound authorization; ordinary page load, task creation, browser refresh, and launcher restart do not rent a GPU.
+
+# Limits after Stage 4J.9 queue/session work
+
+- Queue separation, selection, persistence, stop-without-retire, model-family switching, idle cancellation, and cancellation idempotency were verified with local fixtures/mocks only. This checkpoint did not rent an RTX4090/RTX5090, deploy either family, stop a real worker, or cancel a real provider order.
+- The web controller records actions for the existing safe runtime/provider driver. A real future session must still prove that the active operator process consumes those actions and completes the corresponding persisted transition; default-off execution remains mandatory.
+- The local candidate feed currently follows the configured Clore target and may have no compatible RTX4090 listing when an RTX4090 queue is selected. The UI refuses to substitute an RTX5090 or another class silently.
+- Personal local daily-use closure remains valid for accepted Stage 4J.8 media. Public/commercial readiness, multi-user concurrency, broad historical lint/CI cleanup, and real reusable-session acceptance remain out of scope; `production_ready=false`.
