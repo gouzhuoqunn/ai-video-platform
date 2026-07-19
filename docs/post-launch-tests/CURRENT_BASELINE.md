@@ -58,3 +58,9 @@
 - The persisted session has explicit rented-GPU, deployed-family, and activity fields. One rented GPU runs one model family at a time. Safe stop preserves the GPU/order and starts a 120-second idle-retire deadline; the same compatible GPU/order can switch model family after stop. Provider cancellation remains separate and uses one controller path.
 - Rental is still manual and default-off. Nonce/risk/exact server-plus-price confirmation is bound to the selected family/GPU/task IDs. No threshold or refresh action can rent a GPU.
 - Offline/controller and browser fixture checks passed with provider mutations `0`, hydration errors `0`, and no accepted-media changes. Personal-use closure remains valid; `production_ready=false`.
+
+# Audio Foundation Stage 1 baseline (2026-07-20, non-billable)
+
+- The current feature branch adds a project-local, ignored `local-data/` layout for future media, voice packs, worker state, cache, temp files, logs, and migration manifests. Existing image/video libraries remain readable fallbacks and were not moved or modified.
+- The only new local-media action is an identity-based, loopback-only Windows Explorer selection route. It resolves canonical files below approved roots and never exposes an absolute local path to the browser.
+- Audio Foundation is metadata and contract work only: RLS-protected voice, dialogue, inference, immutable revision, and composition tables plus local worker/status TypeScript contracts. There is no voice model, training, inference, audio muxing, media migration, GPU, provider, SSH, or paid execution.

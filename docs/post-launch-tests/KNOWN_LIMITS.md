@@ -29,3 +29,9 @@
 - The web controller records actions for the existing safe runtime/provider driver. A real future session must still prove that the active operator process consumes those actions and completes the corresponding persisted transition; default-off execution remains mandatory.
 - The local candidate feed currently follows the configured Clore target and may have no compatible RTX4090 listing when an RTX4090 queue is selected. The UI refuses to substitute an RTX5090 or another class silently.
 - Personal local daily-use closure remains valid for accepted Stage 4J.8 media. Public/commercial readiness, multi-user concurrency, broad historical lint/CI cleanup, and real reusable-session acceptance remain out of scope; `production_ready=false`.
+
+# Audio Foundation Stage 1 limits (2026-07-20)
+
+- The audio tables, worker queue shapes, and status mapping are contracts only. There is no user-facing audio generation action, worker implementation, voice-pack download, cloning/training, inference, audition, muxing, or audio revision migration.
+- Existing libraries remain read-only compatibility roots. New writes use `local-data/` only when a future scoped feature explicitly creates them; this checkpoint does not migrate or remove legacy files.
+- The folder route works only for the local Windows process and a canonical approved media file. It deliberately does not expose a raw directory-opening API, remote URL, signed URL, or browser-visible absolute path.

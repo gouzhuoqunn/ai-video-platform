@@ -1,5 +1,13 @@
 # Project Context
 
+## 2026-07-20 Audio Foundation Stage 1: local media boundary and data contracts
+
+- New local output is centrally rooted at `LOCAL_DATA_ROOT` or the project-local default `local-data/`, with separate `media/images`, `media/videos`, `voices`, worker-state, cache, temp, logs, and migration namespaces. Existing `D:\AI-Creative-Library` and `D:\AI-Video-Library` remain read-only fallback roots; this checkpoint does not copy, move, or delete any existing media.
+- `local-data/` is ignored at the project root and excluded from Docker, Next output tracing, TypeScript, ESLint, and VS Code file watching/search. Tests use only temporary fixtures and do not recursively scan local libraries, media, model caches, `local-data`, or `.secrets`.
+- Local results prefer the new root and fall back to the legacy roots. Long-video media now streams with HTTP Range support instead of loading the full file into memory. The loopback-only `POST /api/local-lab/open-folder` route accepts only validated asset identifiers, resolves canonical paths beneath approved media roots, rejects traversal/junction escapes, and opens Explorer with a selected file without returning an absolute path to the browser.
+- Migration `0011_audio_foundation_contracts.sql` adds RLS-protected metadata for voice profiles, dialogue cues, inference jobs, immutable audio revisions, immutable composition versions, and current-composition pointers. The authenticated creation RPC validates the caller-owned media parent, ready voice profile, relative reference, and idempotency key. It stores no media bytes or absolute paths.
+- The TypeScript status and worker contracts only define future local-queue states and user-facing status mapping. No voice model download, cloning/training, inference, video muxing, local-media migration, GPU/Clore/RunPod request, SSH action, or paid action occurred in this stage.
+
 ## 2026-07-20 Local Studio GPU price filter ceiling
 
 - The left Studio GPU price filter now defaults to and accepts an effective hourly price of up to `5 USD/hour`, including the existing 5% Clore renter fee. The read-only local-lab candidate endpoint uses the same display ceiling, so the UI change can surface otherwise compliant candidates above the former `0.70` display limit.
