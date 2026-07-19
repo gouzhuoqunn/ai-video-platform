@@ -269,6 +269,8 @@ export async function createCloreOrder(input: {
         : await cloreRequest<unknown>(input.config, "/create_order", {
             method: "POST",
             body: JSON.stringify(input.requestBody),
+          }, {
+            beforeCreateRetry: input.beforeCreateRequest ? async () => { await input.beforeCreateRequest?.(); } : undefined,
           });
     } finally {
       await input.afterCreateRequestAttempt?.();

@@ -42,8 +42,12 @@ export type LongVideoExecutionAuthorization = {
   batchId?: string;
   resolutionNonce?: string;
   allowedTaskIds?: string[];
+  allowedSegmentIds?: string[];
+  executionPurpose?: "final_video_resume_resilient";
   maxHourlyUsd?: number;
   maxOrders?: 1;
+  maxCreateRequests?: 3;
+  maxSuccessfulOrders?: 1;
   orderType?: "on-demand";
   noReplacementOrder?: true;
   walletDeltaCapUsd?: number;
@@ -325,6 +329,18 @@ export class LongVideoExecutionCoordinator {
     const plan = await this.plan(projectId);
     if (!plan.real_project_plan_ready) throw new Error(`long_video_plan_blocked:${plan.blockers.join(",")}`);
     if (plan.resume_existing_project && !options.resume) throw new Error("long_video_resume_flag_required");
+    if (authorization.executionPurpose === "final_video_resume_resilient") {
+      const expectedSegmentIds = plan.segments_to_generate.map((index) => project.segments[index]?.id).filter(Boolean);
+      if (
+        !plan.resume_existing_project ||
+        expectedSegmentIds.length !== 1 ||
+        authorization.allowedSegmentIds?.length !== 1 ||
+        authorization.allowedSegmentIds[0] !== expectedSegmentIds[0] ||
+        authorization.allowedTaskIds?.length !== 2 ||
+        authorization.allowedTaskIds[0] !== projectId ||
+        authorization.allowedTaskIds[1] !== expectedSegmentIds[0]
+      ) throw new Error("long_video_resume_authorization_scope_mismatch");
+    }
     if (authorization.maxSegments !== undefined && authorization.maxSegments > this.policy.maxSegmentsPerSession) throw new Error("long_video_authorization_segment_cap_exceeded");
     // The project creation flow leaves a boundary task in the generation pool.
     // Direct real-session execution owns the full sequence, so remove that

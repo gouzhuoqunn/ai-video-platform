@@ -27,6 +27,11 @@ export type CloreApiResponse<T> = {
   code: number;
   data?: T;
   message?: string;
+  error?: unknown;
+  details?: unknown;
+  errors?: unknown;
+  field?: unknown;
+  request_id?: unknown;
 };
 
 export type RawCloreServer = Record<string, unknown>;

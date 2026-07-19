@@ -32,6 +32,7 @@ export type GpuCandidate = {
   containerDiskGb: number;
   volumeGb: number;
   hourlyUsd: number | null;
+  allowedCurrencies?: string[];
   cloudType?: "SECURE" | "COMMUNITY";
   availability?: "High" | "Medium" | "Low" | "None" | "Unknown";
   reliability?: number | null;
@@ -92,7 +93,7 @@ export interface GpuProvider {
   readonly id: GpuProviderId;
   inspectCredentials(): Promise<ProviderCredentialInspection>;
   getBalance(): Promise<{ availableUsd: number | null; supported: boolean }>;
-  listCandidates(): Promise<GpuCandidate[]>;
+  listCandidates(options?: { forceRefresh?: boolean }): Promise<GpuCandidate[]>;
   createSession(input: CreateSessionInput): Promise<GpuSession>;
   getSession(sessionId: string): Promise<GpuSession | null>;
   waitForSsh(session: GpuSession, timeoutMs?: number): Promise<GpuTarget>;

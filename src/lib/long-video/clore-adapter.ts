@@ -49,8 +49,10 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
   private readonly watchdogServerId: string | null;
   private readonly videoNegativePrompt: string;
   private readonly videoSeedBase: number;
+  private readonly beforeCreateRequest?: () => Promise<void> | void;
+  private readonly afterCreateRequestAttempt?: () => Promise<void> | void;
 
-  constructor(options: { gpu?: GpuProvider; libraryDir?: string; statePath?: string; activeOrderReader?: () => Promise<number>; watchdogServerId?: string | null; videoNegativePrompt?: string; videoSeedBase?: number } = {}) {
+  constructor(options: { gpu?: GpuProvider; libraryDir?: string; statePath?: string; activeOrderReader?: () => Promise<number>; watchdogServerId?: string | null; videoNegativePrompt?: string; videoSeedBase?: number; beforeCreateRequest?: () => Promise<void> | void; afterCreateRequestAttempt?: () => Promise<void> | void } = {}) {
     this.gpu = options.gpu ?? getGpuProvider("clore");
     this.libraryDir = options.libraryDir ?? (process.env.LOCAL_VIDEO_LIBRARY_DIR?.trim() || "D:\\AI-Video-Library");
     this.statePath = options.statePath ?? path.join(process.cwd(), ".secrets", "long-video-state.json");
@@ -59,6 +61,8 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     this.watchdogServerId = options.watchdogServerId === undefined ? (watchdog?.armed ? watchdog.serverId : null) : options.watchdogServerId;
     this.videoNegativePrompt = options.videoNegativePrompt?.trim() ?? "";
     this.videoSeedBase = options.videoSeedBase ?? 50902001;
+    this.beforeCreateRequest = options.beforeCreateRequest;
+    this.afterCreateRequestAttempt = options.afterCreateRequestAttempt;
   }
 
   async inspectProviderState() {
@@ -98,18 +102,37 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     if (this.contexts.size > 0) throw new Error("clore_adapter_session_already_bound");
     if (getCloreDeploymentHold().enabled && !input.authorization.releaseHold) throw new Error("clore_hold_requires_explicit_authorization");
     if (input.authorization.gpuProfile === "rtx5090" && (!input.authorization.batchId || !input.authorization.resolutionNonce)) throw new Error("clore_resolved_batch_authorization_missing");
-    if (input.authorization.gpuProfile === "rtx5090" && (
-      input.authorization.maxOrders !== 1 ||
-      input.authorization.maxActiveOrders !== 1 ||
-      input.authorization.maxPreSshAttempts !== 1 ||
-      input.authorization.orderType !== "on-demand" ||
-      input.authorization.noReplacementOrder !== true ||
-      input.authorization.maxHourlyUsd !== 0.65 ||
-      input.authorization.maxSpendUsd > 3 ||
-      input.authorization.walletDeltaCapUsd !== 3 ||
-      input.authorization.wallClockMinutes !== 300 ||
-      input.authorization.drainingAtMinutes !== 270
-    )) throw new Error("clore_final_5090_authorization_policy_mismatch");
+    if (input.authorization.gpuProfile === "rtx5090") {
+      const common =
+        input.authorization.maxOrders === 1 &&
+        input.authorization.maxActiveOrders === 1 &&
+        input.authorization.maxPreSshAttempts === 1 &&
+        input.authorization.orderType === "on-demand" &&
+        input.authorization.noReplacementOrder === true &&
+        input.authorization.maxHourlyUsd === 0.65;
+      const fullAcceptance =
+        input.authorization.executionPurpose === undefined &&
+        input.authorization.maxSpendUsd <= 3 &&
+        input.authorization.walletDeltaCapUsd === 3 &&
+        input.authorization.wallClockMinutes === 300 &&
+        input.authorization.drainingAtMinutes === 270;
+      const resilientResume =
+        input.authorization.executionPurpose === "final_video_resume_resilient" &&
+        input.authorization.maxSpendUsd === 1.25 &&
+        input.authorization.walletDeltaCapUsd === 1.25 &&
+        input.authorization.wallClockMinutes === 120 &&
+        input.authorization.drainingAtMinutes === 105 &&
+        input.authorization.maxSegments === 1 &&
+        input.authorization.maxCreateRequests === 3 &&
+        input.authorization.maxSuccessfulOrders === 1 &&
+        input.authorization.allowedSegmentIds?.length === 1 &&
+        input.authorization.allowedTaskIds?.length === 2 &&
+        input.authorization.allowedTaskIds[0] === input.projectId &&
+        input.authorization.allowedTaskIds[1] === input.authorization.allowedSegmentIds[0];
+      if (!common || (!fullAcceptance && !resilientResume)) {
+        throw new Error("clore_final_5090_authorization_policy_mismatch");
+      }
+    }
     if (getCloreDeploymentHold().enabled && input.authorization.gpuProfile === "rtx4090") setCloreDeploymentHold(false, `long_video:${input.projectId}`);
     const candidates = await this.gpu.listCandidates();
     const candidate = candidates.find((value) => value.id === input.candidate.serverId);
@@ -117,7 +140,7 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     const sessionId = `lv-${input.projectId.slice(0, 8)}-${randomUUID().slice(0, 8)}`;
     let created: GpuSession | null = null;
     try {
-      created = await this.gpu.createSession({ sessionId, candidate, sshPublicKey: "managed-by-clore-provider", bootstrapImage: FIXED_RUNTIME_DIGEST, dryRun: false, cloreProfile: "clore_key_with_password_fallback", resolvedBatchRelease: input.authorization.gpuProfile === "rtx5090" ? { batchId: input.authorization.batchId!, resolutionNonce: input.authorization.resolutionNonce!, gpuProfile: "rtx5090" } : undefined });
+      created = await this.gpu.createSession({ sessionId, candidate, sshPublicKey: "managed-by-clore-provider", bootstrapImage: FIXED_RUNTIME_DIGEST, dryRun: false, cloreProfile: "clore_key_with_password_fallback", resolvedBatchRelease: input.authorization.gpuProfile === "rtx5090" ? { batchId: input.authorization.batchId!, resolutionNonce: input.authorization.resolutionNonce!, gpuProfile: "rtx5090" } : undefined, beforeCreateRequest: this.beforeCreateRequest, afterCreateRequestAttempt: this.afterCreateRequestAttempt });
       if (!created.target && !created.id) throw new Error("clore_session_binding_invalid");
       const target = created.target ?? await this.gpu.waitForSsh(created, 10 * 60_000);
       this.contexts.set(sessionId, { gpu: this.gpu, gpuSession: created, target, candidate, projectId: input.projectId });

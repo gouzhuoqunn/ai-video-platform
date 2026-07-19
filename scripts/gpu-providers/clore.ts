@@ -1,18 +1,18 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { getCloreDeploymentHold } from "../clore/deployment-hold";
 import { loadCloreConfig } from "../clore/config";
 import { loadCloreExecutionConfig } from "../clore/execution-config";
 import { readLiveMarketplace, readLiveOrdersSummary, readWalletSummary } from "../clore/live";
-import { readActiveOrder } from "../clore/order-state";
+import { readActiveOrder, writeActiveOrder } from "../clore/order-state";
 import { cleanupOrderKnownHosts, orderKnownHostsPath } from "../clore/ssh-readiness-policy";
 import { findBootstrapImageCandidates } from "../clore/bootstrap-image-profile";
 import { buildCreateOrderBody, buildKeyOnlyCreateOrderBody, buildKeyWithPasswordFallbackCreateOrderBody, buildManualParityCreateOrderBody, createCloreOrder } from "../clore/order-execution";
 import { cancelCloreOrder } from "../clore/cancel-execution";
 import { assertWatchdogsReadyForCreate } from "../clore/watchdog-preflight";
 import { CLORE_LIGHT_BOOTSTRAP_IMAGE, CLORE_LIGHT_BOOTSTRAP_PROFILE, loadVerifiedCloreLightBootstrapImage } from "../clore/public-image";
-import { assertGpuTarget, FIXED_RUNTIME_DIGEST, sshCommand } from "./common";
+import { assertGpuTarget, FIXED_RUNTIME_DIGEST, sleep, sshCommand } from "./common";
 import type { CreateSessionInput, GpuCandidate, GpuProvider, GpuSession, GpuTarget } from "./types";
 import { clearManualParitySecrets, createManualParityState, updateManualParityState } from "../clore/manual-parity";
 import { ensureValidatedProjectSshKey } from "../clore/ssh-key-validation";
@@ -20,6 +20,19 @@ import { assertResolvedBatchRelease } from "../clore/deployment-resolution";
 
 const CLORE_ENV = path.join(process.cwd(), ".secrets", "clore.env");
 const TARGET_PATH = path.join(process.cwd(), ".secrets", "clore-ssh-target.json");
+const LAST_CREATE_EVIDENCE_PATH = path.join(process.cwd(), ".secrets", "clore-last-create-evidence.json");
+
+function writeLastCreateEvidence(value: unknown) {
+  const part = `${LAST_CREATE_EVIDENCE_PATH}.${process.pid}.part`;
+  writeFileSync(part, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  renameSync(part, LAST_CREATE_EVIDENCE_PATH);
+}
+
+export function readLastCloreCreateEvidence() {
+  return existsSync(LAST_CREATE_EVIDENCE_PATH)
+    ? JSON.parse(readFileSync(LAST_CREATE_EVIDENCE_PATH, "utf8")) as Record<string, unknown>
+    : null;
+}
 
 export type CloreSshAuthEvidence = {
   passwordAuthSucceeded: boolean;
@@ -56,6 +69,7 @@ function mapCandidate(candidate: ReturnType<typeof findBootstrapImageCandidates>
     containerDiskGb: candidate.diskGb ?? 0,
     volumeGb: 0,
     hourlyUsd: candidate.effectivePriceUsdPerHour,
+    allowedCurrencies: candidate.allowedCurrencies,
     availability: candidate.rentable ? "High" : "None",
     reliability: candidate.reliability,
     rating: candidate.rating,
@@ -77,9 +91,9 @@ export class CloreProvider implements GpuProvider {
     return { availableUsd: wallet.availableUsdBalance, supported: true };
   }
 
-  async listCandidates(): Promise<GpuCandidate[]> {
+  async listCandidates(options: { forceRefresh?: boolean } = {}): Promise<GpuCandidate[]> {
     const config = loadCloreConfig();
-    return findBootstrapImageCandidates(await readLiveMarketplace(config), config).map(mapCandidate);
+    return findBootstrapImageCandidates(await readLiveMarketplace(config, { forceRefresh: options.forceRefresh }), config).map(mapCandidate);
   }
 
   async createSession(input: CreateSessionInput): Promise<GpuSession> {
@@ -115,6 +129,7 @@ export class CloreProvider implements GpuProvider {
         ? buildKeyOnlyCreateOrderBody({ serverId: candidate.serverId, currency: config.rentalCurrency, sshPublicKey: key, requiredPriceForApi })
         : buildCreateOrderBody({ serverId: candidate.serverId, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, currency: config.rentalCurrency, sshPublicKey: key, maxPriceUsdPerHour: candidate.priceUsdPerHour ?? 0, requiredPriceForApi, bootstrapProfile: CLORE_LIGHT_BOOTSTRAP_PROFILE });
     let created;
+    const createStartedAt = new Date();
     try {
       created = await createCloreOrder({
         config,
@@ -145,9 +160,52 @@ export class CloreProvider implements GpuProvider {
         resolvedBatchRelease: Boolean(input.resolvedBatchRelease),
       });
     } catch (error) {
+      await sleep(2500);
+      const reconciledOrders = await readLiveOrdersSummary(config, { forceRefresh: true });
+      const matching = reconciledOrders.find((order) => {
+        if (!order.active || !order.orderId || order.serverId !== candidate.serverId) return false;
+        if (order.createdTimestamp === null) return true;
+        const timestampMs = order.createdTimestamp > 10_000_000_000 ? order.createdTimestamp : order.createdTimestamp * 1000;
+        return timestampMs >= createStartedAt.getTime() - 30_000 && timestampMs <= Date.now() + 30_000;
+      });
+      const failure = error && typeof error === "object" && "failure" in error
+        ? (error as { failure: unknown }).failure
+        : { message: error instanceof Error ? error.message.slice(0, 4000) : String(error).slice(0, 4000) };
+      if (matching?.orderId) {
+        writeActiveOrder({
+          order_id: matching.orderId,
+          server_id: candidate.serverId,
+          project_tag: "ai-video-platform-wan22",
+          created_at: createStartedAt.toISOString(),
+          status: "order_pending",
+          usd_per_hour: candidate.effectivePriceUsdPerHour ?? input.candidate.hourlyUsd ?? 0,
+          max_price_usd_per_hour: candidate.effectivePriceUsdPerHour ?? input.candidate.hourlyUsd ?? 0,
+          order_type: "on-demand",
+          open_ports: ["ssh/tcp"],
+          gpu_type: candidate.gpu,
+          gpu_profile: candidate.runtimeGpuProfile,
+          bootstrap_image: `${manifest.image}@${manifest.digest}`,
+        });
+        if (parity) updateManualParityState({ orderId: matching.orderId, passwordConfiguredInPayload: request.ssh_password === parity.sshPassword });
+        writeLastCreateEvidence({
+          requestStartedAt: createStartedAt.toISOString(), completedAt: new Date().toISOString(),
+          candidateId: candidate.serverId, outcome: "reconciled_order", orderId: matching.orderId, failure,
+        });
+        const recovered = await this.getSession(matching.orderId);
+        if (!recovered) throw new Error("clore_reconciled_session_state_missing");
+        return recovered;
+      }
       if (parity) clearManualParitySecrets();
+      writeLastCreateEvidence({
+        requestStartedAt: createStartedAt.toISOString(), completedAt: new Date().toISOString(),
+        candidateId: candidate.serverId, outcome: "failed_request", orderId: null, failure,
+      });
       throw error;
     }
+    writeLastCreateEvidence({
+      requestStartedAt: createStartedAt.toISOString(), completedAt: new Date().toISOString(),
+      candidateId: candidate.serverId, outcome: "successful_order", orderId: created.order_id, failure: null,
+    });
     if (parity) updateManualParityState({ orderId: created.order_id, passwordConfiguredInPayload: request.ssh_password === parity.sshPassword });
     const session = await this.getSession(created.order_id);
     if (!session) throw new Error("clore_session_state_missing_after_create");

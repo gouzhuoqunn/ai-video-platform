@@ -34,6 +34,10 @@ function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+function stringArray(value: unknown) {
+  return asArray(value).filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim());
+}
+
 function firstString(record: Record<string, unknown>, names: string[]) {
   for (const name of names) {
     const value = record[name];
@@ -364,7 +368,7 @@ export function normalizeCloreServer(raw: RawCloreServer, config: CloreConfig): 
   const priceUsdPerHour = price.value;
   const sixHourCostUsd = priceUsdPerHour === null ? null : priceUsdPerHour * config.assumedMinimumRentalHours;
   const projected = computeCloreProjectedCost(priceUsdPerHour, CLORE_DEFAULT_MAX_SESSION_HOURS);
-  const rawCurrency = price.originalCurrency ? [price.originalCurrency] : [];
+  const rawCurrency = stringArray(raw.allowed_coins ?? raw.allowed_currencies);
   const gpu = getGpuName(raw);
   const gpuNormalizedName = normalizeGpuName(gpu);
   const gpuMemory = getGpuMemory(raw, gpuNormalizedName, config);
@@ -452,6 +456,7 @@ function getRejectionReasons(candidate: Omit<CloreCandidate, "missingFields" | "
   if (candidate.downloadMbps === null || candidate.downloadMbps < config.minDownloadMbps) reasons.push("download bandwidth below minimum or missing");
   if (candidate.uploadMbps === null || candidate.uploadMbps < config.minUploadMbps) reasons.push("upload bandwidth below minimum or missing");
   if (candidate.priceUsdPerHour === null) reasons.push("missing USD hourly on-demand price");
+  if (candidate.allowedCurrencies.length > 0 && !candidate.allowedCurrencies.includes(config.rentalCurrency)) reasons.push("configured rental currency is not accepted by this server");
   if ((candidate.priceUsdPerHour ?? Number.POSITIVE_INFINITY) > config.maxGpuPricePerHour) reasons.push("price above maximum");
   if (config.excludedServerIds.includes(candidate.serverId)) reasons.push("server is temporarily excluded after a failed session");
   if (!candidate.supportsDocker) reasons.push("custom Docker image is not supported");
