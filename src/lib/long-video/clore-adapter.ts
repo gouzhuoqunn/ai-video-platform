@@ -43,6 +43,7 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
   readonly adapterName = "clore-long-video";
   private readonly gpu: GpuProvider;
   private readonly contexts = new Map<string, Context>();
+  private readonly restoreQualifications = new Map<string, Record<string, unknown>>();
   private readonly libraryDir: string;
   private readonly statePath: string;
   private readonly activeOrderReader?: () => Promise<number>;
@@ -314,7 +315,6 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
 
   private async restoreFamily(target: GpuTarget, family: string) {
     const bundle = await buildRestoreBundle(family, 7200);
-    bundle.parallelDownloads = 3;
     const local = path.join(os.tmpdir(), `long-video-restore-${randomUUID()}.json`);
     const jobId = `lv-restore-${randomUUID().slice(0, 12)}`;
     const remoteDir = `/workspace/jobs/${jobId}`;
@@ -333,7 +333,61 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     } finally { rmSync(local, { force: true }); sshCommand(target, `rm -f ${remoteBundle}`, 30_000); }
   }
 
+  async probeWanRestoreThroughput(session: LongVideoProviderSession, budget: { cumulativeWalletDeltaUsd?: number; elapsedSeconds?: number } = {}) {
+    const { target, candidate, gpu, gpuSession } = await this.context(session);
+    const bundle = await buildRestoreBundle("wan22-remix-14b-i2v-fp8", 900);
+    const billing = await gpu.getBilling(gpuSession).catch(() => null);
+    bundle.qualificationGate.hourlyUsd = candidate.hourlyUsd;
+    bundle.qualificationGate.elapsedSeconds = budget.elapsedSeconds ?? billing?.elapsedSeconds ?? 0;
+    bundle.qualificationGate.walletSpentUsd = Math.max(
+      budget.cumulativeWalletDeltaUsd ?? 0,
+      billing?.estimatedSpendUsd ?? 0,
+    );
+    const local = path.join(os.tmpdir(), `long-video-restore-probe-${randomUUID()}.json`);
+    const jobId = `lv-probe-${randomUUID().slice(0, 12)}`;
+    const remoteDir = `/workspace/jobs/${jobId}`;
+    const remoteBundle = `${remoteDir}/bundle.json`;
+    writeFileSync(local, `${JSON.stringify(bundle)}\n`, { encoding: "utf8", mode: 0o600 });
+    try {
+      requireOk(sshCommand(target, `mkdir -p /workspace/tools /workspace/logs ${remoteDir}`, 30_000), "clore_restore_probe_dirs_failed");
+      await installDetachedWorker(target);
+      requireOk(scpFile(target, path.join(process.cwd(), "scripts", "clore", "restore-production-r2.py"), "/workspace/tools/restore-production-r2.py", 2 * 60_000), "clore_restore_probe_tool_upload_failed");
+      requireOk(scpFile(target, local, remoteBundle, 2 * 60_000), "clore_restore_probe_bundle_upload_failed");
+      const launched = await launchDetachedJob(target, { jobId, mode: "probe", bundlePath: remoteBundle });
+      if (launched.returnedMs > 15_000) throw new Error("clore_restore_probe_launch_timeout");
+      const completed = await waitForDetachedJob(target, jobId, 120_000);
+      if (!completed.reachable || completed.state?.phase !== "completed") throw new Error("clore_restore_probe_failed");
+      const result = completed.result as { probe?: Record<string, unknown> } | null;
+      if (!result?.probe || result.probe.source !== "presigned_readonly_r2_model_objects") {
+        throw new Error("clore_restore_probe_result_invalid");
+      }
+      const evidencePath = path.join(process.cwd(), ".secrets", "restore-throughput-probe-evidence.json");
+      const evidencePart = `${evidencePath}.${process.pid}.part`;
+      writeFileSync(evidencePart, `${JSON.stringify({
+        schemaVersion: 1,
+        recordedAt: new Date().toISOString(),
+        candidateId: candidate.id,
+        signedUrlsPersisted: false,
+        credentialsPersisted: false,
+        probe: result.probe,
+      }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      renameSync(evidencePart, evidencePath);
+      const qualification = result.probe.qualification as { passed?: boolean; reason?: string } | undefined;
+      if (qualification?.passed !== true) {
+        throw new Error(`clore_restore_probe_rejected:${String(qualification?.reason ?? "unknown")}`);
+      }
+      this.restoreQualifications.set(session.sessionId, result.probe);
+      return result.probe;
+    } finally {
+      rmSync(local, { force: true });
+      sshCommand(target, `rm -f ${remoteBundle}`, 30_000);
+    }
+  }
+
   async restoreWan(session: LongVideoProviderSession) {
+    if (session.gpuProfile === "rtx5090" && !this.restoreQualifications.has(session.sessionId)) {
+      throw new Error("clore_rtx5090_restore_requires_actual_source_qualification");
+    }
     const { target } = await this.context(session);
     return this.restoreFamily(target, "wan22-remix-14b-i2v-fp8");
   }
@@ -402,6 +456,7 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
       await sleep(5_000);
     }
     if (confirmations.filter((value) => value === 0).length < 2) throw new Error("clore_zero_resource_confirmation_failed");
+    this.restoreQualifications.delete(session.sessionId);
     this.contexts.delete(session.sessionId);
     void billing;
   }

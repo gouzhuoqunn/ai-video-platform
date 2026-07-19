@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "stage": "4J.7",
+  "sanitized": true,
+  "hardcodedServerIds": false,
+  "restoreBytes": 35572266487,
+  "compatibilityFirst": true,
+  "rankingOrder": [
+    "historical_actual_source_restore_or_probe",
+    "advertised_network_sufficiency",
+    "reliability",
+    "advertised_disk_speed",
+    "hourly_price"
+  ],
+  "advertisedNetworkEfficiencyFactor": 0.55,
+  "rejectClearlyInadequateAdvertisedBandwidthWhenPresent": true,
+  "persistedEvidenceFields": [
+    "candidate_id",
+    "compatibility",
+    "rejection_reasons",
+    "historical_probe_or_restore_tier",
+    "download_mbps",
+    "upload_mbps",
+    "advertised_restore_eta_seconds",
+    "reliability",
+    "disk_speed_mbps",
+    "hourly_usd"
+  ],
+  "excludedEvidenceFields": [
+    "raw_provider_payload",
+    "presigned_url",
+    "credential",
+    "ssh_endpoint"
+  ]
+}

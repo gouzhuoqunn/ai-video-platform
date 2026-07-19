@@ -53,6 +53,7 @@ export type CloreCandidate = {
   diskGb: number | null;
   downloadMbps: number | null;
   uploadMbps: number | null;
+  diskSpeedMbps: number | null;
   reliability: number | null;
   rating: number | null;
   ratingCount: number | null;

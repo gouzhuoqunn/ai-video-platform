@@ -360,6 +360,7 @@ export function normalizeCloreServer(raw: RawCloreServer, config: CloreConfig): 
   const price = getOnDemandUsdPrice(raw);
   const specs = nestedRecord(raw, ["specs"]) ?? {};
   const net = nestedRecord(specs, ["net"]) ?? {};
+  const disk = nestedRecord(specs, ["disk"]) ?? {};
   const rating = nestedRecord(raw, ["rating"]) ?? {};
   const country = (firstString(raw, ["country", "country_code", "region"]) ?? firstString(net, ["cc"]))?.toUpperCase() ?? null;
   const hasOnDemandPrice = price.value !== null;
@@ -395,6 +396,10 @@ export function normalizeCloreServer(raw: RawCloreServer, config: CloreConfig): 
       firstNumber(raw, ["upload_mbps", "ul_mbps", "net_up_mbps", "inet_up", "net_up"]) ??
       firstNumber(specs, ["upload_mbps", "net_up", "inet_up"]) ??
       firstNumber(net, ["up"]),
+    diskSpeedMbps:
+      firstNumber(raw, ["disk_speed_mbps", "disk_speed", "disk_benchmark_mbps", "disk_read_mbps"]) ??
+      firstNumber(specs, ["disk_speed_mbps", "disk_speed", "disk_benchmark_mbps", "disk_read_mbps"]) ??
+      firstNumber(disk, ["read_mbps", "write_mbps", "speed_mbps", "read", "write"]),
     reliability: firstNumber(raw, ["reliability", "online_reliability"]),
     rating: firstNumber(raw, ["rating", "avg_rating", "rating_avg"]) ?? firstNumber(rating, ["avg", "average", "rating"]),
     ratingCount: firstNumber(raw, ["rating_count", "ratings", "rating_samples"]) ?? firstNumber(rating, ["cnt", "count", "ratings"]),
@@ -492,6 +497,7 @@ export function summarizeCandidate(candidate: CloreCandidate) {
     disk_gb: candidate.diskGb,
     download_mbps: candidate.downloadMbps,
     upload_mbps: candidate.uploadMbps,
+    disk_speed_mbps: candidate.diskSpeedMbps,
     reliability: candidate.reliability,
     rating: candidate.rating,
     rating_count: candidate.ratingCount,

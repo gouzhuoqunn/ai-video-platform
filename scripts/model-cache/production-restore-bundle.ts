@@ -7,7 +7,7 @@ export async function buildRestoreBundle(familyId: string, expiresSeconds = 7200
   const sign = (key: string) => createPresignedGetUrl({ creds, key, expiresSeconds });
   const sharedFiles = manifest.files.filter((file) => file.shared);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     familyId,
     expiresSeconds,
     currentUrl: sign(family.currentKey),
@@ -15,7 +15,33 @@ export async function buildRestoreBundle(familyId: string, expiresSeconds = 7200
     expectedManifestKey: current.manifestKey,
     manifestUrl: sign(current.manifestKey),
     objectUrls: Object.fromEntries(manifest.files.map((file) => [file.objectKey, sign(file.objectKey)])),
-    parallelDownloads: family.parallelDownloads,
+    parallelDownloads: Math.max(1, Math.min(3, family.parallelDownloads)),
+    multistream: {
+      enabled: true,
+      streamsPerLargeObject: 8,
+      minimumStreamsPerObject: 4,
+      maximumStreamsPerObject: 12,
+      maximumTotalStreams: 12,
+      largeObjectThresholdBytes: 1024 ** 3,
+      chunkDirectoryName: ".restore-chunks",
+    },
+    throughputProbe: {
+      objectCount: 2,
+      totalBytes: 384 * 1024 ** 2,
+      streamCount: 8,
+      deadlineSeconds: 90,
+      minimumObjectBytes: 1024 ** 3,
+      resultPath: `/workspace/logs/restore-probe-${familyId}.json`,
+    },
+    qualificationGate: {
+      hourlyUsd: null as number | null,
+      walletSpentUsd: 0,
+      walletCapUsd: 1.25,
+      elapsedSeconds: 0,
+      fixedAllowanceSeconds: 55 * 60,
+      wallClockCapSeconds: 240 * 60,
+      drainingAtSeconds: 220 * 60,
+    },
     destinationRoot: "/workspace/models",
     progressPath: `/workspace/logs/restore-${familyId}.json`,
     restoreBytes: family.restoreBytes,

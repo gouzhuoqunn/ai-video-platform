@@ -14,3 +14,12 @@
 12. 如果 terminal marker 已存在但本地读取 JSON 中断，保留 job 目录。用同一个 durable attempt UUID 重入时只读取原结果，不能创建新尝试或再次提交推理。
 13. 空状态响应、非零远程退出、结果读取中断和有界超时是四种不同错误，不能都折叠为 `invalid_runner_json`。
 14. 恢复循环从 `nextSegmentIndex` 开始；已接受 segment 直接跳过。`generating` segment 若已有 `running` attempt，必须复用该 attempt ID。
+
+## Stage 4J.7 restore-throughput recovery
+
+15. A slow but error-free restore must not be relabeled as a Wan, Blackwell, R2-integrity, SSH, or Runtime failure. Stage 4J.6 is classified exactly as `restore_throughput_incompatible_with_previous_session_deadline`.
+16. Run the bounded actual presigned read-only R2 model-source probe before restore. A generic public speed test is not evidence for the model route.
+17. If Range/206 validation or the dynamic time/cost gate fails before restore, cancel that candidate. One different qualification candidate may be tried only when a new explicit paid authorization permits it.
+18. After any production restore starts or any inference is submitted, do not create a replacement order.
+19. Resume chunk `.part` files only at their exact non-overlapping range boundaries. Publish a restored object only after exact size and full SHA-256 pass; delete corrupt assembled/chunk state.
+20. Preserve both accepted images, accepted segment 0, its MP4 and last-frame hashes, and segment-1 attempts `0`. Throughput recovery must never regenerate those assets.

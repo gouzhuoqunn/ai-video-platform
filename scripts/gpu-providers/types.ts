@@ -39,6 +39,7 @@ export type GpuCandidate = {
   rating?: number | null;
   downloadMbps?: number | null;
   uploadMbps?: number | null;
+  diskSpeedMbps?: number | null;
   interruptible: false;
 };
 

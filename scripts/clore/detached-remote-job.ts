@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { GpuTarget } from "../gpu-providers/types";
 import { sleep, sshCommand } from "../gpu-providers/common";
@@ -25,17 +24,17 @@ export async function installDetachedWorker(target: GpuTarget) {
   const source = path.join(process.cwd(), "scripts", "clore", "detached-job-worker.py");
   return await uploadExecutableWithRepair(targetWorkspaceIo(target), source, "/workspace/tools/detached-job-worker.py", 2);
 }
-export function buildDetachedLaunchCommand(input: { jobId: string; mode: "canary" | "restore"; bundlePath?: string }) {
+export function buildDetachedLaunchCommand(input: { jobId: string; mode: "canary" | "restore" | "probe"; bundlePath?: string }) {
   const job = safeId(input.jobId); const dir = remoteJobDir(job);
   const initial = Buffer.from(JSON.stringify({ job_id: job, pid: null, phase: "launching", current_object: null,
     completed_bytes: 0, total_bytes: input.mode === "canary" ? 90 : 0, last_heartbeat_at: Date.now() / 1000,
     started_at: Date.now() / 1000, completed_at: null, exit_code: null, sanitized_error: null })).toString("base64");
-  const bundle = input.mode === "restore" ? ` --bundle ${input.bundlePath ?? `${dir}/bundle.json`}` : "";
+  const bundle = input.mode === "restore" || input.mode === "probe" ? ` --bundle ${input.bundlePath ?? `${dir}/bundle.json`}` : "";
   return `set -e; mkdir -p ${dir}; echo ${initial} | base64 -d >${dir}/state.json.part; mv ${dir}/state.json.part ${dir}/state.json; ` +
     `nohup setsid -f python3 /workspace/tools/detached-job-worker.py --job-dir ${dir} --job-id ${job} --mode ${input.mode}${bundle} ` +
     `</dev/null >${dir}/stdout.log 2>${dir}/stderr.log; printf '{"launched":true,"job_id":"${job}"}\\n'`;
 }
-export async function launchDetachedJob(target: GpuTarget, input: { jobId: string; mode: "canary" | "restore"; bundlePath?: string }, timeoutMs = 15_000) {
+export async function launchDetachedJob(target: GpuTarget, input: { jobId: string; mode: "canary" | "restore" | "probe"; bundlePath?: string }, timeoutMs = 15_000) {
   const command = buildDetachedLaunchCommand(input); const started = Date.now();
   return await new Promise<{ returnedMs: number; transportTimedOut: boolean; stdout: string }>((resolve, reject) => {
     const child = spawn("ssh", sshArgs(target, command), { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });

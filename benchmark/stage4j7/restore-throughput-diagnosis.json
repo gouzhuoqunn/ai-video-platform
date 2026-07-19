@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "stage": "4J.7",
+  "classification": "restore_throughput_incompatible_with_previous_session_deadline",
+  "providerIdentifiersRedacted": true,
+  "signedUrlsPersisted": false,
+  "sourcePath": {
+    "endpointClass": "authenticated_cloudflare_r2_s3_compatible",
+    "delivery": "aws_sigv4_presigned_readonly_get",
+    "client": "python_urllib_request",
+    "previousWholeObjectParallelism": 3,
+    "previousConnectionsPerObject": 1,
+    "previousRangeUse": "monolithic_part_resume_only",
+    "previousConnectionPool": false,
+    "connectTimeoutSeconds": 30,
+    "stallTimeoutSeconds": 120,
+    "maximumAttemptsPerObject": 5
+  },
+  "wanObjects": [
+    {
+      "role": "high_diffusion_model",
+      "bytes": 14291272136
+    },
+    {
+      "role": "low_diffusion_model",
+      "bytes": 14291272136
+    },
+    {
+      "role": "shared_umt5",
+      "bytes": 6735906897
+    },
+    {
+      "role": "vae",
+      "bytes": 253815318
+    }
+  ],
+  "totalBytes": 35572266487,
+  "lastObservedCompletedBytes": 4336910336,
+  "observedSeconds": 770,
+  "observedAverageBytesPerSecond": 5632351,
+  "errorBeforeCancellation": null,
+  "excludedFailureClasses": [
+    "wan_model_failure",
+    "blackwell_gate_failure",
+    "r2_integrity_failure",
+    "ssh_failure",
+    "runtime_failure"
+  ]
+}

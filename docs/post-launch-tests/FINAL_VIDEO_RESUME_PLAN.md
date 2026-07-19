@@ -63,3 +63,19 @@ The runner must recover an already-completed remote result by the same determini
 - Hard proposed wallet-delta cap: `$1.25`
 
 These values are a proposal, not an authorization. Current provider holds remain enabled and no automatic rental action may consume this plan.
+
+## Stage 4J.7 throughput-qualified future guard
+
+This section supersedes the old 120/105-minute proposal above.
+
+- GPU/order: RTX 5090, Clore On-Demand, at most one active order.
+- Maximum hourly price: `$0.65/hour`.
+- Combined wallet-delta cap across qualification orders: `$1.25`.
+- Wall clock: `240 minutes`; begin draining at `220 minutes`.
+- At most one production order, at most two qualification orders, and at most two sequential orders.
+- The first order must run the bounded actual presigned read-only R2 model-object probe before restore.
+- Continue on that same order only when Range support and the dynamic time/cost gate pass.
+- If the first candidate fails before restore starts, it may be canceled and at most one different candidate may be qualified.
+- Once restore or inference starts, no replacement order is permitted.
+
+Both provider holds stay enabled, `paid_execution_authorized=false`, and no automatic rental action may consume this plan.

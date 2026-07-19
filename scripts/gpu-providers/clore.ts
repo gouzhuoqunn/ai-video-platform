@@ -17,10 +17,13 @@ import type { CreateSessionInput, GpuCandidate, GpuProvider, GpuSession, GpuTarg
 import { clearManualParitySecrets, createManualParityState, updateManualParityState } from "../clore/manual-parity";
 import { ensureValidatedProjectSshKey } from "../clore/ssh-key-validation";
 import { assertResolvedBatchRelease } from "../clore/deployment-resolution";
+import { rankRestoreCandidates, type RestoreCandidateHistory } from "../model-cache/restore-throughput";
 
 const CLORE_ENV = path.join(process.cwd(), ".secrets", "clore.env");
 const TARGET_PATH = path.join(process.cwd(), ".secrets", "clore-ssh-target.json");
 const LAST_CREATE_EVIDENCE_PATH = path.join(process.cwd(), ".secrets", "clore-last-create-evidence.json");
+const RESTORE_HISTORY_PATH = path.join(process.cwd(), ".secrets", "restore-candidate-history.json");
+const RESTORE_SCORING_PATH = path.join(process.cwd(), ".secrets", "restore-candidate-scoring.json");
 
 function writeLastCreateEvidence(value: unknown) {
   const part = `${LAST_CREATE_EVIDENCE_PATH}.${process.pid}.part`;
@@ -75,8 +78,64 @@ function mapCandidate(candidate: ReturnType<typeof findBootstrapImageCandidates>
     rating: candidate.rating,
     downloadMbps: candidate.downloadMbps,
     uploadMbps: candidate.uploadMbps,
+    diskSpeedMbps: candidate.diskSpeedMbps,
     interruptible: false,
   };
+}
+
+function readRestoreCandidateHistory(): RestoreCandidateHistory[] {
+  if (!existsSync(RESTORE_HISTORY_PATH)) return [];
+  try {
+    const value = JSON.parse(readFileSync(RESTORE_HISTORY_PATH, "utf8")) as { candidates?: RestoreCandidateHistory[] };
+    return Array.isArray(value.candidates)
+      ? value.candidates.filter((entry) => typeof entry.candidateId === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export function rankWanRestoreGpuCandidates(candidates: GpuCandidate[], persistEvidence = false) {
+  const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  const ranked = rankRestoreCandidates({
+    candidates: candidates.map((candidate) => ({
+      id: candidate.id,
+      compatible:
+        /RTX\s*5090/i.test(candidate.gpuType) &&
+        candidate.gpuCount === 1 &&
+        candidate.minimumRamGb >= 32 &&
+        candidate.containerDiskGb >= 200 &&
+        candidate.interruptible === false &&
+        candidate.hourlyUsd !== null &&
+        candidate.hourlyUsd <= 0.65,
+      downloadMbps: candidate.downloadMbps ?? null,
+      uploadMbps: candidate.uploadMbps ?? null,
+      reliability: candidate.reliability ?? null,
+      diskSpeedMbps: candidate.diskSpeedMbps ?? null,
+      hourlyUsd: candidate.hourlyUsd,
+    })),
+    history: readRestoreCandidateHistory(),
+    restoreBytes: 35_572_266_487,
+    fixedAllowanceSeconds: 55 * 60,
+    drainingAtSeconds: 220 * 60,
+  });
+  if (persistEvidence) {
+    const part = `${RESTORE_SCORING_PATH}.${process.pid}.part`;
+    writeFileSync(part, `${JSON.stringify({
+      schemaVersion: 1,
+      recordedAt: new Date().toISOString(),
+      sanitized: true,
+      signedUrlsPersisted: false,
+      candidates: ranked.map((candidate) => ({
+        candidateId: candidate.id,
+        rejected: candidate.rejected,
+        rejectionReasons: candidate.rejectionReasons,
+        evidence: candidate.scoreEvidence,
+      })),
+    }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    renameSync(part, RESTORE_SCORING_PATH);
+  }
+  return ranked.filter((candidate) => !candidate.rejected).map((candidate) => byId.get(candidate.id)!);
 }
 
 export class CloreProvider implements GpuProvider {
@@ -93,7 +152,13 @@ export class CloreProvider implements GpuProvider {
 
   async listCandidates(options: { forceRefresh?: boolean } = {}): Promise<GpuCandidate[]> {
     const config = loadCloreConfig();
-    return findBootstrapImageCandidates(await readLiveMarketplace(config, { forceRefresh: options.forceRefresh }), config).map(mapCandidate);
+    const candidates = findBootstrapImageCandidates(
+      await readLiveMarketplace(config, { forceRefresh: options.forceRefresh }),
+      config,
+    ).map(mapCandidate);
+    return config.targetGpu === "NVIDIA GeForce RTX 5090"
+      ? rankWanRestoreGpuCandidates(candidates, true)
+      : candidates;
   }
 
   async createSession(input: CreateSessionInput): Promise<GpuSession> {

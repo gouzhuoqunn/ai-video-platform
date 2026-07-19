@@ -129,6 +129,8 @@
     "stage4j4:resume-plan:test": "tsx scripts/stage4j4-video-resume-plan-tests.ts",
     "stage4j6:plan": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/stage4j6-final-video-resume.ts --plan",
     "stage4j6:execute": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/stage4j6-final-video-resume.ts --execute",
+    "stage4j7:plan": "tsx scripts/stage4j7-final-video-retry-plan.ts",
+    "stage4j7:restore:test": "tsx scripts/stage4j7-throughput-restore-tests.ts",
     "clore:support:acknowledge": "tsx scripts/clore/support-acknowledgement.ts",
     "clore:deployment:operator-retry": "tsx scripts/clore/operator-retry-override.ts",
     "generation:stage3o:prepare": "tsx scripts/stage3o-batch.ts",

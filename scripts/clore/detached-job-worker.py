@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Detached canary/restore worker with atomic state and heartbeat evidence."""
+"""Detached canary/restore/probe worker with atomic state and heartbeat evidence."""
 from __future__ import annotations
 import argparse, json, os, pathlib, re, signal, subprocess, sys, time
 
@@ -12,14 +12,16 @@ def atomic(path: pathlib.Path, value: dict) -> None:
 
 def clean(value: object) -> str:
     text = str(value)
-    text = re.sub(r"https://[^\s\"']+\?[^\s\"']+", "<redacted-url>", text)
+    text = re.sub(r"https://[^\s\"'<>]+", "<redacted-url>", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(authorization|token|secret|password|ssh_key|access_key|signature)\b\s*[:=]\s*[^\s,;]+",
+                  r"\1=<redacted>", text, flags=re.IGNORECASE)
     return text[-2000:]
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-dir", required=True)
     parser.add_argument("--job-id", required=True)
-    parser.add_argument("--mode", choices=("canary", "restore"), required=True)
+    parser.add_argument("--mode", choices=("canary", "restore", "probe"), required=True)
     parser.add_argument("--bundle")
     parser.add_argument("--restore-script", default="/workspace/tools/restore-production-r2.py")
     args = parser.parse_args()
@@ -60,27 +62,43 @@ def main() -> int:
         else:
             if not args.bundle: raise ValueError("restore_bundle_missing")
             bundle = json.loads(pathlib.Path(args.bundle).read_text(encoding="utf-8"))
-            state["total_bytes"] = int(bundle["restoreBytes"])
-            progress_path = pathlib.Path(bundle["progressPath"])
-            child = subprocess.Popen([sys.executable, args.restore_script, "--bundle", args.bundle],
-                                     stdin=subprocess.DEVNULL)
+            if args.mode == "probe":
+                state["total_bytes"] = int(bundle["throughputProbe"]["totalBytes"])
+                progress_path = pathlib.Path(bundle["throughputProbe"]["resultPath"])
+                command = [sys.executable, args.restore_script, "--bundle", args.bundle, "--probe"]
+            else:
+                state["total_bytes"] = int(bundle["restoreBytes"])
+                progress_path = pathlib.Path(bundle["progressPath"])
+                command = [sys.executable, args.restore_script, "--bundle", args.bundle]
+            child = subprocess.Popen(command, stdin=subprocess.DEVNULL)
             while child.poll() is None:
                 if stop_requested:
                     child.terminate()
                     raise InterruptedError("restore_canceled")
                 if progress_path.exists():
                     progress = json.loads(progress_path.read_text(encoding="utf-8"))
-                    files = progress.get("files", {})
-                    state["completed_bytes"] = sum(int(item.get("completedBytes", 0)) for item in files.values())
-                    active = [name for name, item in files.items() if item.get("status") != "verified"]
-                    state["current_object"] = active[0] if active else None
+                    if args.mode == "probe":
+                        state["completed_bytes"] = int(progress.get("receivedBytes", 0))
+                        state["current_object"] = "readonly-r2-throughput-probe"
+                    else:
+                        files = progress.get("files", {})
+                        state["completed_bytes"] = int(progress.get("completedBytes", 0))
+                        active = [name for name, item in files.items() if item.get("status") != "verified"]
+                        state["current_object"] = active[0] if active else None
                 update()
                 time.sleep(10)
             if child.returncode != 0:
                 raise RuntimeError(f"restore_exit_{child.returncode}")
-            state["completed_bytes"] = state["total_bytes"]
+            if args.mode != "probe":
+                state["completed_bytes"] = state["total_bytes"]
+            else:
+                probe = json.loads(progress_path.read_text(encoding="utf-8"))
+                state["completed_bytes"] = int(probe.get("receivedBytes", 0))
         state.update(phase="completed", completed_at=time.time(), exit_code=0)
-        atomic(result_path, {"job_id": args.job_id, "ok": True, "completed_at": state["completed_at"]})
+        result = {"job_id": args.job_id, "ok": True, "completed_at": state["completed_at"]}
+        if args.mode == "probe":
+            result["probe"] = json.loads(pathlib.Path(bundle["throughputProbe"]["resultPath"]).read_text(encoding="utf-8"))
+        atomic(result_path, result)
         update()
         return 0
     except InterruptedError as error:

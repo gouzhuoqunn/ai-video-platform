@@ -92,3 +92,15 @@ Result: **non-billable layout/runner correction complete; one paid segment remai
 - `FINAL_VIDEO_RESUME_PLAN.md` is plan-only: zero image jobs, no UltraReal, one Wan restore, one segment-1 inference, immediate cancel, local 720P merge and 1080P derivation. It proposes 120 minutes, draining at 105, expected `$0.35–$0.80`, hard wallet-delta cap `$1.25`, and `paid_execution_authorized=false`.
 - Browser acceptance passed at 1366x768 and 1920x1080 with sidebar width 320px, preview heights about 323px/454px, eight columns, no horizontal overflow, `资费情况`, segment strip, no hydration error, and no automatic provider action.
 - Daily-use closure remains incomplete only because segment 1, the tail-frame chain, 720P master, and 1080P final do not yet exist. `production_ready=false`.
+
+## Stage 4J.6 failure classification and Stage 4J.7 non-billable recovery
+
+Date: 2026-07-19
+
+Stage 4J.6 created one successful RTX 5090 order after resilient create handling, passed SSH, Blackwell, and Runtime readiness, and started one Wan restore. It submitted no inference. The restore moved 4,336,910,336 of 35,572,266,487 bytes in 770 seconds at an observed 5,632,351 bytes/second. There was no restore error before bounded cancellation. The exact classification is `restore_throughput_incompatible_with_previous_session_deadline`, not a Wan, Blackwell, R2-integrity, SSH, or Runtime failure.
+
+Stage 4J.7 was strictly non-billable: no authorization, provider create/cancel, hold release, real SSH, model download, or inference occurred. It added an actual-model-source Range probe, throughput-aware candidate ranking, per-large-object parallel ranged restore with resumable chunks and full integrity publication, and a dynamic completion/spend gate.
+
+The accepted image hashes remain `c79c99476486fdcd83dbdc0cb7e90e2961ebdda85fe556a1c1a10be2558e6078` and `d3b12a75c5b30086f2dec902d4d9e7e38f8418a8436c64cbca97d765623b32ac`. Accepted segment-0 MP4 remains `4d72d09d12f2bf7a40e6ab49f29cc963e002bcab3d3ec2046126aef2307758d9`; its last frame remains `6260f7149b352bb4f337d8ce9a63f16f169e28c61e11052590e653e342cfb77a`. Segment 0 has one attempt and segment 1 has zero attempts.
+
+The future proposal is RTX 5090 On-Demand, `$0.65/hour` maximum, one active order, one production order, at most two pre-restore qualification orders, at most two sequential orders, combined wallet delta at most `$1.25`, 240-minute wall cap, and draining at 220 minutes. A second candidate is permitted only if the first actual-source probe fails before restore; no replacement is allowed after restore or inference. `paid_execution_authorized=false`, `provider_mutations=0`, `daily_use_ready=false`, and `production_ready=false`.
