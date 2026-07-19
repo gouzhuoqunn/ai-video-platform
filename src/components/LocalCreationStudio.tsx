@@ -780,7 +780,12 @@ export function LocalCreationStudio() {
                 <p className="font-semibold">{mode === "image" ? (selectedImage?.sessionId ?? pendingImage?.sessionId ?? "首张FLUX图片") : selectedVideoKind === "long" && selectedLongVideo ? selectedLongVideo.title : showingPoolVideo && poolVideoTask ? safePromptPreview(poolVideoTask.prompt) : selectedJob ? safePromptPreview(selectedJob.prompt) : "选择任务后会在这里显示"}</p>
                 <p className="text-stone-500">{mode === "image" ? (selectedImage ? "图片已完成并保存到本地" : "图片任务等待受控Clore调度") : selectedVideoKind === "long" && selectedLongVideo ? `${selectedLongVideo.segments.filter((segment) => segment.status === "accepted").length}/${selectedLongVideo.totalSegments} 段已完成` : showingPoolVideo ? "任务池视频已完成并保存到本地" : selectedJob ? `${videoJobStatusLabels[selectedJob.status]} · ${etaText(selectedJob, jobs)}` : "未生成任务需要确认或立即生成后才会进入队列"}</p>
               </div>
-              <span className="rounded-md border border-stone-200 bg-white px-3 py-2 text-xs text-stone-600">短期签名播放 · 本地结果优先</span>
+              <div className="flex items-center gap-2">
+                {selectedVideoKind === "long" && selectedLongVideo?.finalVideoRef ? (
+                  <a className="rounded-md border border-emerald-200 bg-white px-3 py-2 text-xs font-semibold text-emerald-800" data-testid="long-video-master-link" href={longVideoPublicMediaUrl(selectedLongVideo.id, "master")}>720P 母版</a>
+                ) : null}
+                <span className="rounded-md border border-stone-200 bg-white px-3 py-2 text-xs text-stone-600">短期签名播放 · 本地结果优先</span>
+              </div>
             </div>
           </div>
 

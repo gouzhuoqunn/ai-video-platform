@@ -146,6 +146,45 @@ def test_resume_and_assembly():
     assert_true(not any(value.startswith("bytes=0-") for value in requests if value), "completed_first_chunk_not_requested")
 
 
+def test_probe_bytes_feed_restore_without_redownload():
+    payload = bytes((index * 19) % 241 for index in range(2 * 1024 * 1024 + 17))
+    with tempfile.TemporaryDirectory() as raw:
+        root = pathlib.Path(raw)
+        file = fixture_file(payload)
+        ranges = restore.exact_ranges(len(payload), 8)
+        start, full_end = ranges[0]
+        sample_end = start + (full_end - start + 1) // 2 - 1
+        target = root / file["path"]
+        chunk_dir = target.parent / ".restore-chunks" / hashlib.sha256(file["objectKey"].encode("utf-8")).hexdigest()[:24]
+        chunk_path = chunk_dir / f"000-{start}-{full_end}.part"
+        opener = FakeOpener(payload, True)
+        original = restore.urllib.request.urlopen
+        restore.urllib.request.urlopen = opener
+        try:
+            probe = restore.probe_stream(
+                "https://redacted.invalid/object", start, sample_end,
+                restore.time.monotonic() + 60, chunk_path)
+            assert_true(probe["retainedBytes"] > 0, "probe_bytes_retained")
+            probe_request_count = len(opener.requests)
+            progress = restore.Progress(root / "progress.json", "fixture")
+            progress.set_total(len(payload))
+            result = restore.restore_file(file, "https://redacted.invalid/object", root, progress, {
+                "enabled": True,
+                "streamsPerLargeObject": 8,
+                "minimumStreamsPerObject": 4,
+                "maximumStreamsPerObject": 12,
+                "maximumTotalStreams": 12,
+                "largeObjectThresholdBytes": 1,
+                "chunkDirectoryName": ".restore-chunks",
+            }, threading.Semaphore(12))
+            restore_requests = opener.requests[probe_request_count:]
+            assert_true(result["reusedBytes"] == probe["retainedBytes"], "probe_bytes_counted_as_restore_reuse")
+            assert_true(not any(value == f"bytes={start}-{full_end}" for value in restore_requests), "probe_range_not_redownloaded")
+            assert_true(target.read_bytes() == payload, "probe_seeded_restore_matches_source")
+        finally:
+            restore.urllib.request.urlopen = original
+
+
 def test_range_unsupported_fallback():
     payload = bytes((index * 13) % 239 for index in range(1024 * 1024 + 7))
     result, requests = run_restore_fixture(payload, False)
@@ -198,6 +237,7 @@ def test_log_redaction():
 if __name__ == "__main__":
     test_exact_ranges()
     test_resume_and_assembly()
+    test_probe_bytes_feed_restore_without_redownload()
     test_range_unsupported_fallback()
     test_sha_failure_cleanup()
     test_log_redaction()

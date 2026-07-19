@@ -98,6 +98,8 @@ def main() -> int:
         result = {"job_id": args.job_id, "ok": True, "completed_at": state["completed_at"]}
         if args.mode == "probe":
             result["probe"] = json.loads(pathlib.Path(bundle["throughputProbe"]["resultPath"]).read_text(encoding="utf-8"))
+        elif args.mode == "restore":
+            result["restore"] = json.loads(pathlib.Path(bundle["progressPath"]).read_text(encoding="utf-8"))
         atomic(result_path, result)
         update()
         return 0

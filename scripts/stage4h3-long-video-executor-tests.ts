@@ -38,6 +38,8 @@ class FakeProvider implements LongVideoProvider {
   restoreCount = 0;
   generateCount = 0;
   cancelCount = 0;
+  finalizationCount = 0;
+  lifecycle: string[] = [];
   prompts: string[] = [];
   lineage: Array<{ input: string; previousSegmentId: string | null; previousAttemptId: string | null; previousLastFrameSha256: string | null }> = [];
   decisions: Array<"timeout_accept" | "accept"> = ["timeout_accept", "accept", "timeout_accept"];
@@ -65,7 +67,13 @@ class FakeProvider implements LongVideoProvider {
     return { sourceVideo, inputFrameSha256: inputSha, previousSegmentId: input.previousSegmentId, previousAttemptId: input.previousAttemptId, previousLastFrameSha256: input.previousLastFrameSha256 };
   }
   async awaitReview(input: { projectId: string; sequenceIndex: number; deadline: string }) { this.reviewDeadlines.push(input.deadline); assert.equal(Date.parse(input.deadline), fakeNow.getTime() + 20_000); if (this.reviewDeadlines.length === 1) processExpiredLongVideoReviews(new Date(fakeNow.getTime() + 20_000), statePath); return this.decisions.shift()!; }
-  async cancelSession() { this.active = 0; this.cancelCount += 1; }
+  async finalizeBeforeCancel(input: Parameters<NonNullable<LongVideoProvider["finalizeBeforeCancel"]>>[0]) {
+    assert.equal(this.active, 1);
+    assert.equal(input.project.status, "awaiting_merge_confirmation");
+    this.finalizationCount += 1;
+    this.lifecycle.push("finalize");
+  }
+  async cancelSession() { this.active = 0; this.cancelCount += 1; this.lifecycle.push("cancel"); }
 }
 
 const provider = new FakeProvider();
@@ -93,6 +101,8 @@ assert.equal(provider.lineage[1].input, provider.lineage[1].previousLastFrameSha
 assert.equal(provider.lineage[2].input, provider.lineage[2].previousLastFrameSha256);
 assert.equal(provider.active, 0);
 assert.equal(provider.cancelCount, 1);
+assert.equal(provider.finalizationCount, 1);
+assert.deepEqual(provider.lifecycle, ["finalize", "cancel"]);
 const beforeMerge = buildLongVideoProjectPaths(libraryDir, project.createdAt.slice(0, 10), projectId);
 assert.equal(existsSync(path.join(beforeMerge.projectDir, "segments")), true);
 await coordinator.mergeAfterConfirmation(projectId);

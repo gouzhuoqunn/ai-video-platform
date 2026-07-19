@@ -14,11 +14,11 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pro
   let filePath: string;
   let contentType: string;
   let isVideo = false;
-  if (kind === "video" || kind === "thumbnail") {
+  if (kind === "video" || kind === "master" || kind === "thumbnail") {
     if (project.status !== "completed") return NextResponse.json({ error: "长视频媒体不存在。" }, { status: 404 });
-    filePath = kind === "video" ? paths.finalVideo : paths.finalThumbnail;
-    contentType = kind === "video" ? "video/mp4" : "image/jpeg";
-    isVideo = kind === "video";
+    filePath = kind === "video" ? paths.finalVideo : kind === "master" ? `${paths.projectDir}/master-720p.mp4` : paths.finalThumbnail;
+    contentType = kind === "thumbnail" ? "image/jpeg" : "video/mp4";
+    isVideo = kind !== "thumbnail";
   } else if (["segment-video", "segment-thumbnail", "segment-last-frame"].includes(kind)) {
     const sequenceIndex = Number(new URL(request.url).searchParams.get("sequence"));
     const requestedAttempt = new URL(request.url).searchParams.get("attempt");

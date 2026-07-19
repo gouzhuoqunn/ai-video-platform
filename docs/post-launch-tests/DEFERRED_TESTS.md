@@ -11,3 +11,9 @@
 - The current one-order authorization is consumed. Do not create another Clore order automatically or reuse any Stage 4J.3 authorization.
 - A future task may proceed only after a new explicit paid authorization. It should resume project `a6cbf8c1-f158-4583-8f40-fa524dddd9d1` at segment 1, preserve accepted segment 0 and its last-frame SHA, exercise the detached result-return fix, generate exactly one remaining segment, then verify the tail-frame chain, 720P merge, deterministic 1080P finalization, browser playback, Range/seeking, and cleanup.
 - RTX4090, short-video, RunPod fallback, broad lint, historical CI, R2 publication, and commercial-release work remain deferred.
+
+# Deferred after Stage 4J.8 success
+
+- No further RTX 5090 acceptance order is needed for personal daily use. Do not reuse any consumed Stage 4J authorization.
+- Still deferred by scope: RTX 4090 revalidation, ordinary short-video revalidation, RunPod fallback, pure-prompt long video, real regenerate/pause-resume stress, inference-time Next restart, five-minute stress testing, broad lint and historical CI cleanup, R2 publication, public deployment, multi-user hardening, and commercial release testing.
+- Any future paid task requires a new narrowly bound authorization and must begin from zero cloud state.

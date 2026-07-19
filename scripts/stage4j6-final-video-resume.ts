@@ -25,6 +25,7 @@ import { setCloreDeploymentHold } from "./clore/deployment-hold";
 import { clearManualParitySecrets } from "./clore/manual-parity";
 import { resilientCreateOrder, type ResilientCreateAttempt } from "./clore/resilient-create";
 import { LOCAL_WATCHDOG_TASK_NAME } from "./clore/watchdog-io";
+import { evaluateRestoreGate } from "./model-cache/restore-throughput";
 
 const PROJECT_ID = "a6cbf8c1-f158-4583-8f40-fa524dddd9d1";
 const SEGMENT_0_ID = "9e5f4d03-5233-4612-a375-01251c9c230a";
@@ -34,13 +35,14 @@ const SEGMENT_1_JOB_ID = "4aef1e01-ec3e-40cb-936d-5b6c1e29d68c";
 const SEGMENT_0_MP4_SHA = "4d72d09d12f2bf7a40e6ab49f29cc963e002bcab3d3ec2046126aef2307758d9";
 const SEGMENT_0_LAST_FRAME_SHA = "6260f7149b352bb4f337d8ce9a63f16f169e28c61e11052590e653e342cfb77a";
 const LIBRARY_DIR = "D:\\AI-Video-Library";
+const STAGE4J8 = process.env.STAGE4J8_FINAL === "true";
 const STATE_PATH = path.join(process.cwd(), ".secrets", "long-video-state.json");
 const SESSION_PATH = path.join(process.cwd(), ".secrets", "long-video-execution.json");
 const BATCH_PATH = path.join(process.cwd(), ".secrets", "stage4j1-batch.json");
 const AUTH_DIR = path.join(process.cwd(), ".secrets", "long-video-authorizations");
-const EVIDENCE_PATH = path.join(process.cwd(), ".secrets", "stage4j6-session-evidence.json");
-const FAILURE_PATH = path.join(process.cwd(), ".secrets", "stage4j6-session-failure.json");
-const CREATE_BUDGET_PATH = path.join(process.cwd(), ".secrets", "stage4j6-create-budget.json");
+const EVIDENCE_PATH = path.join(process.cwd(), ".secrets", STAGE4J8 ? "stage4j8-session-evidence.json" : "stage4j6-session-evidence.json");
+const FAILURE_PATH = path.join(process.cwd(), ".secrets", STAGE4J8 ? "stage4j8-session-failure.json" : "stage4j6-session-failure.json");
+const CREATE_BUDGET_PATH = path.join(process.cwd(), ".secrets", STAGE4J8 ? "stage4j8-create-budget.json" : "stage4j6-create-budget.json");
 const FFMPEG_PATH = ffmpegInstaller.path;
 
 type Batch = {
@@ -60,6 +62,12 @@ type CreateBudget = {
 };
 
 function sha256(filePath: string) { return createHash("sha256").update(readFileSync(filePath)).digest("hex"); }
+function hasFastStart(filePath: string) {
+  const header = readFileSync(filePath).subarray(0, 16 * 1024 * 1024);
+  const moov = header.indexOf(Buffer.from("moov"));
+  const mdat = header.indexOf(Buffer.from("mdat"));
+  return moov >= 0 && mdat >= 0 && moov < mdat;
+}
 function atomicJson(filePath: string, value: unknown) {
   mkdirSync(path.dirname(filePath), { recursive: true });
   const part = `${filePath}.${process.pid}.part`;
@@ -92,7 +100,7 @@ function armWatchdogs(serverId: string) {
   requireCommand(runNpm(["run", "clore:watchdog:local:install"]), "stage4j6_watchdog_install_failed");
   requireCommand(runNpm([
     "run", "clore:watchdog:remote:arm", "--", `--server-id=${serverId}`,
-    "--hard-deadline-minutes=120", "--draining-at-minutes=105", "--hard-budget-usd=1.25",
+    `--hard-deadline-minutes=${STAGE4J8 ? 240 : 120}`, `--draining-at-minutes=${STAGE4J8 ? 220 : 105}`, "--hard-budget-usd=1.25",
   ], 240_000), "stage4j6_watchdog_arm_failed");
 }
 
@@ -128,6 +136,8 @@ async function buildPlan(provider = new CloreLongVideoProviderAdapter({ libraryD
   const resume = await coordinator.plan(PROJECT_ID);
   const segment0 = state.project.segments[0];
   const segment1 = state.project.segments[1];
+  const restoreSource = readFileSync(path.join(process.cwd(), "scripts", "clore", "restore-production-r2.py"), "utf8");
+  const resilientSource = readFileSync(path.join(process.cwd(), "scripts", "clore", "resilient-create.ts"), "utf8");
   const flags = {
     final_video_resume_ready:
       state.project.status === "failed" && state.project.nextSegmentIndex === 1 &&
@@ -144,9 +154,19 @@ async function buildPlan(provider = new CloreLongVideoProviderAdapter({ libraryD
       identity.all_ssh_components_share_identity && identity.global_known_hosts_used === false && runnerReady(),
     project_id: PROJECT_ID,
     remaining_segment_id: SEGMENT_1_ID,
-    completed_images_reused: true,
+    throughput_qualification_ready:
+      restoreSource.includes("probeChunksRetainedForRestore") &&
+      restoreSource.includes("retainedProbeBytes") &&
+      restoreSource.includes("parallel_ranges"),
+    resilient_create_ready:
+      resilientSource.includes("reconcile") &&
+      resilientSource.includes("maximumCreateRequests") &&
+      resilientSource.includes("activeOrderCount"),
+    prepared_batch_reused: state.batch.batchId === "stage4j1-final-5090-20260718",
+    completed_images_reused: state.batch.imageJobs.length === 2,
     image_jobs_to_generate: 0,
     image_model_restore_required: false,
+    UltraReal_restore_required: false,
     segment_0_reused: true,
     segment_0_inference_required: false,
     segment_0_media_valid: state.mp4Valid,
@@ -158,6 +178,9 @@ async function buildPlan(provider = new CloreLongVideoProviderAdapter({ libraryD
     video_segments_to_generate: resume.segments_to_generate.length,
     short_video_tests: 0,
     expected_provider_orders: 1,
+    expected_production_orders: 1,
+    maximum_sequential_qualification_orders: STAGE4J8 ? 2 : 1,
+    maximum_active_orders: 1,
     maximum_create_requests: 3,
     canonical_ssh_identity_ready: identity.canonical_ssh_identity_ready,
     runner_channel_fix_ready: runnerReady(),
@@ -166,8 +189,10 @@ async function buildPlan(provider = new CloreLongVideoProviderAdapter({ libraryD
   };
   const blockers = Object.entries(flags).flatMap(([name, value]) => {
     if (["image_jobs_to_generate", "segment_1_attempts", "short_video_tests", "provider_mutations"].includes(name)) return value === 0 ? [] : [name];
-    if (["image_model_restore_required", "segment_0_inference_required", "paid_execution_authorized"].includes(name)) return value === false ? [] : [name];
-    if (name === "video_segments_to_generate" || name === "expected_provider_orders" || name === "segment_0_attempts") return value === 1 ? [] : [name];
+    if (["image_model_restore_required", "UltraReal_restore_required", "segment_0_inference_required", "paid_execution_authorized"].includes(name)) return value === false ? [] : [name];
+    if (name === "video_segments_to_generate" || name === "expected_provider_orders" || name === "expected_production_orders" ||
+        name === "maximum_active_orders" || name === "segment_0_attempts") return value === 1 ? [] : [name];
+    if (name === "maximum_sequential_qualification_orders") return value === (STAGE4J8 ? 2 : 1) ? [] : [name];
     if (name === "maximum_create_requests") return value === 3 ? [] : [name];
     if (name.endsWith("_id")) return [];
     return value === true ? [] : [name];
@@ -179,23 +204,25 @@ function authorization(batch: Batch): LongVideoExecutionAuthorization {
   return {
     id: randomUUID(), projectId: PROJECT_ID, batchId: batch.batchId, resolutionNonce: batch.resolutionNonce,
     provider: "clore", gpuProfile: "rtx5090", oneUse: true,
-    expiresAt: new Date(Date.now() + 120 * 60_000).toISOString(),
+    expiresAt: new Date(Date.now() + (STAGE4J8 ? 240 : 120) * 60_000).toISOString(),
     maxSpendUsd: 1.25, walletDeltaCapUsd: 1.25, releaseHold: true,
-    maxActiveOrders: 1, maxPreSshAttempts: 1, wallClockMinutes: 120, drainingAtMinutes: 105,
-    maxSegments: 1, maxOrders: 1, maxCreateRequests: 3, maxSuccessfulOrders: 1,
-    maxHourlyUsd: 0.65, orderType: "on-demand", noReplacementOrder: true,
+    maxActiveOrders: 1, maxPreSshAttempts: 1, wallClockMinutes: STAGE4J8 ? 240 : 120, drainingAtMinutes: STAGE4J8 ? 220 : 105,
+    maxSegments: 1, maxOrders: STAGE4J8 ? 2 : 1, maxProductionOrders: 1,
+    maxQualificationOrders: STAGE4J8 ? 2 : 1, maxCreateRequests: 3, maxSuccessfulOrders: STAGE4J8 ? 2 : 1,
+    maxHourlyUsd: 0.65, orderType: "on-demand", noReplacementOrder: !STAGE4J8,
     executionPurpose: "final_video_resume_resilient",
     allowedTaskIds: [PROJECT_ID, SEGMENT_1_ID], allowedSegmentIds: [SEGMENT_1_ID],
   };
 }
 
 function compliant(candidates: GpuCandidate[], excluded = new Set<string>()) {
-  return candidates.filter((candidate) =>
+  const filtered = candidates.filter((candidate) =>
     !excluded.has(candidate.id) && /RTX\s*5090/i.test(candidate.gpuType) &&
     candidate.gpuCount === 1 && candidate.minimumRamGb >= 32 && candidate.containerDiskGb >= 120 &&
     candidate.interruptible === false && candidate.hourlyUsd !== null && candidate.hourlyUsd <= 0.65
     && candidate.allowedCurrencies?.includes("USD-Blockchain") === true
-  ).sort((left, right) => (left.hourlyUsd ?? Infinity) - (right.hourlyUsd ?? Infinity));
+  );
+  return STAGE4J8 ? filtered : filtered.sort((left, right) => (left.hourlyUsd ?? Infinity) - (right.hourlyUsd ?? Infinity));
 }
 
 function restoreSegmentTask() {
@@ -211,6 +238,55 @@ function finalizeLocalVideo() {
   if (!project) throw new Error("stage4j6_project_missing_after_inference");
   project = markLongVideoMergeStarted(project.id, project.version, STATE_PATH);
   try {
+    const preparedPaths = buildLongVideoProjectPaths(LIBRARY_DIR, project.createdAt.slice(0, 10), project.id);
+    const remoteEvidencePath = path.join(preparedPaths.projectDir, "remote-finalization.json");
+    const remoteMaster = path.join(preparedPaths.projectDir, "master-720p.mp4");
+    if (STAGE4J8 && existsSync(remoteEvidencePath) && existsSync(remoteMaster) &&
+        existsSync(preparedPaths.finalVideo) && existsSync(preparedPaths.finalThumbnail)) {
+      const remoteEvidence = JSON.parse(readFileSync(remoteEvidencePath, "utf8")) as {
+        master_sha256: string; final_sha256: string; generation_resolution: string;
+        final_resolution: string; native_1080p: boolean; scaling_encoding_method: string;
+      };
+      const masterProbe = probeLongVideoMedia(remoteMaster);
+      const finalProbe = probeLongVideoMedia(preparedPaths.finalVideo);
+      const masterVideo = masterProbe.streams.find((stream) => stream.codec_type === "video");
+      const finalVideo = finalProbe.streams.find((stream) => stream.codec_type === "video");
+      const masterDuration = Number(masterProbe.format.duration);
+      const finalDuration = Number(finalProbe.format.duration);
+      const masterDecode = spawnSync(FFMPEG_PATH, ["-v", "error", "-ss", "1", "-i", remoteMaster, "-frames:v", "1", "-f", "null", "-"], { encoding: "utf8", timeout: 120_000 });
+      const finalDecode = spawnSync(FFMPEG_PATH, ["-v", "error", "-ss", "1", "-i", preparedPaths.finalVideo, "-frames:v", "1", "-f", "null", "-"], { encoding: "utf8", timeout: 120_000 });
+      if (sha256(remoteMaster) !== remoteEvidence.master_sha256 || sha256(preparedPaths.finalVideo) !== remoteEvidence.final_sha256 ||
+          masterVideo?.width !== 1280 || masterVideo.height !== 720 || finalVideo?.width !== 1920 || finalVideo.height !== 1080 ||
+          masterVideo.codec_name !== "h264" || masterVideo.pix_fmt !== "yuv420p" ||
+          finalVideo.codec_name !== "h264" || finalVideo.pix_fmt !== "yuv420p" ||
+          !Number.isFinite(masterDuration) || masterDuration < 9.5 || masterDuration > 11 ||
+          !Number.isFinite(finalDuration) || Math.abs(finalDuration - masterDuration) > 0.15 ||
+          !hasFastStart(remoteMaster) || !hasFastStart(preparedPaths.finalVideo) ||
+          Number(masterProbe.format.start_time ?? 0) > 0.1 || Number(finalProbe.format.start_time ?? 0) > 0.1 ||
+          masterDecode.status !== 0 || finalDecode.status !== 0) {
+        throw new Error("stage4j8_remote_finalization_local_validation_failed");
+      }
+      const finalization = {
+        ...remoteEvidence,
+        source_master_sha256: remoteEvidence.master_sha256,
+        finalization_method: remoteEvidence.scaling_encoding_method,
+        duration_seconds: Number(finalProbe.format.duration),
+        locally_validated_at: new Date().toISOString(),
+      };
+      atomicJson(path.join(preparedPaths.projectDir, "finalization.json"), finalization);
+      project = commitLongVideoMerge({
+        projectId: project.id, expectedVersion: project.version, finalVideoRef: "output.mp4",
+        finalThumbnailRef: "thumbnail.jpg", actualDurationSeconds: Number(finalProbe.format.duration), filePath: STATE_PATH,
+      });
+      return {
+        mergeStrategy: "remote_prevalidated",
+        projectStatus: project.status,
+        master720p: { path: remoteMaster, sha256: remoteEvidence.master_sha256, probe: masterProbe },
+        final1080p: { path: preparedPaths.finalVideo, sha256: remoteEvidence.final_sha256, probe: finalProbe },
+        thumbnail: preparedPaths.finalThumbnail,
+        finalization,
+      };
+    }
     const merged = mergeLongVideoProjectMedia({ project, libraryDir: LIBRARY_DIR });
     const paths = merged.paths;
     const master = path.join(paths.projectDir, "master-720p.mp4");
@@ -266,7 +342,7 @@ async function execute() {
   const state = preservedState();
   process.env.CLORE_ORDER_EXECUTION_ENABLED = "true";
   process.env.CLORE_FIRST_SESSION_MAX_BUDGET_USD = "1.25";
-  process.env.CLORE_HARD_SESSION_LIMIT_MINUTES = "120";
+  process.env.CLORE_HARD_SESSION_LIMIT_MINUTES = STAGE4J8 ? "240" : "120";
   process.env.CLORE_MAX_GPU_PRICE_PER_HOUR = "0.65";
   const createBudget = readCreateBudget();
   let actualCreateRequests = createBudget.createRequestCount;
@@ -276,6 +352,7 @@ async function execute() {
   const adapter = new CloreLongVideoProviderAdapter({
     gpu, libraryDir: LIBRARY_DIR, statePath: STATE_PATH,
     videoNegativePrompt: state.batch.video.negativePrompt, videoSeedBase: state.batch.video.seed,
+    preserveCreatedOrderForReconciliation: true,
     beforeCreateRequest: () => {
       if (actualCreateRequests >= 3) throw new Error("stage4j6_create_request_cap_reached");
       actualCreateRequests += 1; actualCreateStartedAt.push(new Date().toISOString());
@@ -303,67 +380,192 @@ async function execute() {
   const captured: {
     providerSession: LongVideoProviderSession | null; selected: GpuCandidate | null; createAttempts: ResilientCreateAttempt[];
     ssh: unknown; blackwell: unknown; wanRestores: number; inferences: number; review: string | null; canceledAt: string | null;
-  } = { providerSession: null, selected: null, createAttempts: [...createBudget.attempts], ssh: null, blackwell: null, wanRestores: 0, inferences: 0, review: null, canceledAt: null };
+    successfulOrders: number; qualifiedPrepared: boolean; qualification: unknown[]; remoteFinalization: unknown; restoreEvidence: unknown;
+  } = {
+    providerSession: null, selected: null, createAttempts: [...createBudget.attempts],
+    ssh: null, blackwell: null, wanRestores: 0, inferences: 0, review: null, canceledAt: null,
+    successfulOrders: 0, qualifiedPrepared: false, qualification: [], remoteFinalization: null, restoreEvidence: null,
+  };
   let watchdogArmed = false;
   try {
     const delegated: LongVideoProvider = {
       listCandidates: async () => [{ serverId: initial.id, gpuProfile: "rtx5090", hourlyUsd: initial.hourlyUsd!, vramGb: initial.vramGb }],
       activeOrderCount: () => adapter.activeOrderCount(),
       createSession: async () => {
-        const resilient = await resilientCreateOrder<GpuCandidate, LongVideoProviderSession>({
-          maximumCreateRequests: 3 - createBudget.createRequestCount,
-          selectFreshCandidate: async (attempted) => {
-            const billing = await readGpuBillingStatus();
-            const wallet = await gpu.getBalance();
-            if (billing.clore.activeOrders !== 0 || wallet.availableUsd === null) throw new Error("stage4j6_active_order_or_wallet_changed");
-            return compliant(await gpu.listCandidates({ forceRefresh: true }), new Set([...createBudget.attemptedCandidateIds, ...attempted]))[0] ?? null;
-          },
-          activeOrderCount: async () => (await readGpuBillingStatus()).clore.activeOrders,
-          create: async (candidate) => {
-            captured.selected = candidate;
-            armWatchdogs(candidate.id); watchdogArmed = true;
-            const selected: LongVideoProviderCandidate = { serverId: candidate.id, gpuProfile: "rtx5090", hourlyUsd: candidate.hourlyUsd!, vramGb: candidate.vramGb };
-            const session = await adapter.createSession({ projectId: PROJECT_ID, authorization: auth, candidate: selected });
-            captured.providerSession = session;
-            captured.ssh = readCloreSshAuthEvidence();
-            return { orderId: session.orderId, value: session };
-          },
-          reconcile: async () => {
-            const recovered = await gpu.recoverExistingSession();
-            if (!recovered) return null;
-            const session: LongVideoProviderSession = {
-              sessionId: `lv-${PROJECT_ID.slice(0, 8)}-reconciled`, orderId: recovered.id,
-              serverId: captured.selected?.id ?? "", gpuProfile: "rtx5090",
-              host: recovered.target?.host ?? "", port: recovered.target?.port ?? 0,
-            };
-            captured.providerSession = session;
-            return { orderId: recovered.id, value: session };
-          },
-          onAttempt: async (attempt) => {
-            captured.createAttempts.push(attempt);
-            atomicJson(CREATE_BUDGET_PATH, {
-              schemaVersion: 1,
-              createRequestCount: actualCreateRequests,
-              attemptedCandidateIds: [...new Set([...createBudget.attemptedCandidateIds, ...captured.createAttempts.map((item) => item.candidateId)])],
-              requestStartedAt: actualCreateStartedAt,
-              attempts: captured.createAttempts,
+        const maximumQualifications = STAGE4J8 ? 2 : 1;
+        for (let qualificationIndex = 0; qualificationIndex < maximumQualifications; qualificationIndex += 1) {
+          const remainingCreateRequests = 3 - actualCreateRequests;
+          if (remainingCreateRequests < 1) throw new Error("stage4j8_create_request_cap_reached");
+          const resilient = await resilientCreateOrder<GpuCandidate, LongVideoProviderSession>({
+            maximumCreateRequests: remainingCreateRequests,
+            selectFreshCandidate: async (attempted) => {
+              const billing = await readGpuBillingStatus();
+              const wallet = await gpu.getBalance();
+              if (billing.clore.activeOrders !== 0 || wallet.availableUsd === null) throw new Error("stage4j6_active_order_or_wallet_changed");
+              const excluded = new Set([
+                ...createBudget.attemptedCandidateIds,
+                ...captured.createAttempts.map((item) => item.candidateId),
+                ...attempted,
+              ]);
+              return compliant(await gpu.listCandidates({ forceRefresh: true }), excluded)[0] ?? null;
+            },
+            activeOrderCount: async () => (await readGpuBillingStatus()).clore.activeOrders,
+            create: async (candidate) => {
+              captured.selected = candidate;
+              armWatchdogs(candidate.id); watchdogArmed = true;
+              const selected: LongVideoProviderCandidate = {
+                serverId: candidate.id, gpuProfile: "rtx5090",
+                hourlyUsd: candidate.hourlyUsd!, vramGb: candidate.vramGb,
+              };
+              const session = await adapter.createSession({ projectId: PROJECT_ID, authorization: auth, candidate: selected });
+              captured.providerSession = session;
+              captured.ssh = readCloreSshAuthEvidence();
+              return { orderId: session.orderId, value: session };
+            },
+            reconcile: async () => {
+              const recovered = await gpu.recoverExistingSession();
+              if (!recovered) return null;
+              const session: LongVideoProviderSession = {
+                sessionId: `lv-${PROJECT_ID.slice(0, 8)}-reconciled`, orderId: recovered.id,
+                serverId: captured.selected?.id ?? "", gpuProfile: "rtx5090",
+                host: recovered.target?.host ?? "", port: recovered.target?.port ?? 0,
+              };
+              captured.providerSession = session;
+              return { orderId: recovered.id, value: session };
+            },
+            onAttempt: async (attempt) => {
+              captured.createAttempts.push(attempt);
+              atomicJson(CREATE_BUDGET_PATH, {
+                schemaVersion: 1,
+                createRequestCount: actualCreateRequests,
+                attemptedCandidateIds: [...new Set([...createBudget.attemptedCandidateIds, ...captured.createAttempts.map((item) => item.candidateId)])],
+                requestStartedAt: actualCreateStartedAt,
+                attempts: captured.createAttempts,
+              });
+              if (attempt.result === "failed_request") { disarmWatchdogs(); watchdogArmed = false; }
+            },
+          });
+          if (resilient.successfulOrderCount !== 1 || resilient.activeOrderCount !== 1 || actualCreateRequests > 3) {
+            throw new Error("stage4j6_order_counter_invalid");
+          }
+          captured.successfulOrders += 1;
+          if (captured.successfulOrders > (STAGE4J8 ? 2 : 1)) throw new Error("stage4j8_successful_order_cap_reached");
+          const session = resilient.order.value as LongVideoProviderSession;
+          if (!STAGE4J8) return session;
+          try {
+            await adapter.waitForSsh(session);
+            await adapter.prepareWorkspace(session);
+            await adapter.bootstrapRuntime(session);
+            captured.blackwell = JSON.parse(readFileSync(path.join(process.cwd(), ".secrets", "stage4j3-blackwell-evidence.json"), "utf8"));
+            await adapter.runCanary(session);
+            const walletNow = await gpu.getBalance();
+            if (walletNow.availableUsd === null) throw new Error("stage4j8_wallet_unavailable_during_qualification");
+            const cumulativeWalletDeltaUsd = Math.max(0, (walletBefore.availableUsd ?? 0) - walletNow.availableUsd);
+            const [preparation, probe] = await Promise.all([
+              adapter.prepareFinalVideoInputs(session),
+              adapter.probeWanRestoreThroughput(session, {
+                cumulativeWalletDeltaUsd,
+                elapsedSeconds: Math.max(0, (Date.now() - Date.parse(startedAt)) / 1000),
+              }),
+            ]);
+            captured.qualification.push({
+              qualificationIndex, candidateId: captured.selected?.id,
+              orderId: session.orderId, passed: true,
+              candidate: captured.selected ? {
+                gpuType: captured.selected.gpuType,
+                ramGb: captured.selected.minimumRamGb,
+                diskGb: captured.selected.containerDiskGb,
+                downloadMbps: captured.selected.downloadMbps ?? null,
+                uploadMbps: captured.selected.uploadMbps ?? null,
+                reliability: captured.selected.reliability ?? null,
+                rating: captured.selected.rating ?? null,
+                diskSpeedMbps: captured.selected.diskSpeedMbps ?? null,
+                hourlyUsd: captured.selected.hourlyUsd,
+              } : null,
+              preparation, probe,
             });
-            if (attempt.result === "failed_request") { disarmWatchdogs(); watchdogArmed = false; }
-          },
-        });
-        if (resilient.successfulOrderCount !== 1 || resilient.activeOrderCount !== 1 || actualCreateRequests > 3) throw new Error("stage4j6_order_counter_invalid");
-        return resilient.order.value as LongVideoProviderSession;
+            captured.qualifiedPrepared = true;
+            return session;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const probeEvidencePath = path.join(process.cwd(), ".secrets", "restore-throughput-probe-evidence.json");
+            const probeEvidence = existsSync(probeEvidencePath) ? JSON.parse(readFileSync(probeEvidencePath, "utf8")) : null;
+            captured.qualification.push({
+              qualificationIndex, candidateId: captured.selected?.id,
+              orderId: session.orderId, passed: false, reason: message,
+              candidate: captured.selected ? {
+                gpuType: captured.selected.gpuType,
+                ramGb: captured.selected.minimumRamGb,
+                diskGb: captured.selected.containerDiskGb,
+                downloadMbps: captured.selected.downloadMbps ?? null,
+                uploadMbps: captured.selected.uploadMbps ?? null,
+                reliability: captured.selected.reliability ?? null,
+                rating: captured.selected.rating ?? null,
+                diskSpeedMbps: captured.selected.diskSpeedMbps ?? null,
+                hourlyUsd: captured.selected.hourlyUsd,
+              } : null,
+              probeEvidence,
+            });
+            const throughputRejected = message.startsWith("clore_restore_probe_rejected:");
+            if (throughputRejected) await adapter.discardWanRestoreProbe(session);
+            let canceled = false;
+            try {
+              await adapter.cancelSession(session);
+              canceled = true;
+            } finally {
+              disarmWatchdogs(); watchdogArmed = false;
+              if (canceled) {
+                captured.providerSession = null;
+                captured.qualifiedPrepared = false;
+              }
+            }
+            const zero = await readGpuBillingStatus();
+            const walletNow = await gpu.getBalance();
+            const walletDelta = walletNow.availableUsd === null ? Infinity : (walletBefore.availableUsd ?? 0) - walletNow.availableUsd;
+            if (zero.clore.activeOrders !== 0 || walletDelta > 1.25) throw new Error("stage4j8_qualification_cleanup_or_budget_failed");
+            if (!throughputRejected || qualificationIndex + 1 >= maximumQualifications) throw error;
+          }
+        }
+        throw new Error("stage4j8_qualification_exhausted");
       },
-      waitForSsh: (session) => adapter.waitForSsh(session),
-      prepareWorkspace: (session) => adapter.prepareWorkspace(session),
+      waitForSsh: (session) => captured.qualifiedPrepared ? Promise.resolve() : adapter.waitForSsh(session),
+      prepareWorkspace: (session) => captured.qualifiedPrepared ? Promise.resolve() : adapter.prepareWorkspace(session),
       bootstrapRuntime: async (session) => {
+        if (captured.qualifiedPrepared) return;
         await adapter.bootstrapRuntime(session);
         captured.blackwell = JSON.parse(readFileSync(path.join(process.cwd(), ".secrets", "stage4j3-blackwell-evidence.json"), "utf8"));
       },
-      runCanary: (session) => adapter.runCanary(session),
+      runCanary: (session) => captured.qualifiedPrepared ? Promise.resolve() : adapter.runCanary(session),
       restoreWan: async (session) => {
         captured.wanRestores += 1; if (captured.wanRestores > 1) throw new Error("stage4j6_duplicate_wan_restore");
-        return adapter.restoreWan(session);
+        const restored = await adapter.restoreWan(session);
+        const restoreEvidencePath = path.join(process.cwd(), ".secrets", "restore-throughput-final-evidence.json");
+        captured.restoreEvidence = existsSync(restoreEvidencePath) ? JSON.parse(readFileSync(restoreEvidencePath, "utf8")) : null;
+        if (STAGE4J8) {
+          const probeEvidencePath = path.join(process.cwd(), ".secrets", "restore-throughput-probe-evidence.json");
+          const probeEvidence = JSON.parse(readFileSync(probeEvidencePath, "utf8")) as {
+            probe?: { aggregateBytesPerSecond?: number };
+          };
+          const walletNow = await gpu.getBalance();
+          if (walletNow.availableUsd === null || captured.selected?.hourlyUsd === null || captured.selected?.hourlyUsd === undefined) {
+            throw new Error("stage4j8_post_restore_budget_inputs_missing");
+          }
+          const walletDelta = Math.max(0, (walletBefore.availableUsd ?? 0) - walletNow.availableUsd);
+          const postRestoreGate = evaluateRestoreGate({
+            remainingBytes: 0,
+            measuredBytesPerSecond: Number(probeEvidence.probe?.aggregateBytesPerSecond ?? 0),
+            elapsedSeconds: Math.max(0, (Date.now() - Date.parse(startedAt)) / 1000),
+            fixedAllowanceSeconds: 35 * 60,
+            hourlyUsd: captured.selected.hourlyUsd,
+            walletSpentUsd: walletDelta,
+            walletCapUsd: 1.25,
+            wallClockCapSeconds: 240 * 60,
+            drainingAtSeconds: 220 * 60,
+          });
+          captured.qualification.push({ phase: "post_restore_pre_inference", gate: postRestoreGate });
+          if (!postRestoreGate.allowed) throw new Error(`stage4j8_post_restore_gate_rejected:${postRestoreGate.reason}`);
+        }
+        return restored;
       },
       generateSegment: async (input) => {
         captured.inferences += 1;
@@ -371,9 +573,15 @@ async function execute() {
         return adapter.generateSegment(input);
       },
       awaitReview: async (input) => { const decision = await adapter.awaitReview(input); captured.review = decision; return decision; },
+      finalizeBeforeCancel: async ({ session, project }) => {
+        if (!STAGE4J8) return;
+        captured.remoteFinalization = await adapter.finalizeLongVideoRemote(session, project);
+      },
       cancelSession: async (session) => {
-        try { await adapter.cancelSession(session); } finally {
+        try {
+          await adapter.cancelSession(session);
           captured.canceledAt = new Date().toISOString();
+        } finally {
           disarmWatchdogs(); watchdogArmed = false;
         }
       },
@@ -399,7 +607,7 @@ async function execute() {
     const completed = getLongVideoProject(PROJECT_ID, STATE_PATH)!;
     const attempt = completed.segments[1].attempts.find((item) => item.id === completed.segments[1].selectedAttemptId)!;
     const evidence = {
-      schemaVersion: 1, stage: "4J.6", startedAt, completedAt: new Date().toISOString(), gate,
+      schemaVersion: 1, stage: STAGE4J8 ? "4J.8" : "4J.6", startedAt, completedAt: new Date().toISOString(), gate,
       stage4j5Diagnostic: {
         httpStatus: 500, code: 6, error: null, message: null, details: null, requestId: null,
         classification: "unknown_code6", fullPayloadRecoverable: false,
@@ -415,7 +623,8 @@ async function execute() {
       create: {
         actualCreateRequests, completedCreateRequests, actualCreateStartedAt,
         candidateAttempts: captured.createAttempts, lastProviderEvidence: readLastCloreCreateEvidence(),
-        successfulOrderCount: captured.providerSession ? 1 : 0,
+        successfulOrderCount: captured.successfulOrders,
+        qualification: captured.qualification,
       },
       wallet: { beforeUsd: walletBefore.availableUsd, afterUsd: walletAfter.availableUsd, deltaUsd: walletDelta },
       order: {
@@ -425,7 +634,7 @@ async function execute() {
         diskGb: captured.selected?.containerDiskGb, canceledAt: captured.canceledAt,
       },
       ssh: captured.ssh, blackwell: captured.blackwell,
-      wan: { restores: captured.wanRestores, revision: execution.restoreRevision },
+      wan: { restores: captured.wanRestores, revision: execution.restoreRevision, restoreEvidence: captured.restoreEvidence },
       segment1: {
         id: SEGMENT_1_ID, attemptId: attempt.id, inferenceSubmissions: captured.inferences, reviewDecision: captured.review,
         inputFrameSha256: attempt.evidenceSummary.inputFrameSha256,
@@ -433,12 +642,13 @@ async function execute() {
         outputSha256: attempt.evidenceSummary.outputSha256, lastFrameSha256: attempt.evidenceSummary.lastFrameSha256,
         durationSeconds: attempt.evidenceSummary.durationSeconds,
       },
-      finalMedia, cleanup: { first: zeroFirst, second: zeroSecond }, secretsPrinted: false,
+      finalMedia, remoteFinalization: captured.remoteFinalization,
+      cleanup: { first: zeroFirst, second: zeroSecond }, secretsPrinted: false,
     };
     atomicJson(EVIDENCE_PATH, evidence); rmSync(FAILURE_PATH, { force: true });
     console.log(JSON.stringify({
       ok: true, projectId: PROJECT_ID, createRequestCount: actualCreateRequests,
-      successfulOrderCount: 1, orderId: captured.providerSession?.orderId, serverId: captured.providerSession?.serverId,
+      successfulOrderCount: captured.successfulOrders, orderId: captured.providerSession?.orderId, serverId: captured.providerSession?.serverId,
       endpoint: captured.providerSession ? `${captured.providerSession.host}:${captured.providerSession.port}` : null,
       hourlyUsd: captured.selected?.hourlyUsd, walletBefore: walletBefore.availableUsd, walletAfter: walletAfter.availableUsd,
       walletDelta, canceledAt: captured.canceledAt, master720p: finalMedia.master720p.path, output1080p: finalMedia.final1080p.path,
@@ -446,12 +656,13 @@ async function execute() {
   } catch (error) {
     restoreSegmentTask();
     atomicJson(FAILURE_PATH, {
-      stage: "4J.6", at: new Date().toISOString(),
+      stage: STAGE4J8 ? "4J.8" : "4J.6", at: new Date().toISOString(),
       error: error instanceof Error ? error.message : String(error),
       actualCreateRequests, completedCreateRequests, candidateAttempts: captured.createAttempts,
       lastProviderEvidence: readLastCloreCreateEvidence(), orderId: captured.providerSession?.orderId ?? null,
       serverId: captured.providerSession?.serverId ?? null, canceledAt: captured.canceledAt,
       wanRestores: captured.wanRestores, inferenceSubmissions: captured.inferences,
+      successfulOrders: captured.successfulOrders, qualification: captured.qualification,
     });
     if (captured.providerSession && !captured.canceledAt) {
       try { await adapter.cancelSession(captured.providerSession); captured.canceledAt = new Date().toISOString(); } catch { /* billing audit reports residue */ }
@@ -460,7 +671,7 @@ async function execute() {
   } finally {
     if (watchdogArmed) disarmWatchdogs();
     disableLocalWatchdog(); clearManualParitySecrets();
-    setCloreDeploymentHold(true, "stage4j6_final_cleanup");
+    setCloreDeploymentHold(true, STAGE4J8 ? "stage4j8_final_cleanup" : "stage4j6_final_cleanup");
     rmSync(authPath, { force: true });
   }
 }

@@ -14,3 +14,11 @@
 - The completed remote Comfy runner left its original long SSH channel open. Segment 0 was rescued and validated locally, but the orchestrator received empty JSON after the stuck local SSH process was ended. Segment 1 was never submitted.
 - The return path now uses one detached remote submission plus short result polls. This is offline-tested only; the current task permits no replacement order.
 - A complete 10-second 720P master, 1080P final, and explicit segment-0-tail to segment-1-input SHA chain do not exist. Daily-use closure remains incomplete and `production_ready=false`.
+
+# Limits after Stage 4J.8 closure
+
+- The prior Stage 4J.3 missing-video limits are resolved: the two-segment chain, 720P master, and derived 1080P final are verified.
+- The 1080P result is intentionally derived from the 720P master (`native_1080p=false`), using CUDA scaling and quality-oriented NVENC on the accepted host. It is not claimed as native 1080P Wan inference.
+- The 2048×2048 image remains a derived high-final result, not a native 2048×2048 inference.
+- Personal local daily use is ready. `production_ready=false` still applies to public/commercial release, multi-user scale, RunPod fallback, broad historical CI/lint cleanup, and public cloud deployment.
+- The one-active-order rule remains. Real rental still requires explicit task-bound authorization; ordinary page load, task creation, browser refresh, and launcher restart do not rent a GPU.

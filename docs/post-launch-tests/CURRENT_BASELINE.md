@@ -40,3 +40,13 @@
 - Final partial boundary is unchanged: image jobs `d3573f65-1400-4a27-9bcf-4ff6f8f34273` and `8cdc12f3-cc75-43dc-ae49-423071389f07` are reused; project `a6cbf8c1-f158-4583-8f40-fa524dddd9d1` remains failed at `nextSegmentIndex=1`; segment 0 attempt `b94faa26-e434-4c38-a67c-bacbb3bd51a6` is accepted; segment 1 `554adaa8-fc5f-40c3-a02b-331eabcd23c8` has zero attempts.
 - Current plan flags remain `image_jobs_to_generate=0`, `segment_0_inference_required=false`, `video_segments_to_generate=1`, `expected_provider_orders=1`, and `paid_execution_authorized=false`. Proposed future wallet cap is `$1.25`.
 - Stage 4J.4 provider mutations and spend are zero. Expected zero-resource state remains Clore `0`, RunPod `0/0`, both holds `true`, no authorization, create lock, watchdog, or watcher.
+
+# Stage 4J.8 completed baseline (2026-07-19)
+
+- Feature start HEAD: `66af63c4e0dfd13a4a7621579243e524b030c121`; backup: `backup/stage4j8-before-final-throughput-resume-20260719-173956`. Main is unchanged.
+- Completed images remain unchanged: 1536×1024 medium SHA `c79c99476486fdcd83dbdc0cb7e90e2961ebdda85fe556a1c1a10be2558e6078`; derived 2048×2048 high SHA `d3b12a75c5b30086f2dec902d4d9e7e38f8418a8436c64cbca97d765623b32ac`.
+- Project `a6cbf8c1-f158-4583-8f40-fa524dddd9d1` is `completed`, `nextSegmentIndex=2`, with accepted attempt counts exactly `1/1`. Tail-frame linkage SHA is `6260f7149b352bb4f337d8ce9a63f16f169e28c61e11052590e653e342cfb77a`.
+- Final local media root: `D:\AI-Video-Library\2026-07-18\a6cbf8c1-f158-4583-8f40-fa524dddd9d1`. The 720P master is 1280×720, 10.125 seconds, SHA `95c02008a67d671a92c82f816e44852f3547ad032917957252604e4e87de5c74`. The final is 1920×1080, 10.125 seconds, SHA `befbf0ca3ac59743e81d9cf0fe2a1546616f0d264510e526c9504aeee30f5a9b`.
+- Paid result: one successful order, one create request, one Wan restore, one segment-1 inference, no replacement. Wallet `$10.31 -> $9.82`, delta `$0.49`.
+- Final zero state: Clore `0`, RunPod `0/0`, both holds `true`, no active authorization/lock/watchdog/watcher/temporary credential state.
+- Personal daily-use closure is complete. `production_ready=false` remains deliberate because commercial/public deployment and broad release validation are out of scope.

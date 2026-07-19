@@ -16,7 +16,7 @@ import { installDetachedWorker, launchDetachedJob, waitForDetachedJob } from "..
 import { buildRestoreBundle } from "../../../scripts/model-cache/production-restore-bundle";
 import { installRemoteComfyRunner, runRemoteComfyProbe, runRemoteComfyWorkflow, downloadRemoteRunnerOutputPersistent, removeRemoteRunnerOutput } from "../../../scripts/comfy-remote-runner";
 import { findLocalImageResultFile } from "@/lib/local-lab/local-results";
-import { buildLongVideoProjectPaths } from "@/lib/long-video/media";
+import { buildLongVideoProjectPaths, probeLongVideoMedia } from "@/lib/long-video/media";
 import { getLongVideoProject, processExpiredLongVideoReviews } from "@/lib/long-video/store";
 import type { LongVideoProject, LongVideoSegment } from "@/lib/long-video/domain";
 import type { LongVideoExecutionAuthorization, LongVideoProvider, LongVideoProviderCandidate, LongVideoProviderSession, LongVideoReviewDecision, LongVideoSegmentMedia } from "@/lib/long-video/execution";
@@ -52,8 +52,10 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
   private readonly videoSeedBase: number;
   private readonly beforeCreateRequest?: () => Promise<void> | void;
   private readonly afterCreateRequestAttempt?: () => Promise<void> | void;
+  private readonly preserveCreatedOrderForReconciliation: boolean;
+  private authorizedProjectId: string | null = null;
 
-  constructor(options: { gpu?: GpuProvider; libraryDir?: string; statePath?: string; activeOrderReader?: () => Promise<number>; watchdogServerId?: string | null; videoNegativePrompt?: string; videoSeedBase?: number; beforeCreateRequest?: () => Promise<void> | void; afterCreateRequestAttempt?: () => Promise<void> | void } = {}) {
+  constructor(options: { gpu?: GpuProvider; libraryDir?: string; statePath?: string; activeOrderReader?: () => Promise<number>; watchdogServerId?: string | null; videoNegativePrompt?: string; videoSeedBase?: number; beforeCreateRequest?: () => Promise<void> | void; afterCreateRequestAttempt?: () => Promise<void> | void; preserveCreatedOrderForReconciliation?: boolean } = {}) {
     this.gpu = options.gpu ?? getGpuProvider("clore");
     this.libraryDir = options.libraryDir ?? (process.env.LOCAL_VIDEO_LIBRARY_DIR?.trim() || "D:\\AI-Video-Library");
     this.statePath = options.statePath ?? path.join(process.cwd(), ".secrets", "long-video-state.json");
@@ -64,6 +66,7 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     this.videoSeedBase = options.videoSeedBase ?? 50902001;
     this.beforeCreateRequest = options.beforeCreateRequest;
     this.afterCreateRequestAttempt = options.afterCreateRequestAttempt;
+    this.preserveCreatedOrderForReconciliation = options.preserveCreatedOrderForReconciliation === true;
   }
 
   async inspectProviderState() {
@@ -90,9 +93,10 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     if (existing) return existing;
     const gpuSession = await this.gpu.getSession(session.orderId);
     if (!gpuSession) throw new Error("clore_bound_order_missing");
+    if (!this.authorizedProjectId) throw new Error("clore_reconciled_project_scope_missing");
     const target = gpuSession.target ?? await this.gpu.waitForSsh(gpuSession, 10 * 60_000);
     const candidate: GpuCandidate = { id: session.serverId, gpuType: `NVIDIA GeForce ${session.gpuProfile === "rtx5090" ? "RTX 5090" : "RTX 4090"}`, priority: 0, vramGb: session.gpuProfile === "rtx5090" ? 32 : 24, gpuCount: 1, minimumRamGb: 32, containerDiskGb: 200, volumeGb: 0, hourlyUsd: session.gpuProfile === "rtx5090" ? 0.65 : 0.7, interruptible: false };
-    const value = { gpu: this.gpu, gpuSession, target, candidate, projectId: session.sessionId };
+    const value = { gpu: this.gpu, gpuSession, target, candidate, projectId: this.authorizedProjectId };
     this.contexts.set(session.sessionId, value);
     return value;
   }
@@ -105,20 +109,22 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     if (input.authorization.gpuProfile === "rtx5090" && (!input.authorization.batchId || !input.authorization.resolutionNonce)) throw new Error("clore_resolved_batch_authorization_missing");
     if (input.authorization.gpuProfile === "rtx5090") {
       const common =
-        input.authorization.maxOrders === 1 &&
         input.authorization.maxActiveOrders === 1 &&
         input.authorization.maxPreSshAttempts === 1 &&
         input.authorization.orderType === "on-demand" &&
-        input.authorization.noReplacementOrder === true &&
         input.authorization.maxHourlyUsd === 0.65;
       const fullAcceptance =
         input.authorization.executionPurpose === undefined &&
+        input.authorization.maxOrders === 1 &&
+        input.authorization.noReplacementOrder === true &&
         input.authorization.maxSpendUsd <= 3 &&
         input.authorization.walletDeltaCapUsd === 3 &&
         input.authorization.wallClockMinutes === 300 &&
         input.authorization.drainingAtMinutes === 270;
       const resilientResume =
         input.authorization.executionPurpose === "final_video_resume_resilient" &&
+        input.authorization.maxOrders === 1 &&
+        input.authorization.noReplacementOrder === true &&
         input.authorization.maxSpendUsd === 1.25 &&
         input.authorization.walletDeltaCapUsd === 1.25 &&
         input.authorization.wallClockMinutes === 120 &&
@@ -130,10 +136,28 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
         input.authorization.allowedTaskIds?.length === 2 &&
         input.authorization.allowedTaskIds[0] === input.projectId &&
         input.authorization.allowedTaskIds[1] === input.authorization.allowedSegmentIds[0];
-      if (!common || (!fullAcceptance && !resilientResume)) {
+      const throughputQualifiedResume =
+        input.authorization.executionPurpose === "final_video_resume_resilient" &&
+        input.authorization.maxOrders === 2 &&
+        input.authorization.maxProductionOrders === 1 &&
+        input.authorization.maxQualificationOrders === 2 &&
+        input.authorization.noReplacementOrder === false &&
+        input.authorization.maxSpendUsd === 1.25 &&
+        input.authorization.walletDeltaCapUsd === 1.25 &&
+        input.authorization.wallClockMinutes === 240 &&
+        input.authorization.drainingAtMinutes === 220 &&
+        input.authorization.maxSegments === 1 &&
+        input.authorization.maxCreateRequests === 3 &&
+        input.authorization.maxSuccessfulOrders === 2 &&
+        input.authorization.allowedSegmentIds?.length === 1 &&
+        input.authorization.allowedTaskIds?.length === 2 &&
+        input.authorization.allowedTaskIds[0] === input.projectId &&
+        input.authorization.allowedTaskIds[1] === input.authorization.allowedSegmentIds[0];
+      if (!common || (!fullAcceptance && !resilientResume && !throughputQualifiedResume)) {
         throw new Error("clore_final_5090_authorization_policy_mismatch");
       }
     }
+    this.authorizedProjectId = input.projectId;
     if (getCloreDeploymentHold().enabled && input.authorization.gpuProfile === "rtx4090") setCloreDeploymentHold(false, `long_video:${input.projectId}`);
     const candidates = await this.gpu.listCandidates();
     const candidate = candidates.find((value) => value.id === input.candidate.serverId);
@@ -147,7 +171,7 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
       this.contexts.set(sessionId, { gpu: this.gpu, gpuSession: created, target, candidate, projectId: input.projectId });
       return { sessionId, orderId: created.id, serverId: candidate.id, gpuProfile: input.authorization.gpuProfile, host: target.host, port: target.port };
     } catch (error) {
-      if (created) {
+      if (created && !this.preserveCreatedOrderForReconciliation) {
         try { await this.gpu.terminateSession(created); } catch { /* cleanup is retried by the outer session path */ }
       }
       setCloreDeploymentHold(true, "long_video_create_failed");
@@ -329,7 +353,30 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
       if (launched.returnedMs > 15_000) throw new Error("clore_restore_launch_timeout");
       const completed = await waitForDetachedJob(target, jobId, 100 * 60_000);
       if (!completed.reachable || completed.state?.phase !== "completed") throw new Error("clore_restore_failed");
-      return { revision: bundle.expectedCurrentKey, verifiedObjects: Object.keys(bundle.objectUrls).length };
+      const result = completed.result as { restore?: Record<string, unknown> } | null;
+      if (!result?.restore || result.restore.status !== "completed") throw new Error("clore_restore_result_missing");
+      const files = result.restore.files as Record<string, { reusedBytes?: number; transferredBytes?: number }> | undefined;
+      const reusedProbeBytes = Object.values(files ?? {}).reduce((total, file) => total + Number(file.reusedBytes ?? 0), 0);
+      const transferredBytes = Object.values(files ?? {}).reduce((total, file) => total + Number(file.transferredBytes ?? 0), 0);
+      const evidencePath = path.join(process.cwd(), ".secrets", "restore-throughput-final-evidence.json");
+      const evidencePart = `${evidencePath}.${process.pid}.part`;
+      writeFileSync(evidencePart, `${JSON.stringify({
+        schemaVersion: 1,
+        recordedAt: new Date().toISOString(),
+        signedUrlsPersisted: false,
+        credentialsPersisted: false,
+        reusedProbeBytes,
+        transferredBytes,
+        restore: result.restore,
+      }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      renameSync(evidencePart, evidencePath);
+      return {
+        revision: bundle.expectedCurrentKey,
+        verifiedObjects: Object.keys(bundle.objectUrls).length,
+        reusedProbeBytes,
+        transferredBytes,
+        progress: result.restore,
+      };
     } finally { rmSync(local, { force: true }); sshCommand(target, `rm -f ${remoteBundle}`, 30_000); }
   }
 
@@ -384,12 +431,132 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     }
   }
 
+  async discardWanRestoreProbe(session: LongVideoProviderSession) {
+    const { target } = await this.context(session);
+    requireOk(sshCommand(
+      target,
+      "find /workspace/models -type d -name .restore-chunks -prune -exec rm -rf -- {} + 2>/dev/null || true; rm -f /workspace/logs/restore-probe-wan22-remix-14b-i2v-fp8.json",
+      60_000,
+    ), "clore_restore_probe_cleanup_failed");
+    this.restoreQualifications.delete(session.sessionId);
+  }
+
+  async prepareFinalVideoInputs(session: LongVideoProviderSession) {
+    const { target, projectId } = await this.context(session);
+    const resolvedProject = getLongVideoProject(projectId, this.statePath);
+    if (!resolvedProject) throw new Error("clore_finalization_project_missing");
+    const segment0 = resolvedProject.segments[0];
+    if (segment0.attemptsCount !== 1 || !segment0.selectedAttemptId) throw new Error("clore_segment0_boundary_invalid");
+    const paths = buildLongVideoProjectPaths(this.libraryDir, resolvedProject.createdAt.slice(0, 10), resolvedProject.id);
+    const attemptDir = path.join(paths.projectDir, "segments", "000", "attempts", segment0.selectedAttemptId);
+    const mp4 = path.join(attemptDir, "output.mp4");
+    const lastFrame = path.join(attemptDir, "last-frame.png");
+    if (!existsSync(mp4) || !existsSync(lastFrame)) throw new Error("clore_segment0_media_missing");
+    const remoteDir = `/workspace/finalize/${resolvedProject.id}`;
+    requireOk(sshCommand(target, `mkdir -p ${remoteDir}`, 30_000), "clore_finalization_remote_dir_failed");
+    requireOk(scpFile(target, mp4, `${remoteDir}/segment-0.mp4`, 10 * 60_000), "clore_segment0_upload_failed");
+    requireOk(scpFile(target, lastFrame, `${remoteDir}/segment-0-last-frame.png`, 5 * 60_000), "clore_segment0_last_frame_upload_failed");
+    const workflowPath = path.join(process.cwd(), "comfy-runtime", "workflows", "production", `wan22-remix-14b-i2v-fp8-${session.gpuProfile}-api.json`);
+    requireOk(scpFile(target, workflowPath, `${remoteDir}/segment-1-workflow.json`, 2 * 60_000), "clore_segment1_workflow_upload_failed");
+    const expectedMp4 = sha256File(mp4);
+    const expectedLastFrame = sha256File(lastFrame);
+    const proof = requireOk(sshCommand(
+      target,
+      `set -e; test "$(sha256sum ${remoteDir}/segment-0.mp4 | cut -d' ' -f1)" = "${expectedMp4}"; ` +
+      `test "$(sha256sum ${remoteDir}/segment-0-last-frame.png | cut -d' ' -f1)" = "${expectedLastFrame}"; ` +
+      `ffmpeg -version >/dev/null; ffprobe -version >/dev/null; ffmpeg -hide_banner -encoders 2>/dev/null | grep -E 'libx264|h264_nvenc' >/dev/null || true; ` +
+      `printf '{"segment0Mp4Sha256":"${expectedMp4}","segment0LastFrameSha256":"${expectedLastFrame}","remoteDir":"${remoteDir}"}\\n'`,
+      120_000,
+    ), "clore_finalization_input_validation_failed");
+    return JSON.parse(proof.trim()) as { segment0Mp4Sha256: string; segment0LastFrameSha256: string; remoteDir: string };
+  }
+
   async restoreWan(session: LongVideoProviderSession) {
     if (session.gpuProfile === "rtx5090" && !this.restoreQualifications.has(session.sessionId)) {
       throw new Error("clore_rtx5090_restore_requires_actual_source_qualification");
     }
     const { target } = await this.context(session);
     return this.restoreFamily(target, "wan22-remix-14b-i2v-fp8");
+  }
+
+  async finalizeLongVideoRemote(session: LongVideoProviderSession, project: LongVideoProject) {
+    const { target } = await this.context(session);
+    if (project.id !== this.contexts.get(session.sessionId)?.projectId) throw new Error("clore_finalization_project_scope_mismatch");
+    const segment0 = project.segments[0];
+    const segment1 = project.segments[1];
+    if (segment0.attemptsCount !== 1 || segment1.attemptsCount !== 1 || !segment0.selectedAttemptId || !segment1.selectedAttemptId) {
+      throw new Error("clore_finalization_attempt_boundary_invalid");
+    }
+    const paths = buildLongVideoProjectPaths(this.libraryDir, project.createdAt.slice(0, 10), project.id);
+    const segment0Mp4 = path.join(paths.projectDir, "segments", "000", "attempts", segment0.selectedAttemptId, "output.mp4");
+    const segment1Mp4 = path.join(paths.projectDir, "segments", "001", "attempts", segment1.selectedAttemptId, "output.mp4");
+    const remoteDir = `/workspace/finalize/${project.id}`;
+    requireOk(sshCommand(target, `mkdir -p ${remoteDir}`, 30_000), "clore_finalization_remote_dir_failed");
+    requireOk(scpFile(target, segment0Mp4, `${remoteDir}/segment-0.mp4`, 10 * 60_000), "clore_final_segment0_upload_failed");
+    requireOk(scpFile(target, segment1Mp4, `${remoteDir}/segment-1.mp4`, 10 * 60_000), "clore_final_segment1_upload_failed");
+    const concat = Buffer.from("file 'segment-0.mp4'\nfile 'segment-1.mp4'\n", "utf8").toString("base64");
+    const command =
+      `set -e; cd ${remoteDir}; echo ${concat} | base64 -d > concat.txt; ` +
+      `rm -f master-720p.mp4 output.mp4 thumbnail.jpg merge-method.txt final-method.txt; ` +
+      `if ffmpeg -y -v error -f concat -safe 0 -i concat.txt -c copy -movflags +faststart master-720p.mp4 && ` +
+      `test "$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height,pix_fmt -of csv=p=0 master-720p.mp4)" = "h264,1280,720,yuv420p" && ` +
+      `copy_duration="$(ffprobe -v error -show_entries format=duration -of csv=p=0 master-720p.mp4)" && ` +
+      `awk -v d="$copy_duration" 'BEGIN { exit !(d >= 9.5 && d <= 11.0) }'; then echo concat_copy > merge-method.txt; ` +
+      `else rm -f master-720p.mp4; ffmpeg -y -v error -f concat -safe 0 -i concat.txt -an -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p -movflags +faststart master-720p.mp4; echo concat_h264_fallback > merge-method.txt; fi; ` +
+      `if ffmpeg -y -v error -hwaccel cuda -hwaccel_output_format cuda -i master-720p.mp4 -vf "scale_cuda=1920:1080:format=yuv420p" -an -c:v h264_nvenc -preset p7 -tune hq -cq 18 -b:v 0 -movflags +faststart output.mp4; ` +
+      `then echo cuda_scale_h264_nvenc_p7_cq18 > final-method.txt; ` +
+      `elif ffmpeg -y -v error -i master-720p.mp4 -vf "scale=1920:1080:flags=lanczos:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" -an -c:v h264_nvenc -preset p7 -tune hq -cq 18 -b:v 0 -pix_fmt yuv420p -movflags +faststart output.mp4; ` +
+      `then echo lanczos_h264_nvenc_p7_cq18 > final-method.txt; ` +
+      `else rm -f output.mp4; ffmpeg -y -v error -i master-720p.mp4 -vf "scale=1920:1080:flags=lanczos:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" -an -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p -movflags +faststart output.mp4; echo lanczos_libx264_crf18 > final-method.txt; fi; ` +
+      `ffmpeg -y -v error -ss 1 -i output.mp4 -frames:v 1 -vf "scale=640:-2:force_original_aspect_ratio=decrease" -q:v 3 thumbnail.jpg; ` +
+      `ffmpeg -v error -ss 1 -i master-720p.mp4 -frames:v 1 -f null -; ` +
+      `ffmpeg -v error -ss 1 -i output.mp4 -frames:v 1 -f null -; ` +
+      `ffprobe -v error -show_entries stream=codec_name,width,height,pix_fmt -show_entries format=duration,size -of json master-720p.mp4 > master-probe.json; ` +
+      `ffprobe -v error -show_entries stream=codec_name,width,height,pix_fmt -show_entries format=duration,size -of json output.mp4 > output-probe.json; ` +
+      `sha256sum master-720p.mp4 output.mp4 thumbnail.jpg > sha256.txt`;
+    requireOk(sshCommand(target, command, 60 * 60_000), "clore_remote_finalization_failed");
+    const masterPart = path.join(paths.projectDir, "master-720p.mp4.part");
+    const finalPart = `${paths.finalVideo}.part`;
+    const thumbnailPart = `${paths.finalThumbnail}.part`;
+    rmSync(masterPart, { force: true }); rmSync(finalPart, { force: true }); rmSync(thumbnailPart, { force: true });
+    requireOk(scpFromRemote(target, `${remoteDir}/master-720p.mp4`, masterPart, 20 * 60_000), "clore_master_download_failed");
+    requireOk(scpFromRemote(target, `${remoteDir}/output.mp4`, finalPart, 20 * 60_000), "clore_final_download_failed");
+    requireOk(scpFromRemote(target, `${remoteDir}/thumbnail.jpg`, thumbnailPart, 5 * 60_000), "clore_final_thumbnail_download_failed");
+    const master = path.join(paths.projectDir, "master-720p.mp4");
+    rmSync(master, { force: true }); rmSync(paths.finalVideo, { force: true }); rmSync(paths.finalThumbnail, { force: true });
+    renameSync(masterPart, master); renameSync(finalPart, paths.finalVideo); renameSync(thumbnailPart, paths.finalThumbnail);
+    const masterProbe = probeLongVideoMedia(master);
+    const finalProbe = probeLongVideoMedia(paths.finalVideo);
+    const masterVideo = masterProbe.streams.find((stream) => stream.codec_type === "video");
+    const finalVideo = finalProbe.streams.find((stream) => stream.codec_type === "video");
+    const masterDuration = Number(masterProbe.format.duration);
+    const finalDuration = Number(finalProbe.format.duration);
+    if (masterVideo?.width !== 1280 || masterVideo.height !== 720 || masterVideo.codec_name !== "h264" || masterVideo.pix_fmt !== "yuv420p" ||
+        finalVideo?.width !== 1920 || finalVideo.height !== 1080 || finalVideo.codec_name !== "h264" || finalVideo.pix_fmt !== "yuv420p" ||
+        !Number.isFinite(masterDuration) || masterDuration < 9.5 || masterDuration > 11 ||
+        !Number.isFinite(finalDuration) || Math.abs(finalDuration - masterDuration) > 0.15) {
+      throw new Error("clore_remote_finalization_media_invalid");
+    }
+    const methodsRaw = requireOk(sshCommand(target, `cat ${remoteDir}/merge-method.txt; cat ${remoteDir}/final-method.txt`, 30_000), "clore_finalization_method_read_failed").trim().split(/\r?\n/);
+    const evidence = {
+      schemaVersion: 1,
+      generation_resolution: "1280x720",
+      final_resolution: "1920x1080",
+      native_1080p: false,
+      segment_order: [0, 1],
+      tail_frame_sha_linkage: segment0.attempts.find((attempt) => attempt.id === segment0.selectedAttemptId)?.evidenceSummary.lastFrameSha256,
+      merge_method: methodsRaw[0] ?? "unknown",
+      scaling_encoding_method: methodsRaw[1] ?? "unknown",
+      master_sha256: sha256File(master),
+      final_sha256: sha256File(paths.finalVideo),
+      thumbnail_sha256: sha256File(paths.finalThumbnail),
+      master_probe: masterProbe,
+      final_probe: finalProbe,
+      remote_finalization: true,
+      created_at: new Date().toISOString(),
+    };
+    writeFileSync(path.join(paths.projectDir, "remote-finalization.json"), `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+    return evidence;
   }
 
   private resolveInputFrame(project: LongVideoProject, segment: LongVideoSegment) {
@@ -458,6 +625,7 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
     if (confirmations.filter((value) => value === 0).length < 2) throw new Error("clore_zero_resource_confirmation_failed");
     this.restoreQualifications.delete(session.sessionId);
     this.contexts.delete(session.sessionId);
+    if (this.contexts.size === 0) this.authorizedProjectId = null;
     void billing;
   }
 }

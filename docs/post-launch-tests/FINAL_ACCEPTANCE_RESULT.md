@@ -104,3 +104,22 @@ Stage 4J.7 was strictly non-billable: no authorization, provider create/cancel, 
 The accepted image hashes remain `c79c99476486fdcd83dbdc0cb7e90e2961ebdda85fe556a1c1a10be2558e6078` and `d3b12a75c5b30086f2dec902d4d9e7e38f8418a8436c64cbca97d765623b32ac`. Accepted segment-0 MP4 remains `4d72d09d12f2bf7a40e6ab49f29cc963e002bcab3d3ec2046126aef2307758d9`; its last frame remains `6260f7149b352bb4f337d8ce9a63f16f169e28c61e11052590e653e342cfb77a`. Segment 0 has one attempt and segment 1 has zero attempts.
 
 The future proposal is RTX 5090 On-Demand, `$0.65/hour` maximum, one active order, one production order, at most two pre-restore qualification orders, at most two sequential orders, combined wallet delta at most `$1.25`, 240-minute wall cap, and draining at 220 minutes. A second candidate is permitted only if the first actual-source probe fails before restore; no replacement is allowed after restore or inference. `paid_execution_authorized=false`, `provider_mutations=0`, `daily_use_ready=false`, and `production_ready=false`.
+
+## Stage 4J.8 final throughput-qualified acceptance
+
+Date: 2026-07-19
+
+Result: **successful personal daily-use closure**.
+
+- One Clore RTX 5090 On-Demand order: `1964355`, server `104843`, `root@n1.us.clorecloud.net:1211`, `$0.42/hour`. One create request, one successful order, no replacement.
+- Wallet: `$10.31 -> $9.82`; total delta `$0.49`, below the `$1.25` cap.
+- SSH: canonical Ed25519 key-only login passed on attempt 1; password fallback was not used. Blackwell: capability `12.0`, 32,607 MiB VRAM, Torch `2.7.1+cu128`, CUDA `12.8`, Triton `3.3.1`, `sm_120`.
+- R2 probe: 384 MiB retained, eight HTTP 206 streams, 209.71 MiB/s. Full Wan restore: 35,572,266,487 verified bytes in about 140 seconds, 243.74 MiB/s aggregate, 402,653,184 probe bytes reused, zero retry.
+- Segment 0 remains one accepted attempt. Segment 1 completed with one submission and one automatically accepted attempt, 1280×720, 81 frames, 16 fps, 5.0625 seconds. Output SHA is `28f5e0743ada4eef00c9a07bd664de1daca3278a652f45a337c1361fb637e804`; last-frame SHA is `b4e1b6bc497675da1396d0db2134de932c4d449b61aac04d27883570b91637ce`.
+- Tail linkage passed: segment-0 last-frame SHA and segment-1 input SHA both equal `6260f7149b352bb4f337d8ce9a63f16f169e28c61e11052590e653e342cfb77a`.
+- Remote master: concat-copy, 1280×720, H.264/yuv420p, 162 frames, 16 fps, 10.125 seconds, SHA `95c02008a67d671a92c82f816e44852f3547ad032917957252604e4e87de5c74`.
+- Remote final: CUDA scaling plus `h264_nvenc` P7/CQ18, 1920×1080, H.264/yuv420p, 10.125 seconds, SHA `befbf0ca3ac59743e81d9cf0fe2a1546616f0d264510e526c9504aeee30f5a9b`, `native_1080p=false`.
+- Browser and launcher passed: completed green 长视频 card, 高 badge, both segment thumbnails, final playback/seeking, final and master Range 206, visible 720P-master link, refresh persistence, 320px sidebar, correct `资费情况`, no hydration errors, no provider mutation, and one `启动平台.cmd` restart.
+- Cleanup: canceled at `2026-07-19T11:10:02.825Z`; Clore `0`, RunPod `0/0`, both holds true, no active authorization/lock/watchdog/watcher/temporary credential state.
+- Final flags: `rtx4090_profile_preserved=true`, `rtx5090_profile_implemented=true`, `rtx5090_gpu_verified=true`, `rtx5090_image_medium_verified=true`, `rtx5090_image_high_final_verified=true`, `rtx5090_long_video_720p_verified=true`, `rtx5090_long_video_1080p_final_verified=true`, `long_video_tail_frame_chain_verified=true`, `remote_runner_channel_verified=true`, `throughput_qualified_restore_verified=true`, `windows_launcher_verified=true`, `daily_use_ready=true`, `project_closed_for_personal_use=true`, `production_ready=false`.
+- `MANUAL_HANDOFF_REQUIRED=false`.

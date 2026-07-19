@@ -453,14 +453,35 @@ def run(bundle_path: pathlib.Path) -> None:
         heartbeat_thread.join(timeout=2)
 
 
-def probe_stream(url: str, start: int, end: int, deadline: float) -> dict:
+def probe_stream(
+    url: str,
+    start: int,
+    end: int,
+    deadline: float,
+    chunk_path: pathlib.Path,
+) -> dict:
     requested = end - start + 1
+    chunk_path.parent.mkdir(parents=True, exist_ok=True)
+    if chunk_path.exists() and chunk_path.stat().st_size > requested:
+        chunk_path.unlink()
+    existing = chunk_path.stat().st_size if chunk_path.exists() else 0
+    request_start = start + existing
     received = 0
     status = None
     started = time.monotonic()
+    if existing == requested:
+        return {
+            "requestedBytes": requested,
+            "receivedBytes": 0,
+            "retainedBytes": existing,
+            "reusedBytes": existing,
+            "durationSeconds": 0.001,
+            "httpStatus": 206,
+            "rangeSupported": True,
+        }
     request = urllib.request.Request(url, headers={
         "User-Agent": "ai-video-platform-restore-probe-v1",
-        "Range": f"bytes={start}-{end}",
+        "Range": f"bytes={request_start}-{end}",
         "Accept-Encoding": "identity",
     })
     remaining_timeout = max(1, min(STALL_TIMEOUT_SECONDS, deadline - time.monotonic()))
@@ -468,15 +489,19 @@ def probe_stream(url: str, start: int, end: int, deadline: float) -> dict:
         status = response_status(response)
         if status != 206:
             raise RangeUnsupported(f"probe_range_status_{status}")
-        validate_content_range(response.headers.get("Content-Range"), start, end)
-        while received < requested and time.monotonic() < deadline:
-            data = response.read(min(IO_CHUNK_BYTES, requested - received))
-            if not data:
-                break
-            received += len(data)
+        validate_content_range(response.headers.get("Content-Range"), request_start, end)
+        with chunk_path.open("ab" if existing else "wb") as output:
+            while existing + received < requested and time.monotonic() < deadline:
+                data = response.read(min(IO_CHUNK_BYTES, requested - existing - received))
+                if not data:
+                    break
+                output.write(data)
+                received += len(data)
     return {
         "requestedBytes": requested,
         "receivedBytes": received,
+        "retainedBytes": existing + received,
+        "reusedBytes": existing,
         "durationSeconds": max(0.001, time.monotonic() - started),
         "httpStatus": status,
         "rangeSupported": status == 206,
@@ -500,24 +525,34 @@ def run_probe(bundle_path: pathlib.Path) -> dict:
     )[:object_count]
     if len(selected) < 2:
         raise ValueError("probe_requires_two_large_objects")
-    per_object = total_bytes // len(selected)
     tasks = []
     deadline = time.monotonic() + deadline_seconds
     probe_started = time.monotonic()
-    for object_index, file in enumerate(selected):
-        object_budget = min(per_object, int(file["bytes"]))
-        ranges = exact_ranges(object_budget, max(2, stream_count // len(selected)))
+    multistream = bundle.get("multistream", {})
+    restore_streams = max(
+        int(multistream.get("minimumStreamsPerObject", 4)),
+        min(int(multistream.get("maximumStreamsPerObject", 12)), int(multistream.get("streamsPerLargeObject", 8))),
+    )
+    probe_streams_per_object = max(2, stream_count // len(selected))
+    sample_per_stream = max(1, total_bytes // (probe_streams_per_object * len(selected)))
+    root = pathlib.Path(bundle["destinationRoot"])
+    for file in selected:
+        ranges = exact_ranges(int(file["bytes"]), restore_streams)
         url = bundle["objectUrls"].get(file["objectKey"])
         if not url:
             raise ValueError("probe_object_url_missing")
-        for start, end in ranges:
-            absolute_start = min(int(file["bytes"]) - (end - start + 1), object_index * per_object + start)
-            tasks.append((file, url, absolute_start, absolute_start + (end - start)))
+        target = root / file["path"]
+        chunk_root = target.parent / str(multistream.get("chunkDirectoryName", ".restore-chunks"))
+        chunk_dir = chunk_root / hashlib.sha256(file["objectKey"].encode("utf-8")).hexdigest()[:24]
+        for index, (full_start, full_end) in enumerate(ranges[:probe_streams_per_object]):
+            sample_end = min(full_end, full_start + sample_per_stream - 1)
+            chunk_path = chunk_dir / f"{index:03d}-{full_start}-{full_end}.part"
+            tasks.append((file, url, full_start, sample_end, chunk_path))
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=stream_count) as pool:
         futures = [
-            (file, pool.submit(probe_stream, url, start, end, deadline))
-            for file, url, start, end in tasks
+            (file, pool.submit(probe_stream, url, start, end, deadline, chunk_path))
+            for file, url, start, end, chunk_path in tasks
         ]
         for file, future in futures:
             result = future.result(timeout=deadline_seconds + 10)
@@ -527,18 +562,21 @@ def run_probe(bundle_path: pathlib.Path) -> dict:
     for file in selected:
         matching = [result for candidate, result in results if candidate["objectKey"] == file["objectKey"]]
         received = sum(int(result["receivedBytes"]) for result in matching)
+        retained = sum(int(result["retainedBytes"]) for result in matching)
         requested = sum(int(result["requestedBytes"]) for result in matching)
         object_duration = max((float(result["durationSeconds"]) for result in matching), default=duration)
         objects.append({
             "objectId": hashlib.sha256(file["objectKey"].encode("utf-8")).hexdigest()[:16],
             "requestedBytes": requested,
             "receivedBytes": received,
+            "retainedProbeBytes": retained,
             "durationSeconds": object_duration,
             "bytesPerSecond": received / max(0.001, object_duration),
             "httpStatuses": sorted(set(int(result["httpStatus"]) for result in matching)),
             "rangeSupported": all(bool(result["rangeSupported"]) for result in matching),
         })
     received_total = sum(int(item["receivedBytes"]) for item in objects)
+    retained_total = sum(int(item["retainedProbeBytes"]) for item in objects)
     aggregate = received_total / duration
     restore_bytes = int(bundle["restoreBytes"])
     gate = bundle.get("qualificationGate", {})
@@ -584,6 +622,8 @@ def run_probe(bundle_path: pathlib.Path) -> dict:
         "durationSeconds": duration,
         "requestedBytes": sum(int(item["requestedBytes"]) for item in objects),
         "receivedBytes": received_total,
+        "reusedProbeBytes": retained_total,
+        "probeChunksRetainedForRestore": retained_total > 0,
         "aggregateBytesPerSecond": aggregate,
         "aggregateMiBPerSecond": mib_per_second,
         "restoreEtaSeconds": restore_eta,

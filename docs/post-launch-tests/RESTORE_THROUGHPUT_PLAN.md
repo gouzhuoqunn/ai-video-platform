@@ -1,6 +1,6 @@
 # RTX 5090 restore-throughput qualification plan
 
-Status: **implemented and tested offline; no paid execution is authorized**.
+Status: **implemented, fixture-tested, and verified on the final paid Stage 4J.8 production order**.
 
 ## Stage 4J.6 diagnosis
 
@@ -22,14 +22,14 @@ The last sanitized observation was 4,336,910,336 of 35,572,266,487 bytes in 770 
 The future probe uses the same presigned read-only R2 model-object URLs as restore. It:
 
 - selects at least the two largest objects;
-- reads and discards 384 MiB total;
+- reads and retains 384 MiB total in the exact restore chunk layout;
 - uses eight bounded Range streams;
 - runs for no more than the 60–90 second qualification window;
 - requires HTTP 206 and valid `Content-Range` for every stream;
 - records aggregate and per-object rates, HTTP statuses, Range support, restore ETA, remaining wall-clock allowance, projected spend, pass/fail, and the exact reason;
 - writes only hashed object identifiers, never signed URLs or credentials.
 
-No bytes are persisted as model files by the probe.
+Probe bytes are retained only on a passing host and reused as the initial restore chunks. A rejected host discards them before cancellation.
 
 ## Restore transport
 
@@ -63,3 +63,11 @@ Clearly inadequate advertised bandwidth is rejected when the provider exposes it
 ## Future bounded sequence
 
 The non-authorized future policy permits one active order, one production order, at most two qualification orders, and at most two sequential orders. The first candidate runs the probe. A different second candidate is allowed only if the first fails qualification before restore or inference. There is no replacement after restore begins or after any inference submission. All qualification and production time shares one `$1.25` wallet-delta cap.
+
+## Stage 4J.8 verified result
+
+- Candidate `104843`: RTX 5090, 61.92 GiB RAM, 5.1 TB advertised disk, 1,676.77/1,651.25 Mbps advertised down/up, reliability `1`, rating `5`, disk `6,362.63 Mbps`, `$0.42/hour`.
+- Probe: 402,653,184 bytes, eight Range streams, HTTP 206 for every stream, 209.71 MiB/s aggregate, healthy band, projected spend `$0.458`, qualification passed.
+- Reuse: `reused_probe_bytes=402653184`; both large diffusion objects reused 201,326,592 bytes. No restore retry occurred.
+- Restore: 35,572,266,487/35,572,266,487 bytes verified in about 140 seconds at 243.74 MiB/s aggregate. Exact size and full SHA validation passed for all four objects.
+- Post-restore gate passed before inference. The same order continued to production; no replacement order was used.

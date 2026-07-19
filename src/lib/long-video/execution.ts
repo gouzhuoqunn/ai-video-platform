@@ -45,11 +45,13 @@ export type LongVideoExecutionAuthorization = {
   allowedSegmentIds?: string[];
   executionPurpose?: "final_video_resume_resilient";
   maxHourlyUsd?: number;
-  maxOrders?: 1;
+  maxOrders?: 1 | 2;
+  maxProductionOrders?: 1;
+  maxQualificationOrders?: 1 | 2;
   maxCreateRequests?: 3;
-  maxSuccessfulOrders?: 1;
+  maxSuccessfulOrders?: 1 | 2;
   orderType?: "on-demand";
-  noReplacementOrder?: true;
+  noReplacementOrder?: boolean;
   walletDeltaCapUsd?: number;
 };
 
@@ -92,6 +94,7 @@ export interface LongVideoProvider {
   restoreWan(session: LongVideoProviderSession): Promise<{ revision: string; verifiedObjects: number }>;
   generateSegment(input: { session: LongVideoProviderSession; project: LongVideoProject; sequenceIndex: number; attemptId: string; prompt: string; inputFrameRef: string; previousSegmentId: string | null; previousAttemptId: string | null; previousLastFrameSha256: string | null }): Promise<LongVideoSegmentMedia>;
   awaitReview(input: { projectId: string; sequenceIndex: number; deadline: string }): Promise<LongVideoReviewDecision>;
+  finalizeBeforeCancel?(input: { session: LongVideoProviderSession; project: LongVideoProject }): Promise<unknown>;
   cancelSession(session: LongVideoProviderSession): Promise<void>;
 }
 
@@ -434,6 +437,12 @@ export class LongVideoExecutionCoordinator {
       current = getLongVideoProject(projectId, this.statePath)!;
       if (current.status !== "awaiting_merge_confirmation") await this.transition(current, "awaiting_merge_confirmation");
       this.deleteProjectTasks(getLongVideoProject(projectId, this.statePath)!);
+      if (this.provider.finalizeBeforeCancel) {
+        await this.provider.finalizeBeforeCancel({
+          session: providerSession,
+          project: getLongVideoProject(projectId, this.statePath)!,
+        });
+      }
       await this.provider.cancelSession(providerSession);
       session.cleanupState = "completed"; session.active = false; session.updatedAt = this.now().toISOString(); this.saveSession(session);
       return session;

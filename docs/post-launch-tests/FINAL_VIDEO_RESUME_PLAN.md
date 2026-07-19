@@ -1,6 +1,6 @@
 # Final RTX 5090 video-only resume plan
 
-Status: **plan only; no paid execution is authorized**.
+Status: **completed by Stage 4J.8; the one-use paid authorization is consumed and removed**.
 
 This plan is bound to the existing durable Stage 4J.3 partial result. It must not create image work, restore UltraReal, regenerate segment 0, or create any short-video task.
 
@@ -79,3 +79,11 @@ This section supersedes the old 120/105-minute proposal above.
 - Once restore or inference starts, no replacement order is permitted.
 
 Both provider holds stay enabled, `paid_execution_authorized=false`, and no automatic rental action may consume this plan.
+
+## Stage 4J.8 execution result
+
+- The first ranked candidate passed actual-source qualification and became the production host; no second order was created.
+- Orders/create requests/successful orders: `1/1/1`; maximum active orders observed: `1`.
+- One Wan restore and one segment-1 inference completed. Segment attempts are exactly `1/1`; segment 0 was not regenerated.
+- Segment-0 last-frame SHA equals segment-1 input SHA: `6260f7149b352bb4f337d8ce9a63f16f169e28c61e11052590e653e342cfb77a`.
+- The completed project is local, remotely finalized, browser verified, and cloud-clean. This plan must not be executed again.
