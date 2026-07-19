@@ -2,7 +2,7 @@
 
 /* eslint-disable @next/next/no-img-element */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { User } from "@supabase/supabase-js";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -14,6 +14,13 @@ import { normalizeStudioMode, normalizeVideoSubmode, STUDIO_MODE_STORAGE_KEY, VI
 import { LongVideoStudio, longVideoPublicMediaUrl, type LongVideoProject } from "@/components/LongVideoStudio";
 import { BillingPanel } from "@/components/BillingPanel";
 import { FirstFrameInput } from "@/components/FirstFrameInput";
+import {
+  defaultGpuExecutionState,
+  executionActionFor,
+  type ConfirmedQueueCounts,
+  type GpuExecutionState,
+  type RequiredGpuClass,
+} from "@/lib/generation/gpu-execution-state";
 
 type JobCounts = Partial<Record<VideoJobStatus, number>>;
 
@@ -51,17 +58,6 @@ type CloreCandidatesResponse = {
   error?: string;
 };
 
-type SessionResponse = {
-  status: string;
-  orderId: string | null;
-  serverId: string | null;
-  processingJobs: number;
-  lastUpdatedAt: string;
-  deploymentHold?: boolean;
-  deploymentHoldMessage?: string | null;
-  error?: string;
-};
-
 type LocalResult = {
   jobId: string;
   hasVideo: boolean;
@@ -79,10 +75,18 @@ type AutorentRequest = {
   created_at: string;
 };
 
-type BatchGpuMode = "auto" | "current" | "wait_for_current_to_close";
-
 type ImageResult = { sessionId: string; date: string; metadata: Record<string, unknown> | null; imageUrl: string };
 type PendingImage = { sessionId: string; completedStages: string[]; status: "pending" | "completed" };
+type RentalPlan = {
+  nonce: string;
+  server_id: string;
+  max_price_usd_per_hour: number;
+  required_confirmation_text: string;
+  expires_at: string;
+  generation_family: OrdinaryStudioMode;
+  gpu_class: RequiredGpuClass;
+  confirmed_task_ids: string[];
+};
 type PoolTaskStatus = "pending_confirmation" | "waiting_for_batch" | "armed" | "waiting_for_gpu" | "deploying" | "provisioning" | "restoring_models" | "restoring_image_model" | "generating_image" | "unloading_image_model" | "restoring_video_model" | "generating_video" | "downloading_transcoding" | "generating" | "syncing" | "cancel_requested" | "completed" | "failed" | "cancelled";
 type PoolTask = {
   id: string;
@@ -92,6 +96,7 @@ type PoolTask = {
   modelProfile: string;
   modelRevision: string;
   gpuPreference: string[];
+  requiredGpuClass: RequiredGpuClass;
   priority: "normal" | "immediate";
   status: PoolTaskStatus;
   createdAt: string;
@@ -139,6 +144,8 @@ type PoolSummary = {
     automaticShutdownAt: string | null;
     shutdownMode: "immediate" | "after_current" | null;
   } | null;
+  confirmedQueueCounts: ConfirmedQueueCounts;
+  execution: GpuExecutionState;
   readiness: {
     model_cache_ready: boolean;
     gpu_inference_verified: boolean;
@@ -165,7 +172,9 @@ const autorentStatusLabels: Record<AutorentRequest["status"], string> = {
   waiting: "等待中", searching: "寻找显卡", candidate_found: "已找到候选", provisioning: "正在部署", assigned: "已分配", failed: "失败", cancelled: "已取消",
 };
 
-const starterPrompt = "A clean text-only 5 second video title card, cinematic lighting, no people, no logos.";
+const starterPrompt = "整洁的五秒纯文字片头，电影感灯光，无人物，无标志。";
+const emptyExecution = defaultGpuExecutionState(0);
+const EXECUTION_QUEUE_STORAGE_KEY = "ai-video-platform:execution-queue:v1";
 
 function formatMoney(value: number | null | undefined) {
   return typeof value === "number" ? `$${value.toFixed(3)}` : "未确认";
@@ -261,12 +270,18 @@ export function LocalCreationStudio() {
   const [candidateSource, setCandidateSource] = useState("");
   const [selectedServerId, setSelectedServerId] = useState("");
   const [detailServer, setDetailServer] = useState<CloreCandidateSummary | null>(null);
-  const [session, setSession] = useState<SessionResponse | null>(null);
   const [autorentRequests, setAutorentRequests] = useState<AutorentRequest[]>([]);
   const [notice, setNotice] = useState("正在恢复本地实验会话...");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isBatching, setIsBatching] = useState(false);
-  const [pendingGpuChoice, setPendingGpuChoice] = useState<{ action: "confirm" | "urgent"; jobIds: string[] } | null>(null);
+  const [selectedExecutionGpuClass, setSelectedExecutionGpuClass] = useState<RequiredGpuClass | null>(null);
+  const [isStartingExecution, setIsStartingExecution] = useState(false);
+  const [pendingGpuAction, setPendingGpuAction] = useState<"stop" | "cancel" | null>(null);
+  const [rentalSuccessOpen, setRentalSuccessOpen] = useState(false);
+  const [rentalPlan, setRentalPlan] = useState<RentalPlan | null>(null);
+  const [rentalConfirmationText, setRentalConfirmationText] = useState("");
+  const [rentalRiskAccepted, setRentalRiskAccepted] = useState(false);
+  const [selectedLongVideoIds, setSelectedLongVideoIds] = useState<string[]>([]);
   const [filter, setFilter] = useState<"all" | VideoJobStatus>("all");
   const [minPrice, setMinPrice] = useState("0");
   const [maxPrice, setMaxPrice] = useState("0.70");
@@ -289,6 +304,7 @@ export function LocalCreationStudio() {
   const [selectedLongSegmentIndex, setSelectedLongSegmentIndex] = useState(0);
   const [selectedVideoKind, setSelectedVideoKind] = useState<"short" | "long">("short");
   const [clockNow, setClockNow] = useState(0);
+  const automaticCancelRequested = useRef(false);
 
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
   const localResultForSelected = selectedJob ? localResults.find((result) => result.jobId === selectedJob.id) : null;
@@ -301,11 +317,9 @@ export function LocalCreationStudio() {
   const modePoolTasks = pool?.tasks.filter((task) => task.generationType === ordinaryMode && !["long_video_segment", "long_video_first_frame"].includes(task.jobForm)) ?? [];
   const selectedPoolTask = selectedPoolTaskIds.length ? (pool?.tasks.find((task) => task.id === selectedPoolTaskIds[0]) ?? null) : null;
   const selectedPoolFamily = selectedPoolTask?.generationType ?? null;
-  const selectedPoolGpu = selectedPoolTask?.gpuPreference.length === 1 ? selectedPoolTask.gpuPreference[0] : null;
   const poolTaskSelectable = (task: PoolTask) => {
     if (task.status !== "pending_confirmation") return false;
     if (selectedPoolFamily && task.generationType !== selectedPoolFamily) return false;
-    if (selectedPoolGpu && !(task.gpuPreference.length === 1 && task.gpuPreference[0] === selectedPoolGpu)) return false;
     return true;
   };
   const queuedPoolTasks = modePoolTasks.filter((task) => ["waiting_for_batch", "armed", "waiting_for_gpu"].includes(task.status));
@@ -327,10 +341,16 @@ export function LocalCreationStudio() {
         : null
     : null;
   const activeVideoUrl = selectedVideoKind === "long" ? longVideoPreviewUrl : mainVideoUrl;
-  const pending4090 = pool?.tasks.filter((task) => task.gpuPreference.length === 1 && task.gpuPreference[0] === "rtx4090" && !["completed", "failed", "cancelled"].includes(task.status)).length ?? 0;
-  const pending5090 = pool?.tasks.filter((task) => task.gpuPreference.length === 1 && task.gpuPreference[0] === "rtx5090" && !["completed", "failed", "cancelled"].includes(task.status)).length ?? 0;
-  const idleCancelSeconds = pool?.session?.automaticShutdownAt && clockNow
-    ? Math.max(0, Math.ceil((Date.parse(pool.session.automaticShutdownAt) - clockNow) / 1000))
+  const execution = pool?.execution ?? emptyExecution;
+  const visibleQueueCounts = useMemo(
+    () => pool?.confirmedQueueCounts?.[ordinaryMode] ?? { rtx4090: 0, rtx5090: 0 },
+    [ordinaryMode, pool?.confirmedQueueCounts],
+  );
+  const selectedQueueCount = selectedExecutionGpuClass ? visibleQueueCounts[selectedExecutionGpuClass] : 0;
+  const executionAction = selectedExecutionGpuClass ? executionActionFor(execution, ordinaryMode, selectedExecutionGpuClass, selectedQueueCount) : null;
+  const queueSelectionLocked = isStartingExecution || ["searching", "deploying", "stopping", "canceling"].includes(execution.activity);
+  const idleCancelSeconds = execution.idleCancelAt && clockNow
+    ? Math.max(0, Math.ceil((Date.parse(execution.idleCancelAt) - clockNow) / 1000))
     : 120;
   const activeQueue = pool?.tasks.filter((task) => !["completed", "cancelled"].includes(task.status)) ?? [];
   const simplifiedSessionStatus = activeQueue.some((task) => ["failed"].includes(task.status))
@@ -340,6 +360,15 @@ export function LocalCreationStudio() {
       : activeQueue.length
         ? "排队"
         : "已完成";
+  const deployedFamilyLabel = execution.deployedFamily === "image" ? "图片模型" : execution.deployedFamily === "video" ? "视频模型" : execution.deployedFamily === "none" ? "暂无" : "状态未知";
+  const currentModeDeployed = Boolean(execution.rentedGpuClass) && execution.deployedFamily === ordinaryMode;
+  const activeGenerationFamily = execution.activeExecution?.generationFamily ?? (execution.deployedFamily === "image" || execution.deployedFamily === "video" ? execution.deployedFamily : null);
+
+  const selectExecutionQueue = useCallback((gpuClass: RequiredGpuClass | null) => {
+    setSelectedExecutionGpuClass(gpuClass);
+    if (gpuClass) window.localStorage.setItem(EXECUTION_QUEUE_STORAGE_KEY, JSON.stringify({ family: ordinaryMode, gpuClass }));
+    else window.localStorage.removeItem(EXECUTION_QUEUE_STORAGE_KEY);
+  }, [ordinaryMode]);
 
   const priceGate = useMemo(() => {
     const min = parsePrice(minPrice);
@@ -353,14 +382,18 @@ export function LocalCreationStudio() {
     return candidates
       .filter((candidate) => {
         const effective = candidate.effective_usd_per_hour ?? (candidate.normalized_usd_per_hour ? candidate.normalized_usd_per_hour * 1.05 : null);
-        return effective !== null && effective >= priceGate.min! && effective <= priceGate.max!;
+        const gpuClass = /5090/i.test(candidate.gpu) ? "rtx5090" : /4090/i.test(candidate.gpu) ? "rtx4090" : null;
+        return effective !== null
+          && effective >= priceGate.min!
+          && effective <= priceGate.max!
+          && (!selectedExecutionGpuClass || gpuClass === selectedExecutionGpuClass);
       })
       .sort((left, right) => {
         const leftPrice = left.effective_usd_per_hour ?? Number.POSITIVE_INFINITY;
         const rightPrice = right.effective_usd_per_hour ?? Number.POSITIVE_INFINITY;
         return leftPrice - rightPrice;
       });
-  }, [candidates, priceGate.max, priceGate.min, priceGate.valid]);
+  }, [candidates, priceGate.max, priceGate.min, priceGate.valid, selectedExecutionGpuClass]);
 
   const selectedCandidate = selectedServerId ? filteredCandidates.find((candidate) => candidate.server_id === selectedServerId) ?? null : null;
 
@@ -410,7 +443,9 @@ export function LocalCreationStudio() {
   }, []);
 
   const refreshPool = useCallback(async () => {
-    const response = await fetch("/api/local-lab/generation-pool");
+    const query = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+    const fixture = query?.get("gpu_fixture");
+    const response = await fetch(`/api/local-lab/generation-pool${fixture ? `?fixture=${encodeURIComponent(fixture)}` : ""}`);
     const payload = await response.json().catch(() => null) as PoolSummary | null;
     if (response.ok && payload) setPool(payload);
   }, []);
@@ -425,13 +460,11 @@ export function LocalCreationStudio() {
 
   const refreshClore = useCallback(async () => {
     const useVisualMock = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("visual_mock") === "1";
-    const [candidateResponse, sessionResponse, autorentResponse] = await Promise.all([
+    const [candidateResponse, autorentResponse] = await Promise.all([
       fetch(`/api/local-lab/clore/candidates${useVisualMock ? "?mock=1" : ""}`),
-      fetch("/api/local-lab/clore/session"),
       fetch("/api/local-lab/clore/autorent"),
     ]);
     const candidatePayload = (await candidateResponse.json().catch(() => ({}))) as CloreCandidatesResponse;
-    const sessionPayload = (await sessionResponse.json().catch(() => ({}))) as SessionResponse;
     const autorentPayload = (await autorentResponse.json().catch(() => ({}))) as { requests?: AutorentRequest[] };
 
     if (candidateResponse.ok) {
@@ -439,7 +472,6 @@ export function LocalCreationStudio() {
       setCandidateSource(candidatePayload.source ?? "");
       setSelectedServerId((current) => (current && candidatePayload.matches?.some((candidate) => candidate.server_id === current) ? current : candidatePayload.matches?.[0]?.server_id || ""));
     }
-    if (sessionResponse.ok) setSession(sessionPayload);
     if (autorentResponse.ok) setAutorentRequests(autorentPayload.requests ?? []);
   }, []);
 
@@ -479,8 +511,32 @@ export function LocalCreationStudio() {
     };
   }, [refreshClore, refreshImageResults, refreshJobs, refreshLongVideos, refreshPool, refreshResults, supabase]);
 
+  useEffect(() => {
+    if (!pool) return;
+    /* eslint-disable react-hooks/set-state-in-effect */
+    const active = pool.execution.activeExecution;
+    if (active?.generationFamily === ordinaryMode && visibleQueueCounts[active.gpuClass] > 0) {
+      setSelectedExecutionGpuClass(active.gpuClass);
+      return;
+    }
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(EXECUTION_QUEUE_STORAGE_KEY) ?? "null") as { family?: OrdinaryStudioMode; gpuClass?: RequiredGpuClass } | null;
+      if (stored?.family === ordinaryMode && (stored.gpuClass === "rtx4090" || stored.gpuClass === "rtx5090") && visibleQueueCounts[stored.gpuClass] > 0) {
+        setSelectedExecutionGpuClass(stored.gpuClass);
+      } else if (selectedExecutionGpuClass && visibleQueueCounts[selectedExecutionGpuClass] === 0) {
+        setSelectedExecutionGpuClass(null);
+        window.localStorage.removeItem(EXECUTION_QUEUE_STORAGE_KEY);
+      }
+    } catch {
+      window.localStorage.removeItem(EXECUTION_QUEUE_STORAGE_KEY);
+    }
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [ordinaryMode, pool, selectedExecutionGpuClass, visibleQueueCounts]);
+
   function selectMode(next: StudioMode) {
     setMode(next);
+    setSelectedPoolTaskIds([]);
+    if (!queueSelectionLocked) selectExecutionQueue(null);
     window.localStorage.setItem(STUDIO_MODE_STORAGE_KEY, next);
     if (next === "video" || next === "long_video") {
       setVideoSubmode(next === "long_video" ? "long_video" : "video");
@@ -491,6 +547,8 @@ export function LocalCreationStudio() {
   function selectVideoSubmode(next: "video" | "long_video") {
     setVideoSubmode(next);
     setMode(next);
+    setSelectedPoolTaskIds([]);
+    if (!queueSelectionLocked) selectExecutionQueue(null);
     window.localStorage.setItem(VIDEO_SUBMODE_STORAGE_KEY, next);
     window.localStorage.setItem(STUDIO_MODE_STORAGE_KEY, next);
   }
@@ -511,6 +569,27 @@ export function LocalCreationStudio() {
     const interval = window.setInterval(() => setClockNow(Date.now()), 1000);
     return () => window.clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
+    if (execution.notice === "rental_succeeded") setRentalSuccessOpen(true);
+    if (execution.notice === "gpu_canceled") selectExecutionQueue(null);
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [execution.notice, selectExecutionQueue]);
+
+  useEffect(() => {
+    const due = execution.activity === "idle"
+      && Boolean(execution.rentedGpuClass)
+      && Boolean(execution.idleCancelAt)
+      && idleCancelSeconds <= 0;
+    if (!due) {
+      automaticCancelRequested.current = false;
+      return;
+    }
+    if (automaticCancelRequested.current) return;
+    automaticCancelRequested.current = true;
+    void requestGpuAction("cancel_gpu", true);
+  }, [execution.activity, execution.idleCancelAt, execution.rentedGpuClass, idleCancelSeconds]);
 
   useEffect(() => {
     if (!selectedJob || selectedJob.status !== "succeeded" || localResultForSelected?.videoUrl || signedVideos[selectedJob.id]) return;
@@ -535,7 +614,7 @@ export function LocalCreationStudio() {
     return videoProfile === "low_video_4090" || videoProfile === "medium_video_4090" ? "rtx4090" : "rtx5090";
   }
 
-  async function submitPrompt(startMode: "pending" | "immediate" = "pending") {
+  async function submitPrompt() {
     if (!supabase || !user || isSubmitting) return;
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) {
@@ -572,7 +651,7 @@ export function LocalCreationStudio() {
            sizePreset: mode === "image" ? imageSizePreset : videoProfile,
            existingImageJobId: sourceImageId || null,
            gpuPreference: [selectedGpuForProfile()],
-          startMode,
+          startMode: "pending",
         }),
       });
       const payload = await response.json().catch(() => ({})) as { error?: string; tasks?: PoolTask[] };
@@ -583,30 +662,26 @@ export function LocalCreationStudio() {
       setPrompt("");
       setNegativePrompt("");
       setSeed("");
-      setNotice(startMode === "immediate" ? "立即任务已加入常规生产队列；部署暂停期间不会租用显卡。" : "任务已保存为待确认，不扣重复积分，也不会启动显卡。");
+      setNotice("任务已保存为待确认，不扣重复积分，也不会启动显卡。");
       await refreshPool();
     } finally {
       setIsSubmitting(false);
     }
   }
 
-  async function runPoolAction(action: "confirm" | "immediate" | "cancel" | "delete" | "retry" | "regenerate", targetTaskIds?: string[]) {
+  async function runPoolAction(action: "confirm" | "cancel" | "delete" | "retry" | "regenerate", targetTaskIds?: string[]) {
     const expandedIds = new Set(targetTaskIds ?? []);
-    if (action === "confirm" || action === "immediate") {
-      for (const task of pool?.tasks ?? []) {
-        if (expandedIds.has(task.id) && task.inputImageJobId) expandedIds.add(task.inputImageJobId);
-      }
-    }
     const allPoolTasks = pool?.tasks ?? modePoolTasks;
     const requested = targetTaskIds?.length ? allPoolTasks.filter((task) => expandedIds.has(task.id)) : modePoolTasks;
-    const eligible = requested.filter((task) => action === "confirm" || action === "immediate" ? task.status === "pending_confirmation" : action === "retry" ? task.status === "failed" : !["deploying", "provisioning", "restoring_models", "restoring_image_model", "generating_image", "unloading_image_model", "restoring_video_model", "generating_video", "downloading_transcoding", "generating", "syncing"].includes(task.status));
+    const eligible = requested.filter((task) => action === "confirm" ? task.status === "pending_confirmation" : action === "retry" ? task.status === "failed" : !["deploying", "provisioning", "restoring_models", "restoring_image_model", "generating_image", "unloading_image_model", "restoring_video_model", "generating_video", "downloading_transcoding", "generating", "syncing"].includes(task.status));
     if (!eligible.length) { setNotice("当前模式没有可执行该操作的任务。"); return; }
     if (mode === "video" && action === "cancel" && supabase) {
       for (const task of eligible) await supabase.rpc("cancel_video_job", { p_job_id: task.id });
     }
-    const response = await fetch("/api/local-lab/generation-pool", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, taskIds: eligible.map((task) => task.id) }) });
+    const response = await fetch("/api/local-lab/generation-pool", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, generationType: ordinaryMode, taskIds: eligible.map((task) => task.id) }) });
     const payload = await response.json().catch(() => ({})) as { error?: string };
-    setNotice(response.ok ? ({ confirm: "任务已确认，等待达到批量阈值。", immediate: "立即任务已锁定批次，部署暂停期间不会租用显卡。", cancel: "任务已取消或已请求安全停止。", delete: "任务已从本地调度池删除。", retry: "失败步骤已创建新尝试，并从最后验证边界继续。", regenerate: "已创建新的待确认输出，旧结果继续保留。" }[action]) : payload.error ?? "任务池操作失败。");
+    setNotice(response.ok ? ({ confirm: "任务已确认，并进入对应的显卡等待队列。", cancel: "任务已取消或已请求安全停止。", delete: "任务已从本地调度池删除。", retry: "失败步骤已创建新尝试，并从最后验证边界继续。", regenerate: "已创建新的待确认输出，旧结果继续保留。" }[action]) : payload.error ?? "任务池操作失败。");
+    if (response.ok && action === "confirm") setSelectedPoolTaskIds([]);
     await Promise.all([refreshPool(), refreshJobs()]);
   }
 
@@ -622,24 +697,56 @@ export function LocalCreationStudio() {
     await Promise.all([refreshJobs(), refreshPool()]);
   }
 
-  function requestBatch(action: "confirm" | "urgent" | "delete" | "regenerate") {
+  function requestBatch(action: "confirm" | "delete" | "regenerate") {
     if (selectedJobIds.length === 0 || isBatching) return;
-    if ((action === "confirm" || action === "urgent") && session?.orderId) {
-      setPendingGpuChoice({ action, jobIds: [...selectedJobIds] });
-      return;
-    }
-    void runBatch(action, "auto", selectedJobIds);
+    void runBatch(action, selectedJobIds);
   }
 
-  async function runBatch(action: "confirm" | "urgent" | "delete" | "regenerate", gpuMode: BatchGpuMode = "auto", targetJobIds = selectedJobIds) {
-    if (targetJobIds.length === 0 || isBatching) return;
-    if (!priceGate.valid || priceGate.min === null || priceGate.max === null) {
-      setNotice("请先保存合法的GPU单价范围，最高不得超过 $0.70/小时。");
+  async function confirmSelectedVideoTasks() {
+    if (isBatching) return;
+    const jobIds = selectedJobIds.filter((id) => jobs.find((job) => job.id === id)?.status === "pending_confirmation");
+    const projects = selectedLongVideoIds
+      .map((id) => longVideoProjects.find((project) => project.id === id))
+      .filter((project): project is LongVideoProject => project?.status === "pending_confirmation");
+    if (!jobIds.length && !projects.length) {
+      setNotice("所选视频任务已经确认或不可确认。");
       return;
     }
+    setIsBatching(true);
+    try {
+      if (jobIds.length) {
+        const response = await fetch("/api/local-lab/jobs/batch", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "confirm", jobIds }),
+        });
+        const payload = await response.json().catch(() => ({})) as { error?: string };
+        if (!response.ok) throw new Error(payload.error ?? "短视频确认失败。");
+      }
+      for (const project of projects) {
+        const response = await fetch(`/api/local-lab/long-video/${project.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "confirm", expectedProjectVersion: project.version }),
+        });
+        const payload = await response.json().catch(() => ({})) as { error?: string };
+        if (!response.ok) throw new Error(payload.error ?? `长视频“${project.title}”确认失败。`);
+      }
+      setSelectedJobIds([]);
+      setSelectedLongVideoIds([]);
+      setNotice("确认生成已提交：短视频和长视频共同进入视频族队列，不会寻找或租用显卡。");
+    } catch (error) {
+      setNotice(error instanceof Error ? `${error.message} 已保留当前选择，请刷新状态后重试。` : "视频任务确认失败，已保留当前选择。");
+    } finally {
+      await Promise.all([refreshJobs(), refreshPool(), refreshLongVideos()]);
+      setIsBatching(false);
+    }
+  }
+
+  async function runBatch(action: "confirm" | "delete" | "regenerate", targetJobIds = selectedJobIds) {
+    if (targetJobIds.length === 0 || isBatching) return;
 
     setIsBatching(true);
-    setPendingGpuChoice(null);
     const optimisticDeleteIds = action === "delete" ? targetJobIds : [];
     if (optimisticDeleteIds.length > 0) {
       setJobs((current) => current.filter((job) => !optimisticDeleteIds.includes(job.id)));
@@ -653,9 +760,6 @@ export function LocalCreationStudio() {
         body: JSON.stringify({
           action,
           jobIds: targetJobIds,
-          gpuMode,
-          minEffectiveHourlyUsd: priceGate.min,
-          maxEffectiveHourlyUsd: priceGate.max,
         }),
       });
       const payload = (await response.json().catch(() => ({}))) as { error?: string; regenerated?: VideoJob[] };
@@ -666,9 +770,8 @@ export function LocalCreationStudio() {
       }
       setSelectedJobIds([]);
       if (payload.regenerated?.[0]) setSelectedJobId(payload.regenerated[0].id);
-      const labels = { confirm: "确认生成", urgent: "立即生成", delete: "删除", regenerate: "重新生成" };
-      const gpuModeNote = gpuMode === "current" ? "已加入当前GPU队列，不创建新的寻机请求。" : "任务已进入Clore调度安全门；没有合规主机时不会创建订单。";
-      setNotice(`${labels[action]}已提交。${gpuModeNote}`);
+      const labels = { confirm: "确认生成", delete: "删除", regenerate: "重新生成" };
+      setNotice(`${labels[action]}已提交。确认只进入视频等待队列，不会寻找或租用显卡。`);
       await Promise.all([refreshJobs(), refreshClore()]);
     } finally {
       setIsBatching(false);
@@ -682,20 +785,121 @@ export function LocalCreationStudio() {
     await refreshClore();
   }
 
-  async function requestShutdown(shutdownMode: "immediate" | "after_current" | "cancel_waiting") {
+  async function requestExecutionStart() {
+    if (!selectedExecutionGpuClass || !executionAction || executionAction.disabled || isStartingExecution) return;
+    const startingRental = executionAction.kind === "rent";
+    if (startingRental && !selectedCandidate) {
+      setNotice(`当前价格范围内没有可用于 ${selectedExecutionGpuClass === "rtx5090" ? "RTX 5090" : "RTX 4090"} 队列的合规候选。`);
+      return;
+    }
+    setIsStartingExecution(true);
+    try {
+      const response = await fetch("/api/local-lab/generation-pool", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "start_execution",
+          generationType: ordinaryMode,
+          gpuClass: selectedExecutionGpuClass,
+        }),
+      });
+      const payload = await response.json().catch(() => ({})) as { error?: string; pool?: PoolSummary; manual_authorization_required?: boolean };
+      if (payload.pool) setPool(payload.pool);
+      if (!response.ok) {
+        setNotice(payload.error ?? "无法开始执行队列。");
+        return;
+      }
+      if (!startingRental) {
+        setNotice("执行请求已交给受控运行器；当前订单保持不变，不会创建第二个订单。");
+        return;
+      }
+      const basePrice = selectedCandidate?.base_usd_per_hour ?? selectedCandidate?.normalized_usd_per_hour;
+      if (!selectedCandidate || basePrice === null || basePrice === undefined) {
+        await abortRentalSearch("候选价格无法验证，已取消本次寻卡。");
+        return;
+      }
+      const planResponse = await fetch("/api/local-lab/clore/order-plan", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ serverId: selectedCandidate.server_id, maxPriceUsdPerHour: basePrice }),
+      });
+      const plan = await planResponse.json().catch(() => ({})) as RentalPlan & { error?: string };
+      if (!planResponse.ok || !plan.nonce) {
+        await abortRentalSearch(plan.error ?? "无法创建一次性手动租用计划。");
+        return;
+      }
+      setRentalPlan(plan);
+      setRentalConfirmationText("");
+      setRentalRiskAccepted(false);
+      setNotice("已绑定当前显卡队列。请核对服务器与价格后完成一次性确认。");
+    } finally {
+      setIsStartingExecution(false);
+    }
+  }
+
+  async function abortRentalSearch(message = "已取消本次手动寻卡，任务仍保留在原队列。") {
     const response = await fetch("/api/local-lab/generation-pool", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action: "shutdown", shutdownMode }),
+      body: JSON.stringify({ action: "abort_search" }),
     });
-    const payload = await response.json().catch(() => ({})) as { error?: string };
-    const labels = {
-      immediate: "已请求立即安全停止并退租。",
-      after_current: "将在当前任务完成后立即退租。",
-      cancel_waiting: "所有未开始任务已取消；运行中的任务不受影响。",
-    };
-    setNotice(response.ok ? labels[shutdownMode] : payload.error ?? "无法更新关机策略。");
-    await refreshPool();
+    const payload = await response.json().catch(() => ({})) as { pool?: PoolSummary };
+    if (payload.pool) setPool(payload.pool);
+    setRentalPlan(null);
+    setRentalConfirmationText("");
+    setRentalRiskAccepted(false);
+    setNotice(message);
+  }
+
+  async function confirmRentalPlan() {
+    if (!rentalPlan || isStartingExecution) return;
+    setIsStartingExecution(true);
+    try {
+      const response = await fetch("/api/local-lab/clore/order-confirm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          nonce: rentalPlan.nonce,
+          serverId: rentalPlan.server_id,
+          maxPriceUsdPerHour: rentalPlan.max_price_usd_per_hour,
+          confirmationText: rentalConfirmationText,
+          riskAccepted: rentalRiskAccepted,
+          queuedJobCount: rentalPlan.confirmed_task_ids.length,
+        }),
+      });
+      const payload = await response.json().catch(() => ({})) as { order_created?: boolean; error?: string; message?: string };
+      if (response.ok && payload.order_created) {
+        setRentalPlan(null);
+        setNotice("租用请求已成功，正在部署当前队列所需模型。");
+        await refreshPool();
+        return;
+      }
+      await abortRentalSearch(payload.error ?? (payload.message ? `租用未执行：${payload.message}` : "租用未执行，已恢复为未寻卡状态。"));
+    } finally {
+      setIsStartingExecution(false);
+    }
+  }
+
+  async function requestGpuAction(action: "stop_generation" | "cancel_gpu", automatic = false) {
+    const response = await fetch("/api/local-lab/generation-pool", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    const payload = await response.json().catch(() => ({})) as { error?: string; pool?: PoolSummary };
+    if (payload.pool) setPool(payload.pool);
+    setNotice(response.ok
+      ? action === "stop_generation"
+        ? "已请求安全停止生成；GPU 保持租用，队列不会删除。"
+        : automatic ? "GPU 空闲倒计时已结束，正在通过安全路径退租。" : "已请求安全退租；等待任务继续保留。"
+      : payload.error ?? "GPU 操作失败。");
+  }
+
+  async function confirmGpuAction() {
+    if (!pendingGpuAction) return;
+    const action = pendingGpuAction === "stop" ? "stop_generation" : "cancel_gpu";
+    setPendingGpuAction(null);
+    await requestGpuAction(action);
   }
 
   function toggleSelected(jobId: string) {
@@ -728,10 +932,10 @@ export function LocalCreationStudio() {
             </Link>
             <button aria-label="资费情况" className="rounded-md border border-stone-300 bg-white px-2 py-1.5 font-semibold" data-testid="billing-toggle" onClick={() => setShowBilling((current) => !current)} type="button">资费情况</button>
             <span className="rounded-md border border-stone-200 bg-white px-2 py-1.5" data-mode={mode} data-testid="studio-status">{mode === "image" ? `图片 ${imageResults.length}` : mode === "long_video" ? "长视频项目" : `未生成 ${counts.pending_confirmation ?? 0}`}</span>
-            <span className="rounded-md border border-stone-200 bg-white px-2 py-1.5">GPU {session?.orderId ? "运行中" : "未租用"}</span>
+            <span className="rounded-md border border-stone-200 bg-white px-2 py-1.5">GPU {!pool ? "状态加载中" : execution.activity === "searching" ? "搜寻中" : execution.rentedGpuClass ? "已租用" : "未租用"}</span>
             <span className="rounded-md border border-stone-200 bg-white px-2 py-1.5">{mode === "image" ? "UltraReal" : "Wan 2.2"}</span>
-            <span className="rounded-md border border-sky-200 bg-sky-50 px-2 py-1.5 text-xs font-semibold text-sky-800">4090 {session?.serverId?.includes("4090") ? "运行" : "等待"}</span>
-            <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-xs font-semibold text-emerald-800">5090 {session?.serverId?.includes("5090") ? "运行" : "等待"}</span>
+            <span className="rounded-md border border-sky-200 bg-sky-50 px-2 py-1.5 text-xs font-semibold text-sky-800">4090 {execution.rentedGpuClass === "rtx4090" ? "运行" : "等待"}</span>
+            <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-xs font-semibold text-emerald-800">5090 {execution.rentedGpuClass === "rtx5090" ? "运行" : "等待"}</span>
           </div>
         </div>
       </header>
@@ -778,7 +982,7 @@ export function LocalCreationStudio() {
             <div className="flex flex-wrap items-center justify-between gap-2 border-t border-stone-200 bg-[#faf8f4] px-3 py-2 text-sm">
               <div>
                 <p className="font-semibold">{mode === "image" ? (selectedImage?.sessionId ?? pendingImage?.sessionId ?? "首张FLUX图片") : selectedVideoKind === "long" && selectedLongVideo ? selectedLongVideo.title : showingPoolVideo && poolVideoTask ? safePromptPreview(poolVideoTask.prompt) : selectedJob ? safePromptPreview(selectedJob.prompt) : "选择任务后会在这里显示"}</p>
-                <p className="text-stone-500">{mode === "image" ? (selectedImage ? "图片已完成并保存到本地" : "图片任务等待受控Clore调度") : selectedVideoKind === "long" && selectedLongVideo ? `${selectedLongVideo.segments.filter((segment) => segment.status === "accepted").length}/${selectedLongVideo.totalSegments} 段已完成` : showingPoolVideo ? "任务池视频已完成并保存到本地" : selectedJob ? `${videoJobStatusLabels[selectedJob.status]} · ${etaText(selectedJob, jobs)}` : "未生成任务需要确认或立即生成后才会进入队列"}</p>
+                <p className="text-stone-500">{mode === "image" ? (selectedImage ? "图片已完成并保存到本地" : "图片任务等待受控Clore调度") : selectedVideoKind === "long" && selectedLongVideo ? `${selectedLongVideo.segments.filter((segment) => segment.status === "accepted").length}/${selectedLongVideo.totalSegments} 段已完成` : showingPoolVideo ? "任务池视频已完成并保存到本地" : selectedJob ? `${videoJobStatusLabels[selectedJob.status]} · ${etaText(selectedJob, jobs)}` : "未生成任务确认后才会进入对应显卡队列"}</p>
               </div>
               <div className="flex items-center gap-2">
                 {selectedVideoKind === "long" && selectedLongVideo?.finalVideoRef ? (
@@ -852,7 +1056,7 @@ export function LocalCreationStudio() {
               <span className="rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2 text-sm font-semibold">配置将使用 {selectedGpuForProfile().toUpperCase()} · 由分辨率档位决定</span>
               <span className="text-sm text-stone-500">{prompt.trim().length}/2000</span>
               <div className="flex flex-wrap gap-2">
-                <button className="rounded-md bg-stone-900 px-4 py-3 text-sm font-bold text-white disabled:bg-stone-400" disabled={isSubmitting || !user} onClick={() => void submitPrompt("pending")} type="button">
+                <button className="rounded-md bg-stone-900 px-4 py-3 text-sm font-bold text-white disabled:bg-stone-400" disabled={isSubmitting || !user} onClick={() => void submitPrompt()} type="button">
                   {isSubmitting ? "创建中..." : "创建待确认任务"}
                 </button>
               </div>
@@ -864,7 +1068,7 @@ export function LocalCreationStudio() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h2 className="text-lg font-bold">生成队列</h2>
-                <p className="text-sm text-stone-500">创建只保存待生成任务；批次按生成族和 GPU 档位锁定，租用必须手动确认。</p>
+                <p className="text-sm text-stone-500">创建只保存待确认任务；确认后按生成族和 GPU 档位进入等待队列，租用仍需单独手动操作。</p>
               </div>
               <span className="rounded-md bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">{pool?.deploymentHold ? "Clore 部署已暂停" : "Clore 可由操作员恢复"}</span>
             </div>
@@ -874,14 +1078,14 @@ export function LocalCreationStudio() {
               ))}
             </div>
             <div className="mt-3 grid gap-1 text-sm text-stone-600 sm:grid-cols-2">
-              <p>还需 {mode === "image" ? pool?.tasksNeeded.image ?? 3 : pool?.tasksNeeded.video ?? 2} 个任务触发</p>
-              <p>市场监控：{pool?.marketMonitoringActive ? "运行中" : "未启动"}</p>
+              <p>当前模式：{ordinaryMode === "image" ? "图片队列" : "视频队列（短视频与长视频合并）"}</p>
+              <p>租用方式：仅手动启动</p>
               <p>预计会话：{pool?.costEstimate?.totalSession.minMinutes ?? 0}–{pool?.costEstimate?.totalSession.maxMinutes ?? 0} 分钟</p>
               <p>预计计算费：${(pool?.costEstimate?.projectedComputeUsd.min ?? 0).toFixed(2)}–${(pool?.costEstimate?.projectedComputeUsd.max ?? 0).toFixed(2)}</p>
               <p>调度状态：{schedulerStateLabels[pool?.schedulerState ?? "idle"] ?? "未知状态"}</p>
             </div>
             <p className="mt-2 rounded-md bg-stone-50 px-3 py-2 text-sm text-stone-700">{pool?.orderBlockingReason ?? "正在读取调度门禁。"}</p>
-            {selectedPoolTaskIds.length > 0 ? <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-rose-200 bg-rose-50 p-3"><span className="text-sm font-semibold">已选 {selectedPoolTaskIds.length} 个 · {selectedPoolFamily} · {selectedPoolGpu ?? "混合 GPU"}</span><button className="rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-400" disabled={isBatching || !selectedPoolGpu} onClick={() => void runPoolAction("immediate", selectedPoolTaskIds)} type="button">开始任务并租用显卡</button></div> : null}
+            {selectedPoolTaskIds.length > 0 ? <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-3"><span className="text-sm font-semibold">已选 {selectedPoolTaskIds.length} 个{ordinaryMode === "image" ? "图片" : "视频"}任务 · 可同时包含蓝色与绿色卡片</span><button className="rounded-md bg-stone-900 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-400" disabled={isBatching} onClick={() => void runPoolAction("confirm", selectedPoolTaskIds)} type="button">确认生成</button></div> : null}
             {pool?.productionModels?.[ordinaryMode] ? (
               <div className="mt-2 rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2 text-sm text-stone-700">
                 <p className="font-semibold">{mode === "image" ? "UltraReal Flux FP8" : "Wan 2.2 Remix 14B FP8"}：缓存{pool.productionModels[ordinaryMode].cacheReady ? "已就绪" : "发布未完成"} · 推理{pool.productionModels[ordinaryMode].inferenceVerified ? "已验证" : "未验证"}</p>
@@ -920,24 +1124,22 @@ export function LocalCreationStudio() {
               </div> : null}
             </div>
 
-            {mode === "video" && selectedJobIds.length > 0 ? (
+            {mode !== "image" && selectedJobIds.length + selectedLongVideoIds.length > 0 ? (
               <div className="mt-4 flex flex-wrap items-center gap-2 rounded-md border border-stone-200 bg-[#faf8f4] p-3">
-                <span className="text-sm font-semibold">已选 {selectedJobIds.length}</span>
-                <button className="rounded-md bg-emerald-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-400" disabled={isBatching} onClick={() => requestBatch("urgent")} type="button">
-                  立即生成
-                </button>
-                <button className="rounded-md bg-stone-900 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-400" disabled={isBatching} onClick={() => requestBatch("confirm")} type="button">
+                <span className="text-sm font-semibold">已选 {selectedJobIds.length + selectedLongVideoIds.length} 个视频任务</span>
+                <button className="rounded-md bg-stone-900 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-400" disabled={isBatching} onClick={() => void confirmSelectedVideoTasks()} type="button">
                   确认生成
                 </button>
-                <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold disabled:bg-stone-100" disabled={isBatching} onClick={() => requestBatch("regenerate")} type="button">
+                {selectedLongVideoIds.length === 0 ? <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold disabled:bg-stone-100" disabled={isBatching} onClick={() => requestBatch("regenerate")} type="button">
                   重新生成
-                </button>
-                <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold disabled:bg-stone-100" disabled={isBatching} onClick={() => void cancelSelectedVideoTasks()} type="button">
+                </button> : null}
+                {selectedLongVideoIds.length === 0 ? <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold disabled:bg-stone-100" disabled={isBatching} onClick={() => void cancelSelectedVideoTasks()} type="button">
                   取消
-                </button>
-                <button className="rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-400" disabled={isBatching} onClick={() => requestBatch("delete")} type="button">
+                </button> : null}
+                {selectedLongVideoIds.length === 0 ? <button className="rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-400" disabled={isBatching} onClick={() => requestBatch("delete")} type="button">
                   删除
-                </button>
+                </button> : null}
+                <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold" onClick={() => { setSelectedJobIds([]); setSelectedLongVideoIds([]); }} type="button">清除选择</button>
               </div>
             ) : null}
 
@@ -953,7 +1155,7 @@ export function LocalCreationStudio() {
                 const queuePosition = queuedPoolTasks.findIndex((candidate) => candidate.id === task.id);
                 const estimate = task.generationType === "image" ? pool?.costEstimate?.imageInference : pool?.costEstimate?.videoInference;
                 return (
-                  <article className={`min-w-0 rounded-md border p-1.5 text-[11px] ${task.status === "failed" ? "border-rose-200 bg-rose-50" : task.gpuPreference.includes("rtx5090") && task.gpuPreference.length === 1 ? "border-emerald-200 bg-emerald-50" : task.gpuPreference.includes("rtx4090") && task.gpuPreference.length === 1 ? "border-sky-200 bg-sky-50" : "border-stone-200 bg-stone-100"}`} key={`pool-${task.id}`}>
+                  <article className={`min-w-0 rounded-md border p-1.5 text-[11px] ${task.status === "failed" ? "border-rose-200 bg-rose-50" : task.requiredGpuClass === "rtx5090" ? "border-emerald-200 bg-emerald-50" : "border-sky-200 bg-sky-50"}`} data-gpu-class={task.requiredGpuClass} key={`pool-${task.id}`}>
                     <div className="aspect-video overflow-hidden rounded bg-stone-200">
                       <div className="flex h-full items-center justify-center text-stone-500">{task.generationType === "image" ? "图片预览" : "视频预览"}</div>
                     </div>
@@ -1013,7 +1215,7 @@ export function LocalCreationStudio() {
                     </div>
                     <p className={`mt-1 font-semibold ${statusBadgeClass(job.status)}`}>{videoJobStatusLabels[job.status]}</p>
                     <p className="mt-1 line-clamp-2 min-h-8 leading-4">{job.prompt}</p>
-                    <div className="mt-1.5 flex flex-wrap gap-x-2"><button className="font-semibold" onClick={() => { setSelectedJobId(job.id); setSelectedVideoKind("short"); }} type="button">查看详情</button><button className="font-semibold text-rose-700" onClick={() => void runBatch("delete", "auto", [job.id])} type="button">删除</button><button className="font-semibold" onClick={() => void runBatch("regenerate", "auto", [job.id])} type="button">重新生成</button></div>
+                    <div className="mt-1.5 flex flex-wrap gap-x-2"><button className="font-semibold" onClick={() => { setSelectedJobId(job.id); setSelectedVideoKind("short"); }} type="button">查看详情</button><button className="font-semibold text-rose-700" onClick={() => void runBatch("delete", [job.id])} type="button">删除</button><button className="font-semibold" onClick={() => void runBatch("regenerate", [job.id])} type="button">重新生成</button></div>
                   </article>
                 );
               })}
@@ -1024,7 +1226,7 @@ export function LocalCreationStudio() {
                   <button className="aspect-video w-full overflow-hidden rounded bg-stone-200" onClick={() => { setSelectedLongVideoId(project.id); setSelectedVideoKind("long"); setSelectedLongSegmentIndex(segment?.sequenceIndex ?? 0); }} type="button">
                     {project.finalThumbnailRef ? <img alt="长视频缩略图" className="h-full w-full object-cover" src={longVideoPublicMediaUrl(project.id, "thumbnail")} /> : segment ? <img alt="长视频分段缩略图" className="h-full w-full object-cover" src={longVideoPublicMediaUrl(project.id, "segment-thumbnail", segment)} /> : <span className="flex h-full items-center justify-center text-stone-500">待生成</span>}
                   </button>
-                  <div className="mt-1.5 flex items-center justify-between"><strong>长视频</strong><span className="rounded border border-stone-200 bg-white/80 px-1 py-0.5 font-bold">{quality}</span></div>
+                  <div className="mt-1.5 flex items-center justify-between gap-1"><label className="flex min-w-0 items-center gap-1 font-semibold"><input aria-label={`选择长视频 ${project.id}`} checked={selectedLongVideoIds.includes(project.id)} disabled={project.status !== "pending_confirmation"} onChange={() => setSelectedLongVideoIds((current) => current.includes(project.id) ? current.filter((id) => id !== project.id) : [...current, project.id])} type="checkbox" /><span className="truncate">长视频</span></label><span className="rounded border border-stone-200 bg-white/80 px-1 py-0.5 font-bold">{quality}</span></div>
                   <p className="mt-1 font-semibold">{project.status === "failed" ? "失败" : project.status === "completed" ? "已完成" : project.status === "generating" ? "生成中" : "排队"}</p>
                   <p className="mt-1 line-clamp-2 min-h-8 leading-4">{project.overallPrompt || project.segments[0]?.prompt || project.title}</p>
                   <div className="mt-1.5 flex flex-wrap gap-x-2"><button className="font-semibold" onClick={() => { setSelectedLongVideoId(project.id); setSelectedVideoKind("long"); }} type="button">查看详情</button><button className="font-semibold text-rose-700" onClick={() => setNotice("请在长视频项目详情中确认后删除。")} type="button">删除</button><button className="font-semibold" onClick={() => setNotice(project.segments[0]?.status === "accepted" ? "已接受的第 0 段保持不可变；只允许从下一未完成段续作。" : "请在长视频详情中选择可重新生成的分段。")} type="button">重新生成</button></div>
@@ -1037,17 +1239,48 @@ export function LocalCreationStudio() {
 
         <aside className="studio-sidebar space-y-3" data-testid="permanent-gpu-sidebar">
           <section className="rounded-lg border border-stone-200 bg-white p-3 shadow-sm">
-            <div className="flex items-center justify-between gap-2"><h2 className="font-bold">GPU 与任务</h2><span className={`rounded px-2 py-1 text-xs font-semibold ${session?.orderId ? "bg-emerald-50 text-emerald-800" : "bg-stone-100 text-stone-700"}`}>{session?.orderId ? `当前正在租用 ${session.serverId?.includes("5090") ? "RTX 5090" : "GPU"}` : "当前未租用显卡"}</span></div>
+            <div className="flex items-center justify-between gap-2"><h2 className="font-bold">GPU 与任务</h2><span className={`rounded px-2 py-1 text-xs font-semibold ${execution.rentedGpuClass ? "bg-emerald-50 text-emerald-800" : "bg-stone-100 text-stone-700"}`}>{!pool ? "正在恢复GPU会话" : execution.activity === "searching" ? "正在搜寻显卡" : execution.activity === "canceling" ? "正在退租" : execution.rentedGpuClass ? "显卡已租用" : "当前未租用显卡"}</span></div>
+            <div className="mt-2 rounded border border-stone-200 bg-[#faf8f4] p-2 text-xs text-stone-700" data-testid="deployed-family-status">
+              {!pool ? <p className="font-semibold">正在加载GPU与模型状态</p> : <>
+                <p>{execution.rentedGpuClass ? `当前GPU：${execution.rentedGpuClass === "rtx5090" ? "RTX 5090" : "RTX 4090"}` : "当前GPU：暂无"}</p>
+                <p className="mt-1">已部署模型：{deployedFamilyLabel}</p>
+                <p className="mt-1 font-semibold">{currentModeDeployed ? "当前已部署" : "当前未部署"}</p>
+                {!currentModeDeployed && (execution.deployedFamily === "image" || execution.deployedFamily === "video") ? <p className="mt-1 text-amber-800">GPU当前运行{execution.deployedFamily === "image" ? "图片模型" : "视频模型"}</p> : null}
+              </>}
+            </div>
             <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-              <div className="rounded border border-sky-200 bg-sky-50 p-2"><strong>RTX 4090</strong><p>{pending4090} 个待处理</p></div>
-              <div className="rounded border border-emerald-200 bg-emerald-50 p-2"><strong>RTX 5090</strong><p>{pending5090} 个待处理</p></div>
+              {(["rtx4090", "rtx5090"] as const).map((gpuClass) => {
+                const selected = selectedExecutionGpuClass === gpuClass;
+                const otherSelected = selectedExecutionGpuClass !== null && !selected;
+                const baseColor = gpuClass === "rtx4090" ? "border-sky-200 bg-sky-50 text-sky-950" : "border-emerald-200 bg-emerald-50 text-emerald-950";
+                const selectedColor = gpuClass === "rtx4090" ? "border-sky-500 bg-sky-200 text-sky-950" : "border-emerald-500 bg-emerald-200 text-emerald-950";
+                return <button
+                  aria-pressed={selected}
+                  className={`rounded border p-2 text-left transition ${selected ? selectedColor : otherSelected ? "border-stone-200 bg-stone-100 text-stone-400" : baseColor} disabled:cursor-not-allowed disabled:opacity-50`}
+                  data-testid={`execution-queue-${gpuClass}`}
+                  disabled={queueSelectionLocked || visibleQueueCounts[gpuClass] === 0}
+                  key={gpuClass}
+                  onClick={() => selectExecutionQueue(selected ? null : gpuClass)}
+                  type="button"
+                >
+                  <strong>{gpuClass === "rtx4090" ? "RTX 4090" : "RTX 5090"}</strong>
+                  <p>{visibleQueueCounts[gpuClass]} 个{ordinaryMode === "image" ? "图片" : "视频"}待处理</p>
+                </button>;
+              })}
             </div>
             <div className="mt-2 rounded border border-stone-200 bg-[#faf8f4] p-2 text-xs">
-              {selectedPoolTaskIds.length ? <><strong>已选 {selectedPoolTaskIds.length} 个兼容任务</strong><p className="mt-1">{selectedPoolFamily === "image" ? "图片" : "视频"} · {selectedPoolGpu?.toUpperCase()}</p></> : <><strong>尚未选择兼容任务</strong><p className="mt-1 text-stone-500">侧栏会一直保留；选择同一任务族和 GPU 档位后可手动开始。</p></>}
+              {selectedExecutionGpuClass ? <><strong>已选择 {selectedExecutionGpuClass === "rtx4090" ? "RTX 4090" : "RTX 5090"} 执行队列</strong><p className="mt-1">本次只处理其中 {selectedQueueCount} 个{ordinaryMode === "image" ? "图片" : "视频"}任务；另一颜色保持排队。</p></> : <><strong>尚未选择执行队列</strong><p className="mt-1 text-stone-500">先选择蓝色或绿色队列，才会显示租用或继续按钮。</p></>}
             </div>
-            <button className="mt-2 w-full rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-300" disabled={isBatching || !selectedPoolGpu || selectedPoolTaskIds.length === 0} onClick={() => void runPoolAction("immediate", selectedPoolTaskIds)} type="button">开始任务并租用显卡</button>
+            {isStartingExecution || execution.activity === "searching" ? <div className="mt-2 flex items-center justify-center gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900" data-testid="gpu-searching-state"><span className="h-4 w-4 animate-spin rounded-full border-2 border-amber-800 border-t-transparent" />正在搜寻显卡中</div> : selectedExecutionGpuClass && executionAction?.label ? <button className="mt-2 w-full rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-300" data-testid="execution-start-action" disabled={executionAction.disabled} onClick={() => void requestExecutionStart()} type="button">{executionAction.label}</button> : null}
+            {execution.activity === "searching" && !rentalPlan ? <button className="mt-2 w-full rounded-md border border-stone-300 bg-white px-3 py-2 text-xs font-semibold" onClick={() => void abortRentalSearch()} type="button">取消本次寻卡</button> : null}
+            {selectedExecutionGpuClass && executionAction?.reason ? <p className="mt-2 rounded bg-amber-50 px-2 py-2 text-xs text-amber-900">{executionAction.reason}</p> : null}
             <p className="mt-2 text-xs text-stone-600">寻机状态：{activeAutorent ? autorentStatusLabels[activeAutorent.status] : "未启动"} · 队列：{simplifiedSessionStatus}</p>
-            <p className="mt-1 text-xs font-semibold text-stone-700">无任务 {idleCancelSeconds} 秒后自动退租</p>
+            {execution.rentedGpuClass ? <div className="mt-3 grid grid-cols-2 gap-2" data-testid="rented-gpu-controls">
+              <button className="rounded-md border border-amber-300 bg-amber-50 px-2 py-2 text-xs font-bold text-amber-900 disabled:opacity-50" disabled={!activeGenerationFamily || execution.activity !== "running"} onClick={() => setPendingGpuAction("stop")} type="button">终止{activeGenerationFamily === "video" ? "视频" : "图片"}生成，但不退租GPU</button>
+              <button className="rounded-md bg-rose-700 px-2 py-2 text-xs font-bold text-white disabled:bg-stone-300" disabled={execution.activity === "canceling"} onClick={() => setPendingGpuAction("cancel")} type="button">退租显卡</button>
+            </div> : null}
+            {execution.rentedGpuClass && execution.activity === "idle" && execution.idleCancelAt ? <p className="mt-2 rounded bg-amber-50 px-2 py-2 text-xs font-semibold text-amber-900" data-testid="gpu-idle-countdown">GPU空闲，将在 {idleCancelSeconds} 秒后自动退租</p> : null}
+            {execution.activity === "deploying" ? <p className="mt-2 rounded bg-sky-50 px-2 py-2 text-xs font-semibold text-sky-900">{execution.switchPhase === "unloading" ? `正在卸载${execution.deployedFamily === "video" ? "视频" : "图片"}模型` : `正在部署${execution.activeExecution?.generationFamily === "video" ? "视频" : "图片"}模型`}</p> : null}
           </section>
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <h2 className="text-lg font-bold">GPU 价格筛选</h2>
@@ -1096,24 +1329,8 @@ export function LocalCreationStudio() {
           </section>
 
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
-            <h2 className="text-lg font-bold">当前会话与自动退租</h2>
-            <div className="mt-3 space-y-1 text-sm text-stone-600">
-              <p>状态：{pool?.session ? simplifiedSessionStatus : "没有活动会话"}</p>
-              <p>活动任务：{pool?.session?.activeTaskIds.length ?? 0}</p>
-              <p>预计剩余：{pool?.session?.estimatedRemainingMinutes ?? 0} 分钟</p>
-              <p>当前约花费：${(pool?.session?.approximateSpendUsd ?? 0).toFixed(2)}</p>
-              <p>空闲自动退租：{idleCancelSeconds} 秒（固定 120 秒）</p>
-            </div>
-            <div className="mt-3 grid gap-2">
-              <button className="rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white" onClick={() => void requestShutdown("immediate")} type="button">立即停止并退租</button>
-              <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold" onClick={() => void requestShutdown("after_current")} type="button">完成当前任务后退租</button>
-              <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold" onClick={() => void requestShutdown("cancel_waiting")} type="button">取消未开始任务</button>
-            </div>
-          </section>
-
-          <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <h2 className="text-lg font-bold">手动租用控制</h2>
-            <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">不会因数量、等待时间或阈值自动租用。请在任务卡中选择同一生成族和 GPU 档位，再点击“开始任务并租用显卡”。</p>
+            <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">确认任务只会进入等待队列。租用必须先在上方选择一个显卡队列，再进入现有手动授权流程；不会自动选择另一队列或模型。</p>
             <div className="mt-3 space-y-2 text-sm">
               {autorentRequests.slice(0, 5).map((request) => (
                 <div className="rounded-md border border-stone-200 bg-[#faf8f4] p-2" key={request.id}>
@@ -1133,22 +1350,42 @@ export function LocalCreationStudio() {
         </aside>
       </div>
 
-      {pendingGpuChoice ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/50 p-4" onClick={() => setPendingGpuChoice(null)}>
-          <section className="w-full max-w-md rounded-lg bg-white p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
-            <h2 className="text-xl font-bold">已有GPU正在运行</h2>
-            <p className="mt-2 text-sm text-stone-600">同时最多只能有一台GPU。请选择这批任务进入当前GPU队列，或等当前GPU退订后再自动寻找最低价GPU。</p>
-            <div className="mt-4 grid gap-2">
-              <button className="rounded-md bg-stone-900 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-400" disabled={isBatching} onClick={() => void runBatch(pendingGpuChoice.action, "current", pendingGpuChoice.jobIds)} type="button">
-                使用当前GPU并加入{pendingGpuChoice.action === "urgent" ? "加急" : "普通"}队列
-              </button>
-              <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold disabled:bg-stone-100" disabled={isBatching} onClick={() => void runBatch(pendingGpuChoice.action, "wait_for_current_to_close", pendingGpuChoice.jobIds)} type="button">
-                等当前GPU退订后，再自动寻找最低价GPU
-              </button>
-              <button className="rounded-md border border-stone-200 px-3 py-2 text-sm font-semibold" onClick={() => setPendingGpuChoice(null)} type="button">
-                取消
-              </button>
+      {rentalPlan ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/50 p-4" onClick={() => void abortRentalSearch()}>
+          <section className="w-full max-w-lg rounded-lg bg-white p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+            <h2 className="text-xl font-bold">确认手动租用</h2>
+            <p className="mt-2 text-sm text-stone-600">本次计划只绑定 {rentalPlan.gpu_class === "rtx5090" ? "RTX 5090" : "RTX 4090"} {rentalPlan.generation_family === "image" ? "图片" : "视频"}队列，共 {rentalPlan.confirmed_task_ids.length} 个任务。</p>
+            <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-900">显卡会持续计费，直到安全退租完成。请逐字输入下方服务器与价格确认文字。</p>
+            <p className="mt-3 break-words rounded-md border border-stone-200 bg-[#faf8f4] px-3 py-2 text-xs font-semibold" data-testid="rental-confirmation-text">{rentalPlan.required_confirmation_text}</p>
+            <textarea className="mt-3 min-h-24 w-full rounded-md border border-stone-300 p-3 text-sm" onChange={(event) => setRentalConfirmationText(event.target.value)} placeholder="输入完整确认文字" value={rentalConfirmationText} />
+            <label className="mt-3 flex items-start gap-2 text-sm"><input checked={rentalRiskAccepted} className="mt-1 h-4 w-4" onChange={(event) => setRentalRiskAccepted(event.target.checked)} type="checkbox" /><span>我已核对服务器、价格和持续计费风险，并确认只执行当前显卡队列。</span></label>
+            <div className="mt-4 flex justify-end gap-2">
+              <button className="rounded-md border border-stone-200 px-3 py-2 text-sm font-semibold" onClick={() => void abortRentalSearch()} type="button">取消寻卡</button>
+              <button className="rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-300" disabled={isStartingExecution || !rentalRiskAccepted || rentalConfirmationText.trim() !== rentalPlan.required_confirmation_text} onClick={() => void confirmRentalPlan()} type="button">确认租用</button>
             </div>
+          </section>
+        </div>
+      ) : null}
+
+      {pendingGpuAction ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/50 p-4" onClick={() => setPendingGpuAction(null)}>
+          <section className="w-full max-w-md rounded-lg bg-white p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+            <h2 className="text-xl font-bold">{pendingGpuAction === "stop" ? "确认终止生成？" : "确认退租显卡？"}</h2>
+            <p className="mt-2 text-sm text-stone-600">{pendingGpuAction === "stop" ? "当前任务将停止，但GPU不会退租，仍会继续计费。" : "当前生成将停止，显卡将立即退租。未完成任务会保留在待处理队列中。"}</p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button className="rounded-md border border-stone-200 px-3 py-2 text-sm font-semibold" onClick={() => setPendingGpuAction(null)} type="button">返回</button>
+              <button className="rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white" onClick={() => void confirmGpuAction()} type="button">{pendingGpuAction === "stop" ? "确认终止" : "确认退租"}</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {rentalSuccessOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/50 p-4" onClick={() => setRentalSuccessOpen(false)}>
+          <section className="w-full max-w-md rounded-lg bg-white p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+            <h2 className="text-xl font-bold">租用成功</h2>
+            <p className="mt-2 text-sm text-stone-600">已租用 {execution.rentedGpuClass === "rtx4090" ? "RTX 4090" : "RTX 5090"}，正在部署{execution.activeExecution?.generationFamily === "video" ? "视频" : "图片"}模型。</p>
+            <button className="mt-4 w-full rounded-md bg-stone-900 px-3 py-2 text-sm font-bold text-white" onClick={() => setRentalSuccessOpen(false)} type="button">知道了</button>
           </section>
         </div>
       ) : null}

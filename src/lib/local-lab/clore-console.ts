@@ -15,6 +15,11 @@ import { DEFAULT_DOCKER_IMAGE } from "../../../scripts/clore/config";
 import { loadModelCacheConfig } from "../../../scripts/model-cache/config";
 import { MODEL_CACHE_CURRENT_KEY } from "../../../scripts/model-cache/manifest";
 import { getCloreDeploymentHold } from "../../../scripts/clore/deployment-hold";
+import {
+  readGenerationPool,
+  recordConfirmedQueueRentalSuccess,
+} from "@/lib/generation/task-pool";
+import type { GenerationFamily, RequiredGpuClass } from "@/lib/generation/gpu-execution-state";
 
 const MOCK_MARKETPLACE_PATH = path.join(process.cwd(), "scripts", "clore", "mock-marketplace.json");
 const LATEST_MARKETPLACE_PATH = path.join(process.cwd(), "scripts", "clore", "fixtures", "latest-marketplace.sanitized.json");
@@ -29,6 +34,9 @@ type StoredNonce = {
   effectivePriceUsdPerHour: number | null;
   creationFeeUsd: number;
   projectedTotalUsd: number | null;
+  generationFamily: GenerationFamily;
+  gpuClass: RequiredGpuClass;
+  confirmedTaskIds: string[];
   expiresAt: string;
   usedAt: string | null;
 };
@@ -256,6 +264,11 @@ export function createOrderPlan(serverId: string, maxPriceUsdPerHour: number) {
     throw new Error("Invalid server id or max price.");
   }
   const execution = loadCloreExecutionConfig();
+  const pool = readGenerationPool();
+  const binding = pool.execution.activeExecution;
+  if (pool.execution.activity !== "searching" || !binding || pool.execution.rentedGpuClass || pool.execution.providerOrderId) {
+    throw new Error("请先从非空的显卡队列开始手动租用。");
+  }
   const projected = computeCloreProjectedCost(maxPriceUsdPerHour, execution.hardSessionLimitMinutes / 60);
 
   const now = new Date();
@@ -268,6 +281,9 @@ export function createOrderPlan(serverId: string, maxPriceUsdPerHour: number) {
     effectivePriceUsdPerHour: projected.effectiveHourlyUsd,
     creationFeeUsd: projected.creationFeeUsd,
     projectedTotalUsd: projected.projectedTotalUsd,
+    generationFamily: binding.generationFamily,
+    gpuClass: binding.gpuClass,
+    confirmedTaskIds: [...binding.confirmedTaskIds],
     expiresAt: expiresAt.toISOString(),
     usedAt: null,
   };
@@ -282,6 +298,9 @@ export function createOrderPlan(serverId: string, maxPriceUsdPerHour: number) {
     effective_price_usd_per_hour: stored.effectivePriceUsdPerHour,
     creation_fee_usd: stored.creationFeeUsd,
     max_session_projected_total_usd: stored.projectedTotalUsd,
+    generation_family: stored.generationFamily,
+    gpu_class: stored.gpuClass,
+    confirmed_task_ids: stored.confirmedTaskIds,
     expires_at: stored.expiresAt,
     required_confirmation_text: expectedConfirmationText({
       serverId,
@@ -332,6 +351,34 @@ export async function confirmOrderPlan(input: {
   if (input.queuedJobCount <= 0) {
     throw new Error("At least one queued prompt is required before preparing a GPU session.");
   }
+  if (input.queuedJobCount !== stored.confirmedTaskIds.length) {
+    throw new Error("确认任务数与一次性租用计划不一致。");
+  }
+  if (input.riskAccepted !== true) {
+    throw new Error("请先确认 GPU 租用和持续计费风险。");
+  }
+  const requiredText = expectedConfirmationText({
+    serverId: stored.serverId,
+    basePriceUsdPerHour: stored.maxPriceUsdPerHour,
+    effectivePriceUsdPerHour: stored.effectivePriceUsdPerHour,
+    creationFeeUsd: stored.creationFeeUsd,
+    projectedTotalUsd: stored.projectedTotalUsd,
+  });
+  if (input.confirmationText?.trim() !== requiredText) {
+    throw new Error("确认文字必须与服务器和价格计划完全一致。");
+  }
+  const pool = readGenerationPool();
+  const binding = pool.execution.activeExecution;
+  if (
+    pool.execution.activity !== "searching"
+    || !binding
+    || binding.generationFamily !== stored.generationFamily
+    || binding.gpuClass !== stored.gpuClass
+    || binding.confirmedTaskIds.length !== stored.confirmedTaskIds.length
+    || binding.confirmedTaskIds.some((id) => !stored.confirmedTaskIds.includes(id))
+  ) {
+    throw new Error("当前执行队列已改变，请重新生成一次性租用计划。");
+  }
 
   nonces[index] = { ...stored, usedAt: now.toISOString() };
   writeNonceStore(nonces);
@@ -354,12 +401,20 @@ export async function confirmOrderPlan(input: {
     maxPriceUsdPerHour: input.maxPriceUsdPerHour,
     queuedJobCount: input.queuedJobCount,
   });
-  return createCloreOrder({
+  const result = await createCloreOrder({
     config: loadCloreConfig(),
     execution,
     candidate: prepared.candidate,
     requestBody: prepared.requestBody,
   });
+  if (result.order_created && result.order_id) {
+    recordConfirmedQueueRentalSuccess({
+      providerOrderId: result.order_id,
+      runtimeSessionId: `clore-order-${result.order_id}`,
+      gpuClass: stored.gpuClass,
+    });
+  }
+  return result;
 }
 
 export function stopLocalLabSessionDryRun() {

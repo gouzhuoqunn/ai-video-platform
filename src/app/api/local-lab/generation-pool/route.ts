@@ -1,12 +1,17 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { randomUUID } from "node:crypto";
 import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/route-guard";
 import {
-  armGenerationPool,
+  abortConfirmedQueueRentalSearch,
+  beginConfirmedQueueExecution,
+  confirmGenerationTasks,
   createGenerationTask,
   createNormalJobSet,
   generationPoolSummary,
+  readGenerationPool,
   regenerateGenerationTasks,
-  requestSessionShutdown,
+  requestPoolGenerationStop,
+  requestPoolGpuCancellation,
   retryGenerationTasks,
   updateGenerationTasks,
   upsertGenerationTasks,
@@ -14,12 +19,20 @@ import {
   type GenerationTask,
   type GenerationType,
 } from "@/lib/generation/task-pool";
+import {
+  assertSingleFamilyExecution,
+  confirmedQueueCounts,
+  confirmedQueueTasks,
+  defaultGpuExecutionState,
+  type GpuExecutionState,
+  type RequiredGpuClass,
+} from "@/lib/generation/gpu-execution-state";
 import { validateProductionPrompt } from "@/lib/generation/production-prompt-safety";
 import { listLocalImageResults } from "@/lib/local-lab/local-results";
 import { longVideoUploadExists } from "@/lib/long-video/uploads";
 
 type Payload = {
-  action?: "create" | "sync" | "confirm" | "immediate" | "cancel" | "delete" | "retry" | "regenerate" | "arm" | "shutdown";
+  action?: "create" | "sync" | "confirm" | "cancel" | "delete" | "retry" | "regenerate" | "start_execution" | "abort_search" | "stop_generation" | "cancel_gpu";
   generationType?: GenerationType;
   jobForm?: GenerationJobForm;
   prompt?: string;
@@ -27,8 +40,8 @@ type Payload = {
   seed?: number | null;
   sizePreset?: "square_1024" | "landscape_1024" | "medium_image_4090" | "medium_image_5090" | "high_image_5090" | "wan_4090" | "wan_5090" | "low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090";
   existingImageJobId?: string | null;
-  startMode?: "pending" | "confirm" | "immediate";
-  shutdownMode?: "immediate" | "after_current" | "cancel_waiting";
+  startMode?: "pending";
+  gpuClass?: RequiredGpuClass;
   modelProfile?: string;
   gpuPreference?: string[];
   taskIds?: string[];
@@ -37,10 +50,49 @@ type Payload = {
 
 function ids(value: unknown) { return Array.isArray(value) ? value.map(String).filter(Boolean).slice(0, 100) : []; }
 
+function fixtureExecution(name: string): GpuExecutionState {
+  const base = defaultGpuExecutionState();
+  const active = { generationFamily: "image" as const, gpuClass: "rtx5090" as const, confirmedTaskIds: ["fixture-image-5090-waiting"], runtimeSessionId: "fixture-session" };
+  const rented = { rentedGpuClass: "rtx5090" as const, providerOrderId: "fixture-order", runtimeSessionId: "fixture-session" };
+  if (name === "searching") return { ...base, activity: "searching", activeExecution: active, operationId: "fixture-search", updatedAt: new Date().toISOString() };
+  if (name === "rental_success") return { ...base, ...rented, activity: "deploying", activeExecution: active, switchPhase: "deploying", notice: "rental_succeeded" };
+  if (name === "rented_image") return { ...base, ...rented, activity: "running", deployedFamily: "image", activeExecution: active };
+  if (name === "rented_video") return { ...base, ...rented, activity: "running", deployedFamily: "video", activeExecution: { ...active, generationFamily: "video", confirmedTaskIds: ["fixture-video-5090-waiting"] } };
+  if (name === "stopped_image") return { ...base, ...rented, activity: "idle", deployedFamily: "image", idleCancelAt: new Date(Date.now() + 120_000).toISOString(), notice: "generation_stopped" };
+  if (name === "switching") return { ...base, ...rented, activity: "deploying", deployedFamily: "image", activeExecution: { ...active, generationFamily: "video", confirmedTaskIds: ["fixture-video-5090-waiting"] }, switchPhase: "unloading", operationId: "fixture-switch" };
+  if (name === "canceling") return { ...base, ...rented, activity: "canceling", deployedFamily: "video", activeExecution: { ...active, generationFamily: "video" }, operationId: "fixture-cancel" };
+  return base;
+}
+
+function withStage4J9Fixture(summary: ReturnType<typeof generationPoolSummary>, fixture: string) {
+  const fixtures = [
+    createGenerationTask({ id: "fixture-image-4090-pending", generationType: "image", prompt: "蓝色图片待确认任务", modelProfile: "ultrareal-flux1-dev-fp8", gpuPreference: ["rtx4090"], status: "pending_confirmation" }),
+    createGenerationTask({ id: "fixture-image-5090-pending", generationType: "image", prompt: "绿色图片待确认任务", modelProfile: "ultrareal-flux1-dev-fp8", gpuPreference: ["rtx5090"], status: "pending_confirmation" }),
+    createGenerationTask({ id: "fixture-video-4090-pending", generationType: "video", prompt: "蓝色视频待确认任务", modelProfile: "wan22-remix-14b-i2v-fp8", jobForm: "video_from_existing_image", gpuPreference: ["rtx4090"], status: "pending_confirmation", inputImageVerified: true, inputImageJobId: "fixture-image" }),
+    createGenerationTask({ id: "fixture-video-5090-pending", generationType: "video", prompt: "绿色视频待确认任务", modelProfile: "wan22-remix-14b-i2v-fp8", jobForm: "video_from_existing_image", gpuPreference: ["rtx5090"], status: "pending_confirmation", inputImageVerified: true, inputImageJobId: "fixture-image" }),
+    createGenerationTask({ id: "fixture-image-4090-waiting", generationType: "image", prompt: "蓝色图片已确认任务", modelProfile: "ultrareal-flux1-dev-fp8", gpuPreference: ["rtx4090"], status: "waiting_for_gpu" }),
+    createGenerationTask({ id: "fixture-image-5090-waiting", generationType: "image", prompt: "绿色图片已确认任务", modelProfile: "ultrareal-flux1-dev-fp8", gpuPreference: ["rtx5090"], status: "waiting_for_gpu" }),
+    createGenerationTask({ id: "fixture-video-4090-waiting", generationType: "video", prompt: "蓝色短视频已确认任务", modelProfile: "wan22-remix-14b-i2v-fp8", jobForm: "video_from_existing_image", gpuPreference: ["rtx4090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image" }),
+    createGenerationTask({ id: "fixture-long-video-4090-waiting", generationType: "video", prompt: "蓝色长视频已确认任务", modelProfile: "wan22-remix-14b-i2v-fp8", jobForm: "long_video_segment", gpuPreference: ["rtx4090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image", longVideoProjectId: "fixture-long-video", longVideoSegmentIndex: 0 }),
+    createGenerationTask({ id: "fixture-video-5090-waiting", generationType: "video", prompt: "绿色视频已确认任务", modelProfile: "wan22-remix-14b-i2v-fp8", jobForm: "video_from_existing_image", gpuPreference: ["rtx5090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image" }),
+  ];
+  const tasks = [...summary.tasks.filter((task) => ["completed", "failed", "cancelled"].includes(task.status)), ...fixtures];
+  return {
+    ...summary,
+    tasks,
+    confirmedQueueCounts: confirmedQueueCounts(tasks),
+    execution: fixtureExecution(fixture),
+    provider_mutations: 0,
+    fixture_mode: true,
+  };
+}
+
 export async function GET(request: NextRequest) {
   const guard = guardLocalLabRequest(request);
   if (guard) return guard;
-  return NextResponse.json(generationPoolSummary());
+  const summary = generationPoolSummary();
+  const fixture = process.env.STAGE4J9_UI_FIXTURES === "true" ? request.nextUrl.searchParams.get("fixture") : null;
+  return NextResponse.json(fixture ? withStage4J9Fixture(summary, fixture) : summary);
 }
 
 export async function POST(request: NextRequest) {
@@ -66,11 +118,8 @@ export async function POST(request: NextRequest) {
         existingImageJobId: existingImageId || null,
         existingImageVerified,
       });
-      let state = upsertGenerationTasks(tasks);
-      if (payload.startMode === "confirm") state = updateGenerationTasks(tasks.map((task) => task.id), "confirm");
-      if (payload.startMode === "immediate") state = updateGenerationTasks(tasks.map((task) => task.id), "immediate");
-      const armed = payload.startMode === "immediate" ? armGenerationPool() : null;
-      return NextResponse.json({ tasks, pool: generationPoolSummary(armed?.state ?? state), scheduler_armed: armed?.armed ?? false, provider_authorization_created: false, credit_charged: false, create_order_called: false });
+      const state = upsertGenerationTasks(tasks);
+      return NextResponse.json({ tasks, pool: generationPoolSummary(state), scheduler_armed: false, provider_authorization_created: false, credit_charged: false, create_order_called: false });
     } catch (error) {
       return NextResponse.json({ error: error instanceof Error ? error.message : "无法创建生产任务。" }, { status: 400 });
     }
@@ -82,17 +131,63 @@ export async function POST(request: NextRequest) {
     const tasks = requested.map((task) => createGenerationTask(task));
     return NextResponse.json({ synced: tasks.length, pool: generationPoolSummary(upsertGenerationTasks(tasks)), create_order_called: false });
   }
-  if (payload.action === "arm") {
-    const armed = armGenerationPool();
-    return NextResponse.json({ armed: armed.armed, reason: armed.reason, reused_persisted_batch: armed.reusedPersistedBatch, pool: generationPoolSummary(armed.state), create_order_called: false });
+  if (payload.action === "start_execution") {
+    const family = payload.generationType;
+    const gpuClass = payload.gpuClass;
+    if (!family || !["image", "video"].includes(family) || !gpuClass || !["rtx4090", "rtx5090"].includes(gpuClass)) return NextResponse.json({ error: "执行队列无效。" }, { status: 400 });
+    const state = readGenerationPool();
+    const queue = confirmedQueueTasks(state.tasks, family, gpuClass);
+    const requested = ids(payload.taskIds);
+    const tasks = requested.length ? queue.filter((task) => requested.includes(task.id)) : queue;
+    try {
+      assertSingleFamilyExecution(tasks, family, gpuClass);
+      const next = beginConfirmedQueueExecution({
+        generationFamily: family,
+        gpuClass,
+        operationId: randomUUID(),
+        manualRentalIntentVerified: true,
+        taskIds: tasks.map((task) => task.id),
+      });
+      const needsRental = !state.execution.rentedGpuClass;
+      return NextResponse.json({
+        pool: generationPoolSummary(next),
+        controller_action_required: !needsRental,
+        manual_authorization_required: needsRental,
+        binding: { generation_family: family, gpu_class: gpuClass, confirmed_task_ids: tasks.map((task) => task.id) },
+        paid_execution_authorized: false,
+        provider_mutations: 0,
+        create_order_called: false,
+      }, { status: 202 });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : "无法开始执行队列。", provider_mutations: 0 }, { status: 409 });
+    }
   }
-  if (payload.action === "shutdown") {
-    if (!payload.shutdownMode || !["immediate", "after_current", "cancel_waiting"].includes(payload.shutdownMode)) return NextResponse.json({ error: "关机操作无效。" }, { status: 400 });
-    const state = requestSessionShutdown(payload.shutdownMode);
-    return NextResponse.json({ shutdown_mode: payload.shutdownMode, pool: generationPoolSummary(state), create_order_called: false });
+  if (payload.action === "abort_search") {
+    try {
+      const next = abortConfirmedQueueRentalSearch();
+      return NextResponse.json({ pool: generationPoolSummary(next), provider_mutations: 0, create_order_called: false });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : "无法取消寻卡。", provider_mutations: 0 }, { status: 409 });
+    }
+  }
+  if (payload.action === "stop_generation") {
+    try {
+      const next = requestPoolGenerationStop(randomUUID());
+      return NextResponse.json({ pool: generationPoolSummary(next), controller_action_required: true, provider_order_preserved: true, provider_mutations: 0 }, { status: 202 });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : "无法停止生成。", provider_mutations: 0 }, { status: 409 });
+    }
+  }
+  if (payload.action === "cancel_gpu") {
+    try {
+      const next = requestPoolGpuCancellation(randomUUID());
+      return NextResponse.json({ pool: generationPoolSummary(next), controller_action_required: true, waiting_tasks_preserved: true, provider_mutations: 0 }, { status: 202 });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : "无法退租显卡。", provider_mutations: 0 }, { status: 409 });
+    }
   }
   const action = payload.action;
-  if (!action || !["confirm", "immediate", "cancel", "delete", "retry", "regenerate"].includes(action)) return NextResponse.json({ error: "任务池操作无效。" }, { status: 400 });
+  if (!action || !["confirm", "cancel", "delete", "retry", "regenerate"].includes(action)) return NextResponse.json({ error: "任务池操作无效。" }, { status: 400 });
   const taskIds = ids(payload.taskIds);
   if (!taskIds.length) return NextResponse.json({ error: "请选择至少一个任务。" }, { status: 400 });
   if (action === "retry") {
@@ -107,7 +202,15 @@ export async function POST(request: NextRequest) {
     const result = regenerateGenerationTasks(taskIds);
     return NextResponse.json({ regenerated: result.regenerated, pool: generationPoolSummary(result.state), create_order_called: false });
   }
+  if (action === "confirm") {
+    if (!payload.generationType || !["image", "video"].includes(payload.generationType)) return NextResponse.json({ error: "确认任务缺少生成类型。" }, { status: 400 });
+    try {
+      const result = confirmGenerationTasks(taskIds, payload.generationType);
+      return NextResponse.json({ updated: result.confirmed, duplicate_confirmation_blocked: result.duplicateConfirmationBlocked, pool: generationPoolSummary(result.state), scheduler_armed: false, provider_mutations: 0, create_order_called: false });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : "确认任务失败。", provider_mutations: 0 }, { status: 409 });
+    }
+  }
   const state = updateGenerationTasks(taskIds, action);
-  const armed = action === "immediate" ? armGenerationPool() : null;
-  return NextResponse.json({ updated: taskIds.length, pool: generationPoolSummary(armed?.state ?? state), scheduler_armed: armed?.armed ?? false, create_order_called: false });
+  return NextResponse.json({ updated: taskIds.length, pool: generationPoolSummary(state), scheduler_armed: false, provider_mutations: 0, create_order_called: false });
 }

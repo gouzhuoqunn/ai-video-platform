@@ -41,12 +41,13 @@ function main() {
   assert(autorent.includes("SESSION_COMPLETE_CANCEL_DEADLINE_MS = 60 * 1000"), "mock session completion must expose the 60 second cancel deadline.");
 
   const batchRoute = read("src/app/api/local-lab/jobs/batch/route.ts");
-  assert(batchRoute.includes("gpuMode"), "batch API must accept the active-GPU queue mode.");
-  assert(batchRoute.includes("gpuMode === \"current\""), "current-GPU mode must avoid creating a new auto-rent request.");
+  assert(!batchRoute.includes("gpuMode"), "confirmation must not choose or mutate a GPU execution mode.");
+  assert(batchRoute.includes("create_order_called: false"), "confirmation must not create a provider order.");
+  assert(batchRoute.includes("scheduler_armed: false"), "confirmation must not arm automatic rental.");
 
   const studio = read("src/components/LocalCreationStudio.tsx");
-  assert(studio.includes("已有GPU正在运行"), "UI must show active-GPU choices before batch confirm or urgent.");
-  assert(studio.includes("wait_for_current_to_close"), "UI must support waiting for the current GPU before auto-rent.");
+  assert(studio.includes("确认只进入视频等待队列，不会寻找或租用显卡"), "UI must state that confirmation is queue-only.");
+  assert(studio.includes("开始任务并租用显卡") || read("src/lib/generation/gpu-execution-state.ts").includes("开始任务并租用显卡"), "manual rental must remain a separate action.");
 
   const worker = read("gpu-worker/worker.py");
   assert(worker.includes("ffprobe"), "worker must inspect video duration for thumbnail extraction.");

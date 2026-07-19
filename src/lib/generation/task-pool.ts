@@ -13,8 +13,31 @@ import {
 } from "./production-pipeline";
 import { PRODUCTION_GPU_CLASSES, PRODUCTION_IMAGE_MODEL, PRODUCTION_VIDEO_MODEL, productionModelSummary } from "./production-models";
 import { loadSchedulerPolicy, rankTasksForLoadedSession } from "./scheduler-policy";
+import {
+  assertSingleFamilyExecution,
+  abortRentalSearch,
+  beginExistingGpuExecution,
+  beginRentalSearch,
+  completeGenerationStop,
+  completeGpuCancellation,
+  confirmedQueueCounts,
+  confirmedQueueTasks,
+  defaultGpuExecutionState,
+  deployedFamilyFromModelKeys,
+  normalizeGpuExecutionState,
+  normalizeRequiredGpuClass,
+  recordDeploymentFailure,
+  recordDeploymentReady,
+  recordPreviousFamilyUnloaded,
+  recordRentalSuccess,
+  requestGenerationStop,
+  requestGpuCancellation,
+  type GenerationFamily,
+  type GpuExecutionState,
+  type RequiredGpuClass,
+} from "./gpu-execution-state";
 
-export type GenerationType = "image" | "video";
+export type GenerationType = GenerationFamily;
 export type GenerationPriority = "normal" | "immediate";
 export type GenerationJobForm = "image_only" | "video_from_generated_image" | "video_from_existing_image" | "long_video_segment";
 export type GenerationContentMode = "production" | "legacy_debug";
@@ -56,6 +79,7 @@ export type GenerationTask = {
   prompt: string;
   modelProfile: string;
   gpuPreference: string[];
+  requiredGpuClass: RequiredGpuClass;
   priority: GenerationPriority;
   status: GenerationTaskStatus;
   createdAt: string;
@@ -99,8 +123,9 @@ export type PersistedProductionSession = {
 };
 
 export type GenerationPoolState = {
-  schemaVersion: 2;
+  schemaVersion: 3;
   tasks: GenerationTask[];
+  execution: GpuExecutionState;
   scheduler: {
     state: SchedulerState;
     selectedBatchId: string | null;
@@ -184,8 +209,9 @@ export function validateProductionCandidate(candidate: PoolCandidate) {
 
 export function defaultGenerationPoolState(): GenerationPoolState {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     tasks: [],
+    execution: defaultGpuExecutionState(),
     scheduler: { state: "idle", selectedBatchId: null, selectedTaskIds: [], watchStartedAt: null, lastMarketplaceRequestAt: null, nextMarketplaceRequestAt: null, selectedServerId: null, rejectedHosts: [], orderCreationAttempted: false, drainingRequested: false, session: null, updatedAt: now() },
   };
 }
@@ -200,6 +226,7 @@ function normalizeTask(task: Partial<GenerationTask> & Pick<GenerationTask, "id"
     prompt: task.prompt,
     modelProfile: task.modelProfile,
     gpuPreference: task.gpuPreference ?? acceptableGpuClasses(task.generationType, task.modelProfile),
+    requiredGpuClass: normalizeRequiredGpuClass(task),
     priority: task.priority ?? "normal",
     status: task.status ?? "pending_confirmation",
     createdAt,
@@ -230,12 +257,31 @@ function normalizeTask(task: Partial<GenerationTask> & Pick<GenerationTask, "id"
 export function readGenerationPool(filePath = GENERATION_POOL_PATH): GenerationPoolState {
   if (!existsSync(filePath)) return defaultGenerationPoolState();
   try {
-    const state = JSON.parse(readFileSync(filePath, "utf8")) as GenerationPoolState & { schemaVersion: 1 | 2 };
-    if (![1, 2].includes(state.schemaVersion) || !Array.isArray(state.tasks) || !state.scheduler) throw new Error("invalid");
+    const state = JSON.parse(readFileSync(filePath, "utf8")) as GenerationPoolState & { schemaVersion: 1 | 2 | 3 };
+    if (![1, 2, 3].includes(state.schemaVersion) || !Array.isArray(state.tasks) || !state.scheduler) throw new Error("invalid");
+    const scheduler = { ...defaultGenerationPoolState().scheduler, ...state.scheduler, session: state.scheduler.session ?? null };
+    const tasks = state.tasks.map((task) => normalizeTask(task));
+    const execution = normalizeGpuExecutionState(state.execution, scheduler.session);
+    if (execution.providerOrderId && !execution.rentedGpuClass) {
+      const activeIds = new Set([...(scheduler.session?.activeTaskIds ?? []), ...scheduler.selectedTaskIds]);
+      const activeTasks = tasks.filter((task) => activeIds.has(task.id));
+      const gpuClasses = [...new Set(activeTasks.map((task) => task.requiredGpuClass))];
+      const families = [...new Set(activeTasks.map((task) => task.generationType))];
+      if (gpuClasses.length === 1) execution.rentedGpuClass = gpuClasses[0];
+      if (!execution.activeExecution && gpuClasses.length === 1 && families.length === 1) {
+        execution.activeExecution = {
+          generationFamily: families[0],
+          gpuClass: gpuClasses[0],
+          confirmedTaskIds: activeTasks.map((task) => task.id),
+          runtimeSessionId: scheduler.session?.sessionId ?? null,
+        };
+      }
+    }
     return {
-      schemaVersion: 2,
-      tasks: state.tasks.map((task) => normalizeTask(task)),
-      scheduler: { ...defaultGenerationPoolState().scheduler, ...state.scheduler, session: state.scheduler.session ?? null },
+      schemaVersion: 3,
+      tasks,
+      execution,
+      scheduler,
     };
   } catch {
     return { ...defaultGenerationPoolState(), scheduler: { ...defaultGenerationPoolState().scheduler, state: "blocked_by_provider" } };
@@ -257,10 +303,11 @@ export function createGenerationTask(input: Partial<GenerationTask> & Pick<Gener
   if (!allowed.length) throw new Error("普通新任务只能使用默认生产模型；旧模型需要显式 legacy/debug 开关。");
   const requested = input.gpuPreference?.filter((gpu) => allowed.includes(gpu)) ?? [];
   const gpuPreference = requested.length ? [...new Set(requested)] : allowed;
+  const requiredGpuClass = normalizeRequiredGpuClass({ ...input, gpuPreference });
   return normalizeTask({
     ...input,
     id: input.id ?? randomUUID(), generationType: input.generationType, prompt: input.prompt.trim(), modelProfile: input.modelProfile,
-    gpuPreference, priority: input.priority ?? "normal", status: input.status ?? "pending_confirmation", createdAt: input.createdAt ?? now(), confirmedAt: input.confirmedAt ?? null,
+    gpuPreference, requiredGpuClass, priority: input.priority ?? "normal", status: input.status ?? "pending_confirmation", createdAt: input.createdAt ?? now(), confirmedAt: input.confirmedAt ?? null,
     batchId: input.batchId ?? null, estimatedVram: input.estimatedVram ?? (input.generationType === "image" ? 23 : 24), outputMetadata: input.outputMetadata ?? {},
   });
 }
@@ -342,9 +389,29 @@ export function updateGenerationTasks(taskIds: string[], action: "confirm" | "im
     if (!selected.has(task.id)) return task;
     if (action === "cancel") return { ...task, status: ACTIVE_TASK_STATUSES.has(task.status) ? "cancel_requested" as const : "cancelled" as const };
     if (["completed", "failed", "cancelled"].includes(task.status)) return task;
-    return { ...task, priority: action === "immediate" ? "immediate" as const : task.priority, status: action === "immediate" ? "armed" as const : "waiting_for_batch" as const, confirmedAt: task.confirmedAt ?? now() };
+    return { ...task, priority: action === "immediate" ? "immediate" as const : task.priority, status: "waiting_for_gpu" as const, confirmedAt: task.confirmedAt ?? now() };
   });
   return writeGenerationPool(state, filePath);
+}
+
+export function confirmGenerationTasks(taskIds: string[], family: GenerationType, filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  const uniqueIds = [...new Set(taskIds)];
+  const selected = uniqueIds.map((id) => state.tasks.find((task) => task.id === id)).filter(Boolean) as GenerationTask[];
+  if (!selected.length || selected.length !== uniqueIds.length) throw new Error("所选任务不存在或已经被删除。");
+  if (selected.some((task) => task.generationType !== family)) throw new Error("一次确认不能混合图片和视频任务。");
+  if (selected.some((task) => !["pending_confirmation", "waiting_for_gpu"].includes(task.status))) throw new Error("所选任务包含不可确认状态。");
+  const pending = new Set(selected.filter((task) => task.status === "pending_confirmation").map((task) => task.id));
+  state.tasks = state.tasks.map((task) => pending.has(task.id) ? {
+    ...task,
+    status: "waiting_for_gpu",
+    confirmedAt: task.confirmedAt ?? now(),
+  } : task);
+  return {
+    state: pending.size ? writeGenerationPool(state, filePath) : state,
+    confirmed: pending.size,
+    duplicateConfirmationBlocked: pending.size === 0,
+  };
 }
 
 function lastVerifiedBoundary(task: GenerationTask): GenerationTaskStatus {
@@ -567,8 +634,164 @@ function groupable(task: GenerationTask): GroupableProductionTask {
   };
 }
 
+export function beginConfirmedQueueExecution(input: {
+  generationFamily: GenerationType;
+  gpuClass: RequiredGpuClass;
+  operationId: string;
+  manualRentalIntentVerified: boolean;
+  taskIds?: string[];
+}, filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  if (!state.execution.rentedGpuClass && !input.manualRentalIntentVerified) throw new Error("开始租用前必须绑定当前手动队列意图。");
+  const queue = confirmedQueueTasks(state.tasks, input.generationFamily, input.gpuClass);
+  const requestedIds = input.taskIds?.length ? new Set(input.taskIds) : null;
+  const tasks = requestedIds ? queue.filter((task) => requestedIds.has(task.id)) : queue;
+  if (requestedIds && tasks.length !== requestedIds.size) throw new Error("手动授权中的任务与当前确认队列不一致。");
+  assertSingleFamilyExecution(tasks, input.generationFamily, input.gpuClass);
+  if (state.execution.activeExecution && state.execution.activeExecution.generationFamily !== input.generationFamily) {
+    throw new Error("同一张 GPU 不能并发执行图片和视频任务。");
+  }
+  const active = {
+    generationFamily: input.generationFamily,
+    gpuClass: input.gpuClass,
+    confirmedTaskIds: tasks.map((task) => task.id),
+    operationId: input.operationId,
+  };
+  state.execution = state.execution.rentedGpuClass
+    ? beginExistingGpuExecution(state.execution, active)
+    : beginRentalSearch(state.execution, active);
+  const batchId = `manual-${input.generationFamily}-${input.gpuClass}-${input.operationId}`;
+  state.scheduler = {
+    ...state.scheduler,
+    state: state.execution.activity === "searching" ? "market_watching" : "session_active",
+    selectedBatchId: batchId,
+    selectedTaskIds: tasks.map((task) => task.id),
+    selectedServerId: null,
+    orderCreationAttempted: false,
+  };
+  state.tasks = state.tasks.map((task) => tasks.some((selected) => selected.id === task.id) ? { ...task, batchId } : task);
+  return writeGenerationPool(state, filePath);
+}
+
+export function abortConfirmedQueueRentalSearch(filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  state.execution = abortRentalSearch(state.execution);
+  state.scheduler = {
+    ...state.scheduler,
+    state: "idle",
+    selectedBatchId: null,
+    selectedTaskIds: [],
+    selectedServerId: null,
+    orderCreationAttempted: false,
+  };
+  return writeGenerationPool(state, filePath);
+}
+
+export function recordConfirmedQueueRentalSuccess(input: {
+  providerOrderId: string;
+  runtimeSessionId: string;
+  gpuClass: RequiredGpuClass;
+}, filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  state.execution = recordRentalSuccess(state.execution, input);
+  state.scheduler.state = "session_active";
+  state.scheduler.orderCreationAttempted = true;
+  return writeGenerationPool(state, filePath);
+}
+
+export function completeConfirmedQueueDeployment(filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  state.execution = recordDeploymentReady(state.execution);
+  const activeIds = new Set(state.execution.activeExecution?.confirmedTaskIds ?? []);
+  const runningStatus = state.execution.deployedFamily === "image" ? "generating_image" : "generating_video";
+  state.tasks = state.tasks.map((task) => activeIds.has(task.id) ? { ...task, status: runningStatus } : task);
+  return writeGenerationPool(state, filePath);
+}
+
+export function completePreviousFamilyUnload(filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  state.execution = recordPreviousFamilyUnloaded(state.execution);
+  return writeGenerationPool(state, filePath);
+}
+
+export function failConfirmedQueueDeployment(reason: string, filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  const activeIds = new Set(state.execution.activeExecution?.confirmedTaskIds ?? []);
+  state.execution = recordDeploymentFailure(state.execution, reason);
+  state.tasks = state.tasks.map((task) => activeIds.has(task.id) && !["completed", "cancelled"].includes(task.status) ? { ...task, status: "waiting_for_gpu" } : task);
+  return writeGenerationPool(state, filePath);
+}
+
+function markInterruptedTasksWaiting(state: GenerationPoolState, taskIds: string[]) {
+  const selected = new Set(taskIds);
+  state.tasks = state.tasks.map((task) => {
+    if (!selected.has(task.id) || ["completed", "failed", "cancelled"].includes(task.status)) return task;
+    return {
+      ...task,
+      status: "waiting_for_gpu",
+      attempts: task.attempts.map((attempt) => attempt.id === task.currentAttemptId ? {
+        ...attempt,
+        status: "pending",
+        completedAt: null,
+        errorClass: "interrupted_by_user",
+      } : attempt),
+      outputMetadata: { ...task.outputMetadata, interrupted: true },
+    };
+  });
+}
+
+export function requestPoolGenerationStop(operationId: string, filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  const activeIds = new Set(state.execution.activeExecution?.confirmedTaskIds ?? []);
+  state.execution = requestGenerationStop(state.execution, operationId);
+  state.tasks = state.tasks.map((task) => activeIds.has(task.id) && ACTIVE_TASK_STATUSES.has(task.status) ? { ...task, status: "cancel_requested" } : task);
+  return writeGenerationPool(state, filePath);
+}
+
+export function completePoolGenerationStop(filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  const activeIds = state.execution.activeExecution?.confirmedTaskIds ?? [];
+  state.execution = completeGenerationStop(state.execution);
+  markInterruptedTasksWaiting(state, activeIds);
+  state.scheduler.state = "session_active";
+  state.scheduler.selectedBatchId = null;
+  state.scheduler.selectedTaskIds = [];
+  return writeGenerationPool(state, filePath);
+}
+
+export function requestPoolGpuCancellation(operationId: string, filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  const activeIds = new Set(state.execution.activeExecution?.confirmedTaskIds ?? []);
+  state.execution = requestGpuCancellation(state.execution, operationId);
+  state.tasks = state.tasks.map((task) => activeIds.has(task.id) && ACTIVE_TASK_STATUSES.has(task.status) ? { ...task, status: "cancel_requested" } : task);
+  return writeGenerationPool(state, filePath);
+}
+
+export function completePoolGpuCancellation(filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  const activeIds = state.execution.activeExecution?.confirmedTaskIds ?? [];
+  state.execution = completeGpuCancellation(state.execution);
+  markInterruptedTasksWaiting(state, activeIds);
+  state.scheduler = {
+    ...state.scheduler,
+    state: "idle",
+    selectedBatchId: null,
+    selectedTaskIds: [],
+    selectedServerId: null,
+    orderCreationAttempted: false,
+    drainingRequested: false,
+    session: null,
+  };
+  return writeGenerationPool(state, filePath);
+}
+
 export function productionSessionPlan(state = readGenerationPool()) {
   const selected = state.scheduler.selectedTaskIds.map((id) => state.tasks.find((task) => task.id === id)).filter(Boolean) as GenerationTask[];
+  if (selected.length) {
+    const family = selected[0].generationType;
+    const gpuClass = selected[0].requiredGpuClass;
+    assertSingleFamilyExecution(selected, family, gpuClass);
+  }
   return planSequentialProductionSession(selected.map(groupable));
 }
 
@@ -624,6 +847,34 @@ export function persistRecoveredSession(input: {
     updatedAt: now(),
   };
   state.scheduler.state = phase === "cleanup_pending" ? "cleanup_pending" : input.providerOrderId ? "session_active" : state.scheduler.state;
+  if (input.providerOrderId) {
+    const activeTasks = input.activeTaskIds.map((id) => state.tasks.find((task) => task.id === id)).filter(Boolean) as GenerationTask[];
+    const families = new Set(activeTasks.map((task) => task.generationType));
+    const gpuClasses = new Set(activeTasks.map((task) => task.requiredGpuClass));
+    if (families.size > 1) throw new Error("恢复会话包含图片和视频并发执行，已拒绝写入。");
+    if (gpuClasses.size > 1) throw new Error("恢复会话包含不同 GPU 队列，已拒绝写入。");
+    const generationFamily = activeTasks[0]?.generationType ?? null;
+    const gpuClass = activeTasks[0]?.requiredGpuClass ?? state.execution.rentedGpuClass;
+    const deployedFamily = deployedFamilyFromModelKeys(input.loadedModels ?? []);
+    if (deployedFamily === "unknown") throw new Error("恢复会话检测到多个模型族同时部署。");
+    state.execution = {
+      ...state.execution,
+      activity: input.observation.remoteInferenceKind ? "running" : "idle",
+      deployedFamily,
+      rentedGpuClass: gpuClass,
+      providerOrderId: input.providerOrderId,
+      runtimeSessionId: input.sessionId,
+      activeExecution: generationFamily && gpuClass ? {
+        generationFamily,
+        gpuClass,
+        confirmedTaskIds: activeTasks.map((task) => task.id),
+        runtimeSessionId: input.sessionId,
+      } : null,
+      idleCancelAt: state.scheduler.session.automaticShutdownAt,
+      operationId: null,
+      updatedAt: now(),
+    };
+  }
   return writeGenerationPool(state, filePath);
 }
 
@@ -663,18 +914,22 @@ export function generationPoolSummary(state = readGenerationPool()) {
   const readiness = loadProductionReadiness();
   return {
     schedulerState: state.scheduler.state, selectedBatchId: state.scheduler.selectedBatchId, tasks: state.tasks, counts, queuedTaskCount: state.tasks.filter((task) => ["waiting_for_batch", "armed", "waiting_for_gpu"].includes(task.status)).length,
+    confirmedQueueCounts: confirmedQueueCounts(state.tasks),
+    execution: state.execution,
     selectedTaskIds: selected.map((task) => task.id), selectedTasks: selected, nextBatchTasks: nextBatch?.tasks.map((task) => task.id) ?? [], requiredModelProfile: nextBatch?.modelProfile ?? null,
     acceptableGpuClasses: selection.ready ? selection.acceptableGpuClasses ?? [] : [], estimatedSessionDurationMinutes: estimate.totalSession,
     costEstimate: estimate,
     maximumAcceptableHourlyPrice: MAX_ACCEPTABLE_HOURLY_USD, orderWouldBeCreated: false,
     orderBlockingReason: getCloreDeploymentHold().enabled ? "Clore 部署暂停已开启。" : selection.reason ?? "需要显式恢复命令后才允许创建。",
-    imageBatchThreshold: policy.imageOnlyBatchThreshold, videoBatchThreshold: policy.videoI2vBatchThreshold, combinedBatchThreshold: policy.combinedChainBatchThreshold, maximumWaitMinutes: policy.maximumWaitMinutes, mixedBatchEnabled: true,
+    imageBatchThreshold: policy.imageOnlyBatchThreshold, videoBatchThreshold: policy.videoI2vBatchThreshold, combinedBatchThreshold: policy.combinedChainBatchThreshold, maximumWaitMinutes: policy.maximumWaitMinutes, mixedBatchEnabled: false,
     tasksNeeded: { image: Math.max(0, generationThreshold("image") - eligibleGroups(state, "image").flat().length), video: Math.max(0, generationThreshold("video") - eligibleGroups(state, "video").flat().length) },
     marketMonitoringActive: ["market_watching", "candidate_found"].includes(state.scheduler.state), nextMarketplaceRequestAt: state.scheduler.nextMarketplaceRequestAt,
     estimatedMaximumSessionCost: 2.5, deploymentHold: getCloreDeploymentHold().enabled, productionModels: productionModelSummary(),
     session: state.scheduler.session,
     sessionPlan: selection.ready ? planSequentialProductionSession(selection.tasks.map(groupable)) : planSequentialProductionSession([]),
     readiness,
-    sessionSequence: selection.batches?.length === 2 ? ["恢复一次 UltraReal", "处理全部兼容图片", "卸载图片模型", "恢复一次 Wan Remix", "处理全部兼容视频", "立即清理并退租"] : selection.batches?.length === 1 ? [selection.batches[0].generationType === "image" ? "恢复一次 UltraReal 并处理全部兼容图片" : "恢复一次 Wan Remix 并处理全部兼容视频", "立即清理并退租"] : [],
+    sessionSequence: state.execution.activeExecution
+      ? [state.execution.activeExecution.generationFamily === "image" ? "仅部署图片模型并处理所选图片队列" : "仅部署视频模型并处理所选视频队列", "空闲 120 秒后自动退租或由用户手动切换模型"]
+      : [],
   };
 }

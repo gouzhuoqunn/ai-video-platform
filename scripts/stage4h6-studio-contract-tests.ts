@@ -12,7 +12,7 @@ assert.match(studio, /useState<StudioMode>\("video"\)/);
 assert.match(studio, /setMode\(normalizeStudioMode\(window\.localStorage\.getItem\(STUDIO_MODE_STORAGE_KEY\)\)\)/);
 assert.doesNotMatch(studio, /useState<StudioMode>\(\(\) => typeof window/);
 assert.match(studio, /data-studio-mode=\{mode\}/);
-assert.match(studio, /aria-pressed=\{mode === item\}/);
+assert.match(studio, /\(item === "image" \? mode === "image" : mode === "video"\)/);
 assert.match(studio, /data-testid="studio-status"/);
 assert.match(studio, /data-testid="billing-toggle"/);
 assert.match(studio, /aria-label="资费情况"[\s\S]*?data-testid="billing-toggle"[\s\S]*?>资费情况<\/button>/);
