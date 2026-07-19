@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { loadCloreConfig } from "../../../scripts/clore/config";
 import { readLiveMarketplace, readWalletSummary } from "../../../scripts/clore/live";
-import { applyWalletBalance, computeCloreProjectedCost, evaluateMarketplace, summarizeCandidate } from "../../../scripts/clore/marketplace";
+import { applyWalletBalance, CLORE_RENTER_FEE_RATE, computeCloreProjectedCost, evaluateMarketplace, summarizeCandidate } from "../../../scripts/clore/marketplace";
 import { stopSessionDryRun } from "../../../scripts/clore/session-orchestrator";
 import { readSessionState } from "../../../scripts/clore/session-state";
 import type { RawCloreServer } from "../../../scripts/clore/types";
@@ -20,6 +20,7 @@ import {
   recordConfirmedQueueRentalSuccess,
 } from "@/lib/generation/task-pool";
 import type { GenerationFamily, RequiredGpuClass } from "@/lib/generation/gpu-execution-state";
+import { LOCAL_LAB_GPU_PRICE_FILTER_MAX_USD_PER_HOUR, manualCandidateBasePriceCeiling } from "@/lib/local-lab/gpu-price-filter";
 
 const MOCK_MARKETPLACE_PATH = path.join(process.cwd(), "scripts", "clore", "mock-marketplace.json");
 const LATEST_MARKETPLACE_PATH = path.join(process.cwd(), "scripts", "clore", "fixtures", "latest-marketplace.sanitized.json");
@@ -90,7 +91,11 @@ function writeNonceStore(nonces: StoredNonce[]) {
 
 function safeCandidateList(rawServers: RawCloreServer[], availableUsdBalance: number | null) {
   const config = loadCloreConfig();
-  const evaluated = evaluateMarketplace(rawServers, config);
+  const displayConfig = {
+    ...config,
+    maxGpuPricePerHour: manualCandidateBasePriceCeiling(CLORE_RENTER_FEE_RATE),
+  };
+  const evaluated = evaluateMarketplace(rawServers, displayConfig);
   const candidates = applyWalletBalance(evaluated.candidates, availableUsdBalance);
   const matches = applyWalletBalance(evaluated.matches, availableUsdBalance);
   const rejected5090 = candidates
@@ -107,7 +112,8 @@ function safeCandidateList(rawServers: RawCloreServer[], availableUsdBalance: nu
     filters: {
       gpu: "exact RTX 5090",
       order_type: "on-demand",
-      max_usd_per_hour: config.maxGpuPricePerHour,
+      max_usd_per_hour: LOCAL_LAB_GPU_PRICE_FILTER_MAX_USD_PER_HOUR,
+      price_basis: "effective hourly price including 5% renter fee",
       assumed_minimum_rental_hours: config.assumedMinimumRentalHours,
       min_ram_gb: config.minRamGb,
       min_cpu_cores: config.minCpuCores,

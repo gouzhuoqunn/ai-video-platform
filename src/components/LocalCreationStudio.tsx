@@ -11,6 +11,7 @@ import { requestSignedVideoUrl } from "@/lib/video-jobs/signed-url";
 import { videoJobStatusLabels } from "@/types/video-config";
 import type { SignedVideoResponse, VideoJob, VideoJobStatus } from "@/types/video-jobs";
 import { normalizeStudioMode, normalizeVideoSubmode, STUDIO_MODE_STORAGE_KEY, VIDEO_SUBMODE_STORAGE_KEY, type OrdinaryStudioMode, type StudioMode } from "@/lib/local-lab/studio-mode";
+import { isManualCandidateDisplayPriceAllowed, LOCAL_LAB_GPU_PRICE_FILTER_MAX_USD_PER_HOUR } from "@/lib/local-lab/gpu-price-filter";
 import { LongVideoStudio, longVideoPublicMediaUrl, type LongVideoProject } from "@/components/LongVideoStudio";
 import { BillingPanel } from "@/components/BillingPanel";
 import { FirstFrameInput } from "@/components/FirstFrameInput";
@@ -284,7 +285,7 @@ export function LocalCreationStudio() {
   const [selectedLongVideoIds, setSelectedLongVideoIds] = useState<string[]>([]);
   const [filter, setFilter] = useState<"all" | VideoJobStatus>("all");
   const [minPrice, setMinPrice] = useState("0");
-  const [maxPrice, setMaxPrice] = useState("0.70");
+  const [maxPrice, setMaxPrice] = useState(String(LOCAL_LAB_GPU_PRICE_FILTER_MAX_USD_PER_HOUR));
   const [mode, setMode] = useState<StudioMode>("video");
   const [videoSubmode, setVideoSubmode] = useState<"video" | "long_video">("video");
   const [imageResults, setImageResults] = useState<ImageResult[]>([]);
@@ -373,7 +374,7 @@ export function LocalCreationStudio() {
   const priceGate = useMemo(() => {
     const min = parsePrice(minPrice);
     const max = parsePrice(maxPrice);
-    const valid = min !== null && max !== null && min >= 0 && min <= max && max <= 0.7;
+    const valid = min !== null && max !== null && min >= 0 && min <= max && isManualCandidateDisplayPriceAllowed(max);
     return { min, max, valid };
   }, [maxPrice, minPrice]);
 
@@ -386,6 +387,7 @@ export function LocalCreationStudio() {
         return effective !== null
           && effective >= priceGate.min!
           && effective <= priceGate.max!
+          && isManualCandidateDisplayPriceAllowed(effective)
           && (!selectedExecutionGpuClass || gpuClass === selectedExecutionGpuClass);
       })
       .sort((left, right) => {
@@ -1291,11 +1293,11 @@ export function LocalCreationStudio() {
               </label>
               <label className="text-sm">
                 最高美元/小时
-                <input className="mt-1 w-full rounded-md border border-stone-200 bg-[#faf8f4] px-2 py-2" onChange={(event) => setMaxPrice(event.target.value)} value={maxPrice} />
+                <input className="mt-1 w-full rounded-md border border-stone-200 bg-[#faf8f4] px-2 py-2" max={LOCAL_LAB_GPU_PRICE_FILTER_MAX_USD_PER_HOUR} min="0" onChange={(event) => setMaxPrice(event.target.value)} step="0.01" type="number" value={maxPrice} />
               </label>
             </div>
             <p className={`mt-2 text-xs ${priceGate.valid ? "text-emerald-700" : "text-rose-700"}`}>
-              {priceGate.valid ? "价格范围有效，按含5%租客费小时价过滤。" : "非法输入不会保存或触发寻机，最高价不得超过 $0.70/小时。"}
+              {priceGate.valid ? "价格范围有效，按含5%租客费小时价过滤，仅用于手动查看；最终租用仍受当前任务授权和预算限制。" : `非法输入不会保存或触发寻机，最高价不得超过 $${LOCAL_LAB_GPU_PRICE_FILTER_MAX_USD_PER_HOUR}/小时。`}
             </p>
           </section>
 

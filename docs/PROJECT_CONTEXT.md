@@ -1,5 +1,11 @@
 # Project Context
 
+## 2026-07-20 Local Studio GPU price filter ceiling
+
+- The left Studio GPU price filter now defaults to and accepts an effective hourly price of up to `5 USD/hour`, including the existing 5% Clore renter fee. The read-only local-lab candidate endpoint uses the same display ceiling, so the UI change can surface otherwise compliant candidates above the former `0.70` display limit.
+- This is a local read-only discovery/filter change only. It does not enable order execution, change `CLORE_ORDER_EXECUTION_ENABLED=false`, or raise the independent real-order `CLORE_MAX_GPU_PRICE_PER_HOUR` safety setting, which remains `0.70 USD/hour` by default.
+- No Clore or RunPod order, SSH connection, model download, inference, or paid action was performed for this change.
+
 ## 2026-07-19 Stage 4J.9: independent family/GPU queues and reusable GPU sessions
 
 - This checkpoint was strictly non-billable. It created no Clore order or RunPod resource, opened no SSH connection, restored no model, ran no inference, changed no accepted media, and authorized no paid execution. `CLORE_ORDER_EXECUTION_ENABLED=false` remains the required default.

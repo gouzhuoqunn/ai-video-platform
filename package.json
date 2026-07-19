@@ -113,6 +113,7 @@
     "generation:model-availability:test": "tsx scripts/model-availability-tests.ts",
     "clore:deployment-control:test": "tsx scripts/deployment-control-tests.ts",
     "studio:queue:test": "tsx scripts/studio-queue-tests.ts",
+    "gpu:manual-price:test": "tsx scripts/manual-gpu-candidate-price-tests.ts",
     "clore:deployment:resume": "tsx scripts/clore/deployment-control.ts resume",
     "clore:deployment:pause": "tsx scripts/clore/deployment-control.ts pause",
     "clore:deployment:resolve": "tsx scripts/clore/resolve-deployment-pause.ts",
