@@ -16,6 +16,7 @@ import { installDetachedWorker, launchDetachedJob, waitForDetachedJob } from "..
 import { buildRestoreBundle } from "../../../scripts/model-cache/production-restore-bundle";
 import { installRemoteComfyRunner, runRemoteComfyProbe, runRemoteComfyWorkflow, downloadRemoteRunnerOutputPersistent, removeRemoteRunnerOutput } from "../../../scripts/comfy-remote-runner";
 import { findLocalImageResultFile } from "@/lib/local-lab/local-results";
+import { getLocalDataPaths } from "@/lib/local-data/path-registry";
 import { buildLongVideoProjectPaths, probeLongVideoMedia } from "@/lib/long-video/media";
 import { getLongVideoProject, processExpiredLongVideoReviews } from "@/lib/long-video/store";
 import type { LongVideoProject, LongVideoSegment } from "@/lib/long-video/domain";
@@ -57,7 +58,7 @@ export class CloreLongVideoProviderAdapter implements LongVideoProvider {
 
   constructor(options: { gpu?: GpuProvider; libraryDir?: string; statePath?: string; activeOrderReader?: () => Promise<number>; watchdogServerId?: string | null; videoNegativePrompt?: string; videoSeedBase?: number; beforeCreateRequest?: () => Promise<void> | void; afterCreateRequestAttempt?: () => Promise<void> | void; preserveCreatedOrderForReconciliation?: boolean } = {}) {
     this.gpu = options.gpu ?? getGpuProvider("clore");
-    this.libraryDir = options.libraryDir ?? (process.env.LOCAL_VIDEO_LIBRARY_DIR?.trim() || "D:\\AI-Video-Library");
+    this.libraryDir = options.libraryDir ?? getLocalDataPaths().videoMediaRoot;
     this.statePath = options.statePath ?? path.join(process.cwd(), ".secrets", "long-video-state.json");
     this.activeOrderReader = options.activeOrderReader;
     const watchdog = options.gpu ? null : readLocalWatchdogArmState();

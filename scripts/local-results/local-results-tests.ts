@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import { buildLocalResultsPlan } from "./plan";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -9,7 +10,8 @@ function assert(condition: unknown, message: string): asserts condition {
 
 function main() {
   const plan = buildLocalResultsPlan();
-  assert(plan.library_dir.endsWith("AI-Video-Library"), "default local video library must be D:\\AI-Video-Library.");
+  assert(plan.library_dir.endsWith(path.join("local-data", "media", "videos")), "new local video writes must use local-data/media/videos.");
+  assert(plan.library_dir !== "D:\\AI-Video-Library", "legacy video library must not receive new results.");
   assert(plan.structure.videoPath.endsWith("output.mp4"), "local archive must use output.mp4.");
   assert(plan.structure.metadataPath.endsWith("metadata.json"), "local archive must write metadata.json.");
   assert(plan.structure.thumbnailPath.endsWith("thumbnail.jpg"), "local archive must write thumbnail.jpg.");

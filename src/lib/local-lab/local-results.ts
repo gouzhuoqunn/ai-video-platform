@@ -63,51 +63,51 @@ function sanitizeMetadata(value: unknown): unknown {
 
 export function listLocalResults(): LocalResultSummary[] {
   const config = loadLocalResultsConfig();
-  if (!existsSync(config.libraryDir)) {
-    return [];
-  }
+  const results = new Map<string, LocalResultSummary>();
+  for (const libraryDir of [config.libraryDir, ...config.legacyLibraryDirs]) {
+    if (!existsSync(libraryDir)) continue;
+    for (const date of readdirSync(libraryDir)) {
+      if (!DATE_PATTERN.test(date)) continue;
+      const dateDir = path.join(libraryDir, date);
+      if (!statSync(dateDir).isDirectory()) continue;
 
-  const results: LocalResultSummary[] = [];
-  for (const date of readdirSync(config.libraryDir)) {
-    if (!DATE_PATTERN.test(date)) continue;
-    const dateDir = path.join(config.libraryDir, date);
-    if (!statSync(dateDir).isDirectory()) continue;
-
-    for (const jobId of readdirSync(dateDir)) {
-      if (!JOB_ID_PATTERN.test(jobId)) continue;
-      const paths = buildLocalJobPaths(config.libraryDir, date, jobId);
-      assertInsideLibrary(config.libraryDir, paths.jobDir);
-      const hasVideo = existsSync(paths.videoPath);
-      const hasThumbnail = existsSync(paths.thumbnailPath);
-      results.push({
-        jobId,
-        date,
-        hasVideo,
-        hasThumbnail,
-        metadata: readMetadata(paths.metadataPath),
-        videoUrl: hasVideo ? `/api/local-lab/results/${encodeURIComponent(jobId)}/video` : null,
-        thumbnailUrl: hasThumbnail ? `/api/local-lab/results/${encodeURIComponent(jobId)}/thumbnail` : null,
-      });
+      for (const jobId of readdirSync(dateDir)) {
+        if (!JOB_ID_PATTERN.test(jobId) || results.has(jobId)) continue;
+        const paths = buildLocalJobPaths(libraryDir, date, jobId);
+        assertInsideLibrary(libraryDir, paths.jobDir);
+        const hasVideo = existsSync(paths.outputWithAudioPath) || existsSync(paths.videoPath);
+        const hasThumbnail = existsSync(paths.thumbnailPath);
+        results.set(jobId, {
+          jobId,
+          date,
+          hasVideo,
+          hasThumbnail,
+          metadata: readMetadata(paths.metadataPath),
+          videoUrl: hasVideo ? `/api/local-lab/results/${encodeURIComponent(jobId)}/video` : null,
+          thumbnailUrl: hasThumbnail ? `/api/local-lab/results/${encodeURIComponent(jobId)}/thumbnail` : null,
+        });
+      }
     }
   }
 
-  return results.sort((left, right) => right.date.localeCompare(left.date));
+  return [...results.values()].sort((left, right) => right.date.localeCompare(left.date));
 }
 
 export function findLocalResultFile(jobId: string, kind: "video" | "thumbnail") {
   assertSafeJobId(jobId);
   const config = loadLocalResultsConfig();
-  if (!existsSync(config.libraryDir)) {
-    return null;
-  }
-
-  for (const date of readdirSync(config.libraryDir)) {
-    if (!DATE_PATTERN.test(date)) continue;
-    const paths = buildLocalJobPaths(config.libraryDir, date, jobId);
-    const filePath = kind === "video" ? paths.videoPath : paths.thumbnailPath;
-    assertInsideLibrary(config.libraryDir, filePath);
-    if (existsSync(filePath)) {
-      return { filePath, stat: statSync(filePath) };
+  for (const libraryDir of [config.libraryDir, ...config.legacyLibraryDirs]) {
+    if (!existsSync(libraryDir)) continue;
+    for (const date of readdirSync(libraryDir)) {
+      if (!DATE_PATTERN.test(date)) continue;
+      const paths = buildLocalJobPaths(libraryDir, date, jobId);
+      const filePath = kind === "video"
+        ? (existsSync(paths.outputWithAudioPath) ? paths.outputWithAudioPath : paths.videoPath)
+        : paths.thumbnailPath;
+      assertInsideLibrary(libraryDir, filePath);
+      if (existsSync(filePath)) {
+        return { filePath, stat: statSync(filePath) };
+      }
     }
   }
 
@@ -116,33 +116,37 @@ export function findLocalResultFile(jobId: string, kind: "video" | "thumbnail") 
 
 export function listLocalImageResults(): LocalImageResultSummary[] {
   const config = loadLocalImageResultsConfig();
-  if (!existsSync(config.libraryDir)) return [];
-  const results: LocalImageResultSummary[] = [];
-  for (const date of readdirSync(config.libraryDir)) {
-    if (!DATE_PATTERN.test(date)) continue;
-    const dateDir = path.join(config.libraryDir, date);
-    if (!statSync(dateDir).isDirectory()) continue;
-    for (const sessionId of readdirSync(dateDir)) {
-      if (!JOB_ID_PATTERN.test(sessionId)) continue;
-      const paths = buildLocalImagePaths(config.libraryDir, date, sessionId);
-      assertInsideLibrary(config.libraryDir, paths.sessionDir);
-      if (existsSync(paths.imagePath)) {
-        results.push({ sessionId, date, metadata: readMetadata(paths.metadataPath), imageUrl: `/api/local-lab/image-results/${encodeURIComponent(sessionId)}` });
+  const results = new Map<string, LocalImageResultSummary>();
+  for (const libraryDir of [config.libraryDir, ...config.legacyLibraryDirs]) {
+    if (!existsSync(libraryDir)) continue;
+    for (const date of readdirSync(libraryDir)) {
+      if (!DATE_PATTERN.test(date)) continue;
+      const dateDir = path.join(libraryDir, date);
+      if (!statSync(dateDir).isDirectory()) continue;
+      for (const sessionId of readdirSync(dateDir)) {
+        if (!JOB_ID_PATTERN.test(sessionId) || results.has(sessionId)) continue;
+        const paths = buildLocalImagePaths(libraryDir, date, sessionId);
+        assertInsideLibrary(libraryDir, paths.sessionDir);
+        if (existsSync(paths.imagePath)) {
+          results.set(sessionId, { sessionId, date, metadata: readMetadata(paths.metadataPath), imageUrl: `/api/local-lab/image-results/${encodeURIComponent(sessionId)}` });
+        }
       }
     }
   }
-  return results.sort((left, right) => right.date.localeCompare(left.date));
+  return [...results.values()].sort((left, right) => right.date.localeCompare(left.date));
 }
 
 export function findLocalImageResultFile(sessionId: string) {
   assertSafeJobId(sessionId);
   const config = loadLocalImageResultsConfig();
-  if (!existsSync(config.libraryDir)) return null;
-  for (const date of readdirSync(config.libraryDir)) {
-    if (!DATE_PATTERN.test(date)) continue;
-    const paths = buildLocalImagePaths(config.libraryDir, date, sessionId);
-    assertInsideLibrary(config.libraryDir, paths.imagePath);
-    if (existsSync(paths.imagePath)) return { filePath: paths.imagePath, stat: statSync(paths.imagePath) };
+  for (const libraryDir of [config.libraryDir, ...config.legacyLibraryDirs]) {
+    if (!existsSync(libraryDir)) continue;
+    for (const date of readdirSync(libraryDir)) {
+      if (!DATE_PATTERN.test(date)) continue;
+      const paths = buildLocalImagePaths(libraryDir, date, sessionId);
+      assertInsideLibrary(libraryDir, paths.imagePath);
+      if (existsSync(paths.imagePath)) return { filePath: paths.imagePath, stat: statSync(paths.imagePath) };
+    }
   }
   return null;
 }

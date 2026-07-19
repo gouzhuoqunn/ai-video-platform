@@ -114,6 +114,8 @@
     "clore:deployment-control:test": "tsx scripts/deployment-control-tests.ts",
     "studio:queue:test": "tsx scripts/studio-queue-tests.ts",
     "gpu:manual-price:test": "tsx scripts/manual-gpu-candidate-price-tests.ts",
+    "local:path-registry:test": "tsx scripts/local-path-registry-tests.ts",
+    "local:media-access:test": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/local-media-access-tests.ts",
     "clore:deployment:resume": "tsx scripts/clore/deployment-control.ts resume",
     "clore:deployment:pause": "tsx scripts/clore/deployment-control.ts pause",
     "clore:deployment:resolve": "tsx scripts/clore/resolve-deployment-pause.ts",

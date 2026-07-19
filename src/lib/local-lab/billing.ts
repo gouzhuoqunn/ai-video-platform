@@ -6,6 +6,7 @@ import { getLocalLabSessionSummary, getLocalLabWallet } from "./clore-console";
 import { readGpuBillingStatus } from "../../../scripts/gpu-billing-status";
 import { loadR2Credentials } from "../../../scripts/model-cache/r2-presign";
 import { ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
+import { getLocalMediaReadRoots } from "@/lib/local-data/path-registry";
 
 export const R2_STANDARD_STORAGE_PRICING = { freeGbMonth: 10, usdPerGbMonth: 0.015, asOf: "2026-07-18" } as const;
 const CACHE_TTL_MS = 60_000;
@@ -22,16 +23,21 @@ export type BillingAggregate = {
 };
 
 function projectSpend() {
-  const root = process.env.LOCAL_VIDEO_LIBRARY_DIR?.trim() || "D:\\AI-Video-Library";
   let spend = 0;
-  if (!existsSync(root)) return 0;
-  for (const date of readdirSync(root)) {
-    const dateDir = path.join(root, date);
-    if (!statSync(dateDir).isDirectory()) continue;
-    for (const job of readdirSync(dateDir)) {
-      const evidence = path.join(dateDir, job, "provider-session.json");
-      if (!existsSync(evidence)) continue;
-      try { const value = JSON.parse(readFileSync(evidence, "utf8")) as Record<string, unknown>; spend += Number(value.spendUsd ?? value.approximateSpendUsd ?? 0) || 0; } catch { /* ignore malformed evidence */ }
+  const seen = new Set<string>();
+  for (const root of getLocalMediaReadRoots().videoRoots) {
+    if (!existsSync(root)) continue;
+    for (const date of readdirSync(root)) {
+      const dateDir = path.join(root, date);
+      if (!statSync(dateDir).isDirectory()) continue;
+      for (const job of readdirSync(dateDir)) {
+        const key = `${date}/${job}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const evidence = path.join(dateDir, job, "provider-session.json");
+        if (!existsSync(evidence)) continue;
+        try { const value = JSON.parse(readFileSync(evidence, "utf8")) as Record<string, unknown>; spend += Number(value.spendUsd ?? value.approximateSpendUsd ?? 0) || 0; } catch { /* ignore malformed evidence */ }
+      }
     }
   }
   return Number(spend.toFixed(4));

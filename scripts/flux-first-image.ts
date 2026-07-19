@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync } from "n
 import path from "node:path";
 import workflowTemplate from "../comfy-runtime/workflows/bootstrap/flux2-klein-4b-t2i-api.json";
 import { writeJsonAtomic } from "./local-results/config";
+import { getLocalDataPaths } from "../src/lib/local-data/path-registry";
 
 export const FLUX_FIRST_IMAGE_PROMPT =
   "A cinematic wide shot of a futuristic white research station beside a clear blue ocean at sunset, realistic architecture, warm sunlight, detailed clouds, clean composition, high detail";
@@ -101,7 +102,7 @@ export function archiveFluxFirstImage(input: {
   if (!/^[A-Za-z0-9_-]{6,120}$/.test(input.sessionId)) throw new Error("Invalid first-image session id.");
   if (!existsSync(input.sourcePng)) throw new Error("Generated PNG is missing.");
   const date = new Date().toISOString().slice(0, 10);
-  const libraryDir = input.libraryDir ?? "D:\\AI-Creative-Library";
+  const libraryDir = input.libraryDir ?? getLocalDataPaths().imageMediaRoot;
   const archiveDir = path.join(libraryDir, date, input.sessionId);
   mkdirSync(archiveDir, { recursive: true });
   const outputPath = path.join(archiveDir, "output.png");

@@ -305,6 +305,7 @@ export function LocalCreationStudio() {
   const [selectedLongSegmentIndex, setSelectedLongSegmentIndex] = useState(0);
   const [selectedVideoKind, setSelectedVideoKind] = useState<"short" | "long">("short");
   const [clockNow, setClockNow] = useState(0);
+  const [isOpeningFolder, setIsOpeningFolder] = useState(false);
   const automaticCancelRequested = useRef(false);
 
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
@@ -342,6 +343,15 @@ export function LocalCreationStudio() {
         : null
     : null;
   const activeVideoUrl = selectedVideoKind === "long" ? longVideoPreviewUrl : mainVideoUrl;
+  const previewFolderRequest = useMemo(() => {
+    if (mode === "image" && selectedImage) return { label: "打开图片文件夹", identity: { kind: "image", sessionId: selectedImage.sessionId } };
+    if (selectedVideoKind === "long" && selectedLongVideo) {
+      if (selectedLongVideo.finalVideoRef) return { label: "打开长视频文件夹", identity: { kind: "long-video", projectId: selectedLongVideo.id } };
+      if (playableLongSegment?.selectedAttemptId) return { label: "打开片段文件夹", identity: { kind: "long-video-segment", projectId: selectedLongVideo.id, sequenceIndex: playableLongSegment.sequenceIndex, attemptId: playableLongSegment.selectedAttemptId } };
+    }
+    if (previewVideoResult?.videoUrl) return { label: "打开视频文件夹", identity: { kind: "short-video", jobId: previewVideoResult.jobId } };
+    return null;
+  }, [mode, playableLongSegment, previewVideoResult, selectedImage, selectedLongVideo, selectedVideoKind]);
   const execution = pool?.execution ?? emptyExecution;
   const visibleQueueCounts = useMemo(
     () => pool?.confirmedQueueCounts?.[ordinaryMode] ?? { rtx4090: 0, rtx5090: 0 },
@@ -364,6 +374,24 @@ export function LocalCreationStudio() {
   const deployedFamilyLabel = execution.deployedFamily === "image" ? "图片模型" : execution.deployedFamily === "video" ? "视频模型" : execution.deployedFamily === "none" ? "暂无" : "状态未知";
   const currentModeDeployed = Boolean(execution.rentedGpuClass) && execution.deployedFamily === ordinaryMode;
   const activeGenerationFamily = execution.activeExecution?.generationFamily ?? (execution.deployedFamily === "image" || execution.deployedFamily === "video" ? execution.deployedFamily : null);
+
+  async function openPreviewFolder() {
+    if (!previewFolderRequest || isOpeningFolder) return;
+    setIsOpeningFolder(true);
+    try {
+      const response = await fetch("/api/local-lab/open-folder", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(previewFolderRequest.identity),
+      });
+      const payload = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) setNotice(payload.error ?? "无法打开本地文件夹。");
+    } catch {
+      setNotice("无法打开本地文件夹，请确认平台正在 Windows 本机运行。");
+    } finally {
+      setIsOpeningFolder(false);
+    }
+  }
 
   const selectExecutionQueue = useCallback((gpuClass: RequiredGpuClass | null) => {
     setSelectedExecutionGpuClass(gpuClass);
@@ -990,6 +1018,7 @@ export function LocalCreationStudio() {
                 {selectedVideoKind === "long" && selectedLongVideo?.finalVideoRef ? (
                   <a className="rounded-md border border-emerald-200 bg-white px-3 py-2 text-xs font-semibold text-emerald-800" data-testid="long-video-master-link" href={longVideoPublicMediaUrl(selectedLongVideo.id, "master")}>720P 母版</a>
                 ) : null}
+                <button className="rounded-md border border-stone-300 bg-white px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:text-stone-400" disabled={!previewFolderRequest || isOpeningFolder} onClick={() => void openPreviewFolder()} type="button">{isOpeningFolder ? "正在打开文件夹" : previewFolderRequest?.label ?? "打开本地文件夹"}</button>
                 <span className="rounded-md border border-stone-200 bg-white px-3 py-2 text-xs text-stone-600">短期签名播放 · 本地结果优先</span>
               </div>
             </div>

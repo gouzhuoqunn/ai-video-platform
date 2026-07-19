@@ -70,6 +70,7 @@ tsconfig.tsbuildinfo
 /gpu-worker/.env.*
 D:/AI-Video-Library/
 AI-Video-Library/
+/local-data/
 *.pem
 
 # system files

@@ -15,7 +15,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { DEFAULT_LOCAL_VIDEO_LIBRARY_DIR, writeJsonAtomic } from "../../../scripts/local-results/config";
+import { writeJsonAtomic } from "../../../scripts/local-results/config";
+import {
+  buildLongVideoProjectMediaPaths,
+  buildLongVideoSegmentAttemptMediaPaths,
+  getLocalDataPaths,
+  getLocalMediaReadRoots,
+  relativeMediaReference,
+} from "@/lib/local-data/path-registry";
 import type { LongVideoProject } from "./domain";
 
 const require = createRequire(import.meta.url);
@@ -37,7 +44,7 @@ export type LongVideoMediaProbe = {
 };
 
 export function loadLongVideoLibraryDir() {
-  return process.env.LOCAL_VIDEO_LIBRARY_DIR?.trim() || DEFAULT_LOCAL_VIDEO_LIBRARY_DIR;
+  return getLocalDataPaths().videoMediaRoot;
 }
 
 export function persistLongVideoProjectSnapshot(project: LongVideoProject, libraryDir = loadLongVideoLibraryDir()) {
@@ -62,36 +69,22 @@ export function persistLongVideoProjectSnapshot(project: LongVideoProject, libra
 }
 
 export function buildLongVideoProjectPaths(libraryDir: string, date: string, projectId: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !PROJECT_ID.test(projectId)) throw new Error("long_video_storage_identifier_invalid");
-  const projectDir = path.join(libraryDir, date, projectId);
-  return {
-    projectDir,
-    projectJson: path.join(projectDir, "project.json"),
-    metadataJson: path.join(projectDir, "metadata.json"),
-    segmentsDir: path.join(projectDir, "segments"),
-    finalVideo: path.join(projectDir, "output.mp4"),
-    finalVideoPart: path.join(projectDir, "output.mp4.part"),
-    finalThumbnail: path.join(projectDir, "thumbnail.jpg"),
-    mergeEvidence: path.join(projectDir, "merge-evidence.json"),
-    concatList: path.join(projectDir, "concat.txt"),
-  };
+  if (!PROJECT_ID.test(projectId)) throw new Error("long_video_storage_identifier_invalid");
+  return buildLongVideoProjectMediaPaths(libraryDir, date, projectId);
 }
 
 export function buildLongVideoAttemptPaths(projectDir: string, sequenceIndex: number, attemptId: string) {
-  if (!Number.isInteger(sequenceIndex) || sequenceIndex < 0 || !PROJECT_ID.test(attemptId)) throw new Error("long_video_attempt_identifier_invalid");
-  const attemptDir = path.join(projectDir, "segments", String(sequenceIndex).padStart(3, "0"), "attempts", attemptId);
-  return {
-    attemptDir,
-    sourceWebm: path.join(attemptDir, "source.webm"),
-    sourceWebmPart: path.join(attemptDir, "source.webm.part"),
-    outputMp4: path.join(attemptDir, "output.mp4"),
-    outputMp4Part: path.join(attemptDir, "output.mp4.part"),
-    thumbnail: path.join(attemptDir, "thumbnail.jpg"),
-    lastFrame: path.join(attemptDir, "last-frame.png"),
-    lastFramePart: path.join(attemptDir, "last-frame.png.part"),
-    workflow: path.join(attemptDir, "workflow-api.json"),
-    evidence: path.join(attemptDir, "runtime-evidence.json"),
-  };
+  if (!PROJECT_ID.test(attemptId)) throw new Error("long_video_attempt_identifier_invalid");
+  return buildLongVideoSegmentAttemptMediaPaths(projectDir, sequenceIndex, attemptId);
+}
+
+export function resolveLongVideoProjectPaths(project: Pick<LongVideoProject, "id" | "createdAt">) {
+  const date = project.createdAt.slice(0, 10);
+  for (const root of getLocalMediaReadRoots().videoRoots) {
+    const paths = buildLongVideoProjectPaths(root, date, project.id);
+    if (existsSync(paths.projectDir)) return paths;
+  }
+  return buildLongVideoProjectPaths(loadLongVideoLibraryDir(), date, project.id);
 }
 
 function assertInside(root: string, filePath: string) {
@@ -115,9 +108,7 @@ function sha256(filePath: string) {
 }
 
 function opaqueRelative(projectDir: string, filePath: string) {
-  const relative = path.relative(projectDir, filePath).replace(/\\/g, "/");
-  if (!relative || relative.startsWith("../") || path.isAbsolute(relative)) throw new Error("long_video_reference_unsafe");
-  return relative;
+  return relativeMediaReference(projectDir, filePath);
 }
 
 export function extractLongVideoLastFrame(inputVideo: string, outputPng: string) {
