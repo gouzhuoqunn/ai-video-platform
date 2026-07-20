@@ -33,6 +33,21 @@ class GpuWorker:
         )
 
     def claim(self):
+        if self.config.execution_mode == "immutable_batch":
+            response = self.supabase.rpc(
+                "claim_next_video_job_for_batch",
+                {
+                    "p_batch_id": self.config.execution_batch_id,
+                    "p_worker_id": self.config.worker_id,
+                    "p_expected_model_key": self.config.expected_model_key,
+                    "p_expected_gpu_class": self.config.expected_gpu_class,
+                    "p_lease_seconds": self.config.worker_lease_seconds,
+                },
+            ).execute()
+            data = response.data
+            if isinstance(data, list):
+                return data[0] if data else None
+            return data
         response = self.supabase.rpc(
             "claim_next_video_job",
             {"p_worker_id": self.config.worker_id, "p_lease_seconds": self.config.worker_lease_seconds},

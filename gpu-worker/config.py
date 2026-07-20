@@ -48,6 +48,10 @@ class WorkerConfig:
     worker_poll_interval_seconds: int
     worker_lease_seconds: int
     first_session_max_claims: int
+    execution_mode: str = "generic"
+    execution_batch_id: str = ""
+    expected_model_key: str = ""
+    expected_gpu_class: str = ""
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -74,6 +78,10 @@ class WorkerConfig:
             worker_poll_interval_seconds=_int("WORKER_POLL_INTERVAL_SECONDS", 8),
             worker_lease_seconds=_int("WORKER_LEASE_SECONDS", 300),
             first_session_max_claims=_int("FIRST_SESSION_MAX_CLAIMS", 0),
+            execution_mode=os.getenv("GPU_WORKER_EXECUTION_MODE", "generic").strip().lower(),
+            execution_batch_id=os.getenv("GPU_WORKER_BATCH_ID", "").strip(),
+            expected_model_key=os.getenv("GPU_WORKER_EXPECTED_MODEL_KEY", "").strip(),
+            expected_gpu_class=os.getenv("GPU_WORKER_EXPECTED_GPU_CLASS", "").strip().lower(),
         )
 
     def validate(self) -> None:
@@ -94,6 +102,10 @@ class WorkerConfig:
             raise ValueError("WAN_RUNNER must be mock or real")
         if self.first_session_max_claims < 0:
             raise ValueError("FIRST_SESSION_MAX_CLAIMS must be 0 or greater")
+        if self.execution_mode not in {"generic", "immutable_batch"}:
+            raise ValueError("GPU_WORKER_EXECUTION_MODE must be generic or immutable_batch")
+        if self.execution_mode == "immutable_batch" and (not self.execution_batch_id or self.expected_model_key != "video_wan_silent" or self.expected_gpu_class != "rtx4090"):
+            raise ValueError("immutable batch mode requires batch id, video_wan_silent and rtx4090")
         if self.wan_runner == "real":
             if not self.wan_model_revision or self.wan_model_revision == "main":
                 raise ValueError("WAN_MODEL_REVISION must be pinned for real runner")

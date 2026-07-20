@@ -29,7 +29,7 @@ class FakeRpc:
 
     def execute(self):
         self.client.calls.append((self.name, self.payload))
-        if self.name == "claim_next_video_job":
+        if self.name in {"claim_next_video_job", "claim_next_video_job_for_batch"}:
             return FakeExecute(self.client.claim_data)
         return FakeExecute({})
 
@@ -198,6 +198,16 @@ class WorkerTests(unittest.TestCase):
             self.assertFalse(worker.process_one())
             claim_calls = [call for call in fake.calls if call[0] == "claim_next_video_job"]
             self.assertEqual(len(claim_calls), 1)
+
+    def test_immutable_batch_never_calls_generic_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = config(tmp)
+            batch = WorkerConfig(**{**base.__dict__, "execution_mode": "immutable_batch", "execution_batch_id": "batch-1", "expected_model_key": "video_wan_silent", "expected_gpu_class": "rtx4090"})
+            fake = FakeSupabase(claim_data=[])
+            worker = GpuWorker(batch, supabase_client=fake, runner=MockWanRunner(batch), logger=logging.getLogger("test"))
+            self.assertFalse(worker.process_one())
+            self.assertEqual(fake.calls[0][0], "claim_next_video_job_for_batch")
+            self.assertNotIn("claim_next_video_job", [call[0] for call in fake.calls])
 
 
 if __name__ == "__main__":
