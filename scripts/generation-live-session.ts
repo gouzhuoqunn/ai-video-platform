@@ -1,8 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { rmSync } from "node:fs";
-import path from "node:path";
 import { getGpuProvider } from "./gpu-providers";
-import { FIXED_RUNTIME_DIGEST, sanitizeGpuTarget, scpFile, sleep, sshCommand } from "./gpu-providers/common";
+import { FIXED_RUNTIME_DIGEST, sanitizeGpuTarget, sleep, sshCommand } from "./gpu-providers/common";
 import type { GpuCandidate, GpuSession, GpuTarget } from "./gpu-providers/types";
 import { getCloreDeploymentHold, setCloreDeploymentHold } from "./clore/deployment-hold";
 import { clearManualParitySecrets } from "./clore/manual-parity";
@@ -19,9 +17,8 @@ import { fluxCacheStatus } from "./model-cache/flux4090-cache";
 import { verify as verifyWanCache } from "./model-cache/wan-stage3m-cache";
 import { buildFluxFirstImageWorkflow, validateFluxFirstImageWorkflow } from "./flux-first-image";
 import { runRemoteFirstImage } from "./gpu-first-image";
-import { archiveStage3OWanVideo, buildStage3OWanWorkflow, validateStage3OWanWorkflow } from "./stage3o-wan-executor";
-import { downloadRemoteRunnerOutput, runRemoteComfyWorkflow, websocketCapabilityEvidence } from "./comfy-remote-runner";
-import { writeStage3OWanBundle } from "./stage3o-wan-bundle";
+import { buildStage3OWanWorkflow, validateStage3OWanWorkflow } from "./stage3o-wan-executor";
+import { createRealWanTransport } from "./wan-real-transport";
 import { STAGE3O_BATCH_ID, STAGE3O_IMAGE_TASK_ID, STAGE3O_TASK_IDS, STAGE3O_VIDEO_TASK_ID } from "./stage3o-batch";
 import { readGenerationPool, setGenerationTaskStatus, writeGenerationPool } from "../src/lib/generation/task-pool";
 import { completeStage3OCheckpoint, initialStage3OState, nextStage3OCheckpoint, readStage3OState, writeStage3OState, type Stage3OLiveState } from "./stage3o-live-state";
@@ -243,24 +240,9 @@ function resetDeploymentAttemptCheckpoints(state: Stage3OLiveState) {
 }
 
 async function runWan(target: GpuTarget) {
-  const bundle = writeStage3OWanBundle(); const restoreScript = path.join(process.cwd(), "scripts", "clore", "restore-stage3o-r2.py");
-  requireSuccess(scpFile(target, bundle.filePath, "/workspace/stage3o-wan-r2-bundle.json", 5 * 60_000), "wan_bundle_copy_failed");
-  requireSuccess(scpFile(target, restoreScript, "/workspace/restore-stage3o-r2.py", 2 * 60_000), "wan_restore_script_copy_failed");
-  const restore = requireSuccess(sshCommand(target, "set -e; test $(df --output=avail -B1 /workspace | tail -1) -ge 50000000000; STAGE3O_R2_RESTORE_MANIFEST=/workspace/stage3o-wan-r2-bundle.json python3 /workspace/restore-stage3o-r2.py", 90 * 60_000), "wan_restore_failed");
-  let workflow = buildStage3OWanWorkflow(); let validation = validateStage3OWanWorkflow(workflow); let oomFallbackUsed = false;
-  let remoteResult;
-  try { remoteResult = runRemoteComfyWorkflow({ target, workflow: workflow as unknown as Record<string, unknown>, clientId: STAGE3O_VIDEO_TASK_ID, kind: "video", timeoutSeconds: 90 * 60 }); }
-  catch (error) {
-    if (!/out of memory|cuda.*memory|oom/i.test(error instanceof Error ? error.message : String(error))) throw error;
-    requireSuccess(sshCommand(target, "curl -fsS -X POST -H 'Content-Type: application/json' -d '{\"unload_models\":false,\"free_memory\":true}' http://127.0.0.1:8188/free >/dev/null", 60_000), "wan_oom_memory_clear_failed");
-    workflow = buildStage3OWanWorkflow({ width: 640, height: 368 }); validation = validateStage3OWanWorkflow(workflow); oomFallbackUsed = true;
-    remoteResult = runRemoteComfyWorkflow({ target, workflow: workflow as unknown as Record<string, unknown>, clientId: `${STAGE3O_VIDEO_TASK_ID}-low`, kind: "video", timeoutSeconds: 90 * 60 });
-  }
-  const localWebm = downloadRemoteRunnerOutput(target, remoteResult, ".webm");
-  try {
-    const generated = archiveStage3OWanVideo({ sourceWebm: localWebm, workflow, promptId: String(remoteResult.prompt_id ?? ""), validation, oomFallbackUsed, runtimeEvidence: { system_stats: remoteResult.system_stats, required_nodes_verified: remoteResult.required_nodes_verified, history_verified: remoteResult.history_verified, ...websocketCapabilityEvidence(remoteResult.websocket_remote_local, { attempted: false, connected: false, reason: "image_session_diagnostic_already_recorded" }) } });
-    return { restore: JSON.parse(restore), generated };
-  } finally { rmSync(localWebm, { force: true }); }
+  const transport = createRealWanTransport(target);
+  const result = await transport.run({ id: STAGE3O_VIDEO_TASK_ID, prompt: "" });
+  return { restore: result.restore, generated: result.generated };
 }
 
 async function cleanup(session: GpuSession | null, target: GpuTarget | null, provider: ReturnType<typeof getGpuProvider>, state: Stage3OLiveState) {

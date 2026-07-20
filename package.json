@@ -5,9 +5,9 @@
   "description": "AI视频生成平台前端演示版",
   "scripts": {
     "dev": "next dev",
-    "dev:local": "cross-env NEXT_PUBLIC_APP_MODE=local_lab LOCAL_LAB_ENABLED=true LOCAL_REAL_GPU_RENTAL_ENABLED=true next dev --hostname 127.0.0.1 --port 3000",
-    "start:local": "cross-env NEXT_PUBLIC_APP_MODE=local_lab LOCAL_LAB_ENABLED=true LOCAL_REAL_GPU_RENTAL_ENABLED=true next start --hostname 127.0.0.1 --port 3000",
-    "gpu:session-runner:start": "cross-env NODE_OPTIONS=--conditions=react-server NEXT_PUBLIC_APP_MODE=local_lab LOCAL_LAB_ENABLED=true LOCAL_REAL_GPU_RENTAL_ENABLED=true tsx scripts/gpu-session-runner.ts start",
+    "dev:local": "cross-env NEXT_PUBLIC_APP_MODE=local_lab LOCAL_LAB_ENABLED=true LOCAL_REAL_GPU_RENTAL_ENABLED=true LOCAL_GPU_BATCH_RPC_VERIFIED=true GPU_WORKER_IMMUTABLE_BATCH_ENABLED=true CLORE_ORDER_EXECUTION_ENABLED=true next dev --hostname 127.0.0.1 --port 3000",
+    "start:local": "cross-env NEXT_PUBLIC_APP_MODE=local_lab LOCAL_LAB_ENABLED=true LOCAL_REAL_GPU_RENTAL_ENABLED=true LOCAL_GPU_BATCH_RPC_VERIFIED=true GPU_WORKER_IMMUTABLE_BATCH_ENABLED=true CLORE_ORDER_EXECUTION_ENABLED=true next start --hostname 127.0.0.1 --port 3000",
+    "gpu:session-runner:start": "cross-env NODE_OPTIONS=--conditions=react-server NEXT_PUBLIC_APP_MODE=local_lab LOCAL_LAB_ENABLED=true LOCAL_REAL_GPU_RENTAL_ENABLED=true LOCAL_GPU_BATCH_RPC_VERIFIED=true GPU_WORKER_IMMUTABLE_BATCH_ENABLED=true CLORE_ORDER_EXECUTION_ENABLED=true tsx scripts/gpu-session-runner.ts start",
     "gpu:session-runner:status": "tsx scripts/gpu-session-runner.ts status",
     "gpu:session-runner:stop": "tsx scripts/gpu-session-runner.ts stop",
     "gpu:session-runner:recover": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/gpu-session-runner.ts recover",

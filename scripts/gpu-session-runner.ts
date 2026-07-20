@@ -2,6 +2,10 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 import { getLocalLabCloreCandidates } from "../src/lib/local-lab/clore-console";
 import { GENERATION_POOL_PATH, readGenerationPool, updateManualGpuBatch, type ManualGpuExecutionBatch } from "../src/lib/generation/task-pool";
+import { runManualSilent4090Batch } from "../src/lib/generation/manual-gpu-batch-runner";
+import { getGpuProvider } from "./gpu-providers";
+import type { GpuTarget } from "./gpu-providers/types";
+import { createRealWanTransport } from "./wan-real-transport";
 
 const STATE_DIR = path.join(process.cwd(), ".secrets", "gpu-session-runner");
 const PID_PATH = path.join(STATE_DIR, "runner.pid");
@@ -11,6 +15,7 @@ const INTERVAL_MS = 3_000;
 type RunnerStatus = { pid: number; updatedAt: string; state: "idle" | "searching" | "candidate_selected" | "blocked" | "order_created" | "error"; batchId: string | null; message: string };
 type Candidate = { server_id: string; base_usd_per_hour?: number | null; effective_usd_per_hour?: number | null; gpu?: string | null };
 type CandidateReader = () => Promise<{ selected?: Candidate | null } | Record<string, unknown>>;
+type WanSession = { ensureRestored(): Promise<unknown>; run(task: { id: string; prompt: string; seed?: number }): Promise<{ generated: { outputPath: string; thumbnailPath: string } }>; stop(): Promise<void> };
 
 function statusPath() { mkdirSync(STATE_DIR, { recursive: true }); return STATUS_PATH; }
 function writeStatus(status: Omit<RunnerStatus, "pid" | "updatedAt">) {
@@ -25,6 +30,19 @@ function mutationsEnabled() {
     && process.env.NEXT_PUBLIC_APP_MODE === "local_lab"
     && process.env.LOCAL_REAL_GPU_RENTAL_ENABLED === "true"
     && process.env.CLORE_ORDER_EXECUTION_ENABLED === "true";
+}
+
+export async function executeFrozenWanBatch(input: { target: GpuTarget; poolPath?: string; transport?: WanSession }) {
+  const poolPath = input.poolPath ?? GENERATION_POOL_PATH;
+  const transport = input.transport ?? createRealWanTransport(input.target);
+  return runManualSilent4090Batch({
+    async loadWan22() { await transport.ensureRestored(); },
+    async runSilentShortVideo(task) {
+      const result = await transport.run({ id: task.id, prompt: task.prompt, seed: task.seed ?? undefined });
+      return { outputMetadata: { outputPath: result.generated.outputPath, thumbnailPath: result.generated.thumbnailPath } };
+    },
+    async unloadWan22() { await transport.stop(); },
+  }, poolPath);
 }
 
 /** One idempotent runner tick. It is intentionally the only non-browser mutation owner. */
@@ -67,14 +85,26 @@ export async function runGpuSessionRunnerTick(readCandidates: CandidateReader = 
     const { loadCloreExecutionConfig } = await import("./clore/execution-config");
     const { createCloreOrder, prepareCreateOrderFromLive } = await import("./clore/order-execution");
     const execution = loadCloreExecutionConfig();
-    const prepared = await prepareCreateOrderFromLive({ config: { ...(await import("./clore/config")).loadCloreConfig(), targetGpu: "NVIDIA GeForce RTX 4090", minGpuVramGb: 24, maxGpuPricePerHour: 0.7 }, execution, serverId: candidate.server_id, maxPriceUsdPerHour: candidate.base_usd_per_hour, queuedJobCount: batch.taskCount });
-    const created = await createCloreOrder({ config: (await import("./clore/config")).loadCloreConfig(), execution, candidate: prepared.candidate, requestBody: prepared.requestBody });
+    const config = { ...(await import("./clore/config")).loadCloreConfig(), targetGpu: "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: 24, maxGpuPricePerHour: 0.7 };
+    const prepared = await prepareCreateOrderFromLive({ config, execution, serverId: candidate.server_id, maxPriceUsdPerHour: candidate.base_usd_per_hour, queuedJobCount: batch.taskCount });
+    const created = await createCloreOrder({ config, execution, candidate: prepared.candidate, requestBody: prepared.requestBody });
     if (!created.order_created || !created.order_id) throw new Error("runner_order_not_created");
     const latest = readGenerationPool(poolPath).scheduler.manualBatch!;
     updateIntent(latest, { status: "order_created", lastError: null }, poolPath);
     updateManualGpuBatch({ status: "provisioning", providerOrderId: created.order_id }, poolPath);
     writeStatus({ state: "order_created", batchId: batch.id, message: "租用成功，正在等待主机" });
-    return { action: "order_created" as const, orderId: created.order_id };
+    const provider = getGpuProvider("clore");
+    const session = await provider.recoverExistingSession(created.order_id);
+    if (!session) throw new Error("runner_created_order_not_recoverable");
+    const target = await provider.waitForSsh(session, 10 * 60_000);
+    try {
+      const completed = await executeFrozenWanBatch({ target, poolPath });
+      await provider.terminateSession(session);
+      return { action: "batch_completed" as const, orderId: created.order_id, completed };
+    } catch (error) {
+      await provider.terminateSession(session).catch(() => undefined);
+      throw error;
+    }
   }
   writeStatus({ state: "idle", batchId: batch.id, message: "批次已由 runner 接管" });
   return { action: "already_reconciled" as const };

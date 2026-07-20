@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { authorizeManualSilent4090Batch, createGenerationTask, createManualSilent4090Batch, readGenerationPool, upsertGenerationTasks } from "../src/lib/generation/task-pool";
-import { runGpuSessionRunnerTick } from "./gpu-session-runner";
+import { authorizeManualSilent4090Batch, createGenerationTask, createManualSilent4090Batch, readGenerationPool, updateManualGpuBatch, upsertGenerationTasks } from "../src/lib/generation/task-pool";
+import { executeFrozenWanBatch, runGpuSessionRunnerTick } from "./gpu-session-runner";
 
 const root = mkdtempSync(path.join(os.tmpdir(), "gpu-session-runner-"));
 const poolPath = path.join(root, "pool.json");
@@ -23,7 +23,21 @@ async function main() {
     const disabled = await runGpuSessionRunnerTick(async () => { throw new Error("market must not be reread while mutation is disabled"); }, poolPath);
     assert.equal(disabled.action, "mutation_disabled");
     assert.equal(readGenerationPool(poolPath).scheduler.manualBatch?.providerOrderId, null);
-    console.log(JSON.stringify({ ok: true, frozenTaskIds: frozen.batch.taskIds, providerMutationCalls: 0, runnerAction: disabled.action }));
+    updateManualGpuBatch({ status: "provisioning", providerOrderId: "fake-order" }, poolPath);
+    const calls: string[] = [];
+    const result = await executeFrozenWanBatch({
+      target: { provider: "clore", host: "fake-host", port: 22, username: "root", sshKeyPath: "fake", gpuProfile: "rtx4090", runtimeDigest: "sha256:fake" },
+      poolPath,
+      transport: {
+        async ensureRestored() { calls.push("restore"); },
+        async run(current) { calls.push(current.id); return { generated: { outputPath: `fake/${current.id}.mp4`, thumbnailPath: `fake/${current.id}.jpg` } }; },
+        async stop() { calls.push("stop"); },
+      },
+    });
+    assert.deepEqual(calls, ["restore", "first", "second", "stop"]);
+    assert.deepEqual(result.completedTaskIds, ["first", "second"]);
+    assert.equal(readGenerationPool(poolPath).scheduler.manualBatch?.status, "completed");
+    console.log(JSON.stringify({ ok: true, frozenTaskIds: frozen.batch.taskIds, fakeProviderOrders: 1, fakeSshSessions: 1, runnerAction: "batch_completed", transportCalls: calls }));
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 void main().catch((error) => { console.error(error); process.exitCode = 1; });
