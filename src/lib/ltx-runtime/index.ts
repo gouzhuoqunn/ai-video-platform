@@ -13,7 +13,7 @@ const FFMPEG_PATH = (require("@ffmpeg-installer/ffmpeg") as { path: string }).pa
 const FFPROBE_PATH = (require("@ffprobe-installer/ffprobe") as { path: string }).path;
 
 export const LTX_RUNTIME_VERSION = "stage2-mock-1";
-export const LTX_FAILURES = ["no_output", "invalid_container", "missing_video_stream", "missing_audio_stream", "duration_mismatch", "corrupt_or_truncated_output", "unsupported_dimensions", "input_audio_missing", "input_audio_hash_mismatch", "input_audio_duration_mismatch", "input_audio_revision_mismatch", "audio_conditioning_required", "audio_not_preserved", "canceled", "model_load_failure", "out_of_vram", "insufficient_system_ram", "insufficient_disk", "dependency_runtime_failure", "download_cache_failure", "unknown_failure"] as const;
+export const LTX_FAILURES = ["no_output", "invalid_container", "missing_video_stream", "missing_audio_stream", "duration_mismatch", "corrupt_or_truncated_output", "unsupported_dimensions", "input_audio_missing", "input_audio_hash_mismatch", "input_audio_duration_mismatch", "input_audio_revision_mismatch", "unsupported_audio_format", "audio_conditioning_required", "audio_conditioning_failed", "audio_preservation_failed", "mux_failed", "canceled", "model_load_failure", "out_of_vram", "insufficient_system_ram", "insufficient_disk", "dependency_runtime_failure", "download_cache_failure", "unknown_failure"] as const;
 export type LtxFailureCode = (typeof LTX_FAILURES)[number];
 export type LtxModelRole = "official_ltx_compatibility_baseline" | "sulphur_full" | "sulphur_distilled" | "auxiliary_lora";
 export type LtxExecutableStatus = "compatibility_baseline" | "blocked" | "executable";
@@ -67,12 +67,15 @@ export type LtxDialogueSnapshot = { visualPrompt: string; dialogueText: string; 
 export type LtxAudioConditionedRequest = LtxNativeAudioRequest & {
   executionPreset: "ltx_audible_fast_720p_4090" | "ltx_audible_quality_720p_5090" | "ltx_audible_quality_1080p_5090";
   inputAudioPath: string;
+  inputAudioRef: string;
   inputAudioSha256: string;
   inputAudioDurationMs: number;
   inputAudioRevisionId: string;
   voiceInferenceJobId: string;
   voiceProfileId: string;
   dialogueSnapshot: LtxDialogueSnapshot[];
+  visualPrompt: string;
+  targetDurationMs: number;
   audioConditioningRequired: true;
   preserveInputAudio: true;
 };
@@ -108,8 +111,11 @@ export function classifyLtxFailure(error: unknown): LtxFailureCode {
   if (/input_audio_hash/.test(message)) return "input_audio_hash_mismatch";
   if (/input_audio_duration/.test(message)) return "input_audio_duration_mismatch";
   if (/input_audio_revision/.test(message)) return "input_audio_revision_mismatch";
+  if (/unsupported_audio_format/.test(message)) return "unsupported_audio_format";
   if (/audio_conditioning_required/.test(message)) return "audio_conditioning_required";
-  if (/audio_not_preserved/.test(message)) return "audio_not_preserved";
+  if (/audio_conditioning_failed/.test(message)) return "audio_conditioning_failed";
+  if (/audio_not_preserved|audio_preservation_failed/.test(message)) return "audio_preservation_failed";
+  if (/mux_failed/.test(message)) return "mux_failed";
   if (/cancel/.test(message)) return "canceled";
   if (/audio.*missing|missing_audio/.test(message)) return "missing_audio_stream";
   if (/video.*missing|missing_video/.test(message)) return "missing_video_stream";
@@ -154,11 +160,11 @@ export function validateAudioConditionedLtxRequest(request: LtxAudioConditionedR
     || (request.executionPreset === "ltx_audible_quality_720p_5090" && request.gpuClass === "rtx5090" && request.width === 1280 && request.height === 720)
     || (request.executionPreset === "ltx_audible_quality_1080p_5090" && request.gpuClass === "rtx5090" && request.width === 1920 && request.height === 1080);
   if (!presetMatches) failure("unsupported_dimensions:execution_preset_mismatch");
-  if (!path.isAbsolute(request.inputAudioPath) || !/^[a-f0-9]{64}$/i.test(request.inputAudioSha256)) failure("input_audio_missing");
+  if (!path.isAbsolute(request.inputAudioPath) || !request.inputAudioRef || path.isAbsolute(request.inputAudioRef) || !/^[a-f0-9]{64}$/i.test(request.inputAudioSha256)) failure("input_audio_missing");
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$/.test(request.inputAudioRevisionId)) failure("input_audio_revision_mismatch");
   if (!request.voiceInferenceJobId || !request.voiceProfileId || !request.dialogueSnapshot.length) failure("audio_conditioning_required");
   const expected = request.dialogueSnapshot.reduce((total, item) => total + item.targetDurationMs, 0);
-  if (expected !== request.inputAudioDurationMs) failure("input_audio_duration_mismatch");
+  if (expected !== request.inputAudioDurationMs || request.targetDurationMs !== request.inputAudioDurationMs || request.visualPrompt !== request.prompt) failure("input_audio_duration_mismatch");
   let evidence: LocalDialogueAudioEvidence;
   try {
     evidence = validateLocalDialogueWav(request.inputAudioPath, { audioRevisionId: request.inputAudioRevisionId, voiceInferenceJobId: request.voiceInferenceJobId, voiceProfileId: request.voiceProfileId, targetDurationMs: request.inputAudioDurationMs, speed: request.dialogueSnapshot[0]?.speed ?? null });
@@ -172,7 +178,7 @@ export function validateAudioConditionedLtxRequest(request: LtxAudioConditionedR
 
 export function validateAudioConditionedResult(request: LtxAudioConditionedRequest, result: Pick<LtxResultManifest, "audioConditioning" | "media">) {
   const provenance = result.audioConditioning;
-  if (!provenance?.preservedInputAudio) failure("audio_not_preserved");
+  if (!provenance?.preservedInputAudio) failure("audio_preservation_failed");
   if (provenance.inputAudioRevisionId !== request.inputAudioRevisionId) failure("input_audio_revision_mismatch");
   if (provenance.inputAudioSha256 !== request.inputAudioSha256) failure("input_audio_hash_mismatch");
   if (provenance.inputAudioDurationMs !== request.inputAudioDurationMs || Math.abs(result.media.durationMs - request.inputAudioDurationMs) > request.durationToleranceMs) failure("input_audio_duration_mismatch");

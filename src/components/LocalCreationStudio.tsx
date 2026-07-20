@@ -1223,8 +1223,8 @@ export function LocalCreationStudio() {
                     <p className="mt-1 line-clamp-2 min-h-8 leading-4">{task.prompt}</p>
                     <p className="mt-1 truncate text-stone-500">{task.width}×{task.height} · {queuePosition >= 0 ? `队列 ${queuePosition + 1}` : `${estimate?.minMinutes ?? 1}–${estimate?.maxMinutes ?? 1} 分钟`}</p>
                     <div className="mt-1.5 grid grid-cols-3 gap-1">
-                      <button className="rounded border border-stone-200 px-1 py-1 text-stone-400" disabled type="button">{awaitingLocalAudio ? "等待本地声音" : "重新生成视频"}</button>
-                      <details className="text-stone-600"><summary className="cursor-pointer">查看详情</summary><p className="mt-1 break-all">任务 {task.id}</p></details>
+                      <button className="rounded border border-stone-200 px-1 py-1 text-stone-700 disabled:text-stone-400" disabled={!['completed', 'failed', 'cancelled'].includes(task.status)} onClick={() => void runPoolAction("regenerate", [task.id])} type="button">{awaitingLocalAudio ? "等待本地声音" : "重新生成视频"}</button>
+                      <details className="text-stone-600"><summary className="cursor-pointer">{task.audioBinding ? "声音状态" : "查看详情"}</summary><p className="mt-1 break-all">{task.audioBinding ? poolStatusLabels[task.audioBinding.status] : "无声任务"}</p><p className="mt-1 break-all">任务 {task.id}</p></details>
                       {!["provisioning", "restoring_image_model", "generating_image", "unloading_image_model", "restoring_video_model", "generating_video", "downloading_transcoding"].includes(task.status) ? <button className="font-semibold text-rose-700" onClick={() => void runPoolAction("delete", [task.id])} type="button">删除</button> : null}
                     </div>
                   </article>
