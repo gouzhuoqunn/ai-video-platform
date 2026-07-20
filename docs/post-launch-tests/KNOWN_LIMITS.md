@@ -60,3 +60,9 @@ The `pyopenjtalk==0.4.1` CPython 3.10 Windows x64 artifact is also pending: a re
 ## 2026-07-21 Stage 3A.2B limits
 
 `pyopenjtalk` remains absent from the isolated local Python environment because the normal feature-branch push could not reach GitHub. GPT-SoVITS model download, worker inference, and real synthesis remain blocked. Candidate lookup is repaired, but paid order creation remains guarded.
+
+## 2026-07-21 manual real GPU batch limits
+
+- The manual RTX 4090 batch runner has only a fake transport verification in this checkpoint. A future explicitly authorized real session must wire it to the already-validated worker bootstrap/result transport and prove one synthetic silent prompt before any broader batch.
+- The action is intentionally narrow: no audible/GPT-SoVITS work, image work, long video, RTX 5090, model selection, duration controls, automatic market polling, or remote cleanup is enabled by this batch path.
+- Existing `local-lab:test` currently fails an unrelated stale urgent-generation source-text assertion for the old label. The focused batch test, TypeScript check, and production build pass.

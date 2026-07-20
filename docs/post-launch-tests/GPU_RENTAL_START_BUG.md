@@ -1,5 +1,9 @@
 # GPU rental start interaction repair
 
+## 2026-07-21 follow-up: batch-bound manual RTX 4090 start
+
+The repaired click path now freezes the only supported paid scope before it looks up candidates: silent Wan short videos on RTX 4090. It cannot reuse the default RTX 5090 candidate configuration, cannot require a manual candidate-card click, and presents the search state immediately. A no-candidate outcome is persisted as retryable and never creates an order.
+
 ## Root cause
 
 The Studio button had a `type="button"` and was not covered by a form submit,

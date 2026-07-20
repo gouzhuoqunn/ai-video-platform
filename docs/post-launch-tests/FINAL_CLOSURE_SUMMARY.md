@@ -1,5 +1,9 @@
 # Final personal-use closure summary
 
+## 2026-07-21 manual batch readiness addendum
+
+This is an implementation/readiness checkpoint, not a paid acceptance. The project now has an immutable, cost-bounded, explicit-click RTX 4090 silent-Wan batch contract and fake-runtime coverage. No new Clore order, SSH connection, model restore, inference, accepted media, or cleanup occurred; the historical personal-use closure and `production_ready=false` status are unchanged.
+
 ## 2026-07-20 LTX Audio-Video Integration Stage 1
 
 This non-billable architecture checkpoint preserves the completed Wan/Flux personal-use closure and all accepted media. It adds no Runtime implementation or cloud mutation. LTX native-audio work remains metadata/runtime-blocked pending complete Sulphur candidate evidence and future local GPU validation; `production_ready=false` remains unchanged.

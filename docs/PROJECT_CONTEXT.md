@@ -1,5 +1,12 @@
 # Project Context
 
+## 2026-07-21 Manual real GPU batch enablement (implementation-only)
+
+- The only newly enabled paid-session route is an explicit local browser action for confirmed, silent Wan short-video tasks on RTX 4090. It first freezes the exact oldest-first task IDs in an immutable persisted batch, then performs read-only RTX 4090 candidate lookup and selects the cheapest compliant result at or below the effective `$0.70/hour` ceiling.
+- Every batch persists its fixed model/GPU/sound scope, `$4.50` session cap, `$1.00` wallet reserve, 380-minute hard limit, 350-minute draining point, provider-order ID, current task, progress, cancellation state, and recovery state. Audible, image, RTX 5090, long-video, completed-output, and later-created tasks are excluded.
+- The real provider create call remains server-only and is reachable only after the one-time nonce, exact server/price text, risk confirmation, queued-count recheck, and `LOCAL_LAB_ENABLED=true`, `NEXT_PUBLIC_APP_MODE=local_lab`, and `LOCAL_REAL_GPU_RENTAL_ENABLED=true`. Normal `dev:local` and `start:local` set that last local-only flag explicitly; generic/default environments do not.
+- A transport-injected runner records one Wan load per frozen batch, processes IDs in order, records per-task failures, and unloads once. Its current implementation is covered with a fake runtime only; this checkpoint neither created a provider order nor connected a worker, restored a model, or generated media.
+
 ## 2026-07-21 Stage 3A.2B local rental-start repair and pyopenjtalk branch build
 
 - The Studio's `开始任务并租用显卡` action now has one typed, client-and-server eligibility result. It reports total, confirmed, executable, and waiting-local-audio counts with stable reason codes. Silent Wan queues never consult GPT-SoVITS readiness. Audible queues require an immutable `local_audio_ready` binding before they can be confirmed and an audio-ready confirmed fixture can pass the local gate.

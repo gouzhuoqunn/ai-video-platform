@@ -53,6 +53,12 @@
 
 # Stage 4J.9 queue and reusable-session baseline (2026-07-19, zero cost)
 
+## 2026-07-21 Manual RTX 4090 silent-batch baseline (implementation-only)
+
+- A local manual batch freezes only confirmed silent Wan short-video RTX 4090 tasks before candidate lookup. The persisted snapshot is exact and ordered; retry after a no-candidate result requires a new explicit click and cannot absorb tasks added later.
+- Candidate discovery is read-only, fixed to exact RTX 4090, and capped at `$0.70` effective hourly price. The browser chooses the lowest compliant candidate and still requires the existing nonce/risk/exact confirmation text before a server-side provider create path is considered.
+- `npm run gpu:manual-batch:test` passes with a fake runtime: one load, two frozen IDs in order, one intentionally failed task, one unload, no provider mutation. `npm run build` passes. No paid order, SSH, model load, inference, or cleanup was run.
+
 - Start branch/HEAD: `codex/stage4g1-long-video-prompts` at `315ac207191b168c23b8b5a8c507e0e779faaf59`; backup ref: `backup/before-queue-model-family-session-20260719-231824`. Main remains untouched.
 - Confirmation is queue-only and has one visible action, `确认生成`. Image/video counts are independent; short and long video share the video counts. RTX4090/RTX5090 cards may be selected and confirmed together within one family, then execution selects exactly one GPU queue at a time.
 - The persisted session has explicit rented-GPU, deployed-family, and activity fields. One rented GPU runs one model family at a time. Safe stop preserves the GPU/order and starts a 120-second idle-retire deadline; the same compatible GPU/order can switch model family after stop. Provider cancellation remains separate and uses one controller path.
