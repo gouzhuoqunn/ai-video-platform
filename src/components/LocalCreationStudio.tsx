@@ -158,7 +158,18 @@ type PoolSummary = {
   } | null;
   confirmedQueueCounts: ConfirmedQueueCounts;
   confirmedVideoQueueCounts: Record<"silent" | "audible", Record<RequiredGpuClass, number>>;
-  manualBatch?: { id: string; taskCount: number; completedCount: number; failedCount: number; currentTaskId: string | null; status: string; gpuClass: RequiredGpuClass; modelKey: string; authorizationLimits: { maximumEffectiveHourlyUsd: number; maximumSessionSpendUsd: number } } | null;
+  manualBatch?: {
+    id: string;
+    taskCount: number;
+    completedCount: number;
+    failedCount: number;
+    currentTaskId: string | null;
+    status: string;
+    gpuClass: RequiredGpuClass;
+    modelKey: string;
+    authorizationLimits: { maximumEffectiveHourlyUsd: number; maximumSessionSpendUsd: number };
+    startIntent?: { status: string; selectedServerId?: string | null; selectedEffectiveHourlyUsd?: number | null; lastError: string | null } | null;
+  } | null;
   execution: GpuExecutionState;
   readiness: {
     model_cache_ready: boolean;
@@ -1358,7 +1369,7 @@ export function LocalCreationStudio() {
               {selectedExecutionGpuClass ? <><strong>已选择 {selectedExecutionGpuClass === "rtx4090" ? "RTX 4090" : "RTX 5090"} 执行队列</strong><p className="mt-1">队列任务 {rentalEligibility.totalCount} · 已确认 {rentalEligibility.confirmedCount} · 可执行 {rentalEligibility.executableCount}{ordinaryMode === "video" ? ` · 等待本地声音 ${rentalEligibility.audioWaitingCount}` : ""}；另一颜色保持排队。</p></> : <><strong>尚未选择执行队列</strong><p className="mt-1 text-stone-500">先选择蓝色或绿色队列，才会显示租用或继续按钮。</p></>}
             </div>
             {isStartingExecution || execution.activity === "searching" ? <div aria-live="polite" className="mt-2 flex items-center justify-center gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900" data-testid="gpu-searching-state"><span className="h-4 w-4 animate-spin rounded-full border-2 border-amber-800 border-t-transparent" />正在搜寻符合价格要求的显卡</div> : selectedExecutionGpuClass ? <button className="mt-2 w-full rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-300" data-testid="execution-start-action" disabled={manualBatchAction?.disabled ?? true} onClick={() => void requestExecutionStart()} title={manualBatchAction?.reason ?? undefined} type="button">{manualBatchAction?.kind === "rent" && selectedManualSilent4090 ? `开始 ${rentalEligibility.executableCount} 个任务并租用显卡` : manualBatchAction?.label ?? "开始任务并租用显卡"}</button> : null}
-            {pool?.manualBatch ? <div className="mt-2 rounded bg-sky-50 px-2 py-2 text-xs text-sky-950" data-testid="manual-gpu-batch-progress"><p className="font-semibold">本次批次：{pool.manualBatch.taskCount} 个任务</p><p>已完成：{pool.manualBatch.completedCount} / {pool.manualBatch.taskCount} · 失败：{pool.manualBatch.failedCount}</p><p>显卡：{pool.manualBatch.gpuClass === "rtx4090" ? "RTX 4090" : "RTX 5090"} · 最高 ${pool.manualBatch.authorizationLimits.maximumEffectiveHourlyUsd.toFixed(2)}/小时</p></div> : null}
+            {pool?.manualBatch ? <div className="mt-2 rounded bg-sky-50 px-2 py-2 text-xs text-sky-950" data-testid="manual-gpu-batch-progress"><p className="font-semibold">本次批次：{pool.manualBatch.taskCount} 个任务</p><p>已完成：{pool.manualBatch.completedCount} / {pool.manualBatch.taskCount} · 失败：{pool.manualBatch.failedCount}</p><p>显卡：{pool.manualBatch.gpuClass === "rtx4090" ? "RTX 4090" : "RTX 5090"} · 最高 ${pool.manualBatch.authorizationLimits.maximumEffectiveHourlyUsd.toFixed(2)}/小时</p>{pool.manualBatch.startIntent?.selectedServerId ? <p>已筛选主机：{pool.manualBatch.startIntent.selectedServerId}{pool.manualBatch.startIntent.selectedEffectiveHourlyUsd != null ? ` · 实际 $${pool.manualBatch.startIntent.selectedEffectiveHourlyUsd.toFixed(2)}/小时` : ""}</p> : null}{pool.manualBatch.startIntent?.lastError ? <p className="mt-1 text-rose-800">租用状态：{pool.manualBatch.startIntent.lastError}</p> : null}</div> : null}
             {execution.activity === "searching" && !rentalPlan ? <button className="mt-2 w-full rounded-md border border-stone-300 bg-white px-3 py-2 text-xs font-semibold" onClick={() => void abortRentalSearch()} type="button">取消本次寻卡</button> : null}
             {selectedExecutionGpuClass && manualBatchAction?.reason ? <p className="mt-2 rounded bg-amber-50 px-2 py-2 text-xs text-amber-900">{manualBatchAction.reason}</p> : null}
             <p className="mt-2 text-xs text-stone-600">寻机状态：{activeAutorent ? autorentStatusLabels[activeAutorent.status] : "未启动"} · 队列：{simplifiedSessionStatus}</p>

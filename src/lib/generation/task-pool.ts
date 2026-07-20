@@ -165,6 +165,8 @@ export type ManualGpuStartIntent = {
   walletReserveUsd: number;
   sessionDeadlineAt: string;
   idleTimeoutSeconds: number;
+  selectedServerId?: string | null;
+  selectedEffectiveHourlyUsd?: number | null;
   lastError: string | null;
 };
 export type ManualGpuExecutionBatch = {
