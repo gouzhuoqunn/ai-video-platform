@@ -1,4 +1,5 @@
 import path from "node:path";
+import { mkdirSync } from "node:fs";
 
 export const LEGACY_LOCAL_IMAGE_LIBRARY_DIR = "D:\\AI-Creative-Library";
 export const LEGACY_LOCAL_VIDEO_LIBRARY_DIR = "D:\\AI-Video-Library";
@@ -41,14 +42,20 @@ export type LocalDataPaths = {
   videoMediaRoot: string;
   voiceRoot: string;
   voiceModelRoot: string;
+  gptSoVitsModelRoot: string;
   voicePackRoot: string;
   voiceInferenceRoot: string;
+  voiceRuntimeSourceRoot: string;
+  voiceRuntimeEnvRoot: string;
   voiceTrainingSourceRoot: string;
   voiceTrainingResultRoot: string;
   workerStateRoot: string;
+  voiceLogRoot: string;
   cacheRoot: string;
   tempRoot: string;
   uploadTempRoot: string;
+  audioTempRoot: string;
+  audioDownloadTempRoot: string;
   downloadTempRoot: string;
   transcodeTempRoot: string;
   logRoot: string;
@@ -67,19 +74,37 @@ export function getLocalDataPaths(configuredRoot = process.env.LOCAL_DATA_ROOT) 
     videoMediaRoot: path.join(mediaRoot, "videos"),
     voiceRoot,
     voiceModelRoot: path.join(voiceRoot, "base-models"),
+    gptSoVitsModelRoot: path.join(voiceRoot, "base-models", "gpt-sovits"),
     voicePackRoot: path.join(voiceRoot, "voice-packs"),
     voiceInferenceRoot: path.join(voiceRoot, "inference"),
+    voiceRuntimeSourceRoot: path.join(voiceRoot, "runtime-sources", "gpt-sovits"),
+    voiceRuntimeEnvRoot: path.join(voiceRoot, "runtime-envs", "gpt-sovits"),
     voiceTrainingSourceRoot: path.join(voiceRoot, "training-sources"),
     voiceTrainingResultRoot: path.join(voiceRoot, "training-results"),
-    workerStateRoot: path.join(localDataRoot, "worker-state"),
+    workerStateRoot: path.join(voiceRoot, "worker-state"),
+    voiceLogRoot: path.join(voiceRoot, "logs"),
     cacheRoot: path.join(localDataRoot, "cache"),
     tempRoot,
     uploadTempRoot: path.join(tempRoot, "uploads"),
+    audioTempRoot: path.join(tempRoot, "audio"),
+    audioDownloadTempRoot: path.join(tempRoot, "audio-downloads"),
     downloadTempRoot: path.join(tempRoot, "downloads"),
     transcodeTempRoot: path.join(tempRoot, "transcode"),
     logRoot: path.join(localDataRoot, "logs"),
     migrationRoot: path.join(localDataRoot, "migration"),
   });
+}
+
+/** Creates only project-owned, ignored local-audio folders; safe to call repeatedly. */
+export function ensureLocalAudioDirectories(configuredRoot = process.env.LOCAL_DATA_ROOT) {
+  const paths = getLocalDataPaths(configuredRoot);
+  const directories = [
+    paths.gptSoVitsModelRoot, paths.voiceRuntimeSourceRoot, paths.voiceRuntimeEnvRoot,
+    paths.voicePackRoot, paths.voiceInferenceRoot, paths.voiceTrainingSourceRoot,
+    paths.workerStateRoot, paths.voiceLogRoot, paths.audioTempRoot, paths.audioDownloadTempRoot,
+  ];
+  directories.forEach((directory) => mkdirSync(directory, { recursive: true }));
+  return { paths, directories };
 }
 
 export function getLocalMediaReadRoots() {

@@ -15,8 +15,11 @@ Japanese `g2p("こんにちは")` smoke result before uploading only the wheel a
 provenance JSON artifact. It has a 30-minute job timeout and contains no model
 weights, reference audio, generated audio, or secrets.
 
-The workflow has been added locally but has not been dispatched in this
-checkpoint because GitHub connectivity is currently reset during normal push.
+The workflow has been pushed on the feature branch, but GitHub Actions only
+lists/dispatches this workflow from the repository default branch. `gh workflow
+run ... --ref codex/stage4g1-long-video-prompts` therefore returns the exact
+404 that the workflow is not found on the default branch. This stage must not
+modify `main` merely to bypass that GitHub platform rule.
 Until a successful artifact can be retrieved, verified, and installed into
 `local-data/voice/runtime-envs/gpt-sovits`, the precise blocker is
 `blocked_pyopenjtalk_artifact_download`.
