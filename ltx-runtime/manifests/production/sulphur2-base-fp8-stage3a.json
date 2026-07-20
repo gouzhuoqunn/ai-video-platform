@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 2,
+  "modelKey": "sulphur2_base_fp8",
+  "modelRole": "sulphur_full",
+  "sourceRepository": "SulphurAI/Sulphur-2-base",
+  "immutableRevision": "608bf89",
+  "manifestSha256": "5a8a97e73b138b1b6c9115524ec4ec6ce1cec6f74f60be6ca310e97bacac26b2",
+  "files": [{ "path": "sulphur_dev_fp8mixed.safetensors", "sizeBytes": null, "sha256": "41c999575859c528ff108022246a5524960a778c18742696971c9b0aadb4f70f", "required": true }],
+  "licenseReference": null,
+  "officialRuntimeSource": { "repository": "Lightricks/LTX-2", "revision": "9377758131b1ffde4b7f766804590a6617bf2ab9" },
+  "pipeline": { "id": "official-ti2vid-two-stage", "checkpointPath": "sulphur_dev_fp8mixed.safetensors", "spatialUpscalerPath": null, "gemmaSentinelPath": null },
+  "compatibility": { "required": ["full revision", "bytes", "license", "official TI2VidTwoStagesPipeline compatibility", "spatial upscaler", "Gemma closure", "distilled LoRA closure"], "optional": ["I2V after CLI contract proof"], "forbidden": ["full checkpoint plus incompatible distillation LoRA", "floating main", "automatic download"], "unresolved": ["license and auxiliary evidence"] },
+  "executableStatus": "blocked",
+  "blockerReason": "sulphur_base_evidence_incomplete",
+  "cacheNamespace": "ltx23/sulphur2_base_fp8/<manifest-sha256>/"
+}

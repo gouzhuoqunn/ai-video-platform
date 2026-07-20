@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 2,
+  "modelKey": "ltx23_official_fp8_baseline",
+  "modelRole": "official_ltx_compatibility_baseline",
+  "sourceRepository": "Lightricks/LTX-2.3-fp8",
+  "immutableRevision": "1d756cd27fa11c0896c4dfee093cd1bf36c7f7a1",
+  "manifestSha256": "dabb5de18cebb1c8e9971caeabe2b27cfa03169d141e72495182ab4d7dc52bcb",
+  "files": [{ "path": "ltx-2.3-22b-distilled-fp8.safetensors", "sizeBytes": 29531884062, "sha256": "d9646b6f2d5c42d337b23671634c43bfeece6989644f51b4a3aa088465ccd3b2", "required": true }],
+  "licenseReference": "ltx-2-community-license-agreement",
+  "officialRuntimeSource": { "repository": "Lightricks/LTX-2", "revision": "9377758131b1ffde4b7f766804590a6617bf2ab9" },
+  "pipeline": { "id": "official-distilled", "checkpointPath": "ltx-2.3-22b-distilled-fp8.safetensors", "spatialUpscalerPath": null, "gemmaSentinelPath": null },
+  "compatibility": { "required": ["official source lock", "spatial upscaler", "Gemma artifact manifest", "paid hardware validation"], "optional": ["I2V validation"], "forbidden": ["floating main", "automatic download"], "unresolved": ["auxiliary artifact immutable metadata"] },
+  "executableStatus": "blocked",
+  "blockerReason": "official_auxiliary_artifacts_not_immutable_locked",
+  "cacheNamespace": "ltx23/ltx23_official_fp8_baseline/<manifest-sha256>/"
+}

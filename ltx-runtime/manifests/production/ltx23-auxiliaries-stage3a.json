@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 2,
+  "modelKey": "ltx23_auxiliaries",
+  "modelRole": "auxiliary_lora",
+  "sourceRepository": "Lightricks/LTX-2.3 and google/gemma-3-12b-it-qat-q4_0-unquantized",
+  "immutableRevision": null,
+  "manifestSha256": "8ded7fac7235cdcfe0f046d23de2b45c05a61b44b0a9bb96d7fc1c8fe2248322",
+  "files": [
+    { "path": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "sizeBytes": null, "sha256": null, "required": true },
+    { "path": "gemma-3-12b/config.json", "sizeBytes": null, "sha256": null, "required": true },
+    { "path": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors", "sizeBytes": null, "sha256": null, "required": false }
+  ],
+  "licenseReference": null,
+  "officialRuntimeSource": { "repository": "Lightricks/LTX-2", "revision": "9377758131b1ffde4b7f766804590a6617bf2ab9" },
+  "pipeline": { "id": "official-ti2vid-two-stage", "checkpointPath": null, "spatialUpscalerPath": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "gemmaSentinelPath": "gemma-3-12b/config.json" },
+  "compatibility": { "required": ["immutable revision and hashes for upscaler", "full Gemma asset list and license", "pipeline-specific LoRA compatibility"], "optional": ["temporal upscaler after workflow proof"], "forbidden": ["unverified artifact reuse", "automatic download"], "unresolved": ["all auxiliary immutable metadata"] },
+  "executableStatus": "blocked",
+  "blockerReason": "auxiliary_artifact_evidence_incomplete",
+  "cacheNamespace": "ltx23/ltx23_auxiliaries/<manifest-sha256>/"
+}

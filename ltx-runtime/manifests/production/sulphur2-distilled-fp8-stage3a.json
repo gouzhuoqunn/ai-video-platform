@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 2,
+  "modelKey": "sulphur2_distilled_fp8",
+  "modelRole": "sulphur_distilled",
+  "sourceRepository": "Civitai/Sulphur-2-distilled-fp8",
+  "immutableRevision": null,
+  "manifestSha256": "5982c8702d30b39535d0ed20e7f8d34518332d44c5fefa89a071fc1ea36770f7",
+  "files": [{ "path": "sulphur_distil_fp8mixed.safetensors", "sizeBytes": null, "sha256": null, "required": true }],
+  "licenseReference": null,
+  "officialRuntimeSource": { "repository": "Lightricks/LTX-2", "revision": "9377758131b1ffde4b7f766804590a6617bf2ab9" },
+  "pipeline": { "id": "official-distilled", "checkpointPath": "sulphur_distil_fp8mixed.safetensors", "spatialUpscalerPath": null, "gemmaSentinelPath": null },
+  "compatibility": { "required": ["immutable artifact revision", "artifact bytes", "SHA-256", "license", "official DistilledPipeline compatibility", "auxiliary artifact closure"], "optional": ["I2V after CLI contract proof"], "forbidden": ["full checkpoint plus distillation LoRA", "floating main", "automatic download"], "unresolved": ["all required evidence"] },
+  "executableStatus": "blocked",
+  "blockerReason": "sulphur_distilled_evidence_incomplete",
+  "cacheNamespace": "ltx23/sulphur2_distilled_fp8/<manifest-sha256>/"
+}
