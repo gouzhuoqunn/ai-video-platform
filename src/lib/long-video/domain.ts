@@ -31,6 +31,8 @@ export type LongVideoAttempt = {
 
 export type LongVideoSegment = {
   id: string;
+  mediaType: "video";
+  videoSubtype: "long_video_segment";
   projectId: string;
   sequenceIndex: number;
   startSecond: number;
@@ -66,6 +68,8 @@ export type LongVideoEstimate = {
 
 export type LongVideoProject = {
   id: string;
+  mediaType: "video";
+  videoSubtype: "long_video_parent";
   userId: string;
   title: string;
   overallPrompt: string;
@@ -172,6 +176,8 @@ export function createSegmentSlots(projectId: string, durationSeconds: number, d
   const timestamp = at.toISOString();
   return Array.from({ length: total }, (_, index): LongVideoSegment => ({
     id: randomUUID(),
+    mediaType: "video",
+    videoSubtype: "long_video_segment",
     projectId,
     sequenceIndex: index,
     startSecond: index * LONG_VIDEO_SEGMENT_SECONDS,
@@ -247,6 +253,8 @@ export function createLongVideoProject(input: CreateLongVideoProjectInput): Long
   const timestamp = at.toISOString();
   return {
     id: projectId,
+    mediaType: "video",
+    videoSubtype: "long_video_parent",
     userId: input.userId ?? "local_tester",
     title,
     overallPrompt,

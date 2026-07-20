@@ -40,6 +40,7 @@ import {
   type GpuExecutionState,
   type RequiredGpuClass,
 } from "./gpu-execution-state";
+import type { TaskMediaType, VideoTaskSubtype } from "./gallery-routing";
 
 export type GenerationType = GenerationFamily;
 export type GenerationPriority = "normal" | "immediate";
@@ -84,6 +85,14 @@ export type GenerationAttempt = {
 
 export type GenerationTask = {
   id: string;
+  /** Immutable gallery ownership. `generationType` remains the execution family. */
+  mediaType: TaskMediaType;
+  /** Present only for video media; sound and model remain independent fields. */
+  videoSubtype: VideoTaskSubtype;
+  /** A non-null value makes this an internal dependency, never a top-level card. */
+  galleryParentId: string | null;
+  /** A legacy contradiction is retained but excluded from gallery ownership. */
+  classificationError: string | null;
   generationType: GenerationType;
   prompt: string;
   modelProfile: string;
@@ -100,6 +109,7 @@ export type GenerationTask = {
   priority: GenerationPriority;
   status: GenerationTaskStatus;
   createdAt: string;
+  updatedAt: string;
   confirmedAt: string | null;
   batchId: string | null;
   estimatedVram: number;
@@ -140,7 +150,7 @@ export type PersistedProductionSession = {
 };
 
 export type GenerationPoolState = {
-  schemaVersion: 3;
+  schemaVersion: 4;
   tasks: GenerationTask[];
   execution: GpuExecutionState;
   scheduler: {
@@ -227,20 +237,53 @@ export function validateProductionCandidate(candidate: PoolCandidate) {
 
 export function defaultGenerationPoolState(): GenerationPoolState {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     tasks: [],
     execution: defaultGpuExecutionState(),
     scheduler: { state: "idle", selectedBatchId: null, selectedTaskIds: [], watchStartedAt: null, lastMarketplaceRequestAt: null, nextMarketplaceRequestAt: null, selectedServerId: null, rejectedHosts: [], orderCreationAttempted: false, drainingRequested: false, session: null, updatedAt: now() },
   };
 }
 
+function validMediaType(value: unknown): value is TaskMediaType {
+  return value === "image" || value === "video";
+}
+
+function isUnexecutedLocalTask(task: Partial<GenerationTask>) {
+  return !task.confirmedAt && ["waiting_for_local_audio", "local_audio_queued", "local_audio_generating", "local_audio_failed", "local_audio_ready", "pending_confirmation", "waiting_for_batch", "armed", "waiting_for_gpu"].includes(String(task.status ?? "pending_confirmation"));
+}
+
+function canonicalVideoSubtype(task: Partial<GenerationTask>, mediaType: TaskMediaType): VideoTaskSubtype {
+  if (mediaType === "image") return null;
+  if (task.videoSubtype === "short_video" || task.videoSubtype === "long_video_parent" || task.videoSubtype === "long_video_segment") return task.videoSubtype;
+  if (task.jobForm === "long_video_segment") return "long_video_segment";
+  return "short_video";
+}
+
+function canonicalMediaType(task: Partial<GenerationTask>): TaskMediaType {
+  if (validMediaType(task.mediaType)) {
+    if (validMediaType(task.generationType) && task.mediaType !== task.generationType) throw new Error("task_media_type_execution_family_mismatch");
+    return task.mediaType;
+  }
+  // The legacy execution-family field is a source field, not a UI-derived guess.
+  if (validMediaType(task.generationType)) return task.generationType;
+  throw new Error("task_media_type_missing_or_invalid");
+}
+
 function normalizeTask(task: Partial<GenerationTask> & Pick<GenerationTask, "id" | "generationType" | "prompt" | "modelProfile">): GenerationTask {
+  const mediaType = canonicalMediaType(task);
+  const videoSubtype = canonicalVideoSubtype(task, mediaType);
+  if (mediaType === "image" && task.videoSubtype != null) throw new Error("image_task_cannot_have_video_subtype");
+  if (mediaType === "video" && videoSubtype === null) throw new Error("video_task_requires_subtype");
   const createdAt = task.createdAt ?? now();
   const attemptId = task.currentAttemptId ?? task.attempts?.at(-1)?.id ?? randomUUID();
   const videoProfile = task.generationType === "video" ? getVideoProfile(task.soundMode === "audible" ? "audible_low_video_4090" : task.requiredGpuClass === "rtx5090" ? "medium_video_5090" : "low_video_4090") : null;
   const verified = task.modelProfile === PRODUCTION_IMAGE_MODEL ? loadProductionVerification().imageModel : task.modelProfile === PRODUCTION_VIDEO_MODEL ? loadProductionVerification().videoModel : null;
   return {
     id: task.id,
+    mediaType,
+    videoSubtype,
+    galleryParentId: task.galleryParentId ?? null,
+    classificationError: task.classificationError ?? null,
     generationType: task.generationType,
     prompt: task.prompt,
     modelProfile: task.modelProfile,
@@ -257,6 +300,7 @@ function normalizeTask(task: Partial<GenerationTask> & Pick<GenerationTask, "id"
     priority: task.priority ?? "normal",
     status: task.status ?? "pending_confirmation",
     createdAt,
+    updatedAt: task.updatedAt ?? createdAt,
     confirmedAt: task.confirmedAt ?? null,
     batchId: task.batchId ?? null,
     estimatedVram: task.estimatedVram ?? (task.generationType === "image" ? 23 : 24),
@@ -284,10 +328,21 @@ function normalizeTask(task: Partial<GenerationTask> & Pick<GenerationTask, "id"
 export function readGenerationPool(filePath = GENERATION_POOL_PATH): GenerationPoolState {
   if (!existsSync(filePath)) return defaultGenerationPoolState();
   try {
-    const state = JSON.parse(readFileSync(filePath, "utf8")) as GenerationPoolState & { schemaVersion: 1 | 2 | 3 };
-    if (![1, 2, 3].includes(state.schemaVersion) || !Array.isArray(state.tasks) || !state.scheduler) throw new Error("invalid");
+    const state = JSON.parse(readFileSync(filePath, "utf8")) as GenerationPoolState & { schemaVersion: 1 | 2 | 3 | 4 };
+    if (![1, 2, 3, 4].includes(state.schemaVersion) || !Array.isArray(state.tasks) || !state.scheduler) throw new Error("invalid");
     const scheduler = { ...defaultGenerationPoolState().scheduler, ...state.scheduler, session: state.scheduler.session ?? null };
     const tasks = state.tasks.map((task) => normalizeTask(task));
+    // One safe compatibility repair: an unexecuted image-model dependency is
+    // hidden only when a persisted child video explicitly points at it. We do
+    // not guess ambiguous or already-executed historical records.
+    const videoByInputImageId = new Map(tasks
+      .filter((task) => task.mediaType === "video" && task.inputImageJobId)
+      .map((task) => [task.inputImageJobId!, task.id]));
+    for (const task of tasks) {
+      const provenVideoParent = videoByInputImageId.get(task.id);
+      if (provenVideoParent && task.mediaType === "image" && task.jobForm === "video_from_generated_image" && isUnexecutedLocalTask(task)) task.galleryParentId = provenVideoParent;
+      if (!provenVideoParent && task.mediaType === "image" && task.jobForm !== "image_only") task.classificationError = "unpaired_video_dependency";
+    }
     const execution = normalizeGpuExecutionState(state.execution, scheduler.session);
     if (execution.providerOrderId && !execution.rentedGpuClass) {
       const activeIds = new Set([...(scheduler.session?.activeTaskIds ?? []), ...scheduler.selectedTaskIds]);
@@ -305,7 +360,7 @@ export function readGenerationPool(filePath = GENERATION_POOL_PATH): GenerationP
       }
     }
     return {
-      schemaVersion: 3,
+      schemaVersion: 4,
       tasks,
       execution,
       scheduler,
@@ -317,7 +372,9 @@ export function readGenerationPool(filePath = GENERATION_POOL_PATH): GenerationP
 
 export function writeGenerationPool(state: GenerationPoolState, filePath = GENERATION_POOL_PATH) {
   mkdirSync(path.dirname(filePath), { recursive: true });
-  const normalized = { ...state, scheduler: { ...state.scheduler, updatedAt: now() } };
+  const writtenAt = now();
+  // A pool write is the server-side monotonic snapshot boundary used by polling.
+  const normalized = { ...state, tasks: state.tasks.map((task) => ({ ...task, updatedAt: writtenAt })), scheduler: { ...state.scheduler, updatedAt: writtenAt } };
   const temporary = `${filePath}.${process.pid}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
   renameSync(temporary, filePath);
@@ -325,6 +382,8 @@ export function writeGenerationPool(state: GenerationPoolState, filePath = GENER
 }
 
 export function createGenerationTask(input: Partial<GenerationTask> & Pick<GenerationTask, "generationType" | "prompt" | "modelProfile">): GenerationTask {
+  const mediaType = input.mediaType ?? input.generationType;
+  if (!validMediaType(mediaType) || mediaType !== input.generationType) throw new Error("task_media_type_required_and_immutable");
   const explicitLegacy = input.contentMode === "legacy_debug" && ((input.generationType === "image" && input.modelProfile === "flux2-klein-4b") || (input.generationType === "video" && input.modelProfile === "wan22-ti2v-5b"));
   const allowed: string[] = explicitLegacy ? [...PRODUCTION_GPU_CLASSES] : acceptableGpuClasses(input.generationType, input.modelProfile);
   if (!allowed.length) throw new Error("普通新任务只能使用默认生产模型；旧模型需要显式 legacy/debug 开关。");
@@ -333,6 +392,8 @@ export function createGenerationTask(input: Partial<GenerationTask> & Pick<Gener
   const requiredGpuClass = normalizeRequiredGpuClass({ ...input, gpuPreference });
   return normalizeTask({
     ...input,
+    mediaType,
+    videoSubtype: input.videoSubtype ?? (mediaType === "video" ? (input.jobForm === "long_video_segment" ? "long_video_segment" : "short_video") : null),
     id: input.id ?? randomUUID(), generationType: input.generationType, prompt: input.prompt.trim(), modelProfile: input.modelProfile,
     gpuPreference, requiredGpuClass, priority: input.priority ?? "normal", status: input.status ?? "pending_confirmation", createdAt: input.createdAt ?? now(), confirmedAt: input.confirmedAt ?? null,
     batchId: input.batchId ?? null, estimatedVram: input.estimatedVram ?? (input.generationType === "image" ? 23 : 24), outputMetadata: input.outputMetadata ?? {},
@@ -379,7 +440,7 @@ export function createNormalJobSet(input: NormalJobInput) {
   const common = { prompt, negativePrompt: input.negativePrompt?.trim() ?? "", seed, gpuPreference: input.gpuPreference, priority, status };
   if (input.jobForm === "image_only") {
     return [createGenerationTask({
-      ...common, ...preset(input.sizePreset, "image"), generationType: "image", jobForm: "image_only",
+      ...common, ...preset(input.sizePreset, "image"), mediaType: "image", videoSubtype: null, generationType: "image", jobForm: "image_only",
       modelProfile: PRODUCTION_IMAGE_MODEL, modelRevision: verification.imageModel.revision,
     })];
   }
@@ -390,7 +451,7 @@ export function createNormalJobSet(input: NormalJobInput) {
     const audible = videoProfile.soundMode === "audible";
     const audioBinding = audible ? { voiceInferenceJobId: randomUUID(), audioRevisionId: randomUUID(), status: "waiting_for_local_audio" as const, inputAudioSha256: null, inputAudioDurationMs: null } : null;
     return [createGenerationTask({
-      ...common, ...videoProfile, gpuPreference: [videoProfile.gpuClass], requiredGpuClass: videoProfile.gpuClass, generationType: "video", jobForm: input.jobForm,
+      ...common, ...videoProfile, gpuPreference: [videoProfile.gpuClass], requiredGpuClass: videoProfile.gpuClass, mediaType: "video", videoSubtype: "short_video", generationType: "video", jobForm: input.jobForm,
       modelProfile: videoProfile.soundMode === "audible" ? PRODUCTION_NATIVE_AUDIO_MODEL : PRODUCTION_VIDEO_MODEL,
       modelRevision: videoProfile.soundMode === "audible" ? "metadata_locked_runtime_blocked" : verification.videoModel.revision,
       inputImageJobId: imageId, inputImageVerified: true,
@@ -400,15 +461,17 @@ export function createNormalJobSet(input: NormalJobInput) {
       audioBinding,
     })];
   }
+  const imageId = randomUUID();
+  const videoId = randomUUID();
   const image = createGenerationTask({
-    ...common, ...preset("square_1024", "image"), generationType: "image", jobForm: input.jobForm,
+    ...common, id: imageId, ...preset("square_1024", "image"), mediaType: "image", videoSubtype: null, generationType: "image", jobForm: input.jobForm,
     modelProfile: PRODUCTION_IMAGE_MODEL, modelRevision: verification.imageModel.revision,
   });
   const videoProfile = profileForPreset(input.sizePreset);
   const audible = videoProfile.soundMode === "audible";
   const audioBinding = audible ? { voiceInferenceJobId: randomUUID(), audioRevisionId: randomUUID(), status: "waiting_for_local_audio" as const, inputAudioSha256: null, inputAudioDurationMs: null } : null;
   const video = createGenerationTask({
-    ...common, ...videoProfile, gpuPreference: [videoProfile.gpuClass], requiredGpuClass: videoProfile.gpuClass, generationType: "video", jobForm: input.jobForm,
+    ...common, ...videoProfile, id: videoId, gpuPreference: [videoProfile.gpuClass], requiredGpuClass: videoProfile.gpuClass, mediaType: "video", videoSubtype: "short_video", generationType: "video", jobForm: input.jobForm,
     modelProfile: videoProfile.soundMode === "audible" ? PRODUCTION_NATIVE_AUDIO_MODEL : PRODUCTION_VIDEO_MODEL,
     modelRevision: videoProfile.soundMode === "audible" ? "metadata_locked_runtime_blocked" : verification.videoModel.revision,
     inputImageJobId: image.id, inputImageVerified: false,
@@ -417,13 +480,18 @@ export function createNormalJobSet(input: NormalJobInput) {
     dialogueSnapshot: audible ? [{ visualPrompt: prompt, dialogueText: "", speakerName: null, voiceProfileId: null, language: "zh-CN", targetDurationMs: Math.round((videoProfile.frames / videoProfile.fps) * 1000), sequenceIndex: 0, speed: null, emotion: null, volume: null }] : [],
     audioBinding,
   });
+  image.galleryParentId = video.id;
   return [image, video];
 }
 
 export function upsertGenerationTasks(tasks: GenerationTask[], filePath = GENERATION_POOL_PATH) {
   const state = readGenerationPool(filePath);
   const byId = new Map(state.tasks.map((task) => [task.id, task]));
-  for (const task of tasks) byId.set(task.id, { ...byId.get(task.id), ...task });
+  for (const task of tasks) {
+    const previous = byId.get(task.id);
+    if (previous && previous.mediaType !== task.mediaType) throw new Error("task_media_type_is_immutable");
+    byId.set(task.id, { ...previous, ...task, updatedAt: task.updatedAt || now() });
+  }
   state.tasks = [...byId.values()];
   return writeGenerationPool(state, filePath);
 }
@@ -994,6 +1062,7 @@ export function generationPoolSummary(state = readGenerationPool()) {
   const readiness = loadProductionReadiness();
   return {
     schedulerState: state.scheduler.state, selectedBatchId: state.scheduler.selectedBatchId, tasks: state.tasks, counts, queuedTaskCount: state.tasks.filter((task) => ["waiting_for_batch", "armed", "waiting_for_gpu"].includes(task.status)).length,
+    invalidTaskRecords: state.tasks.filter((task) => task.classificationError).map((task) => ({ id: task.id, mediaType: task.mediaType, error: task.classificationError })),
     confirmedQueueCounts: confirmedQueueCounts(state.tasks),
     confirmedVideoQueueCounts: confirmedVideoQueueCounts(state.tasks),
     execution: state.execution,

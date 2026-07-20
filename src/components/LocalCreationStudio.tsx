@@ -23,6 +23,7 @@ import {
   type RequiredGpuClass,
 } from "@/lib/generation/gpu-execution-state";
 import type { VideoModelKey } from "@/lib/generation/video-profiles";
+import { mergeTasksByUpdatedAt, selectGalleryTasks, type TaskMediaType, type VideoTaskSubtype } from "@/lib/generation/gallery-routing";
 
 type JobCounts = Partial<Record<VideoJobStatus, number>>;
 
@@ -92,6 +93,10 @@ type RentalPlan = {
 type PoolTaskStatus = "waiting_for_local_audio" | "local_audio_queued" | "local_audio_generating" | "local_audio_failed" | "local_audio_ready" | "pending_confirmation" | "waiting_for_batch" | "armed" | "waiting_for_gpu" | "deploying" | "provisioning" | "restoring_models" | "restoring_image_model" | "generating_image" | "unloading_image_model" | "restoring_video_model" | "generating_video" | "downloading_transcoding" | "generating" | "syncing" | "cancel_requested" | "completed" | "failed" | "cancelled";
 type PoolTask = {
   id: string;
+  mediaType: TaskMediaType;
+  videoSubtype: VideoTaskSubtype;
+  galleryParentId: string | null;
+  classificationError: string | null;
   generationType: OrdinaryStudioMode;
   prompt: string;
   negativePrompt: string;
@@ -102,6 +107,7 @@ type PoolTask = {
   priority: "normal" | "immediate";
   status: PoolTaskStatus;
   createdAt: string;
+  updatedAt: string;
   jobForm: "image_only" | "video_from_generated_image" | "video_from_existing_image" | "long_video_segment" | "long_video_first_frame";
   inputImageJobId: string | null;
   generationNumber: number;
@@ -116,6 +122,7 @@ type PoolTask = {
 type ProductionModelSummary = { modelProfile: string; displayName: string; cacheStatus: string; cacheReady: boolean; inferenceVerified: boolean; workflowReady: boolean; restoreBytes: number; uniqueRestoreBytes: number; sharedBytes: number; revision: string; gpuProfiles: string[] };
 type PoolSummary = {
   tasks: PoolTask[];
+  invalidTaskRecords?: Array<{ id: string; mediaType: TaskMediaType; error: string | null }>;
   counts: Partial<Record<PoolTaskStatus, number>>;
   schedulerState: string;
   selectedBatchId: string | null;
@@ -160,6 +167,11 @@ type PoolSummary = {
     production_ready: boolean;
   };
 };
+
+function mergePoolSummary(current: PoolSummary | null, incoming: PoolSummary): PoolSummary {
+  if (!current) return incoming;
+  return { ...incoming, tasks: mergeTasksByUpdatedAt(current.tasks, incoming.tasks) };
+}
 
 const poolStatusLabels: Record<PoolTaskStatus, string> = {
   waiting_for_local_audio: "等待本地生成声音", local_audio_queued: "声音正在本地队列中等待", local_audio_generating: "声音正在生成", local_audio_failed: "声音生成失败", local_audio_ready: "声音生成成功",
@@ -323,7 +335,7 @@ export function LocalCreationStudio() {
   const activeAutorent = autorentRequests.find((request) => !["assigned", "failed", "cancelled"].includes(request.status));
   const selectedImage = imageResults.find((result) => result.sessionId === selectedImageId) ?? imageResults[0] ?? null;
   const ordinaryMode: OrdinaryStudioMode = mode === "long_video" ? "video" : mode;
-  const modePoolTasks = pool?.tasks.filter((task) => task.generationType === ordinaryMode && !["long_video_segment", "long_video_first_frame"].includes(task.jobForm)) ?? [];
+  const modePoolTasks = pool ? selectGalleryTasks(pool.tasks, ordinaryMode) : [];
   const selectedPoolTask = selectedPoolTaskIds.length ? (pool?.tasks.find((task) => task.id === selectedPoolTaskIds[0]) ?? null) : null;
   const selectedPoolFamily = selectedPoolTask?.generationType ?? null;
   const poolTaskSelectable = (task: PoolTask) => {
@@ -496,7 +508,7 @@ export function LocalCreationStudio() {
     const fixture = query?.get("gpu_fixture");
     const response = await fetch(`/api/local-lab/generation-pool${fixture ? `?fixture=${encodeURIComponent(fixture)}` : ""}`, { cache: "no-store" });
     const payload = await response.json().catch(() => null) as PoolSummary | null;
-    if (sequence === poolRefreshSequence.current && response.ok && payload) setPool(payload);
+    if (sequence === poolRefreshSequence.current && response.ok && payload) setPool((current) => mergePoolSummary(current, payload));
   }, []);
 
   const refreshLongVideos = useCallback(async () => {
@@ -694,6 +706,8 @@ export function LocalCreationStudio() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           action: "create",
+          generationType: ordinaryMode,
+          mediaType: ordinaryMode,
           jobForm,
           prompt: trimmedPrompt,
           negativePrompt,
@@ -704,7 +718,7 @@ export function LocalCreationStudio() {
           startMode: "pending",
         }),
       });
-      const payload = await response.json().catch(() => ({})) as { error?: string; tasks?: PoolTask[] };
+      const payload = await response.json().catch(() => ({})) as { error?: string; tasks?: PoolTask[]; pool?: PoolSummary };
       if (!response.ok) {
         setNotice(payload.error ?? "创建任务失败。");
         return;
@@ -712,6 +726,7 @@ export function LocalCreationStudio() {
       setPrompt("");
       setNegativePrompt("");
       setSeed("");
+      if (payload.pool) setPool((current) => mergePoolSummary(current, payload.pool!));
       setNotice("任务已保存为待确认，不扣重复积分，也不会启动显卡。");
       await refreshPool();
     } finally {
@@ -1059,7 +1074,13 @@ export function LocalCreationStudio() {
               <textarea
                 className="min-h-32 w-full resize-y rounded-md border border-stone-200 bg-[#faf8f4] p-4 pb-16 leading-7 outline-none focus:border-emerald-500"
                 maxLength={2000}
-                onChange={(event) => setPrompt(event.target.value)}
+              onChange={(event) => setPrompt(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  void submitPrompt();
+                }
+              }}
                 value={prompt}
               />
               <div className="absolute bottom-3 right-3 flex rounded-md border border-stone-300 bg-white p-1 text-sm font-semibold">
@@ -1205,6 +1226,7 @@ export function LocalCreationStudio() {
               </button>
             </div> : null}
 
+            {pool?.invalidTaskRecords?.length ? <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900" data-testid="invalid-task-records">发现 {pool.invalidTaskRecords.length} 条历史任务分类异常记录；它们已从画廊隔离，未被重新分类或删除。</p> : null}
             <div className="studio-task-grid mt-3 grid grid-cols-1 gap-1.5 min-[480px]:grid-cols-2 min-[800px]:grid-cols-4 min-[1100px]:grid-cols-6 min-[1366px]:grid-cols-8" data-testid="shared-task-gallery">
               {modePoolTasks.map((task) => {
                 const queuePosition = queuedPoolTasks.findIndex((candidate) => candidate.id === task.id);

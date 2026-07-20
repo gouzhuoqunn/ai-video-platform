@@ -170,7 +170,7 @@ function main() {
   rmSync(atomicPath, { force: true });
 
   const empty = defaultGenerationPoolState();
-  assert.equal(empty.schemaVersion, 3);
+assert.equal(empty.schemaVersion, 4);
   assert.equal(empty.scheduler.session, null);
   updateGenerationTasks([], "confirm", path.join(os.tmpdir(), `stage4f-unused-${process.pid}.json`));
   rmSync(path.join(os.tmpdir(), `stage4f-unused-${process.pid}.json`), { force: true });

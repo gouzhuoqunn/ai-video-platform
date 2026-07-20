@@ -32,6 +32,7 @@ import {
 import { validateProductionPrompt } from "@/lib/generation/production-prompt-safety";
 import { listLocalImageResults } from "@/lib/local-lab/local-results";
 import { longVideoUploadExists } from "@/lib/long-video/uploads";
+import type { TaskMediaType } from "@/lib/generation/gallery-routing";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -39,6 +40,7 @@ export const revalidate = 0;
 type Payload = {
   action?: "create" | "sync" | "confirm" | "cancel" | "delete" | "retry" | "regenerate" | "start_execution" | "abort_search" | "stop_generation" | "stop_model" | "cancel_gpu";
   generationType?: GenerationType;
+  mediaType?: TaskMediaType;
   jobForm?: GenerationJobForm;
   prompt?: string;
   negativePrompt?: string;
@@ -114,6 +116,8 @@ export async function POST(request: NextRequest) {
     const prompt = String(payload.prompt ?? "").trim();
     const jobForm = (payload.jobForm ?? (payload.generationType === "image" ? "image_only" : "video_from_generated_image")) as Exclude<GenerationJobForm, "long_video_segment">;
     if (!["image_only", "video_from_generated_image", "video_from_existing_image"].includes(jobForm) || !prompt || prompt.length > 2000) return NextResponse.json({ error: "任务字段无效。" }, { status: 400 });
+    const expectedMediaType: GenerationType = jobForm === "image_only" ? "image" : "video";
+    if (payload.generationType !== expectedMediaType || (payload.mediaType !== undefined && payload.mediaType !== expectedMediaType)) return NextResponse.json({ error: "媒体类型必须与提交的任务形式一致。" }, { status: 400 });
     const safety = validateProductionPrompt(prompt);
     if (!safety.allowed) return NextResponse.json({ error: safety.reason, code: safety.code }, { status: 400 });
     const existingImageId = String(payload.existingImageJobId ?? "");
@@ -137,6 +141,7 @@ export async function POST(request: NextRequest) {
   }
   if (payload.action === "sync") {
     const requested = (payload.tasks ?? []).slice(0, 100);
+    if (requested.some((task) => task.mediaType !== task.generationType || !["image", "video"].includes(String(task.mediaType)))) return NextResponse.json({ error: "同步任务缺少或更改了规范媒体类型。" }, { status: 400 });
     const rejected = requested.map((task) => validateProductionPrompt(String(task.prompt ?? ""))).find((result) => !result.allowed);
     if (rejected) return NextResponse.json({ error: rejected.reason, code: rejected.code }, { status: 400 });
     const tasks = requested.map((task) => createGenerationTask(task));

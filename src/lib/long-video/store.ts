@@ -71,6 +71,8 @@ function createFirstFrameTask(project: LongVideoProject): GenerationTask | null 
   const verification = loadProductionVerification();
   return createGenerationTask({
     id: project.firstFrameJobId,
+    mediaType: "image",
+    videoSubtype: null,
     generationType: "image",
     jobForm: "image_only",
     prompt: project.overallPrompt,
@@ -96,6 +98,8 @@ export function createLongVideoSegmentTask(project: LongVideoProject, sequenceIn
   const jobId = segment.generationJobId ?? crypto.randomUUID();
   return createGenerationTask({
     id: jobId,
+    mediaType: "video",
+    videoSubtype: "long_video_segment",
     generationType: "video",
     jobForm: "long_video_segment",
     prompt: buildLongVideoEffectivePrompt(project.overallPrompt, segment.prompt, sequenceIndex),

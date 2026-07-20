@@ -8,6 +8,8 @@ import { FirstFrameInput } from "@/components/FirstFrameInput";
 type ImageResult = { sessionId: string; date: string; imageUrl: string };
 export type LongVideoSegment = {
   id: string;
+  mediaType: "video";
+  videoSubtype: "long_video_segment";
   sequenceIndex: number;
   startSecond: number;
   endSecond: number;
@@ -22,6 +24,8 @@ export type LongVideoSegment = {
 };
 export type LongVideoProject = {
   id: string;
+  mediaType: "video";
+  videoSubtype: "long_video_parent";
   title: string;
   overallPrompt: string;
   firstFrameSource: "upload" | "existing_image" | "pure_prompt";
