@@ -68,6 +68,7 @@ tsconfig.tsbuildinfo
 /order-logs/
 /gpu-worker/.env
 /gpu-worker/.env.*
+/supabase/.temp/
 D:/AI-Video-Library/
 AI-Video-Library/
 /local-data/
