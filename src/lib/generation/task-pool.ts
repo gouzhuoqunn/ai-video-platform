@@ -11,7 +11,8 @@ import {
   productionReadinessGate,
   type GroupableProductionTask,
 } from "./production-pipeline";
-import { PRODUCTION_GPU_CLASSES, PRODUCTION_IMAGE_MODEL, PRODUCTION_VIDEO_MODEL, productionModelSummary } from "./production-models";
+import { PRODUCTION_GPU_CLASSES, PRODUCTION_IMAGE_MODEL, PRODUCTION_NATIVE_AUDIO_MODEL, PRODUCTION_VIDEO_MODEL, productionModelSummary } from "./production-models";
+import { getVideoProfile, type AudioOrigin, type VideoModelKey, type VideoQualityTier, type VideoSoundMode } from "./video-profiles";
 import { loadSchedulerPolicy, rankTasksForLoadedSession } from "./scheduler-policy";
 import {
   assertSingleFamilyExecution,
@@ -19,8 +20,10 @@ import {
   beginExistingGpuExecution,
   beginRentalSearch,
   completeGenerationStop,
+  completeModelStop,
   completeGpuCancellation,
   confirmedQueueCounts,
+  confirmedVideoQueueCounts,
   confirmedQueueTasks,
   defaultGpuExecutionState,
   deployedFamilyFromModelKeys,
@@ -31,6 +34,7 @@ import {
   recordPreviousFamilyUnloaded,
   recordRentalSuccess,
   requestGenerationStop,
+  requestModelStop,
   requestGpuCancellation,
   type GenerationFamily,
   type GpuExecutionState,
@@ -78,6 +82,10 @@ export type GenerationTask = {
   generationType: GenerationType;
   prompt: string;
   modelProfile: string;
+  soundMode: VideoSoundMode | null;
+  qualityTier: VideoQualityTier | null;
+  modelKey: VideoModelKey | "image_flux";
+  audioOrigin: AudioOrigin;
   gpuPreference: string[];
   requiredGpuClass: RequiredGpuClass;
   priority: GenerationPriority;
@@ -159,7 +167,7 @@ export type PoolCandidate = {
 export const GENERATION_POOL_PATH = process.env.GENERATION_POOL_STATE_PATH?.trim() || path.join(process.cwd(), ".secrets", "generation-pool-state.json");
 export const MAX_ACCEPTABLE_HOURLY_USD = 0.7;
 
-const PRODUCTION_MODELS = new Set([PRODUCTION_IMAGE_MODEL, PRODUCTION_VIDEO_MODEL]);
+const PRODUCTION_MODELS = new Set([PRODUCTION_IMAGE_MODEL, PRODUCTION_VIDEO_MODEL, PRODUCTION_NATIVE_AUDIO_MODEL]);
 const ACTIVE_TASK_STATUSES = new Set<GenerationTaskStatus>([
   "deploying", "provisioning", "restoring_models", "restoring_image_model", "generating_image", "unloading_image_model",
   "restoring_video_model", "generating_video", "downloading_transcoding", "generating", "syncing",
@@ -179,6 +187,7 @@ export function generationThreshold(type: GenerationType, value?: string) {
 export function acceptableGpuClasses(type: GenerationType, modelProfile: string) {
   if (type === "image" && modelProfile === PRODUCTION_IMAGE_MODEL) return [...PRODUCTION_GPU_CLASSES];
   if (type === "video" && modelProfile === PRODUCTION_VIDEO_MODEL) return [...PRODUCTION_GPU_CLASSES];
+  if (type === "video" && modelProfile === PRODUCTION_NATIVE_AUDIO_MODEL) return [...PRODUCTION_GPU_CLASSES];
   if (process.env.GENERATION_LEGACY_DEBUG === "true" && type === "image" && modelProfile === "flux2-klein-4b") return [...PRODUCTION_GPU_CLASSES];
   if (process.env.GENERATION_LEGACY_DEBUG === "true" && type === "video" && modelProfile === "wan22-ti2v-5b") return [...PRODUCTION_GPU_CLASSES];
   return [];
@@ -219,12 +228,17 @@ export function defaultGenerationPoolState(): GenerationPoolState {
 function normalizeTask(task: Partial<GenerationTask> & Pick<GenerationTask, "id" | "generationType" | "prompt" | "modelProfile">): GenerationTask {
   const createdAt = task.createdAt ?? now();
   const attemptId = task.currentAttemptId ?? task.attempts?.at(-1)?.id ?? randomUUID();
+  const videoProfile = task.generationType === "video" ? getVideoProfile(task.soundMode === "audible" ? "audible_low_video_4090" : task.requiredGpuClass === "rtx5090" ? "medium_video_5090" : "low_video_4090") : null;
   const verified = task.modelProfile === PRODUCTION_IMAGE_MODEL ? loadProductionVerification().imageModel : task.modelProfile === PRODUCTION_VIDEO_MODEL ? loadProductionVerification().videoModel : null;
   return {
     id: task.id,
     generationType: task.generationType,
     prompt: task.prompt,
     modelProfile: task.modelProfile,
+    soundMode: task.generationType === "video" ? task.soundMode ?? (task.modelProfile === PRODUCTION_NATIVE_AUDIO_MODEL ? "audible" : "silent") : null,
+    qualityTier: task.generationType === "video" ? task.qualityTier ?? videoProfile!.qualityTier : null,
+    modelKey: task.generationType === "image" ? "image_flux" : task.modelKey ?? (task.modelProfile === PRODUCTION_NATIVE_AUDIO_MODEL ? "video_ltx_native_audio" : "video_wan_silent"),
+    audioOrigin: task.generationType === "video" ? task.audioOrigin ?? (task.modelProfile === PRODUCTION_NATIVE_AUDIO_MODEL ? "native_model" : "none") : "none",
     gpuPreference: task.gpuPreference ?? acceptableGpuClasses(task.generationType, task.modelProfile),
     requiredGpuClass: normalizeRequiredGpuClass(task),
     priority: task.priority ?? "normal",
@@ -317,7 +331,7 @@ export type NormalJobInput = {
   prompt: string;
   negativePrompt?: string;
   seed?: number | null;
-  sizePreset?: "square_1024" | "landscape_1024" | "medium_image_4090" | "medium_image_5090" | "high_image_5090" | "wan_4090" | "wan_5090" | "low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090";
+  sizePreset?: "square_1024" | "landscape_1024" | "medium_image_4090" | "medium_image_5090" | "high_image_5090" | "wan_4090" | "wan_5090" | "low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090" | "audible_low_video_4090" | "audible_medium_video_4090" | "audible_medium_video_5090" | "audible_high_video_5090";
   gpuPreference?: string[];
   existingImageJobId?: string | null;
   existingImageVerified?: boolean;
@@ -338,6 +352,10 @@ function preset(value: NormalJobInput["sizePreset"], type: GenerationType) {
   return { width: 832, height: 480, frames: 33, fps: 16 };
 }
 
+function profileForPreset(value: NormalJobInput["sizePreset"]) {
+  return getVideoProfile(value ?? "low_video_4090");
+}
+
 export function createNormalJobSet(input: NormalJobInput) {
   const prompt = input.prompt.trim();
   if (!prompt || prompt.length > 2000) throw new Error("任务提示词无效。");
@@ -355,9 +373,11 @@ export function createNormalJobSet(input: NormalJobInput) {
   if (input.jobForm === "video_from_existing_image") {
     const imageId = String(input.existingImageJobId ?? "");
     if (!/^[A-Za-z0-9_-]{6,120}$/.test(imageId) || input.existingImageVerified !== true) throw new Error("请选择已经保存并验证的本地图片。");
+    const videoProfile = profileForPreset(input.sizePreset);
     return [createGenerationTask({
-      ...common, ...preset(input.sizePreset, "video"), generationType: "video", jobForm: input.jobForm,
-      modelProfile: PRODUCTION_VIDEO_MODEL, modelRevision: verification.videoModel.revision,
+      ...common, ...videoProfile, gpuPreference: [videoProfile.gpuClass], requiredGpuClass: videoProfile.gpuClass, generationType: "video", jobForm: input.jobForm,
+      modelProfile: videoProfile.soundMode === "audible" ? PRODUCTION_NATIVE_AUDIO_MODEL : PRODUCTION_VIDEO_MODEL,
+      modelRevision: videoProfile.soundMode === "audible" ? "metadata_locked_runtime_blocked" : verification.videoModel.revision,
       inputImageJobId: imageId, inputImageVerified: true,
     })];
   }
@@ -365,9 +385,11 @@ export function createNormalJobSet(input: NormalJobInput) {
     ...common, ...preset("square_1024", "image"), generationType: "image", jobForm: input.jobForm,
     modelProfile: PRODUCTION_IMAGE_MODEL, modelRevision: verification.imageModel.revision,
   });
+  const videoProfile = profileForPreset(input.sizePreset);
   const video = createGenerationTask({
-    ...common, ...preset(input.sizePreset, "video"), generationType: "video", jobForm: input.jobForm,
-    modelProfile: PRODUCTION_VIDEO_MODEL, modelRevision: verification.videoModel.revision,
+    ...common, ...videoProfile, gpuPreference: [videoProfile.gpuClass], requiredGpuClass: videoProfile.gpuClass, generationType: "video", jobForm: input.jobForm,
+    modelProfile: videoProfile.soundMode === "audible" ? PRODUCTION_NATIVE_AUDIO_MODEL : PRODUCTION_VIDEO_MODEL,
+    modelRevision: videoProfile.soundMode === "audible" ? "metadata_locked_runtime_blocked" : verification.videoModel.revision,
     inputImageJobId: image.id, inputImageVerified: false,
   });
   return [image, video];
@@ -639,20 +661,23 @@ export function beginConfirmedQueueExecution(input: {
   gpuClass: RequiredGpuClass;
   operationId: string;
   manualRentalIntentVerified: boolean;
+  modelKey?: "image_flux" | VideoModelKey;
   taskIds?: string[];
 }, filePath = GENERATION_POOL_PATH) {
   const state = readGenerationPool(filePath);
   if (!state.execution.rentedGpuClass && !input.manualRentalIntentVerified) throw new Error("开始租用前必须绑定当前手动队列意图。");
-  const queue = confirmedQueueTasks(state.tasks, input.generationFamily, input.gpuClass);
+  const queue = confirmedQueueTasks(state.tasks, input.generationFamily, input.gpuClass).filter((task) => !input.modelKey || task.modelKey === input.modelKey);
   const requestedIds = input.taskIds?.length ? new Set(input.taskIds) : null;
   const tasks = requestedIds ? queue.filter((task) => requestedIds.has(task.id)) : queue;
   if (requestedIds && tasks.length !== requestedIds.size) throw new Error("手动授权中的任务与当前确认队列不一致。");
   assertSingleFamilyExecution(tasks, input.generationFamily, input.gpuClass);
+  if (new Set(tasks.map((task) => task.modelKey)).size !== 1) throw new Error("一次执行只能选择一个精确视频模型队列。");
   if (state.execution.activeExecution && state.execution.activeExecution.generationFamily !== input.generationFamily) {
     throw new Error("同一张 GPU 不能并发执行图片和视频任务。");
   }
   const active = {
     generationFamily: input.generationFamily,
+    modelKey: tasks[0].modelKey,
     gpuClass: input.gpuClass,
     confirmedTaskIds: tasks.map((task) => task.id),
     operationId: input.operationId,
@@ -754,6 +779,25 @@ export function completePoolGenerationStop(filePath = GENERATION_POOL_PATH) {
   state.execution = completeGenerationStop(state.execution);
   markInterruptedTasksWaiting(state, activeIds);
   state.scheduler.state = "session_active";
+  state.scheduler.selectedBatchId = null;
+  state.scheduler.selectedTaskIds = [];
+  return writeGenerationPool(state, filePath);
+}
+
+export function requestPoolModelStop(operationId: string, filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  const activeIds = new Set(state.execution.activeExecution?.confirmedTaskIds ?? []);
+  if (state.execution.activity === "running") {
+    state.execution = requestGenerationStop(state.execution, operationId);
+    markInterruptedTasksWaiting(state, [...activeIds]);
+  }
+  state.execution = requestModelStop({ ...state.execution, activity: state.execution.activity === "stopping" ? "idle" : state.execution.activity, operationId: null }, operationId);
+  return writeGenerationPool(state, filePath);
+}
+
+export function completePoolModelStop(filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  state.execution = completeModelStop(state.execution);
   state.scheduler.selectedBatchId = null;
   state.scheduler.selectedTaskIds = [];
   return writeGenerationPool(state, filePath);
@@ -915,6 +959,7 @@ export function generationPoolSummary(state = readGenerationPool()) {
   return {
     schedulerState: state.scheduler.state, selectedBatchId: state.scheduler.selectedBatchId, tasks: state.tasks, counts, queuedTaskCount: state.tasks.filter((task) => ["waiting_for_batch", "armed", "waiting_for_gpu"].includes(task.status)).length,
     confirmedQueueCounts: confirmedQueueCounts(state.tasks),
+    confirmedVideoQueueCounts: confirmedVideoQueueCounts(state.tasks),
     execution: state.execution,
     selectedTaskIds: selected.map((task) => task.id), selectedTasks: selected, nextBatchTasks: nextBatch?.tasks.map((task) => task.id) ?? [], requiredModelProfile: nextBatch?.modelProfile ?? null,
     acceptableGpuClasses: selection.ready ? selection.acceptableGpuClasses ?? [] : [], estimatedSessionDurationMinutes: estimate.totalSession,

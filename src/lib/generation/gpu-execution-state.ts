@@ -1,12 +1,14 @@
 export type GenerationFamily = "image" | "video";
 export type RequiredGpuClass = "rtx4090" | "rtx5090";
-export type GenerationActivity = "idle" | "searching" | "deploying" | "running" | "stopping" | "canceling" | "error";
+export type GenerationActivity = "idle" | "searching" | "deploying" | "running" | "stopping" | "stopping_task" | "stopping_model" | "canceling" | "error";
 export type DeployedModelFamily = "none" | "image" | "video" | "unknown";
+export type DeployedModelKey = "none" | "image_flux" | "video_wan_silent" | "video_ltx_native_audio" | "unknown";
 
 export const GPU_IDLE_CANCEL_SECONDS = 120;
 
 export type ActiveGpuExecution = {
   generationFamily: GenerationFamily;
+  modelKey?: DeployedModelKey;
   gpuClass: RequiredGpuClass;
   confirmedTaskIds: string[];
   runtimeSessionId: string | null;
@@ -15,6 +17,7 @@ export type ActiveGpuExecution = {
 export type GpuExecutionState = {
   rentedGpuClass: RequiredGpuClass | null;
   deployedFamily: DeployedModelFamily;
+  deployedModel: DeployedModelKey;
   activity: GenerationActivity;
   providerOrderId: string | null;
   runtimeSessionId: string | null;
@@ -37,10 +40,13 @@ type GpuClassTaskLike = {
 export type QueueTaskLike = GpuClassTaskLike & {
   id: string;
   generationType: GenerationFamily;
+  soundMode?: "silent" | "audible" | null;
+  modelKey?: string;
   status: string;
 };
 
 export type ConfirmedQueueCounts = Record<GenerationFamily, Record<RequiredGpuClass, number>>;
+export type ConfirmedVideoQueueCounts = Record<"silent" | "audible", Record<RequiredGpuClass, number>>;
 
 const CONFIRMED_WAITING_STATUSES = new Set(["waiting_for_batch", "armed", "waiting_for_gpu"]);
 
@@ -52,6 +58,7 @@ export function defaultGpuExecutionState(at = Date.now()): GpuExecutionState {
   return {
     rentedGpuClass: null,
     deployedFamily: "none",
+    deployedModel: "none",
     activity: "idle",
     providerOrderId: null,
     runtimeSessionId: null,
@@ -97,6 +104,22 @@ export function confirmedQueueCounts(tasks: QueueTaskLike[]): ConfirmedQueueCoun
   return counts;
 }
 
+export function confirmedVideoQueueCounts(tasks: QueueTaskLike[]): ConfirmedVideoQueueCounts {
+  const counts: ConfirmedVideoQueueCounts = { silent: { rtx4090: 0, rtx5090: 0 }, audible: { rtx4090: 0, rtx5090: 0 } };
+  for (const task of tasks) {
+    if (task.generationType !== "video" || !CONFIRMED_WAITING_STATUSES.has(task.status)) continue;
+    counts[task.soundMode === "audible" ? "audible" : "silent"][normalizeRequiredGpuClass(task)] += 1;
+  }
+  return counts;
+}
+
+export function deployedModelFromModelKeys(modelKeys: string[]): DeployedModelKey {
+  if (modelKeys.some((key) => /ltx|sulphur|native_audio/i.test(key))) return "video_ltx_native_audio";
+  if (modelKeys.some((key) => /wan/i.test(key))) return "video_wan_silent";
+  if (modelKeys.some((key) => /ultrareal|flux/i.test(key))) return "image_flux";
+  return modelKeys.length ? "unknown" : "none";
+}
+
 export function deployedFamilyFromModelKeys(modelKeys: string[]): DeployedModelFamily {
   const image = modelKeys.some((key) => /ultrareal|flux/i.test(key));
   const video = modelKeys.some((key) => /wan/i.test(key));
@@ -134,7 +157,7 @@ export function normalizeGpuExecutionState(
               : value.runtimeState === "error" || value.rentalState === "error"
                 ? "error"
                 : "idle";
-    const activity = ["idle", "searching", "deploying", "running", "stopping", "canceling", "error"].includes(value.activity ?? "")
+    const activity = ["idle", "searching", "deploying", "running", "stopping", "stopping_task", "stopping_model", "canceling", "error"].includes(value.activity ?? "")
       ? value.activity as GenerationActivity
       : legacyActivity;
     return {
@@ -143,16 +166,19 @@ export function normalizeGpuExecutionState(
       activity,
       activeExecution: value.activeExecution ?? null,
       rentedGpuClass: value.rentedGpuClass === "rtx4090" || value.rentedGpuClass === "rtx5090" ? value.rentedGpuClass : null,
+      deployedModel: ["none", "image_flux", "video_wan_silent", "video_ltx_native_audio", "unknown"].includes(value.deployedModel ?? "") ? value.deployedModel as DeployedModelKey : value.deployedFamily === "image" ? "image_flux" : value.deployedFamily === "video" ? "video_wan_silent" : "none",
       runtimeSessionId: value.runtimeSessionId ?? value.activeExecution?.runtimeSessionId ?? null,
     };
   }
   if (!legacy?.providerOrderId) return base;
   const deployedFamily = deployedFamilyFromModelKeys(legacy.loadedModels ?? []);
+  const deployedModel = deployedModelFromModelKeys(legacy.loadedModels ?? []);
   const running = /inference_running|media_conversion_running/.test(legacy.phase ?? "");
   return {
     ...base,
     activity: running ? "running" : "idle",
     deployedFamily,
+    deployedModel,
     providerOrderId: legacy.providerOrderId,
     idleCancelAt: legacy.automaticShutdownAt ?? null,
   };
@@ -213,6 +239,7 @@ export function recordRentalSuccess(
     ...state,
     activity: "deploying",
     deployedFamily: "none",
+    deployedModel: "none",
     rentedGpuClass: input.gpuClass,
     providerOrderId: input.providerOrderId,
     runtimeSessionId: input.runtimeSessionId,
@@ -271,6 +298,7 @@ export function recordDeploymentReady(state: GpuExecutionState, at = Date.now())
     ...state,
     activity: "running",
     deployedFamily: state.activeExecution.generationFamily,
+    deployedModel: state.activeExecution.modelKey ?? (state.activeExecution.generationFamily === "image" ? "image_flux" : "video_wan_silent"),
     switchPhase: null,
     operationId: null,
     idleCancelAt: null,
@@ -285,6 +313,7 @@ export function recordDeploymentFailure(state: GpuExecutionState, reason: string
     ...state,
     activity: "error",
     deployedFamily: "none",
+    deployedModel: "none",
     activeExecution: null,
     idleCancelAt: timestamp(at + GPU_IDLE_CANCEL_SECONDS * 1000),
     switchPhase: null,
@@ -317,6 +346,16 @@ export function completeGenerationStop(state: GpuExecutionState, at = Date.now()
     notice: "generation_stopped",
     updatedAt: timestamp(at),
   };
+}
+
+export function requestModelStop(state: GpuExecutionState, operationId: string, at = Date.now()): GpuExecutionState {
+  if (!state.rentedGpuClass || !state.providerOrderId || state.deployedModel === "none" || state.activity === "canceling" || state.operationId) throw new Error("当前没有可停止的模型。");
+  return { ...state, activity: "stopping_model", operationId, idleCancelAt: null, updatedAt: timestamp(at) };
+}
+
+export function completeModelStop(state: GpuExecutionState, at = Date.now()): GpuExecutionState {
+  if (state.activity !== "stopping_model") throw new Error("当前没有等待完成的停止模型操作。");
+  return { ...state, activity: "idle", deployedFamily: "none", deployedModel: "none", activeExecution: null, switchPhase: null, operationId: null, idleCancelAt: timestamp(at + GPU_IDLE_CANCEL_SECONDS * 1000), notice: "generation_stopped", updatedAt: timestamp(at) };
 }
 
 export function requestGpuCancellation(state: GpuExecutionState, operationId: string, at = Date.now()): GpuExecutionState {

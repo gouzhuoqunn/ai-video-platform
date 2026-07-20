@@ -4,6 +4,7 @@ import { loadModelAvailabilityRegistry } from "./model-availability";
 
 export const PRODUCTION_IMAGE_MODEL = "ultrareal-flux1-dev-fp8";
 export const PRODUCTION_VIDEO_MODEL = "wan22-remix-14b-i2v-fp8";
+export const PRODUCTION_NATIVE_AUDIO_MODEL = "ltx23_sulphur_native_audio_fp8";
 export const PRODUCTION_GPU_CLASSES = ["rtx4090", "rtx5090"] as const;
 
 type ProductionFamily = {

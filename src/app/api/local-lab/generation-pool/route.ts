@@ -11,6 +11,7 @@ import {
   readGenerationPool,
   regenerateGenerationTasks,
   requestPoolGenerationStop,
+  requestPoolModelStop,
   requestPoolGpuCancellation,
   retryGenerationTasks,
   updateGenerationTasks,
@@ -32,17 +33,18 @@ import { listLocalImageResults } from "@/lib/local-lab/local-results";
 import { longVideoUploadExists } from "@/lib/long-video/uploads";
 
 type Payload = {
-  action?: "create" | "sync" | "confirm" | "cancel" | "delete" | "retry" | "regenerate" | "start_execution" | "abort_search" | "stop_generation" | "cancel_gpu";
+  action?: "create" | "sync" | "confirm" | "cancel" | "delete" | "retry" | "regenerate" | "start_execution" | "abort_search" | "stop_generation" | "stop_model" | "cancel_gpu";
   generationType?: GenerationType;
   jobForm?: GenerationJobForm;
   prompt?: string;
   negativePrompt?: string;
   seed?: number | null;
-  sizePreset?: "square_1024" | "landscape_1024" | "medium_image_4090" | "medium_image_5090" | "high_image_5090" | "wan_4090" | "wan_5090" | "low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090";
+  sizePreset?: "square_1024" | "landscape_1024" | "medium_image_4090" | "medium_image_5090" | "high_image_5090" | "wan_4090" | "wan_5090" | "low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090" | "audible_low_video_4090" | "audible_medium_video_4090" | "audible_medium_video_5090" | "audible_high_video_5090";
   existingImageJobId?: string | null;
   startMode?: "pending";
   gpuClass?: RequiredGpuClass;
   modelProfile?: string;
+  modelKey?: "image_flux" | "video_wan_silent" | "video_ltx_native_audio";
   gpuPreference?: string[];
   taskIds?: string[];
   tasks?: Array<Partial<GenerationTask> & Pick<GenerationTask, "id" | "generationType" | "prompt" | "modelProfile">>;
@@ -136,7 +138,7 @@ export async function POST(request: NextRequest) {
     const gpuClass = payload.gpuClass;
     if (!family || !["image", "video"].includes(family) || !gpuClass || !["rtx4090", "rtx5090"].includes(gpuClass)) return NextResponse.json({ error: "执行队列无效。" }, { status: 400 });
     const state = readGenerationPool();
-    const queue = confirmedQueueTasks(state.tasks, family, gpuClass);
+    const queue = confirmedQueueTasks(state.tasks, family, gpuClass).filter((task) => !payload.modelKey || task.modelKey === payload.modelKey);
     const requested = ids(payload.taskIds);
     const tasks = requested.length ? queue.filter((task) => requested.includes(task.id)) : queue;
     try {
@@ -146,6 +148,7 @@ export async function POST(request: NextRequest) {
         gpuClass,
         operationId: randomUUID(),
         manualRentalIntentVerified: true,
+        modelKey: payload.modelKey,
         taskIds: tasks.map((task) => task.id),
       });
       const needsRental = !state.execution.rentedGpuClass;
@@ -176,6 +179,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ pool: generationPoolSummary(next), controller_action_required: true, provider_order_preserved: true, provider_mutations: 0 }, { status: 202 });
     } catch (error) {
       return NextResponse.json({ error: error instanceof Error ? error.message : "无法停止生成。", provider_mutations: 0 }, { status: 409 });
+    }
+  }
+  if (payload.action === "stop_model") {
+    try {
+      const next = requestPoolModelStop(randomUUID());
+      return NextResponse.json({ pool: generationPoolSummary(next), controller_action_required: true, provider_order_preserved: true, provider_mutations: 0 }, { status: 202 });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : "无法停止模型。", provider_mutations: 0 }, { status: 409 });
     }
   }
   if (payload.action === "cancel_gpu") {

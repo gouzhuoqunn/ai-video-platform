@@ -22,6 +22,7 @@ import {
   type GpuExecutionState,
   type RequiredGpuClass,
 } from "@/lib/generation/gpu-execution-state";
+import type { VideoModelKey } from "@/lib/generation/video-profiles";
 
 type JobCounts = Partial<Record<VideoJobStatus, number>>;
 
@@ -146,6 +147,7 @@ type PoolSummary = {
     shutdownMode: "immediate" | "after_current" | null;
   } | null;
   confirmedQueueCounts: ConfirmedQueueCounts;
+  confirmedVideoQueueCounts: Record<"silent" | "audible", Record<RequiredGpuClass, number>>;
   execution: GpuExecutionState;
   readiness: {
     model_cache_ready: boolean;
@@ -276,8 +278,9 @@ export function LocalCreationStudio() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isBatching, setIsBatching] = useState(false);
   const [selectedExecutionGpuClass, setSelectedExecutionGpuClass] = useState<RequiredGpuClass | null>(null);
+  const [selectedVideoModelKey, setSelectedVideoModelKey] = useState<VideoModelKey | null>(null);
   const [isStartingExecution, setIsStartingExecution] = useState(false);
-  const [pendingGpuAction, setPendingGpuAction] = useState<"stop" | "cancel" | null>(null);
+  const [pendingGpuAction, setPendingGpuAction] = useState<"stop" | "stop_model" | "cancel" | null>(null);
   const [rentalSuccessOpen, setRentalSuccessOpen] = useState(false);
   const [rentalPlan, setRentalPlan] = useState<RentalPlan | null>(null);
   const [rentalConfirmationText, setRentalConfirmationText] = useState("");
@@ -296,7 +299,7 @@ export function LocalCreationStudio() {
   const [seed, setSeed] = useState("");
   const [imageSizePreset, setImageSizePreset] = useState<"square_1024" | "medium_image_4090" | "medium_image_5090" | "high_image_5090">("square_1024");
   const [videoSource, setVideoSource] = useState<"generated" | "existing">("generated");
-  const [videoProfile, setVideoProfile] = useState<"low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090">("low_video_4090");
+  const [videoProfile, setVideoProfile] = useState<"low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090" | "audible_low_video_4090" | "audible_medium_video_4090" | "audible_medium_video_5090" | "audible_high_video_5090">("low_video_4090");
   const [existingImageJobId, setExistingImageJobId] = useState("");
   const [uploadedFirstFrameRef, setUploadedFirstFrameRef] = useState("");
   const [showBilling, setShowBilling] = useState(false);
@@ -353,10 +356,11 @@ export function LocalCreationStudio() {
     return null;
   }, [mode, playableLongSegment, previewVideoResult, selectedImage, selectedLongVideo, selectedVideoKind]);
   const execution = pool?.execution ?? emptyExecution;
-  const visibleQueueCounts = useMemo(
-    () => pool?.confirmedQueueCounts?.[ordinaryMode] ?? { rtx4090: 0, rtx5090: 0 },
-    [ordinaryMode, pool?.confirmedQueueCounts],
-  );
+  const visibleQueueCounts = useMemo(() => {
+    if (ordinaryMode === "image") return pool?.confirmedQueueCounts?.image ?? { rtx4090: 0, rtx5090: 0 };
+    const soundMode = selectedVideoModelKey === "video_ltx_native_audio" ? "audible" : "silent";
+    return pool?.confirmedVideoQueueCounts?.[soundMode] ?? { rtx4090: 0, rtx5090: 0 };
+  }, [ordinaryMode, pool?.confirmedQueueCounts, pool?.confirmedVideoQueueCounts, selectedVideoModelKey]);
   const selectedQueueCount = selectedExecutionGpuClass ? visibleQueueCounts[selectedExecutionGpuClass] : 0;
   const executionAction = selectedExecutionGpuClass ? executionActionFor(execution, ordinaryMode, selectedExecutionGpuClass, selectedQueueCount) : null;
   const queueSelectionLocked = isStartingExecution || ["searching", "deploying", "stopping", "canceling"].includes(execution.activity);
@@ -371,9 +375,17 @@ export function LocalCreationStudio() {
       : activeQueue.length
         ? "排队"
         : "已完成";
-  const deployedFamilyLabel = execution.deployedFamily === "image" ? "图片模型" : execution.deployedFamily === "video" ? "视频模型" : execution.deployedFamily === "none" ? "暂无" : "状态未知";
+  const deployedFamilyLabel = execution.deployedModel === "image_flux" ? "图片模型" : execution.deployedModel === "video_wan_silent" ? "无声视频模型" : execution.deployedModel === "video_ltx_native_audio" ? "有声视频模型" : execution.deployedModel === "none" ? "未部署" : "状态未知";
   const currentModeDeployed = Boolean(execution.rentedGpuClass) && execution.deployedFamily === ordinaryMode;
   const activeGenerationFamily = execution.activeExecution?.generationFamily ?? (execution.deployedFamily === "image" || execution.deployedFamily === "video" ? execution.deployedFamily : null);
+  const executionQueueOptions = ordinaryMode === "image"
+    ? ([{ gpuClass: "rtx4090", modelKey: null, label: "RTX 4090", count: pool?.confirmedQueueCounts?.image.rtx4090 ?? 0 }, { gpuClass: "rtx5090", modelKey: null, label: "RTX 5090", count: pool?.confirmedQueueCounts?.image.rtx5090 ?? 0 }] as const)
+    : ([
+      { gpuClass: "rtx4090", modelKey: "video_wan_silent", label: "无声 RTX 4090", count: pool?.confirmedVideoQueueCounts?.silent.rtx4090 ?? 0 },
+      { gpuClass: "rtx5090", modelKey: "video_wan_silent", label: "无声 RTX 5090", count: pool?.confirmedVideoQueueCounts?.silent.rtx5090 ?? 0 },
+      { gpuClass: "rtx4090", modelKey: "video_ltx_native_audio", label: "有声 RTX 4090", count: pool?.confirmedVideoQueueCounts?.audible.rtx4090 ?? 0 },
+      { gpuClass: "rtx5090", modelKey: "video_ltx_native_audio", label: "有声 RTX 5090", count: pool?.confirmedVideoQueueCounts?.audible.rtx5090 ?? 0 },
+    ] as const);
 
   async function openPreviewFolder() {
     if (!previewFolderRequest || isOpeningFolder) return;
@@ -393,9 +405,10 @@ export function LocalCreationStudio() {
     }
   }
 
-  const selectExecutionQueue = useCallback((gpuClass: RequiredGpuClass | null) => {
+  const selectExecutionQueue = useCallback((gpuClass: RequiredGpuClass | null, modelKey: VideoModelKey | null = null) => {
     setSelectedExecutionGpuClass(gpuClass);
-    if (gpuClass) window.localStorage.setItem(EXECUTION_QUEUE_STORAGE_KEY, JSON.stringify({ family: ordinaryMode, gpuClass }));
+    if (ordinaryMode === "video") setSelectedVideoModelKey(modelKey);
+    if (gpuClass) window.localStorage.setItem(EXECUTION_QUEUE_STORAGE_KEY, JSON.stringify({ family: ordinaryMode, gpuClass, modelKey }));
     else window.localStorage.removeItem(EXECUTION_QUEUE_STORAGE_KEY);
   }, [ordinaryMode]);
 
@@ -550,9 +563,10 @@ export function LocalCreationStudio() {
       return;
     }
     try {
-      const stored = JSON.parse(window.localStorage.getItem(EXECUTION_QUEUE_STORAGE_KEY) ?? "null") as { family?: OrdinaryStudioMode; gpuClass?: RequiredGpuClass } | null;
+      const stored = JSON.parse(window.localStorage.getItem(EXECUTION_QUEUE_STORAGE_KEY) ?? "null") as { family?: OrdinaryStudioMode; gpuClass?: RequiredGpuClass; modelKey?: VideoModelKey } | null;
       if (stored?.family === ordinaryMode && (stored.gpuClass === "rtx4090" || stored.gpuClass === "rtx5090") && visibleQueueCounts[stored.gpuClass] > 0) {
         setSelectedExecutionGpuClass(stored.gpuClass);
+        if (ordinaryMode === "video" && (stored.modelKey === "video_wan_silent" || stored.modelKey === "video_ltx_native_audio")) setSelectedVideoModelKey(stored.modelKey);
       } else if (selectedExecutionGpuClass && visibleQueueCounts[selectedExecutionGpuClass] === 0) {
         setSelectedExecutionGpuClass(null);
         window.localStorage.removeItem(EXECUTION_QUEUE_STORAGE_KEY);
@@ -641,7 +655,7 @@ export function LocalCreationStudio() {
 
   function selectedGpuForProfile() {
     if (mode === "image") return imageSizePreset === "square_1024" || imageSizePreset === "medium_image_4090" ? "rtx4090" : "rtx5090";
-    return videoProfile === "low_video_4090" || videoProfile === "medium_video_4090" ? "rtx4090" : "rtx5090";
+    return videoProfile.endsWith("4090") ? "rtx4090" : "rtx5090";
   }
 
   async function submitPrompt() {
@@ -831,6 +845,7 @@ export function LocalCreationStudio() {
           action: "start_execution",
           generationType: ordinaryMode,
           gpuClass: selectedExecutionGpuClass,
+          modelKey: ordinaryMode === "video" ? selectedVideoModelKey ?? "video_wan_silent" : "image_flux",
         }),
       });
       const payload = await response.json().catch(() => ({})) as { error?: string; pool?: PoolSummary; manual_authorization_required?: boolean };
@@ -910,7 +925,7 @@ export function LocalCreationStudio() {
     }
   }
 
-  async function requestGpuAction(action: "stop_generation" | "cancel_gpu", automatic = false) {
+  async function requestGpuAction(action: "stop_generation" | "stop_model" | "cancel_gpu", automatic = false) {
     const response = await fetch("/api/local-lab/generation-pool", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -927,7 +942,7 @@ export function LocalCreationStudio() {
 
   async function confirmGpuAction() {
     if (!pendingGpuAction) return;
-    const action = pendingGpuAction === "stop" ? "stop_generation" : "cancel_gpu";
+    const action = pendingGpuAction === "stop" ? "stop_generation" : pendingGpuAction === "stop_model" ? "stop_model" : "cancel_gpu";
     setPendingGpuAction(null);
     await requestGpuAction(action);
   }
@@ -1070,6 +1085,10 @@ export function LocalCreationStudio() {
                   </label>
                   <label className="text-sm font-semibold text-stone-700">视频配置
                     <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setVideoProfile(event.target.value as typeof videoProfile)} value={videoProfile}>
+                      <option value="audible_low_video_4090">有声·低 · 480P · RTX 4090</option>
+                      <option value="audible_medium_video_4090">有声·中 · 720P · RTX 4090</option>
+                      <option value="audible_medium_video_5090">有声·中高 · 720P · RTX 5090</option>
+                      <option value="audible_high_video_5090">有声·高 · RTX 5090</option>
                       <option value="low_video_4090">低 · 480P（832×480）· RTX 4090</option>
                       <option value="medium_video_4090">中 · 720P · RTX 4090</option>
                       <option value="medium_video_5090">中 · 720P · RTX 5090</option>
@@ -1279,23 +1298,24 @@ export function LocalCreationStudio() {
                 {!currentModeDeployed && (execution.deployedFamily === "image" || execution.deployedFamily === "video") ? <p className="mt-1 text-amber-800">GPU当前运行{execution.deployedFamily === "image" ? "图片模型" : "视频模型"}</p> : null}
               </>}
             </div>
-            <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-              {(["rtx4090", "rtx5090"] as const).map((gpuClass) => {
-                const selected = selectedExecutionGpuClass === gpuClass;
+            <div className={`mt-2 grid gap-2 text-xs ${ordinaryMode === "video" ? "grid-cols-1" : "grid-cols-2"}`}>
+              {executionQueueOptions.map((queue) => {
+                const { gpuClass, modelKey } = queue;
+                const selected = selectedExecutionGpuClass === gpuClass && (ordinaryMode === "image" || selectedVideoModelKey === modelKey);
                 const otherSelected = selectedExecutionGpuClass !== null && !selected;
                 const baseColor = gpuClass === "rtx4090" ? "border-sky-200 bg-sky-50 text-sky-950" : "border-emerald-200 bg-emerald-50 text-emerald-950";
                 const selectedColor = gpuClass === "rtx4090" ? "border-sky-500 bg-sky-200 text-sky-950" : "border-emerald-500 bg-emerald-200 text-emerald-950";
                 return <button
                   aria-pressed={selected}
                   className={`rounded border p-2 text-left transition ${selected ? selectedColor : otherSelected ? "border-stone-200 bg-stone-100 text-stone-400" : baseColor} disabled:cursor-not-allowed disabled:opacity-50`}
-                  data-testid={`execution-queue-${gpuClass}`}
-                  disabled={queueSelectionLocked || visibleQueueCounts[gpuClass] === 0}
-                  key={gpuClass}
-                  onClick={() => selectExecutionQueue(selected ? null : gpuClass)}
+                  data-testid={`execution-queue-${modelKey ?? "image"}-${gpuClass}`}
+                  disabled={queueSelectionLocked || queue.count === 0}
+                  key={`${modelKey ?? "image"}-${gpuClass}`}
+                  onClick={() => selectExecutionQueue(selected ? null : gpuClass, selected ? null : modelKey)}
                   type="button"
                 >
-                  <strong>{gpuClass === "rtx4090" ? "RTX 4090" : "RTX 5090"}</strong>
-                  <p>{visibleQueueCounts[gpuClass]} 个{ordinaryMode === "image" ? "图片" : "视频"}待处理</p>
+                  <strong>{queue.label}</strong>
+                  <p>{queue.count} 个{ordinaryMode === "image" ? "图片" : "视频"}待处理</p>
                 </button>;
               })}
             </div>
@@ -1306,7 +1326,8 @@ export function LocalCreationStudio() {
             {execution.activity === "searching" && !rentalPlan ? <button className="mt-2 w-full rounded-md border border-stone-300 bg-white px-3 py-2 text-xs font-semibold" onClick={() => void abortRentalSearch()} type="button">取消本次寻卡</button> : null}
             {selectedExecutionGpuClass && executionAction?.reason ? <p className="mt-2 rounded bg-amber-50 px-2 py-2 text-xs text-amber-900">{executionAction.reason}</p> : null}
             <p className="mt-2 text-xs text-stone-600">寻机状态：{activeAutorent ? autorentStatusLabels[activeAutorent.status] : "未启动"} · 队列：{simplifiedSessionStatus}</p>
-            {execution.rentedGpuClass ? <div className="mt-3 grid grid-cols-2 gap-2" data-testid="rented-gpu-controls">
+            {execution.rentedGpuClass ? <div className="mt-3 grid grid-cols-3 gap-2" data-testid="rented-gpu-controls">
+              <button className="rounded-md border border-amber-300 bg-white px-2 py-2 text-xs font-bold text-amber-900 disabled:opacity-50" disabled={execution.deployedModel === "none" || execution.activity === "canceling"} onClick={() => setPendingGpuAction("stop_model")} type="button">终止当前模型但不退租</button>
               <button className="rounded-md border border-amber-300 bg-amber-50 px-2 py-2 text-xs font-bold text-amber-900 disabled:opacity-50" disabled={!activeGenerationFamily || execution.activity !== "running"} onClick={() => setPendingGpuAction("stop")} type="button">终止{activeGenerationFamily === "video" ? "视频" : "图片"}生成，但不退租GPU</button>
               <button className="rounded-md bg-rose-700 px-2 py-2 text-xs font-bold text-white disabled:bg-stone-300" disabled={execution.activity === "canceling"} onClick={() => setPendingGpuAction("cancel")} type="button">退租显卡</button>
             </div> : null}
