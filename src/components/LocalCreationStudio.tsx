@@ -267,6 +267,7 @@ export function LocalCreationStudio() {
   const [selectedJobId, setSelectedJobId] = useState("");
   const [selectedJobIds, setSelectedJobIds] = useState<string[]>([]);
   const [selectedPoolTaskIds, setSelectedPoolTaskIds] = useState<string[]>([]);
+  const poolRefreshSequence = useRef(0);
   const [signedVideos, setSignedVideos] = useState<Record<string, SignedVideoResponse>>({});
   const [localResults, setLocalResults] = useState<LocalResult[]>([]);
   const [candidates, setCandidates] = useState<CloreCandidateSummary[]>([]);
@@ -486,11 +487,12 @@ export function LocalCreationStudio() {
   }, []);
 
   const refreshPool = useCallback(async () => {
+    const sequence = ++poolRefreshSequence.current;
     const query = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
     const fixture = query?.get("gpu_fixture");
-    const response = await fetch(`/api/local-lab/generation-pool${fixture ? `?fixture=${encodeURIComponent(fixture)}` : ""}`);
+    const response = await fetch(`/api/local-lab/generation-pool${fixture ? `?fixture=${encodeURIComponent(fixture)}` : ""}`, { cache: "no-store" });
     const payload = await response.json().catch(() => null) as PoolSummary | null;
-    if (response.ok && payload) setPool(payload);
+    if (sequence === poolRefreshSequence.current && response.ok && payload) setPool(payload);
   }, []);
 
   const refreshLongVideos = useCallback(async () => {

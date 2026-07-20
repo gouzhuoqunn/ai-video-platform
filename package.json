@@ -109,6 +109,7 @@
     "generation:pool:arm": "tsx scripts/generation-pool.ts arm",
     "generation:pool:dry-run": "tsx scripts/generation-pool.ts dry-run",
     "generation:pool:test": "tsx scripts/generation-pool-tests.ts",
+    "studio:multi-task-card:test": "tsx scripts/multi-task-card-tests.ts",
     "generation:scheduler:test": "tsx scripts/generation-scheduler-tests.ts",
     "generation:model-availability:test": "tsx scripts/model-availability-tests.ts",
     "clore:deployment-control:test": "tsx scripts/deployment-control-tests.ts",

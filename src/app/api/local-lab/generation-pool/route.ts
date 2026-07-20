@@ -33,6 +33,9 @@ import { validateProductionPrompt } from "@/lib/generation/production-prompt-saf
 import { listLocalImageResults } from "@/lib/local-lab/local-results";
 import { longVideoUploadExists } from "@/lib/long-video/uploads";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 type Payload = {
   action?: "create" | "sync" | "confirm" | "cancel" | "delete" | "retry" | "regenerate" | "start_execution" | "abort_search" | "stop_generation" | "stop_model" | "cancel_gpu";
   generationType?: GenerationType;
@@ -98,7 +101,9 @@ export async function GET(request: NextRequest) {
   if (guard) return guard;
   const summary = generationPoolSummary();
   const fixture = process.env.STAGE4J9_UI_FIXTURES === "true" ? request.nextUrl.searchParams.get("fixture") : null;
-  return NextResponse.json(fixture ? withStage4J9Fixture(summary, fixture) : summary);
+  return NextResponse.json(fixture ? withStage4J9Fixture(summary, fixture) : summary, {
+    headers: { "cache-control": "no-store, max-age=0" },
+  });
 }
 
 export async function POST(request: NextRequest) {
