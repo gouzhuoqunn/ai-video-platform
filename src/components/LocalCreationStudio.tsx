@@ -379,7 +379,6 @@ export function LocalCreationStudio() {
     const soundMode = selectedVideoModelKey === "video_ltx_native_audio" ? "audible" : "silent";
     return pool?.confirmedVideoQueueCounts?.[soundMode] ?? { rtx4090: 0, rtx5090: 0 };
   }, [ordinaryMode, pool?.confirmedQueueCounts, pool?.confirmedVideoQueueCounts, selectedVideoModelKey]);
-  const selectedQueueCount = selectedExecutionGpuClass ? visibleQueueCounts[selectedExecutionGpuClass] : 0;
   const rentalEligibility = useMemo(() => rentalEligibilityFor({
     state: execution,
     tasks: pool?.tasks ?? [],

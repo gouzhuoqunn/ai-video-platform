@@ -78,3 +78,6 @@
 ## Stage 3A.1 audible correction
 
 Audible video now means locally validated dialogue WAV conditioning, not native model dialogue generation. Seven profiles and four sound/GPU queues are the current baseline; all LTX audible presets remain blocked and non-billable.
+## 2026-07-21 Stage 3A.2B local repair
+
+The local Studio rental-start path now uses a shared eligibility result, shows immediate read-only candidate-search progress, and cannot create an order before the existing explicit confirmation path. The pyopenjtalk workflow is constrained to this feature branch and related files; no run or local wheel install is recorded until GitHub is reachable.

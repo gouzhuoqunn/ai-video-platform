@@ -74,3 +74,6 @@ This local-only correction created no provider resource, model download, inferen
 Video gallery ownership is now immutable and independent of model execution. Eleven-card, rapid-submit, stale-response, and selector-isolation regressions cover the repaired gallery path. No provider, model inference, accepted-media, SSH, R2, or paid action occurred.
 
 The pyopenjtalk dependency remains uninstalled locally: only a checked workflow for a free GitHub-hosted Windows CPython 3.10 build has been added. No GPT-SoVITS weight was downloaded and no synthesis is claimed.
+## 2026-07-21 Stage 3A.2B non-provider-paid checkpoint
+
+The rental action no longer silently returns when no card was manually selected: it enters an observable search state and makes only a read-only candidate query. No provider order, authorization release, GPU deployment, model inference, or accepted-media mutation occurred.

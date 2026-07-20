@@ -18,3 +18,6 @@ The three current execution presets are blocked, not executable: `ltx_audible_fa
 8. 结果已确认上传且无处理中任务后，安全卸载、清理临时 jobs、取消同一订单。不得删除远端媒体；清理仍默认 dry-run。
 
 四个可听清晰度档保持中文可见标签：低（快速预览）、中（优先首测，原生音频）、中高（细节增强）、高（优先第二批，原生音频）。参数仅在清单与真实设备验证后固化，当前不宣称已验证。
+## Stage 3A.2B boundary
+
+This checkpoint repairs local queue eligibility and read-only candidate search only. It does not release paid authorization, create an order, download LTX/Sulphur dependencies, or execute LTX/Sulphur inference.

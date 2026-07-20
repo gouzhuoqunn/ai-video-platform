@@ -27,6 +27,7 @@ check("running locks action", { ...base, state: { ...defaultGpuExecutionState(),
 check("provider mutation locks action", { ...base, state: { ...defaultGpuExecutionState(), activity: "canceling", operationId: "op" } }, "provider_mutation_in_progress");
 check("manual rental needs authorization", { ...base, manualAuthorization: false }, "authorization_missing");
 check("runtime gate is explicit", { ...base, runtimeReady: false }, "runtime_not_ready");
+check("model manifest gate is explicit", { ...base, modelManifestReady: false }, "model_manifest_blocked");
 check("unknown execution error blocks action", { ...base, state: { ...defaultGpuExecutionState(), activity: "error" } }, "unknown_blocker");
 
-console.log("Rental eligibility tests passed (15 focused scenarios).");
+console.log("Rental eligibility tests passed (16 focused scenarios).");

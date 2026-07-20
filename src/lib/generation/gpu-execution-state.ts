@@ -153,7 +153,7 @@ const rentalReasonText: Record<RentalEligibilityReason, string> = {
   audible_audio_not_ready: "有声视频仍在等待本地声音完成。",
   task_binding_invalid: "有声视频的本地声音绑定无效。",
   gpu_class_conflict: "当前已租用的显卡类别与所选队列不一致。",
-  gpu_already_searching: "正在搜寻显卡中。",
+  gpu_already_searching: "GPU 操作正在处理中：正在搜寻显卡。",
   gpu_already_deploying: "GPU 正在部署或切换模型。",
   gpu_already_running: "当前 GPU 正在生成，需先安全终止。",
   provider_mutation_in_progress: "GPU 操作正在处理中，请勿重复点击。",
@@ -171,6 +171,7 @@ export function rentalEligibilityFor(input: {
   modelKey?: string | null;
   manualAuthorization?: boolean;
   runtimeReady?: boolean;
+  modelManifestReady?: boolean;
 }): RentalEligibility {
   const empty = (reasonCode: RentalEligibilityReason, totalCount = 0, confirmedCount = 0, executableCount = 0, audioWaitingCount = 0): RentalEligibility => ({ eligible: false, reasonCode, reason: rentalReasonText[reasonCode], totalCount, confirmedCount, executableCount, audioWaitingCount });
   if (!input.gpuClass) return empty("no_queue_selected");
@@ -181,9 +182,12 @@ export function rentalEligibilityFor(input: {
   if (!confirmed.length) return empty(audioWaiting ? "audible_audio_not_ready" : "no_confirmed_tasks", matching.length, 0, 0, audioWaiting);
   const invalidAudioBinding = confirmed.some((task) => task.soundMode === "audible" && (!task.audioBinding || task.audioBinding.status !== "local_audio_ready"));
   if (invalidAudioBinding) return empty("task_binding_invalid", matching.length, confirmed.length, 0, audioWaiting);
+  if (input.modelManifestReady === false) return empty("model_manifest_blocked", matching.length, confirmed.length, 0, audioWaiting);
   if (input.runtimeReady === false) return empty("runtime_not_ready", matching.length, confirmed.length, 0, audioWaiting);
   if (!input.state.rentedGpuClass && input.manualAuthorization === false) return empty("authorization_missing", matching.length, confirmed.length, 0, audioWaiting);
-  if (input.state.rentedGpuClass && input.state.rentedGpuClass !== input.gpuClass) return empty("gpu_class_conflict", matching.length, confirmed.length, 0, audioWaiting);
+  if (input.state.rentedGpuClass && input.state.rentedGpuClass !== input.gpuClass) {
+    return { eligible: false, reasonCode: "gpu_class_conflict", reason: `当前租用的是 ${input.state.rentedGpuClass === "rtx5090" ? "RTX 5090" : "RTX 4090"}，与所选队列不一致。`, totalCount: matching.length, confirmedCount: confirmed.length, executableCount: 0, audioWaitingCount: audioWaiting };
+  }
   if (input.state.activity === "searching") return empty("gpu_already_searching", matching.length, confirmed.length, 0, audioWaiting);
   if (["deploying", "stopping", "stopping_model"].includes(input.state.activity)) return empty("gpu_already_deploying", matching.length, confirmed.length, 0, audioWaiting);
   if (input.state.activity === "running") return empty("gpu_already_running", matching.length, confirmed.length, 0, audioWaiting);
