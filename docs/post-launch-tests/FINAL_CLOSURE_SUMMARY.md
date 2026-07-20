@@ -4,6 +4,10 @@
 
 This non-billable architecture checkpoint preserves the completed Wan/Flux personal-use closure and all accepted media. It adds no Runtime implementation or cloud mutation. LTX native-audio work remains metadata/runtime-blocked pending complete Sulphur candidate evidence and future local GPU validation; `production_ready=false` remains unchanged.
 
+## 2026-07-20 LTX Production Readiness Stage 3A
+
+This is another non-billable readiness checkpoint. It adds no paid or external execution and does not change accepted media or the Wan runtime. Production LTX remains blocked pending complete Sulphur evidence and a separately authorized RTX 5090 validation; `production_ready=false` remains unchanged.
+
 Date: 2026-07-19
 
 Stage 4J.8 completed the remaining throughput-qualified RTX 5090 long-video resume and closed the local platform for personal daily use.

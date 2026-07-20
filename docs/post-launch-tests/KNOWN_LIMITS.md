@@ -42,6 +42,11 @@
 - Official LTX FP8 is not silently substituted for Sulphur. Sulphur remains hard-blocked until immutable artifact, license, native-audio workflow and dependencies are jointly proven.
 - RTX5090 is planned only; RTX4090 is conditional and both require future real, explicitly authorized validation. `production_ready=false` is unchanged.
 
+## LTX Production Readiness Stage 3A limits
+
+- The production Docker target and Python adapter are static, unbuilt contracts. They are not proof of an installed CUDA environment, working official pipeline, model cache, RTX 4090/5090 compatibility, or native-audio output.
+- The requested Sulphur distilled candidate is still blocked by missing immutable artifact, license, compatible-pipeline, and auxiliary-asset evidence. Official LTX is not substituted for it. `npm run ltx:production:plan` must remain non-executing and currently returns `blocked`.
+
 # Audio Foundation Stage 1 limits (2026-07-20)
 
 - The audio tables, worker queue shapes, and status mapping are contracts only. There is no user-facing audio generation action, worker implementation, voice-pack download, cloning/training, inference, audition, muxing, or audio revision migration.

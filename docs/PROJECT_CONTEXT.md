@@ -6,6 +6,12 @@
 - Video waiting work is grouped by four exact queues: silent RTX4090, silent RTX5090, audible RTX4090, and audible RTX5090. Image queues are unchanged. A persisted GPU session now retains exact deployed-model identity (`image_flux`, `video_wan_silent`, or `video_ltx_native_audio`) alongside its compatibility family.
 - The LTX/Sulphur candidate audit is metadata-only. Official LTX FP8 is the evidence-backed Runtime baseline; the Sulphur derivative is intentionally Runtime-blocked because its immutable artifact, license, workflow, and supporting dependencies have not been proven together. No model download, GPU rental, SSH, inference, R2 mutation, authorization, or media mutation occurred.
 
+## 2026-07-20 LTX Native Audio-Video Production Readiness Stage 3A
+
+- `ltx-runtime` now has explicit `mock` and static `production` Docker targets plus a fail-closed Python adapter for the exact official LTX source commit `9377758131b1ffde4b7f766804590a6617bf2ab9`. It is source/dependency preparation only: no image was built or published, and no model, provider, GPU, SSH, R2, Supabase media, cache publish, or inference action occurred.
+- Versioned machine-readable manifests use a self-excluding canonical SHA-256 and fixed cache namespaces `ltx23/<model-key>/<manifest-sha256>/`. The Sulphur distilled candidate remains explicitly blocked: no complete immutable artifact revision, bytes/hash, license, official pipeline-compatibility, or auxiliary-asset proof exists. Official LTX remains a separate blocked compatibility baseline until its auxiliary assets are locked.
+- `npm run ltx:production:plan` only validates local manifests. It reports `blocked` and zero provider/download/inference/cache mutations until the evidence gate is complete. The Stage 3B paid RTX 5090 plan is documentation only and requires future explicit authorization.
+
 ## 2026-07-20 Audio Foundation Stage 1: local media boundary and data contracts
 
 - New local output is centrally rooted at `LOCAL_DATA_ROOT` or the project-local default `local-data/`, with separate `media/images`, `media/videos`, `voices`, worker-state, cache, temp, logs, and migration namespaces. Existing `D:\AI-Creative-Library` and `D:\AI-Video-Library` remain read-only fallback roots; this checkpoint does not copy, move, or delete any existing media.
