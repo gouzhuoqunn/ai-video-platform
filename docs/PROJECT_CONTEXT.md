@@ -1,5 +1,12 @@
 # Project Context
 
+## 2026-07-20 Audible Video Pipeline Correction Stage 3A.1
+
+- The production video selector now has exactly seven profiles: the four existing silent Wan profiles plus audible low 720p/RTX4090, audible medium 720p/RTX5090, and audible high 1080p/RTX5090. Audible work has `audioOrigin=local_voice_conditioning`; it is not model-native TTS.
+- Creating an audible task creates an independent local voice inference-job/revision binding and a structured dialogue snapshot. The task remains in a local-audio status until WAV validation succeeds. GPU confirmation rejects missing or failed audio and freezes the validated audio revision ID when it moves to `waiting_for_gpu`.
+- LTX A2Vid requests carry the input WAV hash, duration, immutable revision identity, dialogue snapshot, voice identity, and required audio-preservation provenance. The three LTX audible presets are contracts only and remain blocked pending model/dependency/runtime evidence. No local voice model, GPU, provider, SSH, media upload, model download, R2 mutation, or paid action was performed.
+- The multi-card regression was caused by out-of-order client refresh responses overwriting a newer task-pool snapshot. Pool reads are now explicitly dynamic/no-store and the Studio ignores stale refresh responses. Persisted task IDs and React keys were already distinct; no submitted task was deliberately de-duplicated.
+
 ## 2026-07-20 LTX Audio-Video Integration Stage 1
 
 - Video profiles are now explicit eight-way records: silent/audible crossed with low, medium, medium-high, and high. Silent profiles retain Wan settings and `audioOrigin=none`; audible profiles use `video_ltx_native_audio` and `audioOrigin=native_model` without creating local voice jobs.

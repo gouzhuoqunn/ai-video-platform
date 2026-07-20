@@ -1,5 +1,11 @@
 # LTX 2.3 Stage 3B RTX 5090 付费验证计划（未执行）
 
+## Stage 3A.1 revision: local-audio-first sequence
+
+This plan remains non-authorizing. Before any future paid validation, the exact sequence is: (1) complete and validate a local dialogue WAV; (2) lock its audio revision/hash/duration to one audible task; (3) independently revalidate model manifests, dependency placement, runtime image, GPU capacity, and price/risk controls; (4) after explicit authorization, run one synthetic 720p audible A2Vid task; (5) verify video stream, audio stream, duration, input-audio provenance, output hash, and cancellation/cleanup evidence; (6) stop for human inspection; (7) only then consider I2V or higher-quality profiles; (8) safely clean temporary job state and cancel the same order only after final output persistence is verified.
+
+The three current execution presets are blocked, not executable: `ltx_audible_fast_720p_4090` requires Sulphur 4090 compatibility evidence; `ltx_audible_quality_720p_5090` requires Sulphur 5090 workflow evidence; `ltx_audible_quality_1080p_5090` additionally requires 1080p/upscaler and input-audio preservation evidence. No production audio model or dependency placement is claimed complete by this document.
+
 状态：`paid_execution_authorized=false`。本文件不是执行授权，不能创建订单、SSH、下载或推理。
 
 1. 重新做只读候选/钱包检查，确认没有活动订单、部署 hold 和所有成本上限。
