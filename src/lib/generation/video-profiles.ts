@@ -5,7 +5,7 @@ export type VideoSoundMode = (typeof videoSoundModes)[number];
 export const videoQualityTiers = ["low", "medium", "medium_high", "high"] as const;
 export type VideoQualityTier = (typeof videoQualityTiers)[number];
 export type VideoModelKey = "video_wan_silent" | "video_ltx_native_audio";
-export type AudioOrigin = "none" | "native_model" | "local_voice";
+export type AudioOrigin = "none" | "local_voice_conditioning" | "native_model";
 
 export type VideoProfile = {
   id: string;
@@ -15,13 +15,14 @@ export type VideoProfile = {
   modelKey: VideoModelKey;
   gpuClass: RequiredGpuClass;
   audioOrigin: AudioOrigin;
+  executionPreset: "wan_silent" | "ltx_audible_fast_720p_4090" | "ltx_audible_quality_720p_5090" | "ltx_audible_quality_1080p_5090";
   width: number;
   height: number;
   frames: number;
   fps: number;
 };
 
-const silent: Array<Omit<VideoProfile, "soundMode" | "modelKey" | "audioOrigin" | "label">> = [
+const silent: Array<Omit<VideoProfile, "soundMode" | "modelKey" | "audioOrigin" | "executionPreset" | "label">> = [
   { id: "low_video_4090", qualityTier: "low", gpuClass: "rtx4090", width: 832, height: 480, frames: 33, fps: 16 },
   { id: "medium_video_4090", qualityTier: "medium", gpuClass: "rtx4090", width: 1280, height: 720, frames: 81, fps: 16 },
   { id: "medium_video_5090", qualityTier: "medium_high", gpuClass: "rtx5090", width: 1280, height: 720, frames: 81, fps: 16 },
@@ -31,15 +32,10 @@ const silent: Array<Omit<VideoProfile, "soundMode" | "modelKey" | "audioOrigin" 
 const labelByTier: Record<VideoQualityTier, string> = { low: "低", medium: "中", medium_high: "中高", high: "高" };
 
 export const VIDEO_PROFILES: VideoProfile[] = [
-  ...silent.map((profile) => ({ ...profile, label: `无声·${labelByTier[profile.qualityTier]}`, soundMode: "silent" as const, modelKey: "video_wan_silent" as const, audioOrigin: "none" as const })),
-  ...silent.map((profile) => ({
-    ...profile,
-    id: `audible_${profile.id}`,
-    label: `有声·${labelByTier[profile.qualityTier]}`,
-    soundMode: "audible" as const,
-    modelKey: "video_ltx_native_audio" as const,
-    audioOrigin: "native_model" as const,
-  })),
+  ...silent.map((profile) => ({ ...profile, label: `无声·${labelByTier[profile.qualityTier]}`, soundMode: "silent" as const, modelKey: "video_wan_silent" as const, audioOrigin: "none" as const, executionPreset: "wan_silent" as const })),
+  { id: "audible_low_video_4090", label: "有声·低", soundMode: "audible", qualityTier: "low", modelKey: "video_ltx_native_audio", audioOrigin: "local_voice_conditioning", executionPreset: "ltx_audible_fast_720p_4090", gpuClass: "rtx4090", width: 1280, height: 720, frames: 81, fps: 16 },
+  { id: "audible_medium_video_5090", label: "有声·中", soundMode: "audible", qualityTier: "medium", modelKey: "video_ltx_native_audio", audioOrigin: "local_voice_conditioning", executionPreset: "ltx_audible_quality_720p_5090", gpuClass: "rtx5090", width: 1280, height: 720, frames: 81, fps: 16 },
+  { id: "audible_high_video_5090", label: "有声·高", soundMode: "audible", qualityTier: "high", modelKey: "video_ltx_native_audio", audioOrigin: "local_voice_conditioning", executionPreset: "ltx_audible_quality_1080p_5090", gpuClass: "rtx5090", width: 1920, height: 1080, frames: 81, fps: 16 },
 ];
 
 export function getVideoProfile(id: string | null | undefined) {

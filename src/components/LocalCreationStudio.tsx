@@ -89,7 +89,7 @@ type RentalPlan = {
   gpu_class: RequiredGpuClass;
   confirmed_task_ids: string[];
 };
-type PoolTaskStatus = "pending_confirmation" | "waiting_for_batch" | "armed" | "waiting_for_gpu" | "deploying" | "provisioning" | "restoring_models" | "restoring_image_model" | "generating_image" | "unloading_image_model" | "restoring_video_model" | "generating_video" | "downloading_transcoding" | "generating" | "syncing" | "cancel_requested" | "completed" | "failed" | "cancelled";
+type PoolTaskStatus = "waiting_for_local_audio" | "local_audio_queued" | "local_audio_generating" | "local_audio_failed" | "local_audio_ready" | "pending_confirmation" | "waiting_for_batch" | "armed" | "waiting_for_gpu" | "deploying" | "provisioning" | "restoring_models" | "restoring_image_model" | "generating_image" | "unloading_image_model" | "restoring_video_model" | "generating_video" | "downloading_transcoding" | "generating" | "syncing" | "cancel_requested" | "completed" | "failed" | "cancelled";
 type PoolTask = {
   id: string;
   generationType: OrdinaryStudioMode;
@@ -109,6 +109,8 @@ type PoolTask = {
   height: number;
   frames: number | null;
   fps: number | null;
+  audioOrigin?: "none" | "local_voice_conditioning" | "native_model";
+  audioBinding?: { status: "waiting_for_local_audio" | "local_audio_queued" | "local_audio_generating" | "local_audio_failed" | "local_audio_ready" } | null;
   attempts: Array<{ id: string; number: number; resumeBoundary: PoolTaskStatus; status: string }>;
 };
 type ProductionModelSummary = { modelProfile: string; displayName: string; cacheStatus: string; cacheReady: boolean; inferenceVerified: boolean; workflowReady: boolean; restoreBytes: number; uniqueRestoreBytes: number; sharedBytes: number; revision: string; gpuProfiles: string[] };
@@ -160,6 +162,7 @@ type PoolSummary = {
 };
 
 const poolStatusLabels: Record<PoolTaskStatus, string> = {
+  waiting_for_local_audio: "等待本地生成声音", local_audio_queued: "声音正在本地队列中等待", local_audio_generating: "声音正在生成", local_audio_failed: "声音生成失败", local_audio_ready: "声音生成成功",
   pending_confirmation: "待确认", waiting_for_batch: "等待凑批", armed: "已准备", waiting_for_gpu: "等待显卡",
   deploying: "正在部署", restoring_models: "正在恢复模型", generating: "正在生成", syncing: "正在同步",
   provisioning: "正在准备主机", restoring_image_model: "恢复图片模型", generating_image: "生成图片",
@@ -300,7 +303,7 @@ export function LocalCreationStudio() {
   const [seed, setSeed] = useState("");
   const [imageSizePreset, setImageSizePreset] = useState<"square_1024" | "medium_image_4090" | "medium_image_5090" | "high_image_5090">("square_1024");
   const [videoSource, setVideoSource] = useState<"generated" | "existing">("generated");
-  const [videoProfile, setVideoProfile] = useState<"low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090" | "audible_low_video_4090" | "audible_medium_video_4090" | "audible_medium_video_5090" | "audible_high_video_5090">("low_video_4090");
+  const [videoProfile, setVideoProfile] = useState<"low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090" | "audible_low_video_4090" | "audible_medium_video_5090" | "audible_high_video_5090">("low_video_4090");
   const [existingImageJobId, setExistingImageJobId] = useState("");
   const [uploadedFirstFrameRef, setUploadedFirstFrameRef] = useState("");
   const [showBilling, setShowBilling] = useState(false);
@@ -324,7 +327,8 @@ export function LocalCreationStudio() {
   const selectedPoolTask = selectedPoolTaskIds.length ? (pool?.tasks.find((task) => task.id === selectedPoolTaskIds[0]) ?? null) : null;
   const selectedPoolFamily = selectedPoolTask?.generationType ?? null;
   const poolTaskSelectable = (task: PoolTask) => {
-    if (task.status !== "pending_confirmation") return false;
+    if (task.status !== "pending_confirmation" && task.status !== "local_audio_ready") return false;
+    if (task.audioOrigin === "local_voice_conditioning" && task.audioBinding?.status !== "local_audio_ready") return false;
     if (selectedPoolFamily && task.generationType !== selectedPoolFamily) return false;
     return true;
   };
@@ -719,7 +723,7 @@ export function LocalCreationStudio() {
     const expandedIds = new Set(targetTaskIds ?? []);
     const allPoolTasks = pool?.tasks ?? modePoolTasks;
     const requested = targetTaskIds?.length ? allPoolTasks.filter((task) => expandedIds.has(task.id)) : modePoolTasks;
-    const eligible = requested.filter((task) => action === "confirm" ? task.status === "pending_confirmation" : action === "retry" ? task.status === "failed" : !["deploying", "provisioning", "restoring_models", "restoring_image_model", "generating_image", "unloading_image_model", "restoring_video_model", "generating_video", "downloading_transcoding", "generating", "syncing"].includes(task.status));
+    const eligible = requested.filter((task) => action === "confirm" ? poolTaskSelectable(task) : action === "retry" ? task.status === "failed" : !["deploying", "provisioning", "restoring_models", "restoring_image_model", "generating_image", "unloading_image_model", "restoring_video_model", "generating_video", "downloading_transcoding", "generating", "syncing"].includes(task.status));
     if (!eligible.length) { setNotice("当前模式没有可执行该操作的任务。"); return; }
     if (mode === "video" && action === "cancel" && supabase) {
       for (const task of eligible) await supabase.rpc("cancel_video_job", { p_job_id: task.id });
@@ -1087,10 +1091,9 @@ export function LocalCreationStudio() {
                   </label>
                   <label className="text-sm font-semibold text-stone-700">视频配置
                     <select className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2" onChange={(event) => setVideoProfile(event.target.value as typeof videoProfile)} value={videoProfile}>
-                      <option value="audible_low_video_4090">有声·低 · 480P · RTX 4090</option>
-                      <option value="audible_medium_video_4090">有声·中 · 720P · RTX 4090</option>
-                      <option value="audible_medium_video_5090">有声·中高 · 720P · RTX 5090</option>
-                      <option value="audible_high_video_5090">有声·高 · RTX 5090</option>
+                      <option value="audible_low_video_4090">有声·低 · 720P · RTX 4090</option>
+                      <option value="audible_medium_video_5090">有声·中 · 720P · RTX 5090</option>
+                      <option value="audible_high_video_5090">有声·高 · 1080P · RTX 5090</option>
                       <option value="low_video_4090">低 · 480P（832×480）· RTX 4090</option>
                       <option value="medium_video_4090">中 · 720P · RTX 4090</option>
                       <option value="medium_video_5090">中 · 720P · RTX 5090</option>
@@ -1206,6 +1209,7 @@ export function LocalCreationStudio() {
               {modePoolTasks.map((task) => {
                 const queuePosition = queuedPoolTasks.findIndex((candidate) => candidate.id === task.id);
                 const estimate = task.generationType === "image" ? pool?.costEstimate?.imageInference : pool?.costEstimate?.videoInference;
+                const awaitingLocalAudio = task.audioOrigin === "local_voice_conditioning" && task.audioBinding?.status !== "local_audio_ready";
                 return (
                   <article className={`min-w-0 rounded-md border p-1.5 text-[11px] ${task.status === "failed" ? "border-rose-200 bg-rose-50" : task.requiredGpuClass === "rtx5090" ? "border-emerald-200 bg-emerald-50" : "border-sky-200 bg-sky-50"}`} data-gpu-class={task.requiredGpuClass} key={`pool-${task.id}`}>
                     <div className="aspect-video overflow-hidden rounded bg-stone-200">
@@ -1215,12 +1219,12 @@ export function LocalCreationStudio() {
                       <label className="flex min-w-0 items-center gap-1 font-semibold"><input aria-label={`选择任务 ${task.id}`} checked={selectedPoolTaskIds.includes(task.id)} disabled={!poolTaskSelectable(task)} onChange={() => setSelectedPoolTaskIds((current) => current.includes(task.id) ? current.filter((id) => id !== task.id) : [...current, task.id])} type="checkbox" /><span className="truncate">{task.generationType === "image" ? "图片" : "短视频"}</span></label>
                       <span className="rounded border border-stone-200 bg-white/80 px-1 py-0.5 font-bold">{qualityBadge(task.width, task.height)}</span>
                     </div>
-                    <p className="mt-1 font-semibold">{poolStatusLabels[task.status]}</p>
+                    <p className="mt-1 font-semibold">{awaitingLocalAudio ? `有声任务：${poolStatusLabels[task.status]}` : poolStatusLabels[task.status]}</p>
                     <p className="mt-1 line-clamp-2 min-h-8 leading-4">{task.prompt}</p>
                     <p className="mt-1 truncate text-stone-500">{task.width}×{task.height} · {queuePosition >= 0 ? `队列 ${queuePosition + 1}` : `${estimate?.minMinutes ?? 1}–${estimate?.maxMinutes ?? 1} 分钟`}</p>
-                    <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-1">
+                    <div className="mt-1.5 grid grid-cols-3 gap-1">
+                      <button className="rounded border border-stone-200 px-1 py-1 text-stone-400" disabled type="button">{awaitingLocalAudio ? "等待本地声音" : "重新生成视频"}</button>
                       <details className="text-stone-600"><summary className="cursor-pointer">查看详情</summary><p className="mt-1 break-all">任务 {task.id}</p></details>
-                      {["completed", "failed", "cancelled"].includes(task.status) ? <button className="font-semibold text-stone-700" onClick={() => void runPoolAction("regenerate", [task.id])} type="button">重新生成</button> : null}
                       {!["provisioning", "restoring_image_model", "generating_image", "unloading_image_model", "restoring_video_model", "generating_video", "downloading_transcoding"].includes(task.status) ? <button className="font-semibold text-rose-700" onClick={() => void runPoolAction("delete", [task.id])} type="button">删除</button> : null}
                     </div>
                   </article>

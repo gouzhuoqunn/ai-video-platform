@@ -46,6 +46,11 @@ export type GenerationPriority = "normal" | "immediate";
 export type GenerationJobForm = "image_only" | "video_from_generated_image" | "video_from_existing_image" | "long_video_segment";
 export type GenerationContentMode = "production" | "legacy_debug";
 export type GenerationTaskStatus =
+  | "waiting_for_local_audio"
+  | "local_audio_queued"
+  | "local_audio_generating"
+  | "local_audio_failed"
+  | "local_audio_ready"
   | "pending_confirmation"
   | "waiting_for_batch"
   | "armed"
@@ -86,6 +91,10 @@ export type GenerationTask = {
   qualityTier: VideoQualityTier | null;
   modelKey: VideoModelKey | "image_flux";
   audioOrigin: AudioOrigin;
+  executionPreset: string | null;
+  dialogueSnapshot: Array<{ visualPrompt: string; dialogueText: string; speakerName: string | null; voiceProfileId: string | null; language: string; targetDurationMs: number; sequenceIndex: number; speed: number | null; emotion: string | null; volume: number | null }>;
+  audioBinding: { voiceInferenceJobId: string; audioRevisionId: string; status: "waiting_for_local_audio" | "local_audio_queued" | "local_audio_generating" | "local_audio_failed" | "local_audio_ready"; inputAudioSha256: string | null; inputAudioDurationMs: number | null } | null;
+  confirmedAudioRevisionIds: string[];
   gpuPreference: string[];
   requiredGpuClass: RequiredGpuClass;
   priority: GenerationPriority;
@@ -238,7 +247,11 @@ function normalizeTask(task: Partial<GenerationTask> & Pick<GenerationTask, "id"
     soundMode: task.generationType === "video" ? task.soundMode ?? (task.modelProfile === PRODUCTION_NATIVE_AUDIO_MODEL ? "audible" : "silent") : null,
     qualityTier: task.generationType === "video" ? task.qualityTier ?? videoProfile!.qualityTier : null,
     modelKey: task.generationType === "image" ? "image_flux" : task.modelKey ?? (task.modelProfile === PRODUCTION_NATIVE_AUDIO_MODEL ? "video_ltx_native_audio" : "video_wan_silent"),
-    audioOrigin: task.generationType === "video" ? task.audioOrigin ?? (task.modelProfile === PRODUCTION_NATIVE_AUDIO_MODEL ? "native_model" : "none") : "none",
+    audioOrigin: task.generationType === "video" ? task.audioOrigin ?? (task.modelProfile === PRODUCTION_NATIVE_AUDIO_MODEL ? "local_voice_conditioning" : "none") : "none",
+    executionPreset: task.executionPreset ?? null,
+    dialogueSnapshot: task.dialogueSnapshot ?? [],
+    audioBinding: task.audioBinding ?? null,
+    confirmedAudioRevisionIds: task.confirmedAudioRevisionIds ?? [],
     gpuPreference: task.gpuPreference ?? acceptableGpuClasses(task.generationType, task.modelProfile),
     requiredGpuClass: normalizeRequiredGpuClass(task),
     priority: task.priority ?? "normal",
@@ -331,7 +344,7 @@ export type NormalJobInput = {
   prompt: string;
   negativePrompt?: string;
   seed?: number | null;
-  sizePreset?: "square_1024" | "landscape_1024" | "medium_image_4090" | "medium_image_5090" | "high_image_5090" | "wan_4090" | "wan_5090" | "low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090" | "audible_low_video_4090" | "audible_medium_video_4090" | "audible_medium_video_5090" | "audible_high_video_5090";
+  sizePreset?: "square_1024" | "landscape_1024" | "medium_image_4090" | "medium_image_5090" | "high_image_5090" | "wan_4090" | "wan_5090" | "low_video_4090" | "medium_video_4090" | "medium_video_5090" | "high_video_5090" | "audible_low_video_4090" | "audible_medium_video_5090" | "audible_high_video_5090";
   gpuPreference?: string[];
   existingImageJobId?: string | null;
   existingImageVerified?: boolean;
@@ -374,11 +387,17 @@ export function createNormalJobSet(input: NormalJobInput) {
     const imageId = String(input.existingImageJobId ?? "");
     if (!/^[A-Za-z0-9_-]{6,120}$/.test(imageId) || input.existingImageVerified !== true) throw new Error("请选择已经保存并验证的本地图片。");
     const videoProfile = profileForPreset(input.sizePreset);
+    const audible = videoProfile.soundMode === "audible";
+    const audioBinding = audible ? { voiceInferenceJobId: randomUUID(), audioRevisionId: randomUUID(), status: "waiting_for_local_audio" as const, inputAudioSha256: null, inputAudioDurationMs: null } : null;
     return [createGenerationTask({
       ...common, ...videoProfile, gpuPreference: [videoProfile.gpuClass], requiredGpuClass: videoProfile.gpuClass, generationType: "video", jobForm: input.jobForm,
       modelProfile: videoProfile.soundMode === "audible" ? PRODUCTION_NATIVE_AUDIO_MODEL : PRODUCTION_VIDEO_MODEL,
       modelRevision: videoProfile.soundMode === "audible" ? "metadata_locked_runtime_blocked" : verification.videoModel.revision,
       inputImageJobId: imageId, inputImageVerified: true,
+      status: audible ? "waiting_for_local_audio" : status,
+      executionPreset: videoProfile.executionPreset,
+      dialogueSnapshot: audible ? [{ visualPrompt: prompt, dialogueText: "", speakerName: null, voiceProfileId: null, language: "zh-CN", targetDurationMs: Math.round((videoProfile.frames / videoProfile.fps) * 1000), sequenceIndex: 0, speed: null, emotion: null, volume: null }] : [],
+      audioBinding,
     })];
   }
   const image = createGenerationTask({
@@ -386,11 +405,17 @@ export function createNormalJobSet(input: NormalJobInput) {
     modelProfile: PRODUCTION_IMAGE_MODEL, modelRevision: verification.imageModel.revision,
   });
   const videoProfile = profileForPreset(input.sizePreset);
+  const audible = videoProfile.soundMode === "audible";
+  const audioBinding = audible ? { voiceInferenceJobId: randomUUID(), audioRevisionId: randomUUID(), status: "waiting_for_local_audio" as const, inputAudioSha256: null, inputAudioDurationMs: null } : null;
   const video = createGenerationTask({
     ...common, ...videoProfile, gpuPreference: [videoProfile.gpuClass], requiredGpuClass: videoProfile.gpuClass, generationType: "video", jobForm: input.jobForm,
     modelProfile: videoProfile.soundMode === "audible" ? PRODUCTION_NATIVE_AUDIO_MODEL : PRODUCTION_VIDEO_MODEL,
     modelRevision: videoProfile.soundMode === "audible" ? "metadata_locked_runtime_blocked" : verification.videoModel.revision,
     inputImageJobId: image.id, inputImageVerified: false,
+    status: audible ? "waiting_for_local_audio" : status,
+    executionPreset: videoProfile.executionPreset,
+    dialogueSnapshot: audible ? [{ visualPrompt: prompt, dialogueText: "", speakerName: null, voiceProfileId: null, language: "zh-CN", targetDurationMs: Math.round((videoProfile.frames / videoProfile.fps) * 1000), sequenceIndex: 0, speed: null, emotion: null, volume: null }] : [],
+    audioBinding,
   });
   return [image, video];
 }
@@ -422,18 +447,29 @@ export function confirmGenerationTasks(taskIds: string[], family: GenerationType
   const selected = uniqueIds.map((id) => state.tasks.find((task) => task.id === id)).filter(Boolean) as GenerationTask[];
   if (!selected.length || selected.length !== uniqueIds.length) throw new Error("所选任务不存在或已经被删除。");
   if (selected.some((task) => task.generationType !== family)) throw new Error("一次确认不能混合图片和视频任务。");
-  if (selected.some((task) => !["pending_confirmation", "waiting_for_gpu"].includes(task.status))) throw new Error("所选任务包含不可确认状态。");
-  const pending = new Set(selected.filter((task) => task.status === "pending_confirmation").map((task) => task.id));
+  if (selected.some((task) => task.audioOrigin === "local_voice_conditioning" && task.audioBinding?.status !== "local_audio_ready")) throw new Error("有声任务必须先完成并验证本地声音。");
+  if (selected.some((task) => !["pending_confirmation", "local_audio_ready", "waiting_for_gpu"].includes(task.status))) throw new Error("所选任务包含不可确认状态。");
+  const pending = new Set(selected.filter((task) => ["pending_confirmation", "local_audio_ready"].includes(task.status)).map((task) => task.id));
   state.tasks = state.tasks.map((task) => pending.has(task.id) ? {
     ...task,
     status: "waiting_for_gpu",
     confirmedAt: task.confirmedAt ?? now(),
+    confirmedAudioRevisionIds: task.audioBinding?.status === "local_audio_ready" ? [task.audioBinding.audioRevisionId] : task.confirmedAudioRevisionIds,
   } : task);
   return {
     state: pending.size ? writeGenerationPool(state, filePath) : state,
     confirmed: pending.size,
     duplicateConfirmationBlocked: pending.size === 0,
   };
+}
+
+export function setLocalAudioReadiness(taskId: string, input: { status: "waiting_for_local_audio" | "local_audio_queued" | "local_audio_generating" | "local_audio_failed" | "local_audio_ready"; sha256?: string | null; durationMs?: number | null }, filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  const task = state.tasks.find((candidate) => candidate.id === taskId);
+  if (!task || task.audioOrigin !== "local_voice_conditioning" || !task.audioBinding) throw new Error("local_audio_binding_not_found");
+  task.audioBinding = { ...task.audioBinding, status: input.status, inputAudioSha256: input.sha256 ?? task.audioBinding.inputAudioSha256, inputAudioDurationMs: input.durationMs ?? task.audioBinding.inputAudioDurationMs };
+  task.status = input.status;
+  return writeGenerationPool(state, filePath);
 }
 
 function lastVerifiedBoundary(task: GenerationTask): GenerationTaskStatus {
