@@ -1,6 +1,14 @@
 name: Build pyopenjtalk Windows wheel
 
 on:
+  push:
+    branches:
+      - codex/stage4g1-long-video-prompts
+    paths:
+      - .github/workflows/build-pyopenjtalk-windows-wheel.yml
+      - scripts/pyopenjtalk-workflow-tests.ts
+      - scripts/gpt-sovits-runtime.ts
+      - config/gpt-sovits-runtime-manifest.json
   workflow_dispatch:
 
 permissions:

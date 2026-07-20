@@ -1,11 +1,17 @@
 # Project Context
 
+## 2026-07-21 Stage 3A.2B local rental-start repair and pyopenjtalk branch build
+
+- The Studio's `开始任务并租用显卡` action now has one typed, client-and-server eligibility result. It reports total, confirmed, executable, and waiting-local-audio counts with stable reason codes. Silent Wan queues never consult GPT-SoVITS readiness. Audible queues require an immutable `local_audio_ready` binding before they can be confirmed and an audio-ready confirmed fixture can pass the local gate.
+- Clicking an eligible rental action first renders the exact status `正在搜寻符合价格要求的显卡`, then makes one read-only Clore-candidate request, binds only the selected queue, and enters the existing one-time confirmation-plan path. A missing pre-selected card is no longer a silent return. This path records `create_order_called=false` and does not call a provider mutation or create a paid order.
+- `.github/workflows/build-pyopenjtalk-windows-wheel.yml` keeps manual dispatch and additionally runs only when this feature branch receives a push touching its workflow, provenance/runtime script, or manifest. The least-privilege `contents: read` permission remains; the first run is still pending normal push observation and artifact verification.
+
 ## 2026-07-21 Video gallery integrity repair and pyopenjtalk build path
 
 - The canonical generation collection now records immutable gallery `mediaType` (`image` or `video`) separately from execution family, with explicit video subtypes. Generated first-frame work remains an image-model dependency under its video parent and cannot enter the image gallery. Legacy unexecuted dependencies are repaired only when a persisted video task proves the exact relationship; contradictory orphan records are surfaced as invalid and isolated rather than guessed.
 - Gallery views are pure media-type filters and pool polling merges task records by stable ID plus `updatedAt`, preserving newly returned records across a stale refresh. The focused multi-card test covers eleven rapid generated-video submissions, selector isolation, stale lifecycle protection, long-segment hiding, scoped delete/regenerate, and key identity.
 - `pyopenjtalk==0.4.1` has no official CPython 3.10 Windows x64 wheel in its official PyPI release; its official source distribution SHA-256 is `d5ada46f7fc2b52c1c79c273eb9668ff6ad7ab276a8db9d8be119ef93440f0dc`. `.github/workflows/build-pyopenjtalk-windows-wheel.yml` is a manual, free Windows Runner build/install/smoke-test/artifact route. It is not dispatched or locally installed yet; no global compiler or GPT-SoVITS model download occurred.
-- The project-local GPT-SoVITS runtime now has idempotent `setup`, `status`, `verify`, `repair`, and explicit `uninstall-runtime` commands. They create only ignored project-owned audio directories and report the exact artifact blocker. GitHub currently cannot dispatch the workflow from this non-default feature branch, and this stage does not change `main` to bypass that platform constraint.
+- The project-local GPT-SoVITS runtime now has idempotent `setup`, `status`, `verify`, `repair`, and explicit `uninstall-runtime` commands. They create only ignored project-owned audio directories and report the exact artifact blocker. The workflow is now safely branch-triggered, avoiding any `main` change to run it.
 
 ## 2026-07-21 GPT-SoVITS Stage 3A.2 local CPU setup attempt
 

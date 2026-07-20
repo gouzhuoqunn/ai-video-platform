@@ -24,6 +24,11 @@ Until a successful artifact can be retrieved, verified, and installed into
 `local-data/voice/runtime-envs/gpt-sovits`, the precise blocker is
 `blocked_pyopenjtalk_artifact_download`.
 
+The workflow retains `workflow_dispatch` and also runs on a constrained `push` to
+`codex/stage4g1-long-video-prompts` when the workflow, provenance test, local
+runtime script, or runtime manifest changes. It has only `contents: read` and
+does not expose secrets, source models, or GPT-SoVITS weights to the runner.
+
 Path C is intentionally not executed. If explicitly approved later, the
 minimum local requirement is Microsoft C++ Build Tools with the MSVC x64/x86
 toolset, Windows SDK, and CMake/Ninja support (roughly several GB of disk; no
