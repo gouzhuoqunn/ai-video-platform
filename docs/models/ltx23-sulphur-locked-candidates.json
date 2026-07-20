@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "runtimeBlocked": true,
+  "blockedReason": "Sulphur native-audio workflow, immutable artifact identity, supporting dependencies, and license evidence are incomplete.",
+  "recommendedRuntimeBaseline": "ltx23_official_distilled_fp8_pending_full_pin",
+  "candidates": [
+    { "key": "ltx23_official_dev_fp8", "repository": "Lightricks/LTX-2.3-fp8", "revision": "1d756cd", "filename": "ltx-2.3-22b-dev-fp8.safetensors", "sizeBytes": null, "reportedSize": "29.1 GB", "integrity": "xet-backed; SHA-256 not published in audited source", "license": "ltx-2-community-license-agreement", "kind": "full_checkpoint", "audioOrigin": "native_model" },
+    { "key": "ltx23_official_distilled_fp8_pending_full_pin", "repository": "Lightricks/LTX-2.3-fp8", "revision": "1d756cd", "filename": "ltx-2.3-22b-distilled-fp8.safetensors", "sizeBytes": null, "integrity": "must be captured before Runtime", "license": "ltx-2-community-license-agreement", "kind": "full_checkpoint", "audioOrigin": "native_model" },
+    { "key": "ltx23_sulphur_native_audio_fp8", "repository": "SulphurAI/Sulphur-2-base", "revision": "608bf89", "filename": "sulphur_dev_fp8mixed.safetensors", "sizeBytes": null, "reportedSize": "29.2 GB", "integrity": "xet-backed; workflow evidence incomplete", "license": "unverified", "kind": "full_checkpoint", "audioOrigin": "native_model" }
+  ]
+}
