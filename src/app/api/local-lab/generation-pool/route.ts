@@ -23,6 +23,7 @@ import {
 import {
   assertSingleFamilyExecution,
   confirmedQueueCounts,
+  confirmedVideoQueueCounts,
   confirmedQueueTasks,
   defaultGpuExecutionState,
   type GpuExecutionState,
@@ -77,12 +78,15 @@ function withStage4J9Fixture(summary: ReturnType<typeof generationPoolSummary>, 
     createGenerationTask({ id: "fixture-video-4090-waiting", generationType: "video", prompt: "蓝色短视频已确认任务", modelProfile: "wan22-remix-14b-i2v-fp8", jobForm: "video_from_existing_image", gpuPreference: ["rtx4090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image" }),
     createGenerationTask({ id: "fixture-long-video-4090-waiting", generationType: "video", prompt: "蓝色长视频已确认任务", modelProfile: "wan22-remix-14b-i2v-fp8", jobForm: "long_video_segment", gpuPreference: ["rtx4090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image", longVideoProjectId: "fixture-long-video", longVideoSegmentIndex: 0 }),
     createGenerationTask({ id: "fixture-video-5090-waiting", generationType: "video", prompt: "绿色视频已确认任务", modelProfile: "wan22-remix-14b-i2v-fp8", jobForm: "video_from_existing_image", gpuPreference: ["rtx5090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image" }),
+    createGenerationTask({ id: "fixture-audible-video-4090-waiting", generationType: "video", prompt: "蓝色有声视频已确认任务", modelProfile: "ltx23_sulphur_native_audio_fp8", modelKey: "video_ltx_native_audio", soundMode: "audible", audioOrigin: "native_model", jobForm: "video_from_existing_image", gpuPreference: ["rtx4090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image" }),
+    createGenerationTask({ id: "fixture-audible-video-5090-waiting", generationType: "video", prompt: "绿色有声视频已确认任务", modelProfile: "ltx23_sulphur_native_audio_fp8", modelKey: "video_ltx_native_audio", soundMode: "audible", audioOrigin: "native_model", jobForm: "video_from_existing_image", gpuPreference: ["rtx5090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image" }),
   ];
   const tasks = [...summary.tasks.filter((task) => ["completed", "failed", "cancelled"].includes(task.status)), ...fixtures];
   return {
     ...summary,
     tasks,
     confirmedQueueCounts: confirmedQueueCounts(tasks),
+    confirmedVideoQueueCounts: confirmedVideoQueueCounts(tasks),
     execution: fixtureExecution(fixture),
     provider_mutations: 0,
     fixture_mode: true,

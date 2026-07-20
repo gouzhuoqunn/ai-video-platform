@@ -92,8 +92,21 @@ async function main() {
 
     await evaluate("document.querySelector('button[data-mode=\"video\"]')?.click()");
     await waitFor(async () => await evaluate<boolean>("document.querySelector('main[data-studio-mode]')?.getAttribute('data-studio-mode')==='video'") ? true : null);
-    await waitFor(async () => await evaluate<boolean>("document.querySelector('[data-testid=\"execution-queue-rtx4090\"]')?.textContent?.includes('2 个视频待处理')===true") ? true : null);
-    assert.match(String(await evaluate("document.querySelector('[data-testid=\"execution-queue-rtx5090\"]')?.textContent")), /1 个视频待处理/);
+    await waitFor(async () => await evaluate<boolean>("Boolean(document.querySelector('[data-testid=\"execution-queue-rtx4090\"]') && document.querySelector('[data-testid=\"execution-queue-rtx5090\"]') && document.querySelector('[data-testid=\"execution-queue-video_ltx_native_audio-rtx4090\"]') && document.querySelector('[data-testid=\"execution-queue-video_ltx_native_audio-rtx5090\"]'))") ? true : null);
+    const videoQueueBuckets = await evaluate<Record<string, string>>(`(()=>({
+      silent4090:document.querySelector('[data-testid="execution-queue-rtx4090"]')?.textContent??'',
+      silent5090:document.querySelector('[data-testid="execution-queue-rtx5090"]')?.textContent??'',
+      audible4090:document.querySelector('[data-testid="execution-queue-video_ltx_native_audio-rtx4090"]')?.textContent??'',
+      audible5090:document.querySelector('[data-testid="execution-queue-video_ltx_native_audio-rtx5090"]')?.textContent??''
+    }))()`);
+    assert.match(videoQueueBuckets.silent4090, /2/);
+    assert.match(videoQueueBuckets.silent5090, /1/);
+    assert.match(videoQueueBuckets.audible4090, /1/);
+    assert.match(videoQueueBuckets.audible5090, /1/);
+    await evaluate("document.querySelector('[data-testid=\"execution-queue-video_ltx_native_audio-rtx5090\"]')?.click()");
+    assert.equal(await evaluate("document.querySelector('[data-testid=\"execution-queue-video_ltx_native_audio-rtx5090\"]')?.getAttribute('aria-pressed')"), "true");
+    await send("Page.reload", { ignoreCache: false });
+    await waitFor(async () => await evaluate<boolean>("document.querySelector('[data-testid=\"execution-queue-video_ltx_native_audio-rtx5090\"]')?.getAttribute('aria-pressed')==='true'") ? true : null);
 
     await send("Page.navigate", { url: `${BASE}/?gpu_fixture=rental_success` });
     await waitFor(async () => await evaluate<boolean>("document.body.innerText.includes('租用成功')&&document.body.innerText.includes('已租用 RTX 5090，正在部署图片模型')") ? true : null);
@@ -109,7 +122,7 @@ async function main() {
     assert.deepEqual(providerMutations, []);
     assert.deepEqual(consoleErrors.filter((value) => /hydration|recoverable|did not match/i.test(value)), []);
     socket.close();
-    console.log(JSON.stringify({ ok: true, imageCounts: "1/1", videoCounts: "2/1", queueSelectionRecovered: true, rentalNotice: true, idleCountdown: true, incompatibleFamilyNotice: true, sidebarWidth: 320, providerMutations: 0, hydrationErrors: 0 }));
+    console.log(JSON.stringify({ ok: true, imageCounts: "1/1", videoCounts: { silent: "2/1", audible: "1/1" }, selectedVideoQueue: "audible/rtx5090", queueSelectionRecovered: true, rentalNotice: true, idleCountdown: true, incompatibleFamilyNotice: true, sidebarWidth: 320, providerMutations: 0, hydrationErrors: 0 }));
   } finally {
     if (browser.pid) spawnSync("taskkill.exe", ["/PID", String(browser.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
     await new Promise((resolve) => setTimeout(resolve, 500));
