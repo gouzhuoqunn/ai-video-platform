@@ -58,6 +58,20 @@ class GpuWorker:
         return data
 
     def heartbeat(self, job_id: str, progress: int) -> None:
+        if self.config.execution_mode == "immutable_batch":
+            self.supabase.rpc(
+                "heartbeat_video_job_for_batch",
+                {
+                    "p_batch_id": self.config.execution_batch_id,
+                    "p_job_id": job_id,
+                    "p_worker_id": self.config.worker_id,
+                    "p_expected_model_key": self.config.expected_model_key,
+                    "p_expected_gpu_class": self.config.expected_gpu_class,
+                    "p_progress": progress,
+                    "p_lease_seconds": self.config.worker_lease_seconds,
+                },
+            ).execute()
+            return
         self.supabase.rpc(
             "heartbeat_video_job",
             {
@@ -69,6 +83,19 @@ class GpuWorker:
         ).execute()
 
     def fail(self, job_id: str, message: str) -> None:
+        if self.config.execution_mode == "immutable_batch":
+            self.supabase.rpc(
+                "fail_video_job_for_batch",
+                {
+                    "p_batch_id": self.config.execution_batch_id,
+                    "p_job_id": job_id,
+                    "p_worker_id": self.config.worker_id,
+                    "p_expected_model_key": self.config.expected_model_key,
+                    "p_expected_gpu_class": self.config.expected_gpu_class,
+                    "p_error_message": message.splitlines()[0][:300] or "GPU worker failed.",
+                },
+            ).execute()
+            return
         self.supabase.rpc(
             "fail_video_job",
             {
@@ -172,16 +199,22 @@ class GpuWorker:
                     )
 
         size_bytes = Path(local_output_path).stat().st_size
-        self.supabase.rpc(
-            "complete_video_job",
-            {
+        rpc_name = "complete_video_job"
+        payload = {
                 "p_job_id": job_id,
                 "p_worker_id": self.config.worker_id,
                 "p_output_video_path": remote_path,
                 "p_output_size_bytes": size_bytes,
                 "p_output_mime_type": mime_type,
-            },
-        ).execute()
+            }
+        if self.config.execution_mode == "immutable_batch":
+            rpc_name = "complete_video_job_for_batch"
+            payload.update({
+                "p_batch_id": self.config.execution_batch_id,
+                "p_expected_model_key": self.config.expected_model_key,
+                "p_expected_gpu_class": self.config.expected_gpu_class,
+            })
+        self.supabase.rpc(rpc_name, payload).execute()
 
     def process_one(self) -> bool:
         if self.config.first_session_max_claims and self.claim_count >= self.config.first_session_max_claims:

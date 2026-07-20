@@ -202,12 +202,25 @@ class WorkerTests(unittest.TestCase):
     def test_immutable_batch_never_calls_generic_claim(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = config(tmp)
-            batch = WorkerConfig(**{**base.__dict__, "execution_mode": "immutable_batch", "execution_batch_id": "batch-1", "expected_model_key": "video_wan_silent", "expected_gpu_class": "rtx4090"})
+            batch = WorkerConfig(**{**base.__dict__, "execution_mode": "immutable_batch", "execution_batch_id": "batch-1", "expected_model_key": "video_wan_silent", "expected_gpu_class": "rtx4090", "expected_task_count": 1})
             fake = FakeSupabase(claim_data=[])
             worker = GpuWorker(batch, supabase_client=fake, runner=MockWanRunner(batch), logger=logging.getLogger("test"))
             self.assertFalse(worker.process_one())
             self.assertEqual(fake.calls[0][0], "claim_next_video_job_for_batch")
             self.assertNotIn("claim_next_video_job", [call[0] for call in fake.calls])
+
+    def test_immutable_batch_uses_claim_scoped_lifecycle_rpcs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = config(tmp)
+            batch = WorkerConfig(**{**base.__dict__, "execution_mode": "immutable_batch", "execution_batch_id": "batch-1", "expected_model_key": "video_wan_silent", "expected_gpu_class": "rtx4090", "expected_task_count": 1})
+            fake = FakeSupabase(claim_data=[{"id": "job-batch", "user_id": "user-1", "prompt": "make video"}])
+            worker = GpuWorker(batch, supabase_client=fake, runner=MockWanRunner(batch), logger=logging.getLogger("test"))
+            self.assertTrue(worker.process_one())
+            names = [call[0] for call in fake.calls]
+            self.assertIn("heartbeat_video_job_for_batch", names)
+            self.assertIn("complete_video_job_for_batch", names)
+            self.assertNotIn("heartbeat_video_job", names)
+            self.assertNotIn("complete_video_job", names)
 
 
 if __name__ == "__main__":

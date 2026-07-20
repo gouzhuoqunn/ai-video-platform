@@ -52,6 +52,9 @@ class WorkerConfig:
     execution_batch_id: str = ""
     expected_model_key: str = ""
     expected_gpu_class: str = ""
+    expected_task_count: int = 0
+    worker_heartbeat_interval_seconds: int = 30
+    batch_cancellation_state_path: str = ""
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -82,6 +85,9 @@ class WorkerConfig:
             execution_batch_id=os.getenv("GPU_WORKER_BATCH_ID", "").strip(),
             expected_model_key=os.getenv("GPU_WORKER_EXPECTED_MODEL_KEY", "").strip(),
             expected_gpu_class=os.getenv("GPU_WORKER_EXPECTED_GPU_CLASS", "").strip().lower(),
+            expected_task_count=_int("GPU_WORKER_EXPECTED_TASK_COUNT", 0),
+            worker_heartbeat_interval_seconds=_int("GPU_WORKER_HEARTBEAT_INTERVAL_SECONDS", 30),
+            batch_cancellation_state_path=os.getenv("GPU_WORKER_BATCH_CANCELLATION_STATE_PATH", "").strip(),
         )
 
     def validate(self) -> None:
@@ -104,8 +110,10 @@ class WorkerConfig:
             raise ValueError("FIRST_SESSION_MAX_CLAIMS must be 0 or greater")
         if self.execution_mode not in {"generic", "immutable_batch"}:
             raise ValueError("GPU_WORKER_EXECUTION_MODE must be generic or immutable_batch")
-        if self.execution_mode == "immutable_batch" and (not self.execution_batch_id or self.expected_model_key != "video_wan_silent" or self.expected_gpu_class != "rtx4090"):
-            raise ValueError("immutable batch mode requires batch id, video_wan_silent and rtx4090")
+        if self.execution_mode == "immutable_batch" and (not self.execution_batch_id or self.expected_model_key != "video_wan_silent" or self.expected_gpu_class != "rtx4090" or self.expected_task_count < 1):
+            raise ValueError("immutable batch mode requires batch id, video_wan_silent, rtx4090 and expected task count")
+        if self.worker_heartbeat_interval_seconds < 5:
+            raise ValueError("GPU_WORKER_HEARTBEAT_INTERVAL_SECONDS must be at least 5")
         if self.wan_runner == "real":
             if not self.wan_model_revision or self.wan_model_revision == "main":
                 raise ValueError("WAN_MODEL_REVISION must be pinned for real runner")
