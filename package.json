@@ -122,6 +122,7 @@
     "audible:pipeline:test": "tsx scripts/audible-pipeline-tests.ts",
     "ltx:stage1:test": "tsx scripts/ltx-stage1-tests.ts",
     "ltx:runtime:test": "tsx scripts/ltx-runtime-tests.ts",
+    "ltx:a2vid:test": "tsx scripts/ltx-a2vid-tests.ts",
     "ltx:runtime:dry": "tsx scripts/ltx-runtime-tests.ts",
     "ltx:production:plan": "tsx scripts/ltx-production-plan.ts",
     "ltx:production:test": "tsx scripts/ltx-production-tests.ts",

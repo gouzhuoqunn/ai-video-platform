@@ -6,13 +6,14 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import type { RequiredGpuClass } from "@/lib/generation/gpu-execution-state";
 import type { VideoQualityTier } from "@/lib/generation/video-profiles";
+import { validateLocalDialogueWav, type LocalDialogueAudioEvidence } from "@/lib/audio/local-voice-runtime";
 
 const require = createRequire(import.meta.url);
 const FFMPEG_PATH = (require("@ffmpeg-installer/ffmpeg") as { path: string }).path;
 const FFPROBE_PATH = (require("@ffprobe-installer/ffprobe") as { path: string }).path;
 
 export const LTX_RUNTIME_VERSION = "stage2-mock-1";
-export const LTX_FAILURES = ["no_output", "invalid_container", "missing_video_stream", "missing_audio_stream", "duration_mismatch", "corrupt_or_truncated_output", "unsupported_dimensions", "canceled", "model_load_failure", "out_of_vram", "insufficient_system_ram", "insufficient_disk", "dependency_runtime_failure", "download_cache_failure", "unknown_failure"] as const;
+export const LTX_FAILURES = ["no_output", "invalid_container", "missing_video_stream", "missing_audio_stream", "duration_mismatch", "corrupt_or_truncated_output", "unsupported_dimensions", "input_audio_missing", "input_audio_hash_mismatch", "input_audio_duration_mismatch", "input_audio_revision_mismatch", "audio_conditioning_required", "audio_not_preserved", "canceled", "model_load_failure", "out_of_vram", "insufficient_system_ram", "insufficient_disk", "dependency_runtime_failure", "download_cache_failure", "unknown_failure"] as const;
 export type LtxFailureCode = (typeof LTX_FAILURES)[number];
 export type LtxModelRole = "official_ltx_compatibility_baseline" | "sulphur_full" | "sulphur_distilled" | "auxiliary_lora";
 export type LtxExecutableStatus = "compatibility_baseline" | "blocked" | "executable";
@@ -62,9 +63,24 @@ export type LtxNativeAudioRequest = {
   durationToleranceMs: number;
 };
 
+export type LtxDialogueSnapshot = { visualPrompt: string; dialogueText: string; speakerName: string | null; voiceProfileId: string | null; language: string; targetDurationMs: number; sequenceIndex: number; speed: number | null; emotion: string | null; volume: number | null };
+export type LtxAudioConditionedRequest = LtxNativeAudioRequest & {
+  executionPreset: "ltx_audible_fast_720p_4090" | "ltx_audible_quality_720p_5090" | "ltx_audible_quality_1080p_5090";
+  inputAudioPath: string;
+  inputAudioSha256: string;
+  inputAudioDurationMs: number;
+  inputAudioRevisionId: string;
+  voiceInferenceJobId: string;
+  voiceProfileId: string;
+  dialogueSnapshot: LtxDialogueSnapshot[];
+  audioConditioningRequired: true;
+  preserveInputAudio: true;
+};
+
 export type LtxProgress = { taskId: string; phase: "preparing" | "loading" | "running" | "validating" | "completed" | "canceled"; progress: number; at: string };
 export type LtxRuntimeHeartbeat = { processAlive: boolean; modelLoaded: boolean; currentTaskId: string | null; lastHeartbeat: string; cancellationRequested: boolean; gracefulShutdownDeadline: string | null; forcedTerminationFallback: boolean; recoveryIdentity: string | null };
-export type LtxResultManifest = { taskId: string; modelKey: string; immutableRevision: string; seed: number; outputPath: string; sha256: string; fileSizeBytes: number; startedAt: string; completedAt: string; runtimeVersion: string; media: NativeAudioMediaEvidence };
+export type LtxAudioConditioningProvenance = { inputAudioRevisionId: string; inputAudioSha256: string; inputAudioDurationMs: number; voiceInferenceJobId: string; voiceProfileId: string; audioConditioningRequired: true; preservedInputAudio: true; validatedAt: string };
+export type LtxResultManifest = { taskId: string; modelKey: string; immutableRevision: string; seed: number; outputPath: string; sha256: string; fileSizeBytes: number; startedAt: string; completedAt: string; runtimeVersion: string; media: NativeAudioMediaEvidence; audioConditioning?: LtxAudioConditioningProvenance };
 export type NativeAudioMediaEvidence = { durationMs: number; width: number; height: number; fps: number | null; frameCount: number | null; videoCodec: string; audioCodec: string; sampleRate: number; channels: number; seekable: boolean; formatName: string };
 
 export type LtxRuntimeBackend = {
@@ -88,6 +104,12 @@ function rate(value?: string) {
 
 export function classifyLtxFailure(error: unknown): LtxFailureCode {
   const message = String(error instanceof Error ? error.message : error).toLowerCase();
+  if (/input_audio_missing/.test(message)) return "input_audio_missing";
+  if (/input_audio_hash/.test(message)) return "input_audio_hash_mismatch";
+  if (/input_audio_duration/.test(message)) return "input_audio_duration_mismatch";
+  if (/input_audio_revision/.test(message)) return "input_audio_revision_mismatch";
+  if (/audio_conditioning_required/.test(message)) return "audio_conditioning_required";
+  if (/audio_not_preserved/.test(message)) return "audio_not_preserved";
   if (/cancel/.test(message)) return "canceled";
   if (/audio.*missing|missing_audio/.test(message)) return "missing_audio_stream";
   if (/video.*missing|missing_video/.test(message)) return "missing_video_stream";
@@ -110,7 +132,8 @@ export function validateLtxRequest(request: LtxNativeAudioRequest) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$/.test(request.taskId)) errors.push("task_id_invalid");
   if (!request.modelKey || !request.immutableRevision || !request.recoveryIdentity || !request.cancellationToken) errors.push("identity_missing");
   if (!request.prompt.trim() || request.prompt.length > 4_000) errors.push("prompt_invalid");
-  if (!Number.isInteger(request.width) || !Number.isInteger(request.height) || request.width < 32 || request.height < 32 || request.width % 32 || request.height % 32) errors.push("dimensions_must_be_divisible_by_32");
+  const supportedVisiblePreset = (request.width === 1280 && request.height === 720) || (request.width === 1920 && request.height === 1080);
+  if (!Number.isInteger(request.width) || !Number.isInteger(request.height) || request.width < 32 || request.height < 32 || ((request.width % 32 || request.height % 32) && !supportedVisiblePreset)) errors.push("dimensions_must_be_divisible_by_32");
   if (!Number.isInteger(request.frameCount) || request.frameCount < 9 || request.frameCount % 8 !== 1) errors.push("frame_count_must_be_8n_plus_1");
   if (!Number.isFinite(request.fps) || request.fps <= 0 || request.fps > 120) errors.push("fps_invalid");
   if (!Number.isSafeInteger(request.seed) || request.seed < 0) errors.push("seed_invalid");
@@ -118,6 +141,42 @@ export function validateLtxRequest(request: LtxNativeAudioRequest) {
   if (!Number.isFinite(request.durationToleranceMs) || request.durationToleranceMs < 0 || request.durationToleranceMs > 10_000) errors.push("duration_tolerance_invalid");
   if (!request.expectedOutputPath || !path.isAbsolute(request.expectedOutputPath)) errors.push("expected_output_path_invalid");
   if (errors.length) failure(`ltx_request_invalid:${errors.join(",")}`);
+}
+
+export function isAudioConditionedRequest(request: LtxNativeAudioRequest): request is LtxAudioConditionedRequest {
+  return "audioConditioningRequired" in request;
+}
+
+export function validateAudioConditionedLtxRequest(request: LtxAudioConditionedRequest): LocalDialogueAudioEvidence {
+  validateLtxRequest(request);
+  if (request.audioConditioningRequired !== true || request.preserveInputAudio !== true) failure("audio_conditioning_required");
+  const presetMatches = (request.executionPreset === "ltx_audible_fast_720p_4090" && request.gpuClass === "rtx4090" && request.width === 1280 && request.height === 720)
+    || (request.executionPreset === "ltx_audible_quality_720p_5090" && request.gpuClass === "rtx5090" && request.width === 1280 && request.height === 720)
+    || (request.executionPreset === "ltx_audible_quality_1080p_5090" && request.gpuClass === "rtx5090" && request.width === 1920 && request.height === 1080);
+  if (!presetMatches) failure("unsupported_dimensions:execution_preset_mismatch");
+  if (!path.isAbsolute(request.inputAudioPath) || !/^[a-f0-9]{64}$/i.test(request.inputAudioSha256)) failure("input_audio_missing");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$/.test(request.inputAudioRevisionId)) failure("input_audio_revision_mismatch");
+  if (!request.voiceInferenceJobId || !request.voiceProfileId || !request.dialogueSnapshot.length) failure("audio_conditioning_required");
+  const expected = request.dialogueSnapshot.reduce((total, item) => total + item.targetDurationMs, 0);
+  if (expected !== request.inputAudioDurationMs) failure("input_audio_duration_mismatch");
+  let evidence: LocalDialogueAudioEvidence;
+  try {
+    evidence = validateLocalDialogueWav(request.inputAudioPath, { audioRevisionId: request.inputAudioRevisionId, voiceInferenceJobId: request.voiceInferenceJobId, voiceProfileId: request.voiceProfileId, targetDurationMs: request.inputAudioDurationMs, speed: request.dialogueSnapshot[0]?.speed ?? null });
+  } catch (error) {
+    const message = String(error instanceof Error ? error.message : error);
+    failure(message === "input_audio_duration_mismatch" ? message : "input_audio_missing");
+  }
+  if (evidence.sha256 !== request.inputAudioSha256) failure("input_audio_hash_mismatch");
+  return evidence;
+}
+
+export function validateAudioConditionedResult(request: LtxAudioConditionedRequest, result: Pick<LtxResultManifest, "audioConditioning" | "media">) {
+  const provenance = result.audioConditioning;
+  if (!provenance?.preservedInputAudio) failure("audio_not_preserved");
+  if (provenance.inputAudioRevisionId !== request.inputAudioRevisionId) failure("input_audio_revision_mismatch");
+  if (provenance.inputAudioSha256 !== request.inputAudioSha256) failure("input_audio_hash_mismatch");
+  if (provenance.inputAudioDurationMs !== request.inputAudioDurationMs || Math.abs(result.media.durationMs - request.inputAudioDurationMs) > request.durationToleranceMs) failure("input_audio_duration_mismatch");
+  return provenance;
 }
 
 export function validateNativeAudioMp4(filePath: string, request: Pick<LtxNativeAudioRequest, "width" | "height" | "fps" | "frameCount" | "durationToleranceMs">): NativeAudioMediaEvidence {
@@ -153,7 +212,8 @@ export class MockLtxNativeAudioBackend implements LtxRuntimeBackend {
     await mkdir(path.dirname(request.expectedOutputPath), { recursive: true });
     onProgress(0.2); onProgress(0.65);
     const duration = request.frameCount / request.fps;
-    const output = spawnSync(FFMPEG_PATH, ["-y", "-f", "lavfi", "-i", `testsrc2=size=${request.width}x${request.height}:rate=${request.fps}`, "-f", "lavfi", "-i", "sine=frequency=660:sample_rate=48000", "-t", String(duration), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", "-movflags", "+faststart", request.expectedOutputPath], { encoding: "utf8", timeout: 120_000 });
+    const audioInput = isAudioConditionedRequest(request) ? ["-i", request.inputAudioPath, "-map", "0:v:0", "-map", "1:a:0"] : ["-f", "lavfi", "-i", "sine=frequency=660:sample_rate=48000"];
+    const output = spawnSync(FFMPEG_PATH, ["-y", "-f", "lavfi", "-i", `testsrc2=size=${request.width}x${request.height}:rate=${request.fps}`, ...audioInput, "-t", String(duration), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", "-movflags", "+faststart", request.expectedOutputPath], { encoding: "utf8", timeout: 120_000 });
     if (output.status !== 0) failure(`dependency_runtime_failure:${String(output.stderr).slice(-500)}`);
     if (this.canceled.has(request.cancellationToken)) { await rm(request.expectedOutputPath, { force: true }); failure("canceled"); }
     onProgress(1);
@@ -170,6 +230,7 @@ export class LtxNativeAudioRuntime {
   getHeartbeat() { return { ...this.heartbeat }; }
   async execute(request: LtxNativeAudioRequest, options: { allowMockWhenBlocked?: boolean; onProgress?: (event: LtxProgress) => void } = {}) {
     validateLtxRequest(request);
+    const audioEvidence = isAudioConditionedRequest(request) ? validateAudioConditionedLtxRequest(request) : null;
     if (request.modelKey !== this.manifest.modelKey || request.immutableRevision !== this.manifest.immutableRevision) failure("model_load_failure:model_manifest_binding_mismatch");
     if (!this.manifest.capabilities.nativeAudio) failure("model_load_failure:native_audio_unsupported");
     if (!this.manifest.supportedGpuClasses.includes(request.gpuClass)) failure("unsupported_dimensions:gpu_class_unsupported");
@@ -182,7 +243,8 @@ export class LtxNativeAudioRuntime {
       report("loading", 0.1); await this.backend.loadModel(this.manifest); this.heartbeat = { ...this.heartbeat, modelLoaded: true, lastHeartbeat: new Date().toISOString() };
       report("running", 0.2); await this.backend.run(request, (progress) => report("running", progress));
       report("validating", 0.95); const media = validateNativeAudioMp4(request.expectedOutputPath, request);
-      const result: LtxResultManifest = { taskId: request.taskId, modelKey: request.modelKey, immutableRevision: request.immutableRevision, seed: request.seed, outputPath: request.expectedOutputPath, sha256: sha256(request.expectedOutputPath), fileSizeBytes: statSync(request.expectedOutputPath).size, startedAt, completedAt: new Date().toISOString(), runtimeVersion: LTX_RUNTIME_VERSION, media };
+      const result: LtxResultManifest = { taskId: request.taskId, modelKey: request.modelKey, immutableRevision: request.immutableRevision, seed: request.seed, outputPath: request.expectedOutputPath, sha256: sha256(request.expectedOutputPath), fileSizeBytes: statSync(request.expectedOutputPath).size, startedAt, completedAt: new Date().toISOString(), runtimeVersion: LTX_RUNTIME_VERSION, media, audioConditioning: audioEvidence ? { inputAudioRevisionId: audioEvidence.audioRevisionId, inputAudioSha256: audioEvidence.sha256, inputAudioDurationMs: audioEvidence.durationMs, voiceInferenceJobId: audioEvidence.voiceInferenceJobId, voiceProfileId: audioEvidence.voiceProfileId, audioConditioningRequired: true, preservedInputAudio: true, validatedAt: new Date().toISOString() } : undefined };
+      if (isAudioConditionedRequest(request)) validateAudioConditionedResult(request, result);
       const manifestPath = `${request.expectedOutputPath}.result.json`; const part = `${manifestPath}.part-${randomUUID()}`;
       writeFileSync(part, `${JSON.stringify(result, null, 2)}\n`, "utf8"); await rename(part, manifestPath);
       report("completed", 1); return result;
