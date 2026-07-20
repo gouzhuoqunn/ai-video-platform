@@ -1,0 +1,76 @@
+name: Build pyopenjtalk Windows wheel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: CPython 3.10 x64 / pyopenjtalk 0.4.1
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          architecture: "x64"
+
+      - name: Download and verify official source distribution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m pip install --upgrade pip setuptools wheel cython
+          New-Item -ItemType Directory -Force -Path dist, provenance | Out-Null
+          python -m pip download --no-binary=:all: --no-deps --dest dist pyopenjtalk==0.4.1
+          $sdist = Get-ChildItem dist -Filter "pyopenjtalk-0.4.1.tar.gz" | Select-Object -First 1
+          if (-not $sdist) { throw "official_sdist_missing" }
+          $hash = (Get-FileHash -Algorithm SHA256 $sdist.FullName).Hash.ToLowerInvariant()
+          if ($hash -ne "d5ada46f7fc2b52c1c79c273eb9668ff6ad7ab276a8db9d8be119ef93440f0dc") { throw "official_sdist_sha256_mismatch:$hash" }
+
+      - name: Build exactly one wheel with runner MSVC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sdist = (Get-ChildItem dist -Filter "pyopenjtalk-0.4.1.tar.gz" | Select-Object -First 1).FullName
+          python -m pip wheel --no-deps --no-build-isolation --wheel-dir dist $sdist
+          $wheels = @(Get-ChildItem dist -Filter "pyopenjtalk-0.4.1-*.whl")
+          if ($wheels.Count -ne 1) { throw "expected_exactly_one_wheel:$($wheels.Count)" }
+
+      - name: Clean-install and deterministic smoke test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m venv wheel-test
+          .\wheel-test\Scripts\python.exe -m pip install --upgrade pip
+          $wheel = (Get-ChildItem dist -Filter "pyopenjtalk-0.4.1-*.whl" | Select-Object -First 1).FullName
+          .\wheel-test\Scripts\python.exe -m pip install $wheel
+          $result = .\wheel-test\Scripts\python.exe -c "import json,platform,pyopenjtalk; value=pyopenjtalk.g2p('こんにちは'); assert value == 'k o N n i ch i w a', value; print(json.dumps({'g2p':value,'python':platform.python_version(),'implementation':platform.python_implementation()}))"
+          $compiler = (& cl.exe 2>&1 | Select-Object -First 1) -join " "
+          $wheelHash = (Get-FileHash -Algorithm SHA256 $wheel).Hash.ToLowerInvariant()
+          $sdist = Get-ChildItem dist -Filter "pyopenjtalk-0.4.1.tar.gz" | Select-Object -First 1
+          $provenance = [ordered]@{
+            schemaVersion = 1
+            package = "pyopenjtalk"
+            version = "0.4.1"
+            source = [ordered]@{ filename = $sdist.Name; sha256 = "d5ada46f7fc2b52c1c79c273eb9668ff6ad7ab276a8db9d8be119ef93440f0dc"; url = "https://files.pythonhosted.org/packages/58/74/ccd31c696f047ba381f9b11a504bf1199756c3f30f3de64e3eeb83e10b4a/pyopenjtalk-0.4.1.tar.gz" }
+            wheel = [ordered]@{ filename = (Split-Path $wheel -Leaf); sha256 = $wheelHash }
+            runner = $env:RUNNER_OS
+            python = (& python --version) -join " "
+            abi = "cp310-win_amd64"
+            compiler = $compiler
+            smokeTest = $result
+          }
+          $provenance | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 provenance\pyopenjtalk-0.4.1-win-amd64-provenance.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pyopenjtalk-0.4.1-cp310-win-amd64
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            dist/pyopenjtalk-0.4.1-*.whl
+            provenance/pyopenjtalk-0.4.1-win-amd64-provenance.json

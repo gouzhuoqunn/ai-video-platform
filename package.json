@@ -119,6 +119,7 @@
     "local:media-access:test": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/local-media-access-tests.ts",
     "audio:contracts:test": "tsx scripts/audio-contract-tests.ts",
     "audio:local-runtime:test": "tsx scripts/local-voice-runtime-tests.ts",
+    "audio:pyopenjtalk:provenance:test": "tsx scripts/pyopenjtalk-workflow-tests.ts",
     "audible:pipeline:test": "tsx scripts/audible-pipeline-tests.ts",
     "ltx:stage1:test": "tsx scripts/ltx-stage1-tests.ts",
     "ltx:runtime:test": "tsx scripts/ltx-runtime-tests.ts",

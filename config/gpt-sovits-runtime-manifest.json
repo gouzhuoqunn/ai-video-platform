@@ -18,9 +18,16 @@
     { "path": "sv/pretrained_eres2netv2w24s4ep4.ckpt", "sha256": null },
     { "path": "G2PWModel.zip", "sha256": null }
   ],
+  "pyopenjtalk": {
+    "version": "0.4.1",
+    "officialSourceFilename": "pyopenjtalk-0.4.1.tar.gz",
+    "officialSourceSha256": "d5ada46f7fc2b52c1c79c273eb9668ff6ad7ab276a8db9d8be119ef93440f0dc",
+    "wheelStatus": "blocked_pyopenjtalk_artifact_download",
+    "workflow": ".github/workflows/build-pyopenjtalk-windows-wheel.yml"
+  },
   "status": "blocked",
   "blockers": [
-    "official_pyopenjtalk_0_4_1_requires_a_windows_c_cpp_toolchain_not_present_in_the_isolated_runtime",
+    "blocked_pyopenjtalk_artifact_download",
     "official_model_files_have_not_been_downloaded_or_hash_verified"
   ]
 }
