@@ -70,6 +70,11 @@ for select
 to authenticated
 using ((select auth.uid()) = user_id);
 
+-- Existing local-lab installations may have created this RPC with an earlier
+-- OUT-row shape before migration history was linked. PostgreSQL cannot change
+-- that shape via CREATE OR REPLACE, so remove only this same-signature RPC.
+drop function if exists public.create_video_job(text, text);
+
 create or replace function public.create_video_job(
   p_prompt text,
   p_model_key text
@@ -177,6 +182,9 @@ begin
     v_job.completed_at;
 end;
 $$;
+
+-- See create_video_job above: preserve data while replacing an older RPC row shape.
+drop function if exists public.cancel_video_job(uuid);
 
 create or replace function public.cancel_video_job(p_job_id uuid)
 returns table (

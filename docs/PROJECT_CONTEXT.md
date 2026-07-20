@@ -2,7 +2,7 @@
 
 ## 2026-07-21 Immutable RTX 4090 runner checkpoint
 
-- `0013_gpu_execution_batch_task_contracts.sql` is a forward-only companion to local migration `0012`. It adds Worker-identity, batch-member, claimed-attempt, GPU/model and monotonic lifecycle checks for batch heartbeat, complete and fail RPCs. It has not been applied remotely: the installed Supabase CLI has no authenticated access token, so no database mutation was attempted.
+- `0013_gpu_execution_batch_task_contracts.sql` is a forward-only companion to migration `0012`. It adds Worker-identity, batch-member, claimed-attempt, GPU/model and monotonic lifecycle checks for batch heartbeat, complete and fail RPCs. On 2026-07-21 the linked remote database applied migrations `0001` through `0013`; a synthetic three-member batch proved ordered batch claim, scoped heartbeat, idempotent completion and normal-user denial. All synthetic records were deleted.
 - The Studio manual RTX 4090 action now persists a frozen batch and one start intent only. The loopback session runner owns marketplace lookup and is the sole potential provider-mutation path. Its normal configuration remains fail-closed until remote RPC verification, Worker transport, runner PID and the explicit Clore execution switch are all present.
 - `npm run gpu:session-runner:start` is launched by the Windows launcher alongside `npm run dev:local`; it uses ignored project state under `.secrets/gpu-session-runner` and does not create an order at startup.
 
