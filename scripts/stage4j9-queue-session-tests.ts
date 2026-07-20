@@ -152,13 +152,14 @@ async function main() {
     const manual = readFileSync("src/lib/local-lab/clore-console.ts", "utf8");
     assert.match(studio, /可同时包含蓝色与绿色卡片/);
     assert.match(studio, /视频队列（短视频与长视频合并）/);
-    assert.match(studio, /data-testid=`execution-queue-|data-testid=\{`execution-queue-/);
+    assert.match(studio, /execution-queue-\$\{modelKey\}-\$\{gpuClass\}/);
     assert.match(studio, /正在恢复GPU会话/);
     assert.match(studio, /租用成功/);
     assert.match(studio, /终止.*生成，但不退租GPU/);
     assert.doesNotMatch(studio, /立即生成/);
     assert.match(route, /provider_mutations: 0/);
     assert.match(route, /create_order_called: false/);
+    assert.match(route, /confirmedVideoQueueCounts: confirmedVideoQueueCounts\(tasks\)/);
     assert.match(manual, /riskAccepted !== true/);
     assert.match(manual, /确认文字必须与服务器和价格计划完全一致/);
     assert.equal(generationPoolSummary(readGenerationPool(poolPath)).mixedBatchEnabled, false);

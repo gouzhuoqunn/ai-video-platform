@@ -36,6 +36,12 @@
 - RTX4090 is planned/conditional for native audio and is not GPU-verified. RTX5090 is planned/recommended; it is likewise not verified for this model path.
 - Native model audio and future local voice composition remain separate. There is no independent regenerate-audio action for a native-audio video task.
 
+## LTX Runtime Stage 2 limits
+
+- The Runtime backend is mock-only. The Dockerfile is a weight-free contract image, not a verified CUDA/PyTorch LTX image and not publishable production evidence.
+- Official LTX FP8 is not silently substituted for Sulphur. Sulphur remains hard-blocked until immutable artifact, license, native-audio workflow and dependencies are jointly proven.
+- RTX5090 is planned only; RTX4090 is conditional and both require future real, explicitly authorized validation. `production_ready=false` is unchanged.
+
 # Audio Foundation Stage 1 limits (2026-07-20)
 
 - The audio tables, worker queue shapes, and status mapping are contracts only. There is no user-facing audio generation action, worker implementation, voice-pack download, cloning/training, inference, audition, muxing, or audio revision migration.

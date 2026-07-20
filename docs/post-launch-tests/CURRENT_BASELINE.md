@@ -70,3 +70,8 @@
 - Silent Wan and planned LTX native-audio video tasks have typed sound mode, quality tier, model key, GPU class, and audio origin. They aggregate into four video queues without changing image queues or accepted media.
 - Session state now records an exact deployed-model identity in addition to the compatibility family. Stopping a model is a retained-rental contract only; no real controller, provider order, SSH action, or model unload was invoked.
 - Official LTX FP8 is the recommended evidence-backed candidate. Sulphur remains Runtime-blocked until immutable artifact, license, compatible workflow, and dependencies are all proven. `production_ready=false` remains intentional.
+
+## LTX Runtime Stage 2 baseline (2026-07-20, non-billable)
+
+- The four-video-queue browser fixture now restores the exact audible RTX5090 selection after refresh; silent counts are `2/1`, audible counts `1/1`, with zero hydration/provider mutations.
+- Mock native-audio Runtime, FFprobe validation, cache/preflight and model-session lifecycle tests pass. The only output is deleted temporary FFmpeg synthetic media; no real LTX/Sulphur model, 4090/5090 Runtime, provider, R2 or accepted media was used.

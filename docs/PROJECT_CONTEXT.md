@@ -1029,3 +1029,9 @@ Safety status remains unchanged: no Clore order, no Clore balance spend, no GPU/
 ## Authoritative current status after Stage 4J.8
 
 Stage 4J.8 supersedes the earlier partial/future statements above. The RTX 5090 project is completed with segment attempts `1/1`, verified 720P and 1080P final media, verified tail-frame linkage, verified throughput-qualified restore, a verified Windows launcher restart, and zero cloud resources. Personal daily-use closure is complete; `production_ready=false` remains intentional.
+
+## 2026-07-20 LTX native-audio Runtime Stage 2 (non-billable)
+
+- `src/lib/ltx-runtime/` isolates mock request/progress/cancel/result contracts, native-audio MP4 validation, cache recovery planning and hardware preflight from Wan. The selected future real backend is a narrow official `ltx-pipelines` adapter; this stage runs no real model.
+- `ltx-runtime/manifests/` contains immutable machine-readable baseline/blocked metadata. Official LTX FP8 is compatibility-baseline only; Sulphur remains blocked. No model weight, signed URL, credential, R2/provider/SSH action or accepted-media mutation was created.
+- `npm run ltx:runtime:dry` uses temporary FFmpeg synthetic media and a mock backend, validates result binding/cancellation/cache/preflight, and deletes its temporary directory. The GPU session driver receives exact model identity for Wan/LTX switching; real execution remains default-off.

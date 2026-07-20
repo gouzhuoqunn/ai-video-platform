@@ -57,3 +57,7 @@ Remaining deferred work is limited to optional scope: RTX 4090/short-video reval
 - The persisted global session separates rented GPU, deployed model family, and activity. One rented GPU runs one family at a time; generation can stop while keeping the GPU, a compatible same-order family switch can follow, and a different GPU class is blocked until retirement.
 - Stop starts the 120-second idle countdown; resumed deployment/work clears it. Manual and idle-expiry retirement share one safe controller cancellation path.
 - Focused mock/controller and browser fixture checks passed with zero provider mutations, zero spend, zero hydration errors, and the permanent sidebar/final gallery preserved. `production_ready=false` remains unchanged.
+
+## 2026-07-20 LTX Runtime Stage 2 boundary
+
+The personal-use Wan closure remains unchanged. LTX Stage 2 adds only local mock contracts and temporary synthetic-media validation. It made zero paid-provider, SSH, model-download, R2, Supabase-media or accepted-media mutations. Real native-audio execution remains blocked pending immutable model/dependency/image evidence and a future explicit paid authorization.
