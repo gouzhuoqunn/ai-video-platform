@@ -6,6 +6,7 @@ import {
   beginConfirmedQueueExecution,
   confirmGenerationTasks,
   createGenerationTask,
+  createManualSilent4090Batch,
   createNormalJobSet,
   generationPoolSummary,
   readGenerationPool,
@@ -34,12 +35,13 @@ import { validateProductionPrompt } from "@/lib/generation/production-prompt-saf
 import { listLocalImageResults } from "@/lib/local-lab/local-results";
 import { longVideoUploadExists } from "@/lib/long-video/uploads";
 import type { TaskMediaType } from "@/lib/generation/gallery-routing";
+import { manualRealGpuRentalEnabled } from "@/lib/local-lab/manual-real-gpu";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 type Payload = {
-  action?: "create" | "sync" | "confirm" | "cancel" | "delete" | "retry" | "regenerate" | "start_execution" | "abort_search" | "stop_generation" | "stop_model" | "cancel_gpu";
+  action?: "create" | "sync" | "confirm" | "cancel" | "delete" | "retry" | "regenerate" | "start_execution" | "start_manual_silent_4090_batch" | "abort_search" | "stop_generation" | "stop_model" | "cancel_gpu";
   generationType?: GenerationType;
   mediaType?: TaskMediaType;
   jobForm?: GenerationJobForm;
@@ -188,6 +190,23 @@ export async function POST(request: NextRequest) {
       }, { status: 202 });
     } catch (error) {
       return NextResponse.json({ error: error instanceof Error ? error.message : "无法开始执行队列。", provider_mutations: 0 }, { status: 409 });
+    }
+  }
+  if (payload.action === "start_manual_silent_4090_batch") {
+    if (!manualRealGpuRentalEnabled()) return NextResponse.json({ error: "本地真实 GPU 租用尚未启用。", provider_mutations: 0, create_order_called: false }, { status: 423 });
+    try {
+      const created = createManualSilent4090Batch();
+      const next = beginConfirmedQueueExecution({
+        generationFamily: "video",
+        gpuClass: "rtx4090",
+        operationId: randomUUID(),
+        manualRentalIntentVerified: true,
+        modelKey: "video_wan_silent",
+        taskIds: created.batch.taskIds,
+      });
+      return NextResponse.json({ pool: generationPoolSummary(next), batch: created.batch, paid_execution_authorized: true, provider_mutations: 0, create_order_called: false }, { status: 202 });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : "无法创建手动 GPU 批次。", provider_mutations: 0, create_order_called: false }, { status: 409 });
     }
   }
   if (payload.action === "abort_search") {

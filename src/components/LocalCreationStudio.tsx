@@ -158,6 +158,7 @@ type PoolSummary = {
   } | null;
   confirmedQueueCounts: ConfirmedQueueCounts;
   confirmedVideoQueueCounts: Record<"silent" | "audible", Record<RequiredGpuClass, number>>;
+  manualBatch?: { id: string; taskCount: number; completedCount: number; failedCount: number; currentTaskId: string | null; status: string; gpuClass: RequiredGpuClass; modelKey: string; authorizationLimits: { maximumEffectiveHourlyUsd: number; maximumSessionSpendUsd: number } } | null;
   execution: GpuExecutionState;
   readiness: {
     model_cache_ready: boolean;
@@ -392,6 +393,12 @@ export function LocalCreationStudio() {
       ? executionActionFor(execution, ordinaryMode, selectedExecutionGpuClass, rentalEligibility.executableCount)
       : { kind: "blocked" as const, label: null, disabled: true, reason: rentalEligibility.reason }
     : null;
+  const selectedManualSilent4090 = ordinaryMode === "video" && selectedExecutionGpuClass === "rtx4090" && selectedVideoModelKey === "video_wan_silent";
+  const manualBatchAction = selectedManualSilent4090
+    ? executionAction
+    : executionAction?.kind === "rent"
+      ? { ...executionAction, disabled: true, reason: "当前仅开放无声 RTX 4090 的 Wan 短视频批次租用。" }
+      : executionAction;
   const queueSelectionLocked = isStartingExecution || ["searching", "deploying", "stopping", "canceling"].includes(execution.activity);
   const idleCancelSeconds = execution.idleCancelAt && clockNow
     ? Math.max(0, Math.ceil((Date.parse(execution.idleCancelAt) - clockNow) / 1000))
@@ -531,9 +538,12 @@ export function LocalCreationStudio() {
     setSelectedLongVideoId((current) => current || payload.projects?.[0]?.id || "");
   }, []);
 
-  const searchCloreCandidates = useCallback(async () => {
+  const searchCloreCandidates = useCallback(async (queue: "default" | "manual_silent_4090" = "default") => {
     const useVisualMock = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("visual_mock") === "1";
-    const candidateResponse = await fetch(`/api/local-lab/clore/candidates${useVisualMock ? "?mock=1" : ""}`);
+    const params = new URLSearchParams();
+    if (useVisualMock) params.set("mock", "1");
+    if (queue === "manual_silent_4090") params.set("queue", queue);
+    const candidateResponse = await fetch(`/api/local-lab/clore/candidates${params.size ? `?${params.toString()}` : ""}`);
     const candidatePayload = (await candidateResponse.json().catch(() => ({}))) as CloreCandidatesResponse;
     if (candidateResponse.ok) {
       setCandidates(candidatePayload.matches ?? []);
@@ -867,26 +877,16 @@ export function LocalCreationStudio() {
   }
 
   async function requestExecutionStart() {
-    if (!selectedExecutionGpuClass || !executionAction || executionAction.disabled || !rentalEligibility.eligible || isStartingExecution) return;
-    const startingRental = executionAction.kind === "rent";
+    if (!selectedExecutionGpuClass || !manualBatchAction || manualBatchAction.disabled || !rentalEligibility.eligible || isStartingExecution) return;
+    const startingRental = manualBatchAction.kind === "rent" && selectedManualSilent4090;
     setIsStartingExecution(true);
     setNotice("正在搜寻符合价格要求的显卡");
     try {
-      const searchedCandidates = startingRental ? await searchCloreCandidates() : [];
-      const searchedCandidate = startingRental && priceGate.valid && priceGate.min !== null && priceGate.max !== null
-        ? searchedCandidates
-          .filter((candidate) => {
-            const effective = candidate.effective_usd_per_hour ?? (candidate.normalized_usd_per_hour ? candidate.normalized_usd_per_hour * 1.05 : null);
-            const gpuClass = /5090/i.test(candidate.gpu) ? "rtx5090" : /4090/i.test(candidate.gpu) ? "rtx4090" : null;
-            return effective !== null && effective >= priceGate.min! && effective <= priceGate.max! && isManualCandidateDisplayPriceAllowed(effective) && gpuClass === selectedExecutionGpuClass;
-          })
-          .sort((left, right) => (left.effective_usd_per_hour ?? Number.POSITIVE_INFINITY) - (right.effective_usd_per_hour ?? Number.POSITIVE_INFINITY))[0] ?? null
-        : null;
       const response = await fetch("/api/local-lab/generation-pool", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          action: "start_execution",
+          action: startingRental ? "start_manual_silent_4090_batch" : "start_execution",
           generationType: ordinaryMode,
           gpuClass: selectedExecutionGpuClass,
           modelKey: ordinaryMode === "video" ? selectedVideoModelKey ?? "video_wan_silent" : "image_flux",
@@ -902,6 +902,16 @@ export function LocalCreationStudio() {
         setNotice("执行请求已交给受控运行器；当前订单保持不变，不会创建第二个订单。");
         return;
       }
+      const searchedCandidates = await searchCloreCandidates("manual_silent_4090");
+      const searchedCandidate = priceGate.valid && priceGate.min !== null
+        ? searchedCandidates
+          .filter((candidate) => {
+            const effective = candidate.effective_usd_per_hour ?? (candidate.normalized_usd_per_hour ? candidate.normalized_usd_per_hour * 1.05 : null);
+            const gpuClass = /5090/i.test(candidate.gpu) ? "rtx5090" : /4090/i.test(candidate.gpu) ? "rtx4090" : null;
+            return effective !== null && effective >= priceGate.min! && effective <= 0.7 && gpuClass === "rtx4090";
+          })
+          .sort((left, right) => (left.effective_usd_per_hour ?? Number.POSITIVE_INFINITY) - (right.effective_usd_per_hour ?? Number.POSITIVE_INFINITY))[0] ?? null
+        : null;
       const basePrice = searchedCandidate?.base_usd_per_hour ?? searchedCandidate?.normalized_usd_per_hour;
       if (!searchedCandidate || basePrice === null || basePrice === undefined) {
         await abortRentalSearch("候选价格无法验证，已取消本次寻卡。");
@@ -1374,9 +1384,10 @@ export function LocalCreationStudio() {
             <div className="mt-2 rounded border border-stone-200 bg-[#faf8f4] p-2 text-xs">
               {selectedExecutionGpuClass ? <><strong>已选择 {selectedExecutionGpuClass === "rtx4090" ? "RTX 4090" : "RTX 5090"} 执行队列</strong><p className="mt-1">队列任务 {rentalEligibility.totalCount} · 已确认 {rentalEligibility.confirmedCount} · 可执行 {rentalEligibility.executableCount}{ordinaryMode === "video" ? ` · 等待本地声音 ${rentalEligibility.audioWaitingCount}` : ""}；另一颜色保持排队。</p></> : <><strong>尚未选择执行队列</strong><p className="mt-1 text-stone-500">先选择蓝色或绿色队列，才会显示租用或继续按钮。</p></>}
             </div>
-            {isStartingExecution || execution.activity === "searching" ? <div aria-live="polite" className="mt-2 flex items-center justify-center gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900" data-testid="gpu-searching-state"><span className="h-4 w-4 animate-spin rounded-full border-2 border-amber-800 border-t-transparent" />正在搜寻符合价格要求的显卡</div> : selectedExecutionGpuClass ? <button className="mt-2 w-full rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-300" data-testid="execution-start-action" disabled={executionAction?.disabled ?? true} onClick={() => void requestExecutionStart()} title={executionAction?.reason ?? undefined} type="button">{executionAction?.label ?? "开始任务并租用显卡"}</button> : null}
+            {isStartingExecution || execution.activity === "searching" ? <div aria-live="polite" className="mt-2 flex items-center justify-center gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900" data-testid="gpu-searching-state"><span className="h-4 w-4 animate-spin rounded-full border-2 border-amber-800 border-t-transparent" />正在搜寻符合价格要求的显卡</div> : selectedExecutionGpuClass ? <button className="mt-2 w-full rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-300" data-testid="execution-start-action" disabled={manualBatchAction?.disabled ?? true} onClick={() => void requestExecutionStart()} title={manualBatchAction?.reason ?? undefined} type="button">{manualBatchAction?.kind === "rent" && selectedManualSilent4090 ? `开始 ${rentalEligibility.executableCount} 个任务并租用显卡` : manualBatchAction?.label ?? "开始任务并租用显卡"}</button> : null}
+            {pool?.manualBatch ? <div className="mt-2 rounded bg-sky-50 px-2 py-2 text-xs text-sky-950" data-testid="manual-gpu-batch-progress"><p className="font-semibold">本次批次：{pool.manualBatch.taskCount} 个任务</p><p>已完成：{pool.manualBatch.completedCount} / {pool.manualBatch.taskCount} · 失败：{pool.manualBatch.failedCount}</p><p>显卡：{pool.manualBatch.gpuClass === "rtx4090" ? "RTX 4090" : "RTX 5090"} · 最高 ${pool.manualBatch.authorizationLimits.maximumEffectiveHourlyUsd.toFixed(2)}/小时</p></div> : null}
             {execution.activity === "searching" && !rentalPlan ? <button className="mt-2 w-full rounded-md border border-stone-300 bg-white px-3 py-2 text-xs font-semibold" onClick={() => void abortRentalSearch()} type="button">取消本次寻卡</button> : null}
-            {selectedExecutionGpuClass && executionAction?.reason ? <p className="mt-2 rounded bg-amber-50 px-2 py-2 text-xs text-amber-900">{executionAction.reason}</p> : null}
+            {selectedExecutionGpuClass && manualBatchAction?.reason ? <p className="mt-2 rounded bg-amber-50 px-2 py-2 text-xs text-amber-900">{manualBatchAction.reason}</p> : null}
             <p className="mt-2 text-xs text-stone-600">寻机状态：{activeAutorent ? autorentStatusLabels[activeAutorent.status] : "未启动"} · 队列：{simplifiedSessionStatus}</p>
             {execution.rentedGpuClass ? <div className="mt-3 grid grid-cols-3 gap-2" data-testid="rented-gpu-controls">
               <button className="rounded-md border border-amber-300 bg-white px-2 py-2 text-xs font-bold text-amber-900 disabled:opacity-50" disabled={execution.deployedModel === "none" || execution.activity === "canceling"} onClick={() => setPendingGpuAction("stop_model")} type="button">终止当前模型但不退租</button>

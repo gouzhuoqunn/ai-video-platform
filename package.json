@@ -5,8 +5,8 @@
   "description": "AI视频生成平台前端演示版",
   "scripts": {
     "dev": "next dev",
-    "dev:local": "cross-env NEXT_PUBLIC_APP_MODE=local_lab LOCAL_LAB_ENABLED=true next dev --hostname 127.0.0.1 --port 3000",
-    "start:local": "cross-env NEXT_PUBLIC_APP_MODE=local_lab LOCAL_LAB_ENABLED=true next start --hostname 127.0.0.1 --port 3000",
+    "dev:local": "cross-env NEXT_PUBLIC_APP_MODE=local_lab LOCAL_LAB_ENABLED=true LOCAL_REAL_GPU_RENTAL_ENABLED=true next dev --hostname 127.0.0.1 --port 3000",
+    "start:local": "cross-env NEXT_PUBLIC_APP_MODE=local_lab LOCAL_LAB_ENABLED=true LOCAL_REAL_GPU_RENTAL_ENABLED=true next start --hostname 127.0.0.1 --port 3000",
     "build": "next build",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
@@ -115,6 +115,7 @@
     "clore:deployment-control:test": "tsx scripts/deployment-control-tests.ts",
     "studio:queue:test": "tsx scripts/studio-queue-tests.ts",
     "gpu:rental-eligibility:test": "tsx scripts/rental-eligibility-tests.ts",
+    "gpu:manual-batch:test": "tsx scripts/manual-gpu-batch-tests.ts",
     "gpu:manual-price:test": "tsx scripts/manual-gpu-candidate-price-tests.ts",
     "local:path-registry:test": "tsx scripts/local-path-registry-tests.ts",
     "local:media-access:test": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/local-media-access-tests.ts",

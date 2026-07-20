@@ -8,7 +8,7 @@ import { readLiveMarketplace, readWalletSummary } from "../../../scripts/clore/l
 import { applyWalletBalance, CLORE_RENTER_FEE_RATE, computeCloreProjectedCost, evaluateMarketplace, summarizeCandidate } from "../../../scripts/clore/marketplace";
 import { stopSessionDryRun } from "../../../scripts/clore/session-orchestrator";
 import { readSessionState } from "../../../scripts/clore/session-state";
-import type { RawCloreServer } from "../../../scripts/clore/types";
+import type { CloreConfig, RawCloreServer } from "../../../scripts/clore/types";
 import { buildLocalResultsPlan } from "../../../scripts/local-results/plan";
 import { loadCloreExecutionConfig } from "../../../scripts/clore/execution-config";
 import { DEFAULT_DOCKER_IMAGE } from "../../../scripts/clore/config";
@@ -18,9 +18,11 @@ import { getCloreDeploymentHold } from "../../../scripts/clore/deployment-hold";
 import {
   readGenerationPool,
   recordConfirmedQueueRentalSuccess,
+  updateManualGpuBatch,
 } from "@/lib/generation/task-pool";
 import type { GenerationFamily, RequiredGpuClass } from "@/lib/generation/gpu-execution-state";
 import { LOCAL_LAB_GPU_PRICE_FILTER_MAX_USD_PER_HOUR, manualCandidateBasePriceCeiling } from "@/lib/local-lab/gpu-price-filter";
+import { manualRealGpuRentalEnabled } from "@/lib/local-lab/manual-real-gpu";
 
 const MOCK_MARKETPLACE_PATH = path.join(process.cwd(), "scripts", "clore", "mock-marketplace.json");
 const LATEST_MARKETPLACE_PATH = path.join(process.cwd(), "scripts", "clore", "fixtures", "latest-marketplace.sanitized.json");
@@ -38,6 +40,7 @@ type StoredNonce = {
   generationFamily: GenerationFamily;
   gpuClass: RequiredGpuClass;
   confirmedTaskIds: string[];
+  batchId: string | null;
   expiresAt: string;
   usedAt: string | null;
 };
@@ -89,17 +92,32 @@ function writeNonceStore(nonces: StoredNonce[]) {
   writeJsonFile(NONCE_STORE_PATH, active.slice(-50));
 }
 
-function safeCandidateList(rawServers: RawCloreServer[], availableUsdBalance: number | null) {
+function manualBatchCloreConfig(): CloreConfig {
   const config = loadCloreConfig();
+  return {
+    ...config,
+    targetGpu: "NVIDIA GeForce RTX 4090",
+    minGpuVramGb: 24,
+    maxGpuPricePerHour: 0.7,
+  };
+}
+
+function safeCandidateList(rawServers: RawCloreServer[], availableUsdBalance: number | null, target: "default" | "manual_silent_4090" = "default") {
+  const config = target === "manual_silent_4090" ? manualBatchCloreConfig() : loadCloreConfig();
   const displayConfig = {
     ...config,
-    maxGpuPricePerHour: manualCandidateBasePriceCeiling(CLORE_RENTER_FEE_RATE),
+    // The ordinary sidebar can display up to $5/hour, but the paid manual
+    // batch endpoint must already reject anything above its effective $0.70 cap.
+    maxGpuPricePerHour: target === "manual_silent_4090"
+      ? 0.7 / (1 + CLORE_RENTER_FEE_RATE)
+      : manualCandidateBasePriceCeiling(CLORE_RENTER_FEE_RATE),
   };
   const evaluated = evaluateMarketplace(rawServers, displayConfig);
   const candidates = applyWalletBalance(evaluated.candidates, availableUsdBalance);
   const matches = applyWalletBalance(evaluated.matches, availableUsdBalance);
+  const targetGpuLabel = target === "manual_silent_4090" ? "RTX 4090" : "RTX 5090";
   const rejected5090 = candidates
-    .filter((candidate) => /rtx\s+5090/i.test(candidate.gpu))
+    .filter((candidate) => target === "manual_silent_4090" ? /rtx\s+4090/i.test(candidate.gpu) : /rtx\s+5090/i.test(candidate.gpu))
     .filter((candidate) => candidate.rejectionReasons.length > 0)
     .sort((left, right) => left.rejectionReasons.length - right.rejectionReasons.length)
     .slice(0, 5)
@@ -110,9 +128,9 @@ function safeCandidateList(rawServers: RawCloreServer[], availableUsdBalance: nu
 
   return {
     filters: {
-      gpu: "exact RTX 5090",
+      gpu: `exact ${targetGpuLabel}`,
       order_type: "on-demand",
-      max_usd_per_hour: LOCAL_LAB_GPU_PRICE_FILTER_MAX_USD_PER_HOUR,
+      max_usd_per_hour: target === "manual_silent_4090" ? 0.7 : LOCAL_LAB_GPU_PRICE_FILTER_MAX_USD_PER_HOUR,
       price_basis: "effective hourly price including 5% renter fee",
       assumed_minimum_rental_hours: config.assumedMinimumRentalHours,
       min_ram_gb: config.minRamGb,
@@ -130,13 +148,13 @@ function safeCandidateList(rawServers: RawCloreServer[], availableUsdBalance: nu
   };
 }
 
-export async function getLocalLabCloreCandidates() {
-  const config = loadCloreConfig();
+export async function getLocalLabCloreCandidates(target: "default" | "manual_silent_4090" = "default") {
+  const config = target === "manual_silent_4090" ? manualBatchCloreConfig() : loadCloreConfig();
 
   if (config.apiKey) {
     const wallet = await readWalletSummary(config);
     const rawServers = await readLiveMarketplace(config);
-    const evaluated = safeCandidateList(rawServers, wallet.availableUsdBalance);
+    const evaluated = safeCandidateList(rawServers, wallet.availableUsdBalance, target);
 
     return {
       mode: "live-marketplace-read-only",
@@ -153,7 +171,7 @@ export async function getLocalLabCloreCandidates() {
   }
 
   const latest = readJsonFile<Record<string, unknown> | null>(LATEST_MARKETPLACE_PATH, null);
-  if (latest) {
+  if (latest && target === "default") {
     return {
       ...latest,
       mode: "latest-sanitized-fixture",
@@ -169,7 +187,7 @@ export async function getLocalLabCloreCandidates() {
     source: "mock fixture",
     wallet: { available_usd_balance: null, source: "mock mode" },
     last_refreshed_at: new Date().toISOString(),
-    ...safeCandidateList(rawServers, null),
+    ...safeCandidateList(rawServers, null, target),
     raw_response_included: false,
     order_created: false,
   };
@@ -272,8 +290,15 @@ export function createOrderPlan(serverId: string, maxPriceUsdPerHour: number) {
   const execution = loadCloreExecutionConfig();
   const pool = readGenerationPool();
   const binding = pool.execution.activeExecution;
+  const batch = pool.scheduler.manualBatch;
   if (pool.execution.activity !== "searching" || !binding || pool.execution.rentedGpuClass || pool.execution.providerOrderId) {
     throw new Error("请先从非空的显卡队列开始手动租用。");
+  }
+  if (batch && (batch.status !== "awaiting_confirmation" || batch.gpuClass !== binding.gpuClass || batch.taskIds.length !== binding.confirmedTaskIds.length || batch.taskIds.some((id) => !binding.confirmedTaskIds.includes(id)))) {
+    throw new Error("冻结批次与当前执行队列不一致。");
+  }
+  if (manualRealGpuRentalEnabled() && (!batch || batch.queueKey !== "silent_rtx4090" || batch.soundMode !== "silent" || batch.gpuClass !== "rtx4090" || batch.modelKey !== "video_wan_silent")) {
+    throw new Error("Real local GPU rental is limited to a frozen silent RTX 4090 Wan batch.");
   }
   const projected = computeCloreProjectedCost(maxPriceUsdPerHour, execution.hardSessionLimitMinutes / 60);
 
@@ -290,6 +315,7 @@ export function createOrderPlan(serverId: string, maxPriceUsdPerHour: number) {
     generationFamily: binding.generationFamily,
     gpuClass: binding.gpuClass,
     confirmedTaskIds: [...binding.confirmedTaskIds],
+    batchId: batch?.id ?? null,
     expiresAt: expiresAt.toISOString(),
     usedAt: null,
   };
@@ -307,6 +333,7 @@ export function createOrderPlan(serverId: string, maxPriceUsdPerHour: number) {
     generation_family: stored.generationFamily,
     gpu_class: stored.gpuClass,
     confirmed_task_ids: stored.confirmedTaskIds,
+    batch_id: stored.batchId,
     expires_at: stored.expiresAt,
     required_confirmation_text: expectedConfirmationText({
       serverId,
@@ -385,11 +412,21 @@ export async function confirmOrderPlan(input: {
   ) {
     throw new Error("当前执行队列已改变，请重新生成一次性租用计划。");
   }
+  if (stored.batchId) {
+    const batch = pool.scheduler.manualBatch;
+    if (!batch || batch.id !== stored.batchId || batch.status !== "awaiting_confirmation" || batch.taskIds.length !== stored.confirmedTaskIds.length || batch.taskIds.some((id) => !stored.confirmedTaskIds.includes(id))) {
+      throw new Error("冻结批次已经改变，不能创建订单。");
+    }
+  }
 
+  if (manualRealGpuRentalEnabled() && !stored.batchId) {
+    throw new Error("Real local GPU rental requires a frozen silent RTX 4090 Wan batch.");
+  }
   nonces[index] = { ...stored, usedAt: now.toISOString() };
   writeNonceStore(nonces);
 
-  const execution = loadCloreExecutionConfig();
+  const configuredExecution = loadCloreExecutionConfig();
+  const execution = manualRealGpuRentalEnabled() ? { ...configuredExecution, enabled: true } : configuredExecution;
   if (!execution.enabled) {
     return {
       order_created: false,
@@ -400,15 +437,16 @@ export async function confirmOrderPlan(input: {
   }
 
   const { createCloreOrder, prepareCreateOrderFromLive } = await import("../../../scripts/clore/order-execution");
+  const cloreConfig = stored.batchId ? manualBatchCloreConfig() : loadCloreConfig();
   const prepared = await prepareCreateOrderFromLive({
-    config: loadCloreConfig(),
+    config: cloreConfig,
     execution,
     serverId: input.serverId,
     maxPriceUsdPerHour: input.maxPriceUsdPerHour,
     queuedJobCount: input.queuedJobCount,
   });
   const result = await createCloreOrder({
-    config: loadCloreConfig(),
+    config: cloreConfig,
     execution,
     candidate: prepared.candidate,
     requestBody: prepared.requestBody,
@@ -419,6 +457,7 @@ export async function confirmOrderPlan(input: {
       runtimeSessionId: `clore-order-${result.order_id}`,
       gpuClass: stored.gpuClass,
     });
+    if (stored.batchId) updateManualGpuBatch({ status: "provisioning", providerOrderId: result.order_id });
   }
   return result;
 }
