@@ -10,13 +10,13 @@ import {
   requestPoolModelStop,
   requestPoolGpuCancellation,
 } from "./task-pool";
-import { idleCancellationDue, type GenerationFamily, type RequiredGpuClass } from "./gpu-execution-state";
+import { idleCancellationDue, type DeployedModelKey, type GenerationFamily, type RequiredGpuClass } from "./gpu-execution-state";
 
 export type SafeGpuSessionDriver = {
   stopClaiming(family: GenerationFamily): Promise<void>;
   interruptGeneration(input: { family: GenerationFamily; taskIds: string[] }): Promise<void>;
   unloadModelFamily(family: GenerationFamily): Promise<void>;
-  ensureModelFamilyReady(input: { family: GenerationFamily; gpuClass: RequiredGpuClass; providerOrderId: string }): Promise<void>;
+  ensureModelFamilyReady(input: { family: GenerationFamily; modelKey?: DeployedModelKey; gpuClass: RequiredGpuClass; providerOrderId: string }): Promise<void>;
   safeCancelSession(input: { providerOrderId: string; hadActiveGeneration: boolean }): Promise<void>;
 };
 
@@ -40,6 +40,7 @@ export class GpuSessionController {
     }
     await this.driver.ensureModelFamilyReady({
       family: active.generationFamily,
+      modelKey: active.modelKey,
       gpuClass: active.gpuClass,
       providerOrderId: state.execution.providerOrderId!,
     });

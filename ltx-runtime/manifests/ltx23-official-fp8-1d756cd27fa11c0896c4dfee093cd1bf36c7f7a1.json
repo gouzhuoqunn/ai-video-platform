@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "modelKey": "ltx23_official_fp8_compatibility",
+  "modelRole": "official_ltx_compatibility_baseline",
+  "sourceRepository": "Lightricks/LTX-2.3-fp8",
+  "immutableRevision": "1d756cd27fa11c0896c4dfee093cd1bf36c7f7a1",
+  "files": [
+    {
+      "path": "ltx-2.3-22b-dev-fp8.safetensors",
+      "sizeBytes": 29145431166,
+      "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450",
+      "required": true
+    }
+  ],
+  "requiredAuxiliaryFiles": [],
+  "optionalFiles": [],
+  "licenseReference": "ltx-2-community-license-agreement",
+  "runtimeCompatibilityVersion": "official-ltx-pipelines-pending-lock",
+  "expectedTotalDownloadBytes": 29145431166,
+  "minimumFreeDiskBytes": 68719476736,
+  "minimumSystemRamBytes": 34359738368,
+  "recommendedSystemRamBytes": 68719476736,
+  "minimumVramBytes": 25769803776,
+  "supportedGpuClasses": ["rtx4090", "rtx5090"],
+  "capabilities": { "t2v": true, "i2vFirstFrame": true, "nativeAudio": true },
+  "workflowAdapterId": "official-ltx-pipelines-ti2vid-two-stage-pending-lock",
+  "executableStatus": "compatibility_baseline",
+  "blockerReason": "官方 ltx-pipelines、完整辅助文件及可复现 Runtime image 尚未共同锁定；本清单仅是兼容性基线。"
+}

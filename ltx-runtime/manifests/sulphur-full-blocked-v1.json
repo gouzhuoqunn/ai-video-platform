@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "modelKey": "sulphur2_full_fp8_blocked",
+  "modelRole": "sulphur_full",
+  "sourceRepository": "SulphurAI/Sulphur-2-base",
+  "immutableRevision": "608bf89",
+  "files": [],
+  "requiredAuxiliaryFiles": [],
+  "optionalFiles": ["distill_loras/"],
+  "licenseReference": "unverified",
+  "runtimeCompatibilityVersion": "unverified",
+  "expectedTotalDownloadBytes": 0,
+  "minimumFreeDiskBytes": 214748364800,
+  "minimumSystemRamBytes": 34359738368,
+  "recommendedSystemRamBytes": 68719476736,
+  "minimumVramBytes": 25769803776,
+  "supportedGpuClasses": ["rtx4090", "rtx5090"],
+  "capabilities": { "t2v": false, "i2vFirstFrame": false, "nativeAudio": false },
+  "workflowAdapterId": "unresolved",
+  "executableStatus": "blocked",
+  "blockerReason": "尚未同时证明不可变完整工件、许可证、原生音视频工作流、辅助依赖和兼容 Runtime；严禁与蒸馏 LoRA 同时加载。",
+  "alternatives": { "distillationLoraModelKey": "sulphur2_distillation_lora_blocked" }
+}
