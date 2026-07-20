@@ -164,11 +164,13 @@ type PoolSummary = {
     completedCount: number;
     failedCount: number;
     currentTaskId: string | null;
+    providerOrderId: string | null;
     status: string;
     gpuClass: RequiredGpuClass;
     modelKey: string;
     authorizationLimits: { maximumEffectiveHourlyUsd: number; maximumSessionSpendUsd: number };
-    startIntent?: { status: string; selectedServerId?: string | null; selectedEffectiveHourlyUsd?: number | null; lastError: string | null } | null;
+    startIntent?: { status: string; selectedServerId?: string | null; selectedEffectiveHourlyUsd?: number | null; selectedHost?: Record<string, unknown> | null; lastError: string | null } | null;
+    runnerProgress?: { stage: string; updatedAt: string; message: string; error: string | null; taskNumber: number | null } | null;
   } | null;
   execution: GpuExecutionState;
   readiness: {
@@ -318,6 +320,7 @@ export function LocalCreationStudio() {
   const [filter, setFilter] = useState<"all" | VideoJobStatus>("all");
   const [minPrice, setMinPrice] = useState("0");
   const [maxPrice, setMaxPrice] = useState(String(LOCAL_LAB_GPU_PRICE_FILTER_MAX_USD_PER_HOUR));
+  const [manualMaxHourlyPrice, setManualMaxHourlyPrice] = useState(() => typeof window === "undefined" ? "0.70" : window.localStorage.getItem("manual_silent_4090_max_hourly_usd") ?? "0.70");
   const [mode, setMode] = useState<StudioMode>("video");
   const [videoSubmode, setVideoSubmode] = useState<"video" | "long_video">("video");
   const [imageResults, setImageResults] = useState<ImageResult[]>([]);
@@ -339,6 +342,7 @@ export function LocalCreationStudio() {
   const [clockNow, setClockNow] = useState(0);
   const [isOpeningFolder, setIsOpeningFolder] = useState(false);
   const automaticCancelRequested = useRef(false);
+  useEffect(() => { window.localStorage.setItem("manual_silent_4090_max_hourly_usd", manualMaxHourlyPrice); }, [manualMaxHourlyPrice]);
 
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
   const localResultForSelected = selectedJob ? localResults.find((result) => result.jobId === selectedJob.id) : null;
@@ -486,6 +490,10 @@ export function LocalCreationStudio() {
   }, [candidates, priceGate.max, priceGate.min, priceGate.valid, selectedExecutionGpuClass]);
 
   const selectedCandidate = selectedServerId ? filteredCandidates.find((candidate) => candidate.server_id === selectedServerId) ?? null : null;
+  const activeManualBatch = pool?.manualBatch ?? null;
+  const activeHost = activeManualBatch?.startIntent?.selectedHost ?? null;
+  const runnerProgress = activeManualBatch?.runnerProgress ?? null;
+  const runnerStageLabels: Record<string, string> = { search_candidates: "搜索候选", creating_order: "创建订单", waiting_deployment: "等待部署", getting_ssh: "获取 SSH", checking_host: "检查主机", pulling_runtime: "拉取运行环境", restoring_wan: "恢复 Wan", starting_worker: "启动 Worker", generating: "生成", uploading: "回传", idle_countdown: "空闲倒计时", terminating: "退租", completed: "已完成", error: "失败" };
 
   const refreshJobs = useCallback(async (currentUser: User | null = user) => {
     if (!supabase || !currentUser) {
@@ -901,6 +909,7 @@ export function LocalCreationStudio() {
           generationType: ordinaryMode,
           gpuClass: selectedExecutionGpuClass,
           modelKey: ordinaryMode === "video" ? selectedVideoModelKey ?? "video_wan_silent" : "image_flux",
+          maxEffectiveHourlyUsd: Number(manualMaxHourlyPrice),
         }),
       });
       const payload = await response.json().catch(() => ({})) as { error?: string; pool?: PoolSummary; manual_authorization_required?: boolean };
@@ -1368,11 +1377,12 @@ export function LocalCreationStudio() {
             <div className="mt-2 rounded border border-stone-200 bg-[#faf8f4] p-2 text-xs">
               {selectedExecutionGpuClass ? <><strong>已选择 {selectedExecutionGpuClass === "rtx4090" ? "RTX 4090" : "RTX 5090"} 执行队列</strong><p className="mt-1">队列任务 {rentalEligibility.totalCount} · 已确认 {rentalEligibility.confirmedCount} · 可执行 {rentalEligibility.executableCount}{ordinaryMode === "video" ? ` · 等待本地声音 ${rentalEligibility.audioWaitingCount}` : ""}；另一颜色保持排队。</p></> : <><strong>尚未选择执行队列</strong><p className="mt-1 text-stone-500">先选择蓝色或绿色队列，才会显示租用或继续按钮。</p></>}
             </div>
+            {selectedManualSilent4090 ? <label className="mt-2 block text-sm font-semibold">本次最高可接受小时价<input aria-label="本次最高可接受小时价" className="mt-1 w-full rounded-md border border-stone-200 bg-white px-2 py-2 font-normal" min="0.01" max="5" onChange={(event) => setManualMaxHourlyPrice(event.target.value)} step="0.01" type="number" value={manualMaxHourlyPrice} /><span className="mt-1 block text-xs font-normal text-stone-500">将冻结到本次批次，并用于真实筛选与下单。</span></label> : null}
             {isStartingExecution || execution.activity === "searching" ? <div aria-live="polite" className="mt-2 flex items-center justify-center gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900" data-testid="gpu-searching-state"><span className="h-4 w-4 animate-spin rounded-full border-2 border-amber-800 border-t-transparent" />正在搜寻符合价格要求的显卡</div> : selectedExecutionGpuClass ? <button className="mt-2 w-full rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-300" data-testid="execution-start-action" disabled={manualBatchAction?.disabled ?? true} onClick={() => void requestExecutionStart()} title={manualBatchAction?.reason ?? undefined} type="button">{manualBatchAction?.kind === "rent" && selectedManualSilent4090 ? `开始 ${rentalEligibility.executableCount} 个任务并租用显卡` : manualBatchAction?.label ?? "开始任务并租用显卡"}</button> : null}
             {pool?.manualBatch ? <div className="mt-2 rounded bg-sky-50 px-2 py-2 text-xs text-sky-950" data-testid="manual-gpu-batch-progress"><p className="font-semibold">本次批次：{pool.manualBatch.taskCount} 个任务</p><p>已完成：{pool.manualBatch.completedCount} / {pool.manualBatch.taskCount} · 失败：{pool.manualBatch.failedCount}</p><p>显卡：{pool.manualBatch.gpuClass === "rtx4090" ? "RTX 4090" : "RTX 5090"} · 最高 ${pool.manualBatch.authorizationLimits.maximumEffectiveHourlyUsd.toFixed(2)}/小时</p>{pool.manualBatch.startIntent?.selectedServerId ? <p>已筛选主机：{pool.manualBatch.startIntent.selectedServerId}{pool.manualBatch.startIntent.selectedEffectiveHourlyUsd != null ? ` · 实际 $${pool.manualBatch.startIntent.selectedEffectiveHourlyUsd.toFixed(2)}/小时` : ""}</p> : null}{pool.manualBatch.startIntent?.lastError ? <p className="mt-1 text-rose-800">租用状态：{pool.manualBatch.startIntent.lastError}</p> : null}</div> : null}
             {execution.activity === "searching" && !rentalPlan ? <button className="mt-2 w-full rounded-md border border-stone-300 bg-white px-3 py-2 text-xs font-semibold" onClick={() => void abortRentalSearch()} type="button">取消本次寻卡</button> : null}
             {selectedExecutionGpuClass && manualBatchAction?.reason ? <p className="mt-2 rounded bg-amber-50 px-2 py-2 text-xs text-amber-900">{manualBatchAction.reason}</p> : null}
-            <p className="mt-2 text-xs text-stone-600">寻机状态：{activeAutorent ? autorentStatusLabels[activeAutorent.status] : "未启动"} · 队列：{simplifiedSessionStatus}</p>
+            {!activeManualBatch ? <p className="mt-2 text-xs text-stone-600">寻机状态：{activeAutorent ? autorentStatusLabels[activeAutorent.status] : "未启动"} · 队列：{simplifiedSessionStatus}</p> : null}
             {execution.rentedGpuClass ? <div className="mt-3 grid grid-cols-3 gap-2" data-testid="rented-gpu-controls">
               <button className="rounded-md border border-amber-300 bg-white px-2 py-2 text-xs font-bold text-amber-900 disabled:opacity-50" disabled={execution.deployedModel === "none" || execution.activity === "canceling"} onClick={() => setPendingGpuAction("stop_model")} type="button">终止当前模型但不退租</button>
               <button className="rounded-md border border-amber-300 bg-amber-50 px-2 py-2 text-xs font-bold text-amber-900 disabled:opacity-50" disabled={!activeGenerationFamily || execution.activity !== "running"} onClick={() => setPendingGpuAction("stop")} type="button">终止{activeGenerationFamily === "video" ? "视频" : "图片"}生成，但不退租GPU</button>
@@ -1426,6 +1436,14 @@ export function LocalCreationStudio() {
             </div>
             <p className="mt-3 text-xs text-stone-500">当前选中：{selectedCandidate ? `${formatMoney(selectedCandidate.effective_usd_per_hour)}/h` : "未选择"}</p>
           </section>
+          {activeManualBatch ? <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm" data-testid="gpu-runner-process-panel">
+            <h2 className="text-lg font-bold">运行进程</h2>
+            <p className="mt-2 text-sm font-semibold">{runnerStageLabels[runnerProgress?.stage ?? "waiting_deployment"] ?? "等待部署"} · {runnerProgress?.message ?? "等待部署"}</p>
+            <p className="mt-1 text-xs text-stone-500">最后更新：{runnerProgress?.updatedAt ? new Date(runnerProgress.updatedAt).toLocaleString() : "尚未收到 Runner 更新"}</p>
+            <p className="mt-2 rounded bg-sky-50 px-2 py-2 text-xs text-sky-950">RTX 4090 · ${activeManualBatch.startIntent?.selectedEffectiveHourlyUsd?.toFixed(2) ?? activeManualBatch.authorizationLimits.maximumEffectiveHourlyUsd.toFixed(2)}/小时 · 主机 {activeManualBatch.startIntent?.selectedServerId ?? "等待筛选"} · {runnerStageLabels[runnerProgress?.stage ?? "waiting_deployment"] ?? "等待部署"}</p>
+            {runnerProgress?.error || activeManualBatch.startIntent?.lastError ? <div className="mt-2 rounded bg-rose-50 p-2 text-xs text-rose-900"><p>失败阶段：{runnerStageLabels[runnerProgress?.stage ?? "error"] ?? "失败"}</p><p className="mt-1 break-words">{runnerProgress?.error ?? activeManualBatch.startIntent?.lastError}</p><p className="mt-1">时间：{runnerProgress?.updatedAt ? new Date(runnerProgress.updatedAt).toLocaleString() : "—"}</p><button className="mt-2 rounded border border-rose-300 bg-white px-2 py-1 font-semibold" onClick={() => void navigator.clipboard.writeText(`${runnerProgress?.stage ?? "error"}: ${runnerProgress?.error ?? activeManualBatch.startIntent?.lastError ?? ""}`)} type="button">复制错误</button></div> : null}
+            <details className="mt-2 rounded border border-stone-200 bg-[#faf8f4] p-2 text-xs"><summary className="cursor-pointer font-semibold">查看详细配置</summary><dl className="mt-2 grid grid-cols-2 gap-x-2 gap-y-1"><dt>GPU</dt><dd>{String(activeHost?.gpu ?? "RTX 4090")}</dd><dt>显存</dt><dd>{String(activeHost?.gpu_memory_gb ?? "—")}</dd><dt>CPU / RAM</dt><dd>{String(activeHost?.cpu_cores ?? "—")} / {String(activeHost?.ram_gb ?? "—")}</dd><dt>磁盘</dt><dd>{String(activeHost?.disk_gb ?? "—")}</dd><dt>网络</dt><dd>↓{String(activeHost?.download_mbps ?? "—")} / ↑{String(activeHost?.upload_mbps ?? "—")}</dd><dt>位置</dt><dd>{String(activeHost?.country ?? "—")}</dd><dt>主机 ID</dt><dd>{activeManualBatch.startIntent?.selectedServerId ?? "—"}</dd><dt>订单 ID</dt><dd>{activeManualBatch.providerOrderId ?? "—"}</dd><dt>SSH / 部署</dt><dd>{runnerProgress?.stage === "getting_ssh" ? "获取中" : runnerProgress?.stage === "waiting_deployment" ? "等待部署" : "已进入 Runner"}</dd></dl></details>
+          </section> : null}
 
           <section className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
             <h2 className="text-lg font-bold">手动租用控制</h2>

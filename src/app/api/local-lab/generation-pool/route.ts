@@ -57,6 +57,7 @@ type Payload = {
   modelKey?: "image_flux" | "video_wan_silent" | "video_ltx_native_audio";
   gpuPreference?: string[];
   taskIds?: string[];
+  maxEffectiveHourlyUsd?: number;
   tasks?: Array<Partial<GenerationTask> & Pick<GenerationTask, "id" | "generationType" | "prompt" | "modelProfile">>;
 };
 
@@ -198,7 +199,7 @@ export async function POST(request: NextRequest) {
     const readiness = manualRealGpuReadiness();
     if (!readiness.ready) return NextResponse.json({ error: readiness.message, readiness, provider_mutations: 0, create_order_called: false }, { status: 423 });
     try {
-      createManualSilent4090Batch();
+      createManualSilent4090Batch(Number(payload.maxEffectiveHourlyUsd));
       const authorized = authorizeManualSilent4090Batch();
       // The request ends after durable authorization.  The local loopback runner
       // owns candidate lookup and is the only code path allowed to mutate Clore.

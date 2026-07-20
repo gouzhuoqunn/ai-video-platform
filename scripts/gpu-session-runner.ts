@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { getLocalLabCloreCandidates } from "../src/lib/local-lab/clore-console";
-import { GENERATION_POOL_PATH, readGenerationPool, updateManualGpuBatch, type ManualGpuExecutionBatch } from "../src/lib/generation/task-pool";
+import { GENERATION_POOL_PATH, readGenerationPool, updateManualGpuBatch, type ManualGpuExecutionBatch, type ManualGpuRunnerStage } from "../src/lib/generation/task-pool";
 import { runManualSilent4090Batch } from "../src/lib/generation/manual-gpu-batch-runner";
 import { getGpuProvider } from "./gpu-providers";
 import type { GpuTarget } from "./gpu-providers/types";
@@ -28,13 +28,20 @@ function updateIntent(batch: ManualGpuExecutionBatch, patch: Partial<NonNullable
   if (!batch.startIntent) return;
   updateManualGpuBatch({ status: batch.status, stateRevision: batch.stateRevision + 1, startIntent: { ...batch.startIntent, ...patch, stateRevision: batch.stateRevision + 1 } }, poolPath);
 }
+function report(batchId: string, stage: ManualGpuRunnerStage, message: string, poolPath = GENERATION_POOL_PATH, error: string | null = null, taskNumber: number | null = null) {
+  const batch = readGenerationPool(poolPath).scheduler.manualBatch;
+  if (!batch || batch.id !== batchId) return;
+  updateManualGpuBatch({ runnerProgress: { stage, message, error, taskNumber, updatedAt: new Date().toISOString() } }, poolPath);
+  writeStatus({ state: error ? "error" : stage === "search_candidates" ? "searching" : stage === "creating_order" ? "candidate_selected" : "order_created", batchId, message });
+}
 function recordRunnerError(error: unknown, poolPath = GENERATION_POOL_PATH) {
   const batch = readGenerationPool(poolPath).scheduler.manualBatch;
   const message = error instanceof Error ? error.message.slice(0, 240) : "runner_failure";
   if (batch?.startIntent && !["completed", "canceled", "failed"].includes(batch.status)) {
     updateIntent(batch, { lastError: message }, poolPath);
   }
-  writeStatus({ state: "error", batchId: batch?.id ?? null, message });
+  if (batch) report(batch.id, "error", message, poolPath, message);
+  else writeStatus({ state: "error", batchId: null, message });
 }
 function mutationsEnabled() {
   return process.env.LOCAL_LAB_ENABLED === "true"
@@ -43,28 +50,36 @@ function mutationsEnabled() {
     && process.env.CLORE_ORDER_EXECUTION_ENABLED === "true";
 }
 
-export async function executeFrozenWanBatch(input: { target: GpuTarget; poolPath?: string; transport?: WanSession }) {
+export async function executeFrozenWanBatch(input: { target: GpuTarget; poolPath?: string; transport?: WanSession; onStage?: (stage: ManualGpuRunnerStage, message: string, taskNumber?: number | null) => void }) {
   const poolPath = input.poolPath ?? GENERATION_POOL_PATH;
   const transport = input.transport ?? createRealWanTransport(input.target);
   return runManualSilent4090Batch({
-    async loadWan22() { await transport.ensureRestored(); },
+    async loadWan22() { input.onStage?.("restoring_wan", "恢复 Wan"); await transport.ensureRestored(); input.onStage?.("starting_worker", "启动 Worker"); },
     async runSilentShortVideo(task) {
+      const batch = readGenerationPool(poolPath).scheduler.manualBatch;
+      input.onStage?.("generating", `生成 ${Math.min((batch?.completedCount ?? 0) + (batch?.failedCount ?? 0) + 1, batch?.taskCount ?? 1)}/${batch?.taskCount ?? 1}`, (batch?.completedCount ?? 0) + (batch?.failedCount ?? 0) + 1);
       const result = await transport.run({ id: task.id, prompt: task.prompt, seed: task.seed ?? undefined });
+      input.onStage?.("uploading", "回传结果");
       return { outputMetadata: { outputPath: result.generated.outputPath, thumbnailPath: result.generated.thumbnailPath } };
     },
-    async unloadWan22() { await transport.stop(); },
+    async unloadWan22() { input.onStage?.("idle_countdown", "空闲倒计时"); await transport.stop(); },
   }, poolPath);
 }
 
 async function resumeCreatedWanBatch(input: { batch: ManualGpuExecutionBatch; orderId: string; poolPath: string }) {
-  writeStatus({ state: "order_created", batchId: input.batch.id, message: "订单已创建，正在恢复 GPU 会话" });
+  report(input.batch.id, "waiting_deployment", "等待部署", input.poolPath);
   const provider = getGpuProvider("clore");
   const session = await provider.recoverExistingSession(input.orderId);
   if (!session) throw new Error("runner_created_order_not_recoverable");
+  report(input.batch.id, "getting_ssh", "获取 SSH", input.poolPath);
   const target = await provider.waitForSsh(session, 10 * 60_000);
   try {
-    const completed = await executeFrozenWanBatch({ target, poolPath: input.poolPath });
+    report(input.batch.id, "checking_host", "检查主机", input.poolPath);
+    report(input.batch.id, "pulling_runtime", "拉取运行环境", input.poolPath);
+    const completed = await executeFrozenWanBatch({ target, poolPath: input.poolPath, onStage: (stage, message, taskNumber) => report(input.batch.id, stage, message, input.poolPath, null, taskNumber ?? null) });
+    report(input.batch.id, "terminating", "退租", input.poolPath);
     await provider.terminateSession(session);
+    report(input.batch.id, "completed", "批次已完成", input.poolPath);
     return { action: "batch_completed" as const, orderId: input.orderId, completed };
   } catch (error) {
     await provider.terminateSession(session).catch(() => undefined);
@@ -73,8 +88,9 @@ async function resumeCreatedWanBatch(input: { batch: ManualGpuExecutionBatch; or
 }
 
 /** One idempotent runner tick. It is intentionally the only non-browser mutation owner. */
-export async function runGpuSessionRunnerTick(readCandidates: CandidateReader = () => getLocalLabCloreCandidates("manual_silent_4090"), poolPath = GENERATION_POOL_PATH) {
+export async function runGpuSessionRunnerTick(readCandidates: CandidateReader | undefined = undefined, poolPath = GENERATION_POOL_PATH) {
   const batch = readGenerationPool(poolPath).scheduler.manualBatch;
+  const candidateReader = readCandidates ?? (() => getLocalLabCloreCandidates("manual_silent_4090", batch?.startIntent?.maxEffectiveHourlyUsd ?? 0.7));
   if (!batch?.startIntent || ["completed", "canceled", "failed"].includes(batch.status)) {
     writeStatus({ state: "idle", batchId: batch?.id ?? null, message: "没有待处理的 RTX 4090 批次" });
     return { action: "idle" as const };
@@ -89,8 +105,8 @@ export async function runGpuSessionRunnerTick(readCandidates: CandidateReader = 
   if (batch.startIntent.status === "requested" || batch.startIntent.status === "runner_claimed") {
     updateIntent(batch, { status: "runner_claimed", lastError: null }, poolPath);
     updateManualGpuBatch({ status: "searching" }, poolPath);
-    writeStatus({ state: "searching", batchId: batch.id, message: "正在搜寻符合价格要求的显卡" });
-    const market = await readCandidates();
+    report(batch.id, "search_candidates", "搜索候选", poolPath);
+    const market = await candidateReader();
     const candidate = (("selected" in market ? market.selected : null) ?? null) as Candidate | null;
     const effective = candidate?.effective_usd_per_hour ?? null;
     if (!candidate || !candidate.server_id || effective === null || effective > batch.startIntent.maxEffectiveHourlyUsd || !/rtx\s*4090/i.test(candidate.gpu ?? "")) {
@@ -105,6 +121,7 @@ export async function runGpuSessionRunnerTick(readCandidates: CandidateReader = 
       status: "candidate_selected",
       selectedServerId: candidate.server_id,
       selectedEffectiveHourlyUsd: effective,
+      selectedHost: candidate as Record<string, unknown>,
       lastError: null,
     }, poolPath);
     updateManualGpuBatch({ status: "order_pending" }, poolPath);
@@ -119,7 +136,8 @@ export async function runGpuSessionRunnerTick(readCandidates: CandidateReader = 
     // This branch is intentionally unreachable in tests unless all server-only
     // execution flags are set. The provider adapter performs its own live
     // candidate, wallet, active-order, lock, and ambiguous-create reconciliation.
-    const market = await readCandidates();
+    report(batch.id, "creating_order", "创建订单", poolPath);
+    const market = await candidateReader();
     const candidate = ("selected" in market ? market.selected : null) as Candidate | null;
     if (!candidate?.server_id || !candidate.base_usd_per_hour) throw new Error("runner_candidate_lost_before_create");
     const latestCandidateState = readGenerationPool(poolPath).scheduler.manualBatch;
@@ -127,6 +145,7 @@ export async function runGpuSessionRunnerTick(readCandidates: CandidateReader = 
       updateIntent(latestCandidateState, {
         selectedServerId: candidate.server_id,
         selectedEffectiveHourlyUsd: candidate.effective_usd_per_hour ?? null,
+        selectedHost: candidate as Record<string, unknown>,
         lastError: null,
       }, poolPath);
       updateManualGpuBatch({ status: "order_pending" }, poolPath);
@@ -134,7 +153,7 @@ export async function runGpuSessionRunnerTick(readCandidates: CandidateReader = 
     const { loadCloreExecutionConfig } = await import("./clore/execution-config");
     const { createCloreOrder, prepareCreateOrderFromLive } = await import("./clore/order-execution");
     const execution = loadCloreExecutionConfig();
-    const config = { ...(await import("./clore/config")).loadCloreConfig(), targetGpu: "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: 24, maxGpuPricePerHour: 0.7 };
+    const config = { ...(await import("./clore/config")).loadCloreConfig(), targetGpu: "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: 24, maxGpuPricePerHour: batch.startIntent.maxEffectiveHourlyUsd / 1.05 };
     const prepared = await prepareCreateOrderFromLive({ config, execution, serverId: candidate.server_id, maxPriceUsdPerHour: candidate.base_usd_per_hour, queuedJobCount: batch.taskCount });
     const created = await createCloreOrder({ config, execution, candidate: prepared.candidate, requestBody: prepared.requestBody });
     if (!created.order_created || !created.order_id) throw new Error("runner_order_not_created");

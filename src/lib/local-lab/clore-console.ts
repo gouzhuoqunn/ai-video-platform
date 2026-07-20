@@ -92,24 +92,24 @@ function writeNonceStore(nonces: StoredNonce[]) {
   writeJsonFile(NONCE_STORE_PATH, active.slice(-50));
 }
 
-function manualBatchCloreConfig(): CloreConfig {
+function manualBatchCloreConfig(maxEffectiveHourlyUsd = 0.7): CloreConfig {
   const config = loadCloreConfig();
   return {
     ...config,
     targetGpu: "NVIDIA GeForce RTX 4090",
     minGpuVramGb: 24,
-    maxGpuPricePerHour: 0.7,
+    maxGpuPricePerHour: maxEffectiveHourlyUsd / (1 + CLORE_RENTER_FEE_RATE),
   };
 }
 
-function safeCandidateList(rawServers: RawCloreServer[], availableUsdBalance: number | null, target: "default" | "manual_silent_4090" = "default") {
-  const config = target === "manual_silent_4090" ? manualBatchCloreConfig() : loadCloreConfig();
+function safeCandidateList(rawServers: RawCloreServer[], availableUsdBalance: number | null, target: "default" | "manual_silent_4090" = "default", maxEffectiveHourlyUsd = 0.7) {
+  const config = target === "manual_silent_4090" ? manualBatchCloreConfig(maxEffectiveHourlyUsd) : loadCloreConfig();
   const displayConfig = {
     ...config,
     // The ordinary sidebar can display up to $5/hour, but the paid manual
     // batch endpoint must already reject anything above its effective $0.70 cap.
     maxGpuPricePerHour: target === "manual_silent_4090"
-      ? 0.7 / (1 + CLORE_RENTER_FEE_RATE)
+      ? maxEffectiveHourlyUsd / (1 + CLORE_RENTER_FEE_RATE)
       : manualCandidateBasePriceCeiling(CLORE_RENTER_FEE_RATE),
   };
   const evaluated = evaluateMarketplace(rawServers, displayConfig);
@@ -130,7 +130,7 @@ function safeCandidateList(rawServers: RawCloreServer[], availableUsdBalance: nu
     filters: {
       gpu: `exact ${targetGpuLabel}`,
       order_type: "on-demand",
-      max_usd_per_hour: target === "manual_silent_4090" ? 0.7 : LOCAL_LAB_GPU_PRICE_FILTER_MAX_USD_PER_HOUR,
+      max_usd_per_hour: target === "manual_silent_4090" ? maxEffectiveHourlyUsd : LOCAL_LAB_GPU_PRICE_FILTER_MAX_USD_PER_HOUR,
       price_basis: "effective hourly price including 5% renter fee",
       assumed_minimum_rental_hours: config.assumedMinimumRentalHours,
       min_ram_gb: config.minRamGb,
@@ -148,13 +148,13 @@ function safeCandidateList(rawServers: RawCloreServer[], availableUsdBalance: nu
   };
 }
 
-export async function getLocalLabCloreCandidates(target: "default" | "manual_silent_4090" = "default") {
-  const config = target === "manual_silent_4090" ? manualBatchCloreConfig() : loadCloreConfig();
+export async function getLocalLabCloreCandidates(target: "default" | "manual_silent_4090" = "default", maxEffectiveHourlyUsd = 0.7) {
+  const config = target === "manual_silent_4090" ? manualBatchCloreConfig(maxEffectiveHourlyUsd) : loadCloreConfig();
 
   if (config.apiKey) {
     const wallet = await readWalletSummary(config);
     const rawServers = await readLiveMarketplace(config);
-    const evaluated = safeCandidateList(rawServers, wallet.availableUsdBalance, target);
+    const evaluated = safeCandidateList(rawServers, wallet.availableUsdBalance, target, maxEffectiveHourlyUsd);
 
     return {
       mode: "live-marketplace-read-only",
@@ -187,7 +187,7 @@ export async function getLocalLabCloreCandidates(target: "default" | "manual_sil
     source: "mock fixture",
     wallet: { available_usd_balance: null, source: "mock mode" },
     last_refreshed_at: new Date().toISOString(),
-    ...safeCandidateList(rawServers, null, target),
+    ...safeCandidateList(rawServers, null, target, maxEffectiveHourlyUsd),
     raw_response_included: false,
     order_created: false,
   };

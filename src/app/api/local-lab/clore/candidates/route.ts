@@ -8,6 +8,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const manualSilent4090 = request.nextUrl.searchParams.get("queue") === "manual_silent_4090";
+    const maxEffectiveHourlyUsd = Number(request.nextUrl.searchParams.get("maxEffectiveHourlyUsd") ?? "0.7");
     if (process.env.NODE_ENV !== "production" && request.nextUrl.searchParams.get("mock") === "1") {
       const mockGpu = manualSilent4090 ? "NVIDIA GeForce RTX 4090" : "NVIDIA GeForce RTX 5090";
       return NextResponse.json({
@@ -47,7 +48,7 @@ export async function GET(request: NextRequest) {
         create_order_called: false,
       });
     }
-    return NextResponse.json(await getLocalLabCloreCandidates(manualSilent4090 ? "manual_silent_4090" : "default"));
+    return NextResponse.json(await getLocalLabCloreCandidates(manualSilent4090 ? "manual_silent_4090" : "default", maxEffectiveHourlyUsd));
   } catch {
     return NextResponse.json({ error: "Clore candidates are temporarily unavailable. No order was created." }, { status: 500 });
   }

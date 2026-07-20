@@ -151,6 +151,8 @@ export type PersistedProductionSession = {
 };
 
 export type ManualGpuExecutionBatchStatus = "searching" | "awaiting_confirmation" | "order_pending" | "provisioning" | "running" | "paused" | "completed" | "canceled" | "failed" | "no_candidate";
+export type ManualGpuRunnerStage = "search_candidates" | "creating_order" | "waiting_deployment" | "getting_ssh" | "checking_host" | "pulling_runtime" | "restoring_wan" | "starting_worker" | "generating" | "uploading" | "idle_countdown" | "terminating" | "completed" | "error";
+export type ManualGpuRunnerProgress = { stage: ManualGpuRunnerStage; updatedAt: string; message: string; error: string | null; taskNumber: number | null };
 export type ManualGpuStartIntent = {
   id: string;
   idempotencyKey: string;
@@ -167,6 +169,7 @@ export type ManualGpuStartIntent = {
   idleTimeoutSeconds: number;
   selectedServerId?: string | null;
   selectedEffectiveHourlyUsd?: number | null;
+  selectedHost?: Record<string, unknown> | null;
   lastError: string | null;
 };
 export type ManualGpuExecutionBatch = {
@@ -187,6 +190,7 @@ export type ManualGpuExecutionBatch = {
   cancellationState: "not_requested" | "requested" | "confirmed";
   recoveryState: "clean" | "reconcile_required";
   startIntent: ManualGpuStartIntent | null;
+  runnerProgress: ManualGpuRunnerProgress | null;
   stateRevision: number;
 };
 
@@ -597,7 +601,9 @@ export function isManualSilent4090BatchTask(task: GenerationTask) {
 }
 
 /** Freezes the only currently supported paid path before any candidate lookup. */
-export function createManualSilent4090Batch(filePath = GENERATION_POOL_PATH) {
+export function createManualSilent4090Batch(maxOrFilePath: number | string = 0.7, requestedFilePath = GENERATION_POOL_PATH) {
+  const maxEffectiveHourlyUsd = typeof maxOrFilePath === "number" ? maxOrFilePath : 0.7;
+  const filePath = typeof maxOrFilePath === "string" ? maxOrFilePath : requestedFilePath;
   const state = readGenerationPool(filePath);
   if (state.scheduler.manualBatch && ACTIVE_MANUAL_BATCH_STATUSES.has(state.scheduler.manualBatch.status)) throw new Error("已有正在进行的手动 GPU 批次，不能重复创建。");
   if (state.execution.rentedGpuClass || state.execution.providerOrderId || state.execution.operationId) throw new Error("当前 GPU 会话尚未安全结束，不能创建新批次。");
@@ -605,6 +611,7 @@ export function createManualSilent4090Batch(filePath = GENERATION_POOL_PATH) {
     .filter(isManualSilent4090BatchTask)
     .sort((left, right) => Date.parse(left.confirmedAt ?? left.createdAt) - Date.parse(right.confirmedAt ?? right.createdAt) || left.id.localeCompare(right.id));
   if (!tasks.length) throw new Error("没有可执行的无声 RTX 4090 短视频任务。");
+  if (!Number.isFinite(maxEffectiveHourlyUsd) || maxEffectiveHourlyUsd <= 0 || maxEffectiveHourlyUsd > 5) throw new Error("manual_silent_4090_max_hourly_price_invalid");
   const id = `manual-silent-rtx4090-${randomUUID()}`;
   const batch: ManualGpuExecutionBatch = {
     id,
@@ -615,7 +622,7 @@ export function createManualSilent4090Batch(filePath = GENERATION_POOL_PATH) {
     taskIds: tasks.map((task) => task.id),
     taskCount: tasks.length,
     createdAt: now(),
-    authorizationLimits: { maximumEffectiveHourlyUsd: 0.7, maximumSessionSpendUsd: 4.5, walletReserveUsd: 1, sessionLimitMinutes: 380, drainingAtMinutes: 350 },
+    authorizationLimits: { maximumEffectiveHourlyUsd: maxEffectiveHourlyUsd, maximumSessionSpendUsd: 4.5, walletReserveUsd: 1, sessionLimitMinutes: 380, drainingAtMinutes: 350 },
     status: "searching",
     completedCount: 0,
     failedCount: 0,
@@ -624,6 +631,7 @@ export function createManualSilent4090Batch(filePath = GENERATION_POOL_PATH) {
     cancellationState: "not_requested",
     recoveryState: "clean",
     startIntent: null,
+    runnerProgress: null,
     stateRevision: 1,
   };
   const ids = new Set(batch.taskIds);
@@ -632,7 +640,7 @@ export function createManualSilent4090Batch(filePath = GENERATION_POOL_PATH) {
   return { state: writeGenerationPool(state, filePath), batch };
 }
 
-export function updateManualGpuBatch(input: Partial<Pick<ManualGpuExecutionBatch, "status" | "currentTaskId" | "providerOrderId" | "completedCount" | "failedCount" | "cancellationState" | "recoveryState" | "startIntent" | "stateRevision">>, filePath = GENERATION_POOL_PATH) {
+export function updateManualGpuBatch(input: Partial<Pick<ManualGpuExecutionBatch, "status" | "currentTaskId" | "providerOrderId" | "completedCount" | "failedCount" | "cancellationState" | "recoveryState" | "startIntent" | "runnerProgress" | "stateRevision">>, filePath = GENERATION_POOL_PATH) {
   const state = readGenerationPool(filePath);
   if (!state.scheduler.manualBatch) throw new Error("当前没有可更新的手动 GPU 批次。");
   state.scheduler.manualBatch = { ...state.scheduler.manualBatch, ...input };
