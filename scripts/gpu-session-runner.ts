@@ -11,6 +11,7 @@ const STATE_DIR = path.join(process.cwd(), ".secrets", "gpu-session-runner");
 const PID_PATH = path.join(STATE_DIR, "runner.pid");
 const STATUS_PATH = path.join(STATE_DIR, "status.json");
 const INTERVAL_MS = 3_000;
+const DEPLOYMENT_TIMEOUT_MS = 20 * 60_000;
 
 type RunnerStatus = { pid: number; updatedAt: string; state: "idle" | "searching" | "candidate_selected" | "blocked" | "order_created" | "error"; batchId: string | null; message: string };
 type Candidate = { server_id: string; base_usd_per_hour?: number | null; effective_usd_per_hour?: number | null; gpu?: string | null };
@@ -67,6 +68,20 @@ export async function executeFrozenWanBatch(input: { target: GpuTarget; poolPath
 }
 
 async function resumeCreatedWanBatch(input: { batch: ManualGpuExecutionBatch; orderId: string; poolPath: string }) {
+  const orderCreatedAt = input.batch.startIntent?.orderCreatedAt ?? input.batch.createdAt;
+  if (Date.now() - Date.parse(orderCreatedAt) >= DEPLOYMENT_TIMEOUT_MS) {
+    const message = "Clore 部署超过 20 分钟仍未开放 SSH，已取消本次未运行订单。";
+    report(input.batch.id, "error", message, input.poolPath, message);
+    const provider = getGpuProvider("clore");
+    const session = await provider.recoverExistingSession(input.orderId);
+    if (session) await provider.terminateSession(session);
+    const latest = readGenerationPool(input.poolPath).scheduler.manualBatch;
+    if (latest?.startIntent) {
+      updateIntent(latest, { status: "canceled", lastError: message }, input.poolPath);
+      updateManualGpuBatch({ status: "failed", currentTaskId: null, recoveryState: "clean" }, input.poolPath);
+    }
+    return { action: "deployment_timeout" as const, orderId: input.orderId };
+  }
   report(input.batch.id, "waiting_deployment", "等待部署", input.poolPath);
   const provider = getGpuProvider("clore");
   const session = await provider.recoverExistingSession(input.orderId);
@@ -163,7 +178,7 @@ export async function runGpuSessionRunnerTick(readCandidates: CandidateReader | 
     const created = await createCloreOrder({ config, execution, candidate: prepared.candidate, requestBody: prepared.requestBody });
     if (!created.order_created || !created.order_id) throw new Error("runner_order_not_created");
     const latest = readGenerationPool(poolPath).scheduler.manualBatch!;
-    updateIntent(latest, { status: "order_created", lastError: null }, poolPath);
+    updateIntent(latest, { status: "order_created", orderCreatedAt: new Date().toISOString(), lastError: null }, poolPath);
     updateManualGpuBatch({ status: "provisioning", providerOrderId: created.order_id }, poolPath);
     writeStatus({ state: "order_created", batchId: batch.id, message: "租用成功，正在等待主机" });
     return resumeCreatedWanBatch({ batch: readGenerationPool(poolPath).scheduler.manualBatch!, orderId: created.order_id, poolPath });

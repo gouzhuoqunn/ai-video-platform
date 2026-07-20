@@ -170,6 +170,7 @@ export type ManualGpuStartIntent = {
   selectedServerId?: string | null;
   selectedEffectiveHourlyUsd?: number | null;
   selectedHost?: Record<string, unknown> | null;
+  orderCreatedAt?: string | null;
   lastError: string | null;
 };
 export type ManualGpuExecutionBatch = {
