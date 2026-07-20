@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto";
 import {
   completeConfirmedQueueDeployment,
   completePoolGenerationStop,
+  completePoolModelStop,
   completePoolGpuCancellation,
   completePreviousFamilyUnload,
   readGenerationPool,
   requestPoolGenerationStop,
+  requestPoolModelStop,
   requestPoolGpuCancellation,
 } from "./task-pool";
 import { idleCancellationDue, type GenerationFamily, type RequiredGpuClass } from "./gpu-execution-state";
@@ -68,6 +70,16 @@ export class GpuSessionController {
       hadActiveGeneration: Boolean(active),
     });
     return completePoolGpuCancellation(this.poolPath);
+  }
+
+  async stopModel() {
+    let state = readGenerationPool(this.poolPath);
+    if (state.execution.activity === "running") await this.stopGeneration();
+    state = requestPoolModelStop(randomUUID(), this.poolPath);
+    const model = state.execution.deployedFamily;
+    if (model !== "image" && model !== "video") throw new Error("当前没有已部署模型可卸载。");
+    await this.driver.unloadModelFamily(model);
+    return completePoolModelStop(this.poolPath);
   }
 
   async cancelExpiredIdleSession(at = Date.now()) {

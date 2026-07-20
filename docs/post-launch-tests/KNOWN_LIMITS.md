@@ -30,6 +30,12 @@
 - The local candidate feed currently follows the configured Clore target and may have no compatible RTX4090 listing when an RTX4090 queue is selected. The UI refuses to substitute an RTX5090 or another class silently.
 - Personal local daily-use closure remains valid for accepted Stage 4J.8 media. Public/commercial readiness, multi-user concurrency, broad historical lint/CI cleanup, and real reusable-session acceptance remain out of scope; `production_ready=false`.
 
+# LTX Audio-Video Stage 1 limits (2026-07-20)
+
+- `video_ltx_native_audio` is a local queue and execution contract only. It has not downloaded, loaded, or validated an LTX or Sulphur model, audio stream, workflow, VRAM profile, or output.
+- RTX4090 is planned/conditional for native audio and is not GPU-verified. RTX5090 is planned/recommended; it is likewise not verified for this model path.
+- Native model audio and future local voice composition remain separate. There is no independent regenerate-audio action for a native-audio video task.
+
 # Audio Foundation Stage 1 limits (2026-07-20)
 
 - The audio tables, worker queue shapes, and status mapping are contracts only. There is no user-facing audio generation action, worker implementation, voice-pack download, cloning/training, inference, audition, muxing, or audio revision migration.

@@ -64,3 +64,9 @@
 - The current feature branch adds a project-local, ignored `local-data/` layout for future media, voice packs, worker state, cache, temp files, logs, and migration manifests. Existing image/video libraries remain readable fallbacks and were not moved or modified.
 - The only new local-media action is an identity-based, loopback-only Windows Explorer selection route. It resolves canonical files below approved roots and never exposes an absolute local path to the browser.
 - Audio Foundation is metadata and contract work only: RLS-protected voice, dialogue, inference, immutable revision, and composition tables plus local worker/status TypeScript contracts. There is no voice model, training, inference, audio muxing, media migration, GPU, provider, SSH, or paid execution.
+
+# LTX Audio-Video Integration Stage 1 baseline (2026-07-20, non-billable)
+
+- Silent Wan and planned LTX native-audio video tasks have typed sound mode, quality tier, model key, GPU class, and audio origin. They aggregate into four video queues without changing image queues or accepted media.
+- Session state now records an exact deployed-model identity in addition to the compatibility family. Stopping a model is a retained-rental contract only; no real controller, provider order, SSH action, or model unload was invoked.
+- Official LTX FP8 is the recommended evidence-backed candidate. Sulphur remains Runtime-blocked until immutable artifact, license, compatible workflow, and dependencies are all proven. `production_ready=false` remains intentional.

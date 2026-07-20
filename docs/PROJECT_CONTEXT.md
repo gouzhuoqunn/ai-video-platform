@@ -1,5 +1,11 @@
 # Project Context
 
+## 2026-07-20 LTX Audio-Video Integration Stage 1
+
+- Video profiles are now explicit eight-way records: silent/audible crossed with low, medium, medium-high, and high. Silent profiles retain Wan settings and `audioOrigin=none`; audible profiles use `video_ltx_native_audio` and `audioOrigin=native_model` without creating local voice jobs.
+- Video waiting work is grouped by four exact queues: silent RTX4090, silent RTX5090, audible RTX4090, and audible RTX5090. Image queues are unchanged. A persisted GPU session now retains exact deployed-model identity (`image_flux`, `video_wan_silent`, or `video_ltx_native_audio`) alongside its compatibility family.
+- The LTX/Sulphur candidate audit is metadata-only. Official LTX FP8 is the evidence-backed Runtime baseline; the Sulphur derivative is intentionally Runtime-blocked because its immutable artifact, license, workflow, and supporting dependencies have not been proven together. No model download, GPU rental, SSH, inference, R2 mutation, authorization, or media mutation occurred.
+
 ## 2026-07-20 Audio Foundation Stage 1: local media boundary and data contracts
 
 - New local output is centrally rooted at `LOCAL_DATA_ROOT` or the project-local default `local-data/`, with separate `media/images`, `media/videos`, `voices`, worker-state, cache, temp, logs, and migration namespaces. Existing `D:\AI-Creative-Library` and `D:\AI-Video-Library` remain read-only fallback roots; this checkpoint does not copy, move, or delete any existing media.

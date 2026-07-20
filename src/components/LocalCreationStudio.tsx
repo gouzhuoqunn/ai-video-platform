@@ -1308,7 +1308,7 @@ export function LocalCreationStudio() {
                 return <button
                   aria-pressed={selected}
                   className={`rounded border p-2 text-left transition ${selected ? selectedColor : otherSelected ? "border-stone-200 bg-stone-100 text-stone-400" : baseColor} disabled:cursor-not-allowed disabled:opacity-50`}
-                  data-testid={`execution-queue-${modelKey ?? "image"}-${gpuClass}`}
+                  data-testid={modelKey === null || modelKey === "video_wan_silent" ? `execution-queue-${gpuClass}` : `execution-queue-${modelKey}-${gpuClass}`}
                   disabled={queueSelectionLocked || queue.count === 0}
                   key={`${modelKey ?? "image"}-${gpuClass}`}
                   onClick={() => selectExecutionQueue(selected ? null : gpuClass, selected ? null : modelKey)}
