@@ -150,6 +150,26 @@ export type PersistedProductionSession = {
   updatedAt: string;
 };
 
+export type ManualGpuExecutionBatchStatus = "searching" | "awaiting_confirmation" | "order_pending" | "provisioning" | "running" | "paused" | "completed" | "canceled" | "failed" | "no_candidate";
+export type ManualGpuExecutionBatch = {
+  id: string;
+  queueKey: "silent_rtx4090";
+  soundMode: "silent";
+  gpuClass: "rtx4090";
+  modelKey: "video_wan_silent";
+  taskIds: string[];
+  taskCount: number;
+  createdAt: string;
+  authorizationLimits: { maximumEffectiveHourlyUsd: number; maximumSessionSpendUsd: number; walletReserveUsd: number; sessionLimitMinutes: number; drainingAtMinutes: number };
+  status: ManualGpuExecutionBatchStatus;
+  completedCount: number;
+  failedCount: number;
+  currentTaskId: string | null;
+  providerOrderId: string | null;
+  cancellationState: "not_requested" | "requested" | "confirmed";
+  recoveryState: "clean" | "reconcile_required";
+};
+
 export type GenerationPoolState = {
   schemaVersion: 4;
   tasks: GenerationTask[];
@@ -166,6 +186,7 @@ export type GenerationPoolState = {
     orderCreationAttempted: boolean;
     drainingRequested: boolean;
     session: PersistedProductionSession | null;
+    manualBatch: ManualGpuExecutionBatch | null;
     updatedAt: string;
   };
 };
@@ -241,7 +262,7 @@ export function defaultGenerationPoolState(): GenerationPoolState {
     schemaVersion: 4,
     tasks: [],
     execution: defaultGpuExecutionState(),
-    scheduler: { state: "idle", selectedBatchId: null, selectedTaskIds: [], watchStartedAt: null, lastMarketplaceRequestAt: null, nextMarketplaceRequestAt: null, selectedServerId: null, rejectedHosts: [], orderCreationAttempted: false, drainingRequested: false, session: null, updatedAt: now() },
+    scheduler: { state: "idle", selectedBatchId: null, selectedTaskIds: [], watchStartedAt: null, lastMarketplaceRequestAt: null, nextMarketplaceRequestAt: null, selectedServerId: null, rejectedHosts: [], orderCreationAttempted: false, drainingRequested: false, session: null, manualBatch: null, updatedAt: now() },
   };
 }
 
@@ -532,6 +553,63 @@ export function confirmGenerationTasks(taskIds: string[], family: GenerationType
   };
 }
 
+const ACTIVE_MANUAL_BATCH_STATUSES = new Set<ManualGpuExecutionBatchStatus>(["searching", "awaiting_confirmation", "order_pending", "provisioning", "running", "paused"]);
+
+export function isManualSilent4090BatchTask(task: GenerationTask) {
+  return task.mediaType === "video"
+    && task.videoSubtype === "short_video"
+    && task.generationType === "video"
+    && task.soundMode === "silent"
+    && task.requiredGpuClass === "rtx4090"
+    && task.modelKey === "video_wan_silent"
+    && task.audioOrigin === "none"
+    && task.longVideoProjectId === null
+    && ["waiting_for_batch", "armed", "waiting_for_gpu"].includes(task.status)
+    && !task.outputMetadata.outputPath
+    && !task.attempts.some((attempt) => attempt.id === task.currentAttemptId && attempt.status === "completed");
+}
+
+/** Freezes the only currently supported paid path before any candidate lookup. */
+export function createManualSilent4090Batch(filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  if (state.scheduler.manualBatch && ACTIVE_MANUAL_BATCH_STATUSES.has(state.scheduler.manualBatch.status)) throw new Error("已有正在进行的手动 GPU 批次，不能重复创建。");
+  if (state.execution.rentedGpuClass || state.execution.providerOrderId || state.execution.operationId) throw new Error("当前 GPU 会话尚未安全结束，不能创建新批次。");
+  const tasks = state.tasks
+    .filter(isManualSilent4090BatchTask)
+    .sort((left, right) => Date.parse(left.confirmedAt ?? left.createdAt) - Date.parse(right.confirmedAt ?? right.createdAt) || left.id.localeCompare(right.id));
+  if (!tasks.length) throw new Error("没有可执行的无声 RTX 4090 短视频任务。");
+  const id = `manual-silent-rtx4090-${randomUUID()}`;
+  const batch: ManualGpuExecutionBatch = {
+    id,
+    queueKey: "silent_rtx4090",
+    soundMode: "silent",
+    gpuClass: "rtx4090",
+    modelKey: "video_wan_silent",
+    taskIds: tasks.map((task) => task.id),
+    taskCount: tasks.length,
+    createdAt: now(),
+    authorizationLimits: { maximumEffectiveHourlyUsd: 0.7, maximumSessionSpendUsd: 4.5, walletReserveUsd: 1, sessionLimitMinutes: 380, drainingAtMinutes: 350 },
+    status: "searching",
+    completedCount: 0,
+    failedCount: 0,
+    currentTaskId: null,
+    providerOrderId: null,
+    cancellationState: "not_requested",
+    recoveryState: "clean",
+  };
+  const ids = new Set(batch.taskIds);
+  state.tasks = state.tasks.map((task) => ids.has(task.id) ? { ...task, batchId: id } : task);
+  state.scheduler = { ...state.scheduler, state: "market_watching", selectedBatchId: id, selectedTaskIds: batch.taskIds, selectedServerId: null, orderCreationAttempted: false, manualBatch: batch };
+  return { state: writeGenerationPool(state, filePath), batch };
+}
+
+export function updateManualGpuBatch(input: Partial<Pick<ManualGpuExecutionBatch, "status" | "currentTaskId" | "providerOrderId" | "completedCount" | "failedCount" | "cancellationState" | "recoveryState">>, filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  if (!state.scheduler.manualBatch) throw new Error("当前没有可更新的手动 GPU 批次。");
+  state.scheduler.manualBatch = { ...state.scheduler.manualBatch, ...input };
+  return writeGenerationPool(state, filePath);
+}
+
 export function setLocalAudioReadiness(taskId: string, input: { status: "waiting_for_local_audio" | "local_audio_queued" | "local_audio_generating" | "local_audio_failed" | "local_audio_ready"; sha256?: string | null; durationMs?: number | null }, filePath = GENERATION_POOL_PATH) {
   const state = readGenerationPool(filePath);
   const task = state.tasks.find((candidate) => candidate.id === taskId);
@@ -799,7 +877,11 @@ export function beginConfirmedQueueExecution(input: {
   state.execution = state.execution.rentedGpuClass
     ? beginExistingGpuExecution(state.execution, active)
     : beginRentalSearch(state.execution, active);
-  const batchId = `manual-${input.generationFamily}-${input.gpuClass}-${input.operationId}`;
+  const frozenBatch = state.scheduler.manualBatch;
+  if (frozenBatch && (frozenBatch.gpuClass !== input.gpuClass || frozenBatch.modelKey !== tasks[0].modelKey || frozenBatch.taskIds.length !== tasks.length || frozenBatch.taskIds.some((id) => !tasks.some((task) => task.id === id)))) {
+    throw new Error("冻结的手动 GPU 批次与当前队列不一致。");
+  }
+  const batchId = frozenBatch?.id ?? `manual-${input.generationFamily}-${input.gpuClass}-${input.operationId}`;
   state.scheduler = {
     ...state.scheduler,
     state: state.execution.activity === "searching" ? "market_watching" : "session_active",
@@ -807,6 +889,7 @@ export function beginConfirmedQueueExecution(input: {
     selectedTaskIds: tasks.map((task) => task.id),
     selectedServerId: null,
     orderCreationAttempted: false,
+    manualBatch: frozenBatch ? { ...frozenBatch, status: frozenBatch.status === "searching" ? "awaiting_confirmation" : frozenBatch.status } : null,
   };
   state.tasks = state.tasks.map((task) => tasks.some((selected) => selected.id === task.id) ? { ...task, batchId } : task);
   return writeGenerationPool(state, filePath);
@@ -815,6 +898,11 @@ export function beginConfirmedQueueExecution(input: {
 export function abortConfirmedQueueRentalSearch(filePath = GENERATION_POOL_PATH) {
   const state = readGenerationPool(filePath);
   state.execution = abortRentalSearch(state.execution);
+  // Keep the frozen batch as an auditable snapshot, but make a no-candidate
+  // outcome retryable. A later explicit click creates a fresh immutable batch.
+  if (state.scheduler.manualBatch && ["searching", "awaiting_confirmation"].includes(state.scheduler.manualBatch.status)) {
+    state.scheduler.manualBatch = { ...state.scheduler.manualBatch, status: "no_candidate", currentTaskId: null, recoveryState: "clean" };
+  }
   state.scheduler = {
     ...state.scheduler,
     state: "idle",
@@ -884,6 +972,7 @@ export function requestPoolGenerationStop(operationId: string, filePath = GENERA
   const activeIds = new Set(state.execution.activeExecution?.confirmedTaskIds ?? []);
   state.execution = requestGenerationStop(state.execution, operationId);
   state.tasks = state.tasks.map((task) => activeIds.has(task.id) && ACTIVE_TASK_STATUSES.has(task.status) ? { ...task, status: "cancel_requested" } : task);
+  if (state.scheduler.manualBatch?.status === "running") state.scheduler.manualBatch = { ...state.scheduler.manualBatch, status: "paused", currentTaskId: null };
   return writeGenerationPool(state, filePath);
 }
 
@@ -906,6 +995,7 @@ export function requestPoolModelStop(operationId: string, filePath = GENERATION_
     markInterruptedTasksWaiting(state, [...activeIds]);
   }
   state.execution = requestModelStop({ ...state.execution, activity: state.execution.activity === "stopping" ? "idle" : state.execution.activity, operationId: null }, operationId);
+  if (state.scheduler.manualBatch && ["running", "provisioning"].includes(state.scheduler.manualBatch.status)) state.scheduler.manualBatch = { ...state.scheduler.manualBatch, status: "paused", currentTaskId: null };
   return writeGenerationPool(state, filePath);
 }
 
@@ -922,6 +1012,7 @@ export function requestPoolGpuCancellation(operationId: string, filePath = GENER
   const activeIds = new Set(state.execution.activeExecution?.confirmedTaskIds ?? []);
   state.execution = requestGpuCancellation(state.execution, operationId);
   state.tasks = state.tasks.map((task) => activeIds.has(task.id) && ACTIVE_TASK_STATUSES.has(task.status) ? { ...task, status: "cancel_requested" } : task);
+  if (state.scheduler.manualBatch) state.scheduler.manualBatch = { ...state.scheduler.manualBatch, status: "canceled", currentTaskId: null, cancellationState: "requested", recoveryState: "reconcile_required" };
   return writeGenerationPool(state, filePath);
 }
 
@@ -929,6 +1020,7 @@ export function completePoolGpuCancellation(filePath = GENERATION_POOL_PATH) {
   const state = readGenerationPool(filePath);
   const activeIds = state.execution.activeExecution?.confirmedTaskIds ?? [];
   state.execution = completeGpuCancellation(state.execution);
+  if (state.scheduler.manualBatch) state.scheduler.manualBatch = { ...state.scheduler.manualBatch, status: "canceled", currentTaskId: null, cancellationState: "confirmed", recoveryState: "clean" };
   markInterruptedTasksWaiting(state, activeIds);
   state.scheduler = {
     ...state.scheduler,
@@ -1075,6 +1167,7 @@ export function generationPoolSummary(state = readGenerationPool()) {
     invalidTaskRecords: state.tasks.filter((task) => task.classificationError).map((task) => ({ id: task.id, mediaType: task.mediaType, error: task.classificationError })),
     confirmedQueueCounts: confirmedQueueCounts(state.tasks),
     confirmedVideoQueueCounts: confirmedVideoQueueCounts(state.tasks),
+    manualBatch: state.scheduler.manualBatch,
     execution: state.execution,
     selectedTaskIds: selected.map((task) => task.id), selectedTasks: selected, nextBatchTasks: nextBatch?.tasks.map((task) => task.id) ?? [], requiredModelProfile: nextBatch?.modelProfile ?? null,
     acceptableGpuClasses: selection.ready ? selection.acceptableGpuClasses ?? [] : [], estimatedSessionDurationMinutes: estimate.totalSession,
