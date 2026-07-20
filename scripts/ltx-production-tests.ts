@@ -1,0 +1,23 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { buildLtxProductionPlan } from "./ltx-production-plan";
+import { checkLtxProductionDependencies } from "./ltx-production-dependency-report";
+
+const plan = buildLtxProductionPlan();
+assert.equal(plan.status, "blocked");
+assert.equal(plan.reason, "sulphur_distilled_evidence_incomplete");
+assert.equal(plan.provider_calls, 0);
+assert.equal(plan.model_downloads, 0);
+assert.equal(plan.inference_submissions, 0);
+assert.equal(plan.cache_mutations, 0);
+assert.ok(plan.cache_prefixes.every((prefix) => /^ltx23\/.+\/[a-f0-9]{64}\/$/.test(prefix)));
+for (const filename of readdirSync("ltx-runtime/manifests/production")) assert.doesNotMatch(readFileSync(`ltx-runtime/manifests/production/${filename}`, "utf8"), /"immutableRevision"\s*:\s*"main"/);
+const dockerfile = readFileSync("ltx-runtime/Dockerfile", "utf8");
+assert.match(dockerfile, /AS mock/); assert.match(dockerfile, /AS production/); assert.match(dockerfile, /HF_HUB_OFFLINE=1/); assert.match(dockerfile, /USER runtime/); assert.match(dockerfile, /9377758131b1ffde4b7f766804590a6617bf2ab9/);
+assert.doesNotMatch(dockerfile, /COPY models|CLORE_API_KEY|SUPABASE_SECRET_KEY/);
+const python = spawnSync("python", ["-m", "unittest", "ltx-runtime/python/tests/test_adapter.py"], { encoding: "utf8", timeout: 30_000 });
+assert.equal(python.status, 0, `${python.stdout}\n${python.stderr}`);
+assert.equal(checkLtxProductionDependencies().ok, true);
+console.log(JSON.stringify({ ok: true, productionPlanBlocked: true, providerMutations: 0, modelDownloads: 0, inferenceSubmissions: 0 }));

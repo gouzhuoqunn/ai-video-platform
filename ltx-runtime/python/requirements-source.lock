@@ -1,0 +1,3 @@
+# Exact official source checkout. No branch, tag, or floating main is accepted.
+git+https://github.com/Lightricks/LTX-2.git@9377758131b1ffde4b7f766804590a6617bf2ab9#subdirectory=packages/ltx-core
+git+https://github.com/Lightricks/LTX-2.git@9377758131b1ffde4b7f766804590a6617bf2ab9#subdirectory=packages/ltx-pipelines

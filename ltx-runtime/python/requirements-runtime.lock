@@ -1,0 +1,19 @@
+# Resolution record, intentionally no model artifacts. Install only from a reviewed wheelhouse
+# in a paid build; the source lock below forbids floating source revisions.
+torch==2.7.1+cu128
+torchaudio==2.7.1+cu128
+torchvision==0.22.1+cu128
+av==15.0.0
+tqdm==4.67.1
+pillow==11.1.0
+openimageio==3.0.1.0
+cloudpickle==3.1.1
+einops==0.8.1
+numpy==2.2.4
+transformers==4.52.4
+safetensors==0.5.3
+accelerate==1.6.0
+scipy==1.15.2
+uv==0.9.8
+# Official source: https://github.com/Lightricks/LTX-2 @ 9377758131b1ffde4b7f766804590a6617bf2ab9
+# ltx-core==1.1.7 and ltx-pipelines==1.1.7 must be built from that exact source checkout.
