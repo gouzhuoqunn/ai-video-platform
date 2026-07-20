@@ -71,7 +71,6 @@ async function resumeCreatedWanBatch(input: { batch: ManualGpuExecutionBatch; or
   const provider = getGpuProvider("clore");
   const session = await provider.recoverExistingSession(input.orderId);
   if (!session) throw new Error("runner_created_order_not_recoverable");
-  report(input.batch.id, "getting_ssh", "获取 SSH", input.poolPath);
   const target = await provider.waitForSsh(session, 10 * 60_000);
   try {
     report(input.batch.id, "checking_host", "检查主机", input.poolPath);
@@ -82,6 +81,12 @@ async function resumeCreatedWanBatch(input: { batch: ManualGpuExecutionBatch; or
     report(input.batch.id, "completed", "批次已完成", input.poolPath);
     return { action: "batch_completed" as const, orderId: input.orderId, completed };
   } catch (error) {
+    const message = error instanceof Error ? error.message : "runner_session_failed";
+    if (/ssh_tcp_not_ready|order_not_deployed|deployment/i.test(message)) {
+      report(input.batch.id, "waiting_deployment", "Clore 仍在部署，SSH 尚未开放", input.poolPath, null);
+      return { action: "awaiting_deployment" as const, orderId: input.orderId };
+    }
+    report(input.batch.id, "error", message, input.poolPath, message);
     await provider.terminateSession(session).catch(() => undefined);
     throw error;
   }
@@ -177,8 +182,16 @@ async function main() {
   mkdirSync(STATE_DIR, { recursive: true });
   if (existsSync(PID_PATH) && Number(readFileSync(PID_PATH, "utf8")) !== process.pid) { console.log("runner_already_recorded"); return; }
   writeFileSync(PID_PATH, String(process.pid), "utf8");
-  await runGpuSessionRunnerTick();
-  const timer = setInterval(() => void runGpuSessionRunnerTick().catch((error) => recordRunnerError(error)), INTERVAL_MS);
+  let ticking = false;
+  const tick = async () => {
+    if (ticking) return;
+    ticking = true;
+    try { await runGpuSessionRunnerTick(); }
+    catch (error) { recordRunnerError(error); }
+    finally { ticking = false; }
+  };
+  await tick();
+  const timer = setInterval(() => void tick(), INTERVAL_MS);
   const stop = () => { clearInterval(timer); clearRunnerPidIfOwned(); process.exit(0); };
   process.once("SIGINT", stop); process.once("SIGTERM", stop);
 }

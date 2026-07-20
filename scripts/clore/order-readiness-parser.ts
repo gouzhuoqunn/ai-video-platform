@@ -93,7 +93,9 @@ export function parseCloreOrder(order: Record<string, unknown>): ParsedCloreOrde
     ?? firstString(container, ["status", "state"])
     ?? firstString(deployment, ["status", "state"]);
   const monitor = typeof order.mon_container === "number" ? order.mon_container : Number.NaN;
-  const deploymentState = explicitDeployment?.toLowerCase() ?? (monitor === 2 ? "deployed" : monitor === 1 ? "deploying" : monitor === 0 ? "not_deployed" : "unknown");
+  // Clore's current order API reports mon_container=0 while its own order UI
+  // labels the container "Deploying". It is not a failed or absent order.
+  const deploymentState = explicitDeployment?.toLowerCase() ?? (monitor === 2 ? "deployed" : monitor === 1 || monitor === 0 ? "deploying" : "unknown");
   const deploymentReady = !terminal && (/deployed|running|ready/.test(deploymentState) || /running|ready/.test((explicitLifecycle ?? "").toLowerCase()));
 
   const sshObject = asRecord(order.ssh); const proxy = asRecord(order.ssh_proxy); const connection = asRecord(order.connection);
