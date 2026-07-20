@@ -27,3 +27,6 @@ Sources: [official LTX model card](https://huggingface.co/Lightricks/LTX-2.3-fp8
 The official Hugging Face metadata now records the full baseline revision `1d756cd27fa11c0896c4dfee093cd1bf36c7f7a1`. The official development FP8 artifact is `29,145,431,166` bytes with SHA-256 `28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450`; the distilled FP8 artifact is `29,531,884,062` bytes with SHA-256 `d9646b6f2d5c42d337b23671634c43bfeece6989644f51b4a3aa088465ccd3b2`. This is metadata evidence only—no artifact was downloaded.
 
 The official LTX repository documents `ltx-pipelines` as its high-level text/image-to-video layer and describes two-stage and distilled pipelines. That supports the selected future narrow Runtime adapter, but does not close the auxiliary-file/dependency/image validation gap. Sulphur’s public card still presents inconsistent generic text/image and LLM instructions rather than a complete verified native-audio workflow, so its executable status remains blocked.
+## Stage 3A.1 audible dependency note
+
+Audible presets must not infer an unverified full-checkpoint plus LoRA combination. The 4090 preset records only a blocked compatibility requirement; the 5090 quality path and the 1080p upscaler path remain blocked until immutable evidence closes their exact dependency layouts.

@@ -41,3 +41,6 @@
 2. 锁定官方 `ltx-pipelines` 提交、Python/Torch/CUDA 组合并构建无密钥 Runtime 镜像。
 3. 将清单状态改为 executable，完成本地/受控 RTX 5090 单条合成提示验收。
 4. 由负责人明确创建受限的单次付费授权；RTX 4090 仍只能作为条件性验证目标。
+## Stage 3A.1 audio-conditioning baseline
+
+The generic native-audio contract remains reusable, but current audible products use `local_voice_conditioning`. A future executable runtime must condition on the exact locked WAV and preserve that input audio through its final mux/provenance record.

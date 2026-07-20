@@ -8,3 +8,6 @@
 | Sulphur 基础 FP8 | `SulphurAI/Sulphur-2-base@608bf89` | 未完成可审计许可与资产闭包 | 阻断 |
 
 官方源码 README 表示 LTX 2.3 具备同步音视频，并把 `DistilledPipeline` 用于快速路径、`TI2VidTwoStagesPipeline` 用于高质量路径。该说明不构成 Sulphur 派生物兼容性证明。任何付费下载或运行前都必须重新核对许可、门控访问和完整不可变元数据。
+## Stage 3A.1 provenance requirement
+
+No new Sulphur, LoRA, VAE, Vocoder, or upscaler artifact is approved by the audible contract. A future manifest must independently record revision, bytes, SHA-256, license, placement, and pipeline compatibility for every required artifact.

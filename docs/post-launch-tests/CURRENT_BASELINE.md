@@ -75,3 +75,6 @@
 
 - The four-video-queue browser fixture now restores the exact audible RTX5090 selection after refresh; silent counts are `2/1`, audible counts `1/1`, with zero hydration/provider mutations.
 - Mock native-audio Runtime, FFprobe validation, cache/preflight and model-session lifecycle tests pass. The only output is deleted temporary FFmpeg synthetic media; no real LTX/Sulphur model, 4090/5090 Runtime, provider, R2 or accepted media was used.
+## Stage 3A.1 audible correction
+
+Audible video now means locally validated dialogue WAV conditioning, not native model dialogue generation. Seven profiles and four sound/GPU queues are the current baseline; all LTX audible presets remain blocked and non-billable.

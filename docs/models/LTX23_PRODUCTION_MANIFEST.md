@@ -11,3 +11,6 @@
 官方基线固定为 `Lightricks/LTX-2.3-fp8@1d756cd27fa11c0896c4dfee093cd1bf36c7f7a1`，并记录蒸馏 FP8 工件 SHA-256 `d9646b6f2d5c42d337b23671634c43bfeece6989644f51b4a3aa088465ccd3b2`。它是兼容性基线，不是 Sulphur 的替代执行项；Gemma 与空间上采样器尚未完成不可变资产锁定，仍不可执行。
 
 缓存命名空间固定为 `ltx23/<internal-model-key>/<manifest-sha256>/`。未来恢复顺序为本地 Clore 缓存、可选只读 R2、经明确确认的官方源；本阶段不执行恢复或发布。
+## Stage 3A.1 task-payload boundary
+
+Task packages reference immutable manifests and do not transport fixed runtime dependencies. The manifest must truthfully establish whether the transformer, Video VAE, Audio VAE, Gemma/tokenizer, Vocoder, optional LoRA, and optional x1.5 upscaler are embedded or separate; this checkpoint does not invent that layout.

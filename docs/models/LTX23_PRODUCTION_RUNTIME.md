@@ -9,3 +9,6 @@
 `npm run ltx:production:plan` 仅校验本地清单并输出阻断原因；它不联系 Clore/RunPod、不下载、不推理、不写缓存。
 
 `npm run ltx:production:dependencies` 检查 Python、Torch/CUDA、FFmpeg 依赖记录和官方源码 revision；它只读锁文件，不解析或安装依赖。
+## Stage 3A.1 result evidence
+
+Audio-conditioned execution requires WAV identity/duration validation before run and output provenance binding the MP4 audio stream to the confirmed audio revision. Synthetic tests cover this contract only; production execution remains blocked.

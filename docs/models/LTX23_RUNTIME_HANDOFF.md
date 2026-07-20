@@ -9,3 +9,6 @@ Do not load a Sulphur full checkpoint with a distill LoRA at the same time. They
 The selected future implementation is a narrow adapter over the official `Lightricks/LTX-2` `ltx-pipelines` package, not a Wan conditional and not a production ComfyUI dependency. The repository now has a mock-only Runtime contract, native-audio FFprobe validator, cache planner, preflight, and model-scoped session driver. Its local command is `npm run ltx:runtime:dry`; it creates and deletes only temporary synthetic media.
 
 `Lightricks/LTX-2.3-fp8` revision `1d756cd27fa11c0896c4dfee093cd1bf36c7f7a1` is a compatibility baseline with a verified development-FP8 artifact digest, but it remains non-executable until auxiliary files and the official Python Runtime lock are closed. Sulphur remains blocked.
+## Stage 3A.1 A2Vid handoff
+
+The task handoff contains a request, dialogue snapshot, relative WAV reference, optional first frame, and immutable model-manifest references. It contains no transformer, VAE, Gemma, Vocoder, LoRA, or upscaler weight. Fixed dependencies belong only in the runtime image and immutable model package/cache mount.
