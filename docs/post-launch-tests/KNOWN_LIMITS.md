@@ -55,3 +55,5 @@
 ## Stage 3A.1 limits
 
 GPT-SoVITS is not installed or executed. Sulphur/LTX A2Vid has contracts and synthetic-fixture coverage only; immutable dependency closure, Audio VAE/Vocoder layout, LoRA compatibility, input-audio preservation on a real runtime, and 1080p upscaler evidence remain prerequisites.
+
+The `pyopenjtalk==0.4.1` CPython 3.10 Windows x64 artifact is also pending: a reproducible free Windows Runner workflow exists, but no artifact has been dispatched, downloaded, hash-verified, or installed into the isolated runtime. No global compiler or GPT-SoVITS model download was performed.

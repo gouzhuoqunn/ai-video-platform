@@ -1,5 +1,11 @@
 # Project Context
 
+## 2026-07-21 Video gallery integrity repair and pyopenjtalk build path
+
+- The canonical generation collection now records immutable gallery `mediaType` (`image` or `video`) separately from execution family, with explicit video subtypes. Generated first-frame work remains an image-model dependency under its video parent and cannot enter the image gallery. Legacy unexecuted dependencies are repaired only when a persisted video task proves the exact relationship; contradictory orphan records are surfaced as invalid and isolated rather than guessed.
+- Gallery views are pure media-type filters and pool polling merges task records by stable ID plus `updatedAt`, preserving newly returned records across a stale refresh. The focused multi-card test covers eleven rapid generated-video submissions, selector isolation, stale lifecycle protection, long-segment hiding, scoped delete/regenerate, and key identity.
+- `pyopenjtalk==0.4.1` has no official CPython 3.10 Windows x64 wheel in its official PyPI release; its official source distribution SHA-256 is `d5ada46f7fc2b52c1c79c273eb9668ff6ad7ab276a8db9d8be119ef93440f0dc`. `.github/workflows/build-pyopenjtalk-windows-wheel.yml` is a manual, free Windows Runner build/install/smoke-test/artifact route. It is not dispatched or locally installed yet; no global compiler or GPT-SoVITS model download occurred.
+
 ## 2026-07-21 GPT-SoVITS Stage 3A.2 local CPU setup attempt
 
 - Official GPT-SoVITS source is checked out only beneath ignored `local-data/voice/runtime-sources/gpt-sovits` at signed release `20250606v2pro`, commit `d7c2210da8c013e81a94bfc7b811a477c99fd506`. An isolated project-local Python 3.10.11 environment contains CPU-only Torch/Torchaudio 2.6.0; system Python 3.14 and global PATH were not modified.

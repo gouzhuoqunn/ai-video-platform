@@ -68,3 +68,9 @@ The personal-use Wan closure remains unchanged. LTX Stage 2 adds only local mock
 ## Stage 3A.1 correction addendum
 
 This local-only correction created no provider resource, model download, inference submission, accepted-media change, R2 mutation, SSH session, or spend. The new local-audio-first path remains fail-closed until its audio revision and future runtime evidence exist.
+
+## 2026-07-21 non-billable gallery and local-audio dependency checkpoint
+
+Video gallery ownership is now immutable and independent of model execution. Eleven-card, rapid-submit, stale-response, and selector-isolation regressions cover the repaired gallery path. No provider, model inference, accepted-media, SSH, R2, or paid action occurred.
+
+The pyopenjtalk dependency remains uninstalled locally: only a checked workflow for a free GitHub-hosted Windows CPython 3.10 build has been added. No GPT-SoVITS weight was downloaded and no synthesis is claimed.
