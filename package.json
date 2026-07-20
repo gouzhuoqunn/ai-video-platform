@@ -114,6 +114,7 @@
     "generation:model-availability:test": "tsx scripts/model-availability-tests.ts",
     "clore:deployment-control:test": "tsx scripts/deployment-control-tests.ts",
     "studio:queue:test": "tsx scripts/studio-queue-tests.ts",
+    "gpu:rental-eligibility:test": "tsx scripts/rental-eligibility-tests.ts",
     "gpu:manual-price:test": "tsx scripts/manual-gpu-candidate-price-tests.ts",
     "local:path-registry:test": "tsx scripts/local-path-registry-tests.ts",
     "local:media-access:test": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/local-media-access-tests.ts",

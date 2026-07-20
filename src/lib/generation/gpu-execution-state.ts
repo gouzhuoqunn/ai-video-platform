@@ -48,6 +48,39 @@ export type QueueTaskLike = GpuClassTaskLike & {
 export type ConfirmedQueueCounts = Record<GenerationFamily, Record<RequiredGpuClass, number>>;
 export type ConfirmedVideoQueueCounts = Record<"silent" | "audible", Record<RequiredGpuClass, number>>;
 
+/** A single, serializable decision shared by the Studio button and its API. */
+export type RentalEligibilityReason =
+  | "no_queue_selected"
+  | "queue_empty"
+  | "no_confirmed_tasks"
+  | "audible_audio_not_ready"
+  | "task_binding_invalid"
+  | "gpu_class_conflict"
+  | "gpu_already_searching"
+  | "gpu_already_deploying"
+  | "gpu_already_running"
+  | "provider_mutation_in_progress"
+  | "authorization_missing"
+  | "runtime_not_ready"
+  | "model_manifest_blocked"
+  | "unknown_blocker";
+
+export type RentalEligibility = {
+  eligible: boolean;
+  reasonCode: RentalEligibilityReason | null;
+  reason: string | null;
+  totalCount: number;
+  confirmedCount: number;
+  executableCount: number;
+  audioWaitingCount: number;
+};
+
+type RentalEligibilityTask = QueueTaskLike & {
+  modelRevision?: string;
+  audioOrigin?: string | null;
+  audioBinding?: { status: string } | null;
+};
+
 const CONFIRMED_WAITING_STATUSES = new Set(["waiting_for_batch", "armed", "waiting_for_gpu"]);
 
 function timestamp(at = Date.now()) {
@@ -111,6 +144,52 @@ export function confirmedVideoQueueCounts(tasks: QueueTaskLike[]): ConfirmedVide
     counts[task.soundMode === "audible" ? "audible" : "silent"][normalizeRequiredGpuClass(task)] += 1;
   }
   return counts;
+}
+
+const rentalReasonText: Record<RentalEligibilityReason, string> = {
+  no_queue_selected: "请先选择一个显卡队列。",
+  queue_empty: "所选队列目前没有任务。",
+  no_confirmed_tasks: "所选队列没有已确认的任务。",
+  audible_audio_not_ready: "有声视频仍在等待本地声音完成。",
+  task_binding_invalid: "有声视频的本地声音绑定无效。",
+  gpu_class_conflict: "当前已租用的显卡类别与所选队列不一致。",
+  gpu_already_searching: "正在搜寻显卡中。",
+  gpu_already_deploying: "GPU 正在部署或切换模型。",
+  gpu_already_running: "当前 GPU 正在生成，需先安全终止。",
+  provider_mutation_in_progress: "GPU 操作正在处理中，请勿重复点击。",
+  authorization_missing: "开始租用前必须绑定当前队列。",
+  runtime_not_ready: "本地运行环境尚未就绪。",
+  model_manifest_blocked: "所选模型清单尚未解除阻塞。",
+  unknown_blocker: "当前 GPU 状态不可执行。",
+};
+
+export function rentalEligibilityFor(input: {
+  state: GpuExecutionState;
+  tasks: RentalEligibilityTask[];
+  family: GenerationFamily;
+  gpuClass: RequiredGpuClass | null;
+  modelKey?: string | null;
+  manualAuthorization?: boolean;
+  runtimeReady?: boolean;
+}): RentalEligibility {
+  const empty = (reasonCode: RentalEligibilityReason, totalCount = 0, confirmedCount = 0, executableCount = 0, audioWaitingCount = 0): RentalEligibility => ({ eligible: false, reasonCode, reason: rentalReasonText[reasonCode], totalCount, confirmedCount, executableCount, audioWaitingCount });
+  if (!input.gpuClass) return empty("no_queue_selected");
+  const matching = input.tasks.filter((task) => task.generationType === input.family && normalizeRequiredGpuClass(task) === input.gpuClass && (!input.modelKey || task.modelKey === input.modelKey));
+  if (!matching.length) return empty("queue_empty");
+  const confirmed = matching.filter((task) => CONFIRMED_WAITING_STATUSES.has(task.status));
+  const audioWaiting = matching.filter((task) => task.soundMode === "audible" && task.audioBinding?.status !== "local_audio_ready").length;
+  if (!confirmed.length) return empty(audioWaiting ? "audible_audio_not_ready" : "no_confirmed_tasks", matching.length, 0, 0, audioWaiting);
+  const invalidAudioBinding = confirmed.some((task) => task.soundMode === "audible" && (!task.audioBinding || task.audioBinding.status !== "local_audio_ready"));
+  if (invalidAudioBinding) return empty("task_binding_invalid", matching.length, confirmed.length, 0, audioWaiting);
+  if (input.runtimeReady === false) return empty("runtime_not_ready", matching.length, confirmed.length, 0, audioWaiting);
+  if (!input.state.rentedGpuClass && input.manualAuthorization === false) return empty("authorization_missing", matching.length, confirmed.length, 0, audioWaiting);
+  if (input.state.rentedGpuClass && input.state.rentedGpuClass !== input.gpuClass) return empty("gpu_class_conflict", matching.length, confirmed.length, 0, audioWaiting);
+  if (input.state.activity === "searching") return empty("gpu_already_searching", matching.length, confirmed.length, 0, audioWaiting);
+  if (["deploying", "stopping", "stopping_model"].includes(input.state.activity)) return empty("gpu_already_deploying", matching.length, confirmed.length, 0, audioWaiting);
+  if (input.state.activity === "running") return empty("gpu_already_running", matching.length, confirmed.length, 0, audioWaiting);
+  if (["canceling", "stopping_task"].includes(input.state.activity) || input.state.operationId) return empty("provider_mutation_in_progress", matching.length, confirmed.length, 0, audioWaiting);
+  if (input.state.activity === "error") return empty("unknown_blocker", matching.length, confirmed.length, 0, audioWaiting);
+  return { eligible: true, reasonCode: null, reason: null, totalCount: matching.length, confirmedCount: confirmed.length, executableCount: confirmed.length, audioWaitingCount: audioWaiting };
 }
 
 export function deployedModelFromModelKeys(modelKeys: string[]): DeployedModelKey {

@@ -33,6 +33,7 @@ import {
   recordDeploymentReady,
   recordPreviousFamilyUnloaded,
   recordRentalSuccess,
+  rentalEligibilityFor,
   requestGenerationStop,
   requestModelStop,
   requestGpuCancellation,
@@ -774,6 +775,15 @@ export function beginConfirmedQueueExecution(input: {
   const requestedIds = input.taskIds?.length ? new Set(input.taskIds) : null;
   const tasks = requestedIds ? queue.filter((task) => requestedIds.has(task.id)) : queue;
   if (requestedIds && tasks.length !== requestedIds.size) throw new Error("手动授权中的任务与当前确认队列不一致。");
+  const eligibility = rentalEligibilityFor({
+    state: state.execution,
+    tasks: state.tasks,
+    family: input.generationFamily,
+    gpuClass: input.gpuClass,
+    modelKey: input.modelKey,
+    manualAuthorization: input.manualRentalIntentVerified,
+  });
+  if (!eligibility.eligible) throw new Error(eligibility.reason ?? "当前队列不可执行。");
   assertSingleFamilyExecution(tasks, input.generationFamily, input.gpuClass);
   if (new Set(tasks.map((task) => task.modelKey)).size !== 1) throw new Error("一次执行只能选择一个精确视频模型队列。");
   if (state.execution.activeExecution && state.execution.activeExecution.generationFamily !== input.generationFamily) {

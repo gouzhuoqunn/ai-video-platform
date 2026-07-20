@@ -18,6 +18,7 @@ import { FirstFrameInput } from "@/components/FirstFrameInput";
 import {
   defaultGpuExecutionState,
   executionActionFor,
+  rentalEligibilityFor,
   type ConfirmedQueueCounts,
   type GpuExecutionState,
   type RequiredGpuClass,
@@ -379,7 +380,19 @@ export function LocalCreationStudio() {
     return pool?.confirmedVideoQueueCounts?.[soundMode] ?? { rtx4090: 0, rtx5090: 0 };
   }, [ordinaryMode, pool?.confirmedQueueCounts, pool?.confirmedVideoQueueCounts, selectedVideoModelKey]);
   const selectedQueueCount = selectedExecutionGpuClass ? visibleQueueCounts[selectedExecutionGpuClass] : 0;
-  const executionAction = selectedExecutionGpuClass ? executionActionFor(execution, ordinaryMode, selectedExecutionGpuClass, selectedQueueCount) : null;
+  const rentalEligibility = useMemo(() => rentalEligibilityFor({
+    state: execution,
+    tasks: pool?.tasks ?? [],
+    family: ordinaryMode,
+    gpuClass: selectedExecutionGpuClass,
+    modelKey: ordinaryMode === "video" ? selectedVideoModelKey : "image_flux",
+    manualAuthorization: true,
+  }), [execution, ordinaryMode, pool?.tasks, selectedExecutionGpuClass, selectedVideoModelKey]);
+  const executionAction = selectedExecutionGpuClass
+    ? rentalEligibility.eligible
+      ? executionActionFor(execution, ordinaryMode, selectedExecutionGpuClass, rentalEligibility.executableCount)
+      : { kind: "blocked" as const, label: null, disabled: true, reason: rentalEligibility.reason }
+    : null;
   const queueSelectionLocked = isStartingExecution || ["searching", "deploying", "stopping", "canceling"].includes(execution.activity);
   const idleCancelSeconds = execution.idleCancelAt && clockNow
     ? Math.max(0, Math.ceil((Date.parse(execution.idleCancelAt) - clockNow) / 1000))
@@ -519,22 +532,26 @@ export function LocalCreationStudio() {
     setSelectedLongVideoId((current) => current || payload.projects?.[0]?.id || "");
   }, []);
 
-  const refreshClore = useCallback(async () => {
+  const searchCloreCandidates = useCallback(async () => {
     const useVisualMock = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("visual_mock") === "1";
-    const [candidateResponse, autorentResponse] = await Promise.all([
-      fetch(`/api/local-lab/clore/candidates${useVisualMock ? "?mock=1" : ""}`),
-      fetch("/api/local-lab/clore/autorent"),
-    ]);
+    const candidateResponse = await fetch(`/api/local-lab/clore/candidates${useVisualMock ? "?mock=1" : ""}`);
     const candidatePayload = (await candidateResponse.json().catch(() => ({}))) as CloreCandidatesResponse;
-    const autorentPayload = (await autorentResponse.json().catch(() => ({}))) as { requests?: AutorentRequest[] };
-
     if (candidateResponse.ok) {
       setCandidates(candidatePayload.matches ?? []);
       setCandidateSource(candidatePayload.source ?? "");
       setSelectedServerId((current) => (current && candidatePayload.matches?.some((candidate) => candidate.server_id === current) ? current : candidatePayload.matches?.[0]?.server_id || ""));
     }
-    if (autorentResponse.ok) setAutorentRequests(autorentPayload.requests ?? []);
+    return candidateResponse.ok ? candidatePayload.matches ?? [] : [];
   }, []);
+
+  const refreshClore = useCallback(async () => {
+    const [, autorentResponse] = await Promise.all([
+      searchCloreCandidates(),
+      fetch("/api/local-lab/clore/autorent"),
+    ]);
+    const autorentPayload = (await autorentResponse.json().catch(() => ({}))) as { requests?: AutorentRequest[] };
+    if (autorentResponse.ok) setAutorentRequests(autorentPayload.requests ?? []);
+  }, [searchCloreCandidates]);
 
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect */
@@ -851,14 +868,21 @@ export function LocalCreationStudio() {
   }
 
   async function requestExecutionStart() {
-    if (!selectedExecutionGpuClass || !executionAction || executionAction.disabled || isStartingExecution) return;
+    if (!selectedExecutionGpuClass || !executionAction || executionAction.disabled || !rentalEligibility.eligible || isStartingExecution) return;
     const startingRental = executionAction.kind === "rent";
-    if (startingRental && !selectedCandidate) {
-      setNotice(`当前价格范围内没有可用于 ${selectedExecutionGpuClass === "rtx5090" ? "RTX 5090" : "RTX 4090"} 队列的合规候选。`);
-      return;
-    }
     setIsStartingExecution(true);
+    setNotice("正在搜寻符合价格要求的显卡");
     try {
+      const searchedCandidates = startingRental ? await searchCloreCandidates() : [];
+      const searchedCandidate = startingRental && priceGate.valid && priceGate.min !== null && priceGate.max !== null
+        ? searchedCandidates
+          .filter((candidate) => {
+            const effective = candidate.effective_usd_per_hour ?? (candidate.normalized_usd_per_hour ? candidate.normalized_usd_per_hour * 1.05 : null);
+            const gpuClass = /5090/i.test(candidate.gpu) ? "rtx5090" : /4090/i.test(candidate.gpu) ? "rtx4090" : null;
+            return effective !== null && effective >= priceGate.min! && effective <= priceGate.max! && isManualCandidateDisplayPriceAllowed(effective) && gpuClass === selectedExecutionGpuClass;
+          })
+          .sort((left, right) => (left.effective_usd_per_hour ?? Number.POSITIVE_INFINITY) - (right.effective_usd_per_hour ?? Number.POSITIVE_INFINITY))[0] ?? null
+        : null;
       const response = await fetch("/api/local-lab/generation-pool", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -879,15 +903,16 @@ export function LocalCreationStudio() {
         setNotice("执行请求已交给受控运行器；当前订单保持不变，不会创建第二个订单。");
         return;
       }
-      const basePrice = selectedCandidate?.base_usd_per_hour ?? selectedCandidate?.normalized_usd_per_hour;
-      if (!selectedCandidate || basePrice === null || basePrice === undefined) {
+      const basePrice = searchedCandidate?.base_usd_per_hour ?? searchedCandidate?.normalized_usd_per_hour;
+      if (!searchedCandidate || basePrice === null || basePrice === undefined) {
         await abortRentalSearch("候选价格无法验证，已取消本次寻卡。");
         return;
       }
+      setSelectedServerId(searchedCandidate.server_id);
       const planResponse = await fetch("/api/local-lab/clore/order-plan", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ serverId: selectedCandidate.server_id, maxPriceUsdPerHour: basePrice }),
+        body: JSON.stringify({ serverId: searchedCandidate.server_id, maxPriceUsdPerHour: basePrice }),
       });
       const plan = await planResponse.json().catch(() => ({})) as RentalPlan & { error?: string };
       if (!planResponse.ok || !plan.nonce) {
@@ -1343,14 +1368,14 @@ export function LocalCreationStudio() {
                   type="button"
                 >
                   <strong>{queue.label}</strong>
-                  <p>{queue.count} 个{ordinaryMode === "image" ? "图片" : "视频"}待处理</p>
+                  <p>{queue.count} 个已确认 · 可执行 {selected && rentalEligibility.eligible ? rentalEligibility.executableCount : queue.count}</p>
                 </button>;
               })}
             </div>
             <div className="mt-2 rounded border border-stone-200 bg-[#faf8f4] p-2 text-xs">
-              {selectedExecutionGpuClass ? <><strong>已选择 {selectedExecutionGpuClass === "rtx4090" ? "RTX 4090" : "RTX 5090"} 执行队列</strong><p className="mt-1">本次只处理其中 {selectedQueueCount} 个{ordinaryMode === "image" ? "图片" : "视频"}任务；另一颜色保持排队。</p></> : <><strong>尚未选择执行队列</strong><p className="mt-1 text-stone-500">先选择蓝色或绿色队列，才会显示租用或继续按钮。</p></>}
+              {selectedExecutionGpuClass ? <><strong>已选择 {selectedExecutionGpuClass === "rtx4090" ? "RTX 4090" : "RTX 5090"} 执行队列</strong><p className="mt-1">队列任务 {rentalEligibility.totalCount} · 已确认 {rentalEligibility.confirmedCount} · 可执行 {rentalEligibility.executableCount}{ordinaryMode === "video" ? ` · 等待本地声音 ${rentalEligibility.audioWaitingCount}` : ""}；另一颜色保持排队。</p></> : <><strong>尚未选择执行队列</strong><p className="mt-1 text-stone-500">先选择蓝色或绿色队列，才会显示租用或继续按钮。</p></>}
             </div>
-            {isStartingExecution || execution.activity === "searching" ? <div className="mt-2 flex items-center justify-center gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900" data-testid="gpu-searching-state"><span className="h-4 w-4 animate-spin rounded-full border-2 border-amber-800 border-t-transparent" />正在搜寻显卡中</div> : selectedExecutionGpuClass && executionAction?.label ? <button className="mt-2 w-full rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-300" data-testid="execution-start-action" disabled={executionAction.disabled} onClick={() => void requestExecutionStart()} type="button">{executionAction.label}</button> : null}
+            {isStartingExecution || execution.activity === "searching" ? <div aria-live="polite" className="mt-2 flex items-center justify-center gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900" data-testid="gpu-searching-state"><span className="h-4 w-4 animate-spin rounded-full border-2 border-amber-800 border-t-transparent" />正在搜寻符合价格要求的显卡</div> : selectedExecutionGpuClass ? <button className="mt-2 w-full rounded-md bg-rose-700 px-3 py-2 text-sm font-bold text-white disabled:bg-stone-300" data-testid="execution-start-action" disabled={executionAction?.disabled ?? true} onClick={() => void requestExecutionStart()} title={executionAction?.reason ?? undefined} type="button">{executionAction?.label ?? "开始任务并租用显卡"}</button> : null}
             {execution.activity === "searching" && !rentalPlan ? <button className="mt-2 w-full rounded-md border border-stone-300 bg-white px-3 py-2 text-xs font-semibold" onClick={() => void abortRentalSearch()} type="button">取消本次寻卡</button> : null}
             {selectedExecutionGpuClass && executionAction?.reason ? <p className="mt-2 rounded bg-amber-50 px-2 py-2 text-xs text-amber-900">{executionAction.reason}</p> : null}
             <p className="mt-2 text-xs text-stone-600">寻机状态：{activeAutorent ? autorentStatusLabels[activeAutorent.status] : "未启动"} · 队列：{simplifiedSessionStatus}</p>

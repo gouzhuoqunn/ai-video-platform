@@ -26,6 +26,7 @@ import {
   confirmedVideoQueueCounts,
   confirmedQueueTasks,
   defaultGpuExecutionState,
+  rentalEligibilityFor,
   type GpuExecutionState,
   type RequiredGpuClass,
 } from "@/lib/generation/gpu-execution-state";
@@ -83,8 +84,8 @@ function withStage4J9Fixture(summary: ReturnType<typeof generationPoolSummary>, 
     createGenerationTask({ id: "fixture-video-4090-waiting", generationType: "video", prompt: "蓝色短视频已确认任务", modelProfile: "wan22-remix-14b-i2v-fp8", jobForm: "video_from_existing_image", gpuPreference: ["rtx4090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image" }),
     createGenerationTask({ id: "fixture-long-video-4090-waiting", generationType: "video", prompt: "蓝色长视频已确认任务", modelProfile: "wan22-remix-14b-i2v-fp8", jobForm: "long_video_segment", gpuPreference: ["rtx4090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image", longVideoProjectId: "fixture-long-video", longVideoSegmentIndex: 0 }),
     createGenerationTask({ id: "fixture-video-5090-waiting", generationType: "video", prompt: "绿色视频已确认任务", modelProfile: "wan22-remix-14b-i2v-fp8", jobForm: "video_from_existing_image", gpuPreference: ["rtx5090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image" }),
-    createGenerationTask({ id: "fixture-audible-video-4090-waiting", generationType: "video", prompt: "蓝色有声视频已确认任务", modelProfile: "ltx23_sulphur_native_audio_fp8", modelKey: "video_ltx_native_audio", soundMode: "audible", audioOrigin: "local_voice_conditioning", jobForm: "video_from_existing_image", gpuPreference: ["rtx4090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image" }),
-    createGenerationTask({ id: "fixture-audible-video-5090-waiting", generationType: "video", prompt: "绿色有声视频已确认任务", modelProfile: "ltx23_sulphur_native_audio_fp8", modelKey: "video_ltx_native_audio", soundMode: "audible", audioOrigin: "local_voice_conditioning", jobForm: "video_from_existing_image", gpuPreference: ["rtx5090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image" }),
+    createGenerationTask({ id: "fixture-audible-video-4090-waiting", generationType: "video", prompt: "蓝色有声视频已确认任务", modelProfile: "ltx23_sulphur_native_audio_fp8", modelKey: "video_ltx_native_audio", soundMode: "audible", audioOrigin: "local_voice_conditioning", audioBinding: { voiceInferenceJobId: "fixture-audio-4090", audioRevisionId: "fixture-audio-revision-4090", status: "local_audio_ready", inputAudioSha256: "fixture", inputAudioDurationMs: 2000 }, jobForm: "video_from_existing_image", gpuPreference: ["rtx4090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image" }),
+    createGenerationTask({ id: "fixture-audible-video-5090-waiting", generationType: "video", prompt: "绿色有声视频已确认任务", modelProfile: "ltx23_sulphur_native_audio_fp8", modelKey: "video_ltx_native_audio", soundMode: "audible", audioOrigin: "local_voice_conditioning", audioBinding: { voiceInferenceJobId: "fixture-audio-5090", audioRevisionId: "fixture-audio-revision-5090", status: "local_audio_ready", inputAudioSha256: "fixture", inputAudioDurationMs: 2000 }, jobForm: "video_from_existing_image", gpuPreference: ["rtx5090"], status: "waiting_for_gpu", inputImageVerified: true, inputImageJobId: "fixture-image" }),
   ];
   const tasks = [...summary.tasks.filter((task) => ["completed", "failed", "cancelled"].includes(task.status)), ...fixtures];
   return {
@@ -156,6 +157,15 @@ export async function POST(request: NextRequest) {
     const requested = ids(payload.taskIds);
     const tasks = requested.length ? queue.filter((task) => requested.includes(task.id)) : queue;
     try {
+      const eligibility = rentalEligibilityFor({
+        state: state.execution,
+        tasks: state.tasks,
+        family,
+        gpuClass,
+        modelKey: payload.modelKey,
+        manualAuthorization: true,
+      });
+      if (!eligibility.eligible) return NextResponse.json({ error: eligibility.reason, eligibility, provider_mutations: 0, create_order_called: false }, { status: 409 });
       assertSingleFamilyExecution(tasks, family, gpuClass);
       const next = beginConfirmedQueueExecution({
         generationFamily: family,
@@ -172,6 +182,7 @@ export async function POST(request: NextRequest) {
         manual_authorization_required: needsRental,
         binding: { generation_family: family, gpu_class: gpuClass, confirmed_task_ids: tasks.map((task) => task.id) },
         paid_execution_authorized: false,
+        eligibility,
         provider_mutations: 0,
         create_order_called: false,
       }, { status: 202 });
