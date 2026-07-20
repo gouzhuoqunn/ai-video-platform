@@ -422,6 +422,18 @@ export async function confirmOrderPlan(input: {
   if (manualRealGpuRentalEnabled() && !stored.batchId) {
     throw new Error("Real local GPU rental requires a frozen silent RTX 4090 Wan batch.");
   }
+  if (stored.batchId) {
+    // Browser confirmation is deliberately not a provider mutation path.  A
+    // persisted runner consumes the previously frozen batch/start intent.
+    nonces[index] = { ...stored, usedAt: now.toISOString() };
+    writeNonceStore(nonces);
+    return {
+      order_created: false,
+      create_order_called: false,
+      status: "runner_handoff",
+      message: "已保存 GPU 会话启动授权，本地会话服务将继续处理。",
+    };
+  }
   nonces[index] = { ...stored, usedAt: now.toISOString() };
   writeNonceStore(nonces);
 

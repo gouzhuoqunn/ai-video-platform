@@ -53,10 +53,12 @@ function Start-Platform {
     if ($LASTEXITCODE -ne 0) { return "Local setup failed; see .secrets/launcher/platform.log" }
   }
   $process = Start-Process -FilePath "npm.cmd" -ArgumentList "run","dev:local" -WorkingDirectory $ProjectRoot -RedirectStandardOutput $LogPath -RedirectStandardError ("$LogPath.err") -PassThru -WindowStyle Hidden
+  $runnerLog = Join-Path $StateRoot "gpu-session-runner.log"
+  $runner = Start-Process -FilePath "npm.cmd" -ArgumentList "run","gpu:session-runner:start" -WorkingDirectory $ProjectRoot -RedirectStandardOutput $runnerLog -RedirectStandardError ("$runnerLog.err") -PassThru -WindowStyle Hidden
   Start-Sleep -Milliseconds 500
-  $ownedPids = @([int]$process.Id) + @((Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($ProjectRoot) -and ($_.CommandLine -match "next.*dev|dev:local") } | ForEach-Object { [int]$_.ProcessId }))
+  $ownedPids = @([int]$process.Id, [int]$runner.Id) + @((Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($ProjectRoot) -and ($_.CommandLine -match "next.*dev|dev:local|gpu-session-runner") } | ForEach-Object { [int]$_.ProcessId }))
   Save-State ([pscustomobject]@{ pid = $process.Id; pids = @($ownedPids | Select-Object -Unique); startedAt = (Get-Date).ToString("o"); project = $ProjectRoot; url = $Url })
-  Write-Log "started npm dev:local pid=$($process.Id)"
+  Write-Log "started npm dev:local pid=$($process.Id), gpu session runner pid=$($runner.Id)"
   if (Wait-Ready) { Open-LocalPage; return "Platform started (PID $($process.Id))" }
   return "Platform is starting; local health check is still pending"
 }

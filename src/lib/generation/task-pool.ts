@@ -151,6 +151,22 @@ export type PersistedProductionSession = {
 };
 
 export type ManualGpuExecutionBatchStatus = "searching" | "awaiting_confirmation" | "order_pending" | "provisioning" | "running" | "paused" | "completed" | "canceled" | "failed" | "no_candidate";
+export type ManualGpuStartIntent = {
+  id: string;
+  idempotencyKey: string;
+  authorizedAt: string;
+  requestedGpuClass: "rtx4090";
+  modelKey: "video_wan_silent";
+  queueKey: "silent_rtx4090";
+  status: "requested" | "runner_claimed" | "candidate_selected" | "order_created" | "blocked" | "canceled";
+  stateRevision: number;
+  maxEffectiveHourlyUsd: number;
+  maxSessionSpendUsd: number;
+  walletReserveUsd: number;
+  sessionDeadlineAt: string;
+  idleTimeoutSeconds: number;
+  lastError: string | null;
+};
 export type ManualGpuExecutionBatch = {
   id: string;
   queueKey: "silent_rtx4090";
@@ -168,6 +184,8 @@ export type ManualGpuExecutionBatch = {
   providerOrderId: string | null;
   cancellationState: "not_requested" | "requested" | "confirmed";
   recoveryState: "clean" | "reconcile_required";
+  startIntent: ManualGpuStartIntent | null;
+  stateRevision: number;
 };
 
 export type GenerationPoolState = {
@@ -353,6 +371,13 @@ export function readGenerationPool(filePath = GENERATION_POOL_PATH): GenerationP
     const state = JSON.parse(readFileSync(filePath, "utf8")) as GenerationPoolState & { schemaVersion: 1 | 2 | 3 | 4 };
     if (![1, 2, 3, 4].includes(state.schemaVersion) || !Array.isArray(state.tasks) || !state.scheduler) throw new Error("invalid");
     const scheduler = { ...defaultGenerationPoolState().scheduler, ...state.scheduler, session: state.scheduler.session ?? null };
+    if (scheduler.manualBatch) {
+      scheduler.manualBatch = {
+        ...scheduler.manualBatch,
+        startIntent: scheduler.manualBatch.startIntent ?? null,
+        stateRevision: scheduler.manualBatch.stateRevision ?? 1,
+      };
+    }
     const tasks = state.tasks.map((task) => normalizeTask(task));
     // One safe compatibility repair: an unexecuted image-model dependency is
     // hidden only when a persisted child video explicitly points at it. We do
@@ -596,6 +621,8 @@ export function createManualSilent4090Batch(filePath = GENERATION_POOL_PATH) {
     providerOrderId: null,
     cancellationState: "not_requested",
     recoveryState: "clean",
+    startIntent: null,
+    stateRevision: 1,
   };
   const ids = new Set(batch.taskIds);
   state.tasks = state.tasks.map((task) => ids.has(task.id) ? { ...task, batchId: id } : task);
@@ -603,11 +630,39 @@ export function createManualSilent4090Batch(filePath = GENERATION_POOL_PATH) {
   return { state: writeGenerationPool(state, filePath), batch };
 }
 
-export function updateManualGpuBatch(input: Partial<Pick<ManualGpuExecutionBatch, "status" | "currentTaskId" | "providerOrderId" | "completedCount" | "failedCount" | "cancellationState" | "recoveryState">>, filePath = GENERATION_POOL_PATH) {
+export function updateManualGpuBatch(input: Partial<Pick<ManualGpuExecutionBatch, "status" | "currentTaskId" | "providerOrderId" | "completedCount" | "failedCount" | "cancellationState" | "recoveryState" | "startIntent" | "stateRevision">>, filePath = GENERATION_POOL_PATH) {
   const state = readGenerationPool(filePath);
   if (!state.scheduler.manualBatch) throw new Error("当前没有可更新的手动 GPU 批次。");
   state.scheduler.manualBatch = { ...state.scheduler.manualBatch, ...input };
   return writeGenerationPool(state, filePath);
+}
+
+/** Persists the only authorization a local runner may consume.  It never calls a provider. */
+export function authorizeManualSilent4090Batch(filePath = GENERATION_POOL_PATH) {
+  const state = readGenerationPool(filePath);
+  const batch = state.scheduler.manualBatch;
+  if (!batch || batch.queueKey !== "silent_rtx4090" || batch.status !== "searching") throw new Error("manual_silent_4090_batch_not_ready_for_authorization");
+  if (batch.startIntent) return { state, batch, reused: true };
+  const authorizedAt = now();
+  const startIntent: ManualGpuStartIntent = {
+    id: randomUUID(),
+    idempotencyKey: randomUUID(),
+    authorizedAt,
+    requestedGpuClass: "rtx4090",
+    modelKey: "video_wan_silent",
+    queueKey: "silent_rtx4090",
+    status: "requested",
+    stateRevision: batch.stateRevision + 1,
+    maxEffectiveHourlyUsd: batch.authorizationLimits.maximumEffectiveHourlyUsd,
+    maxSessionSpendUsd: batch.authorizationLimits.maximumSessionSpendUsd,
+    walletReserveUsd: batch.authorizationLimits.walletReserveUsd,
+    sessionDeadlineAt: new Date(Date.parse(authorizedAt) + batch.authorizationLimits.sessionLimitMinutes * 60_000).toISOString(),
+    idleTimeoutSeconds: 120,
+    lastError: null,
+  };
+  state.scheduler.manualBatch = { ...batch, status: "order_pending", startIntent, stateRevision: startIntent.stateRevision };
+  state.scheduler.state = "market_watching";
+  return { state: writeGenerationPool(state, filePath), batch: state.scheduler.manualBatch, reused: false };
 }
 
 export function setLocalAudioReadiness(taskId: string, input: { status: "waiting_for_local_audio" | "local_audio_queued" | "local_audio_generating" | "local_audio_failed" | "local_audio_ready"; sha256?: string | null; durationMs?: number | null }, filePath = GENERATION_POOL_PATH) {

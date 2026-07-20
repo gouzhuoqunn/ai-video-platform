@@ -902,36 +902,9 @@ export function LocalCreationStudio() {
         setNotice("执行请求已交给受控运行器；当前订单保持不变，不会创建第二个订单。");
         return;
       }
-      const searchedCandidates = await searchCloreCandidates("manual_silent_4090");
-      const searchedCandidate = priceGate.valid && priceGate.min !== null
-        ? searchedCandidates
-          .filter((candidate) => {
-            const effective = candidate.effective_usd_per_hour ?? (candidate.normalized_usd_per_hour ? candidate.normalized_usd_per_hour * 1.05 : null);
-            const gpuClass = /5090/i.test(candidate.gpu) ? "rtx5090" : /4090/i.test(candidate.gpu) ? "rtx4090" : null;
-            return effective !== null && effective >= priceGate.min! && effective <= 0.7 && gpuClass === "rtx4090";
-          })
-          .sort((left, right) => (left.effective_usd_per_hour ?? Number.POSITIVE_INFINITY) - (right.effective_usd_per_hour ?? Number.POSITIVE_INFINITY))[0] ?? null
-        : null;
-      const basePrice = searchedCandidate?.base_usd_per_hour ?? searchedCandidate?.normalized_usd_per_hour;
-      if (!searchedCandidate || basePrice === null || basePrice === undefined) {
-        await abortRentalSearch("候选价格无法验证，已取消本次寻卡。");
-        return;
-      }
-      setSelectedServerId(searchedCandidate.server_id);
-      const planResponse = await fetch("/api/local-lab/clore/order-plan", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ serverId: searchedCandidate.server_id, maxPriceUsdPerHour: basePrice }),
-      });
-      const plan = await planResponse.json().catch(() => ({})) as RentalPlan & { error?: string };
-      if (!planResponse.ok || !plan.nonce) {
-        await abortRentalSearch(plan.error ?? "无法创建一次性手动租用计划。");
-        return;
-      }
-      setRentalPlan(plan);
-      setRentalConfirmationText("");
-      setRentalRiskAccepted(false);
-      setNotice("已绑定当前显卡队列。请核对服务器与价格后完成一次性确认。");
+      // The persistent local runner owns marketplace I/O and all provider
+      // mutation.  Keeping this request short also makes refreshes harmless.
+      setNotice("正在搜寻符合价格要求的显卡");
     } finally {
       setIsStartingExecution(false);
     }

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/route-guard";
 import {
   abortConfirmedQueueRentalSearch,
+  authorizeManualSilent4090Batch,
   beginConfirmedQueueExecution,
   confirmGenerationTasks,
   createGenerationTask,
@@ -35,7 +36,7 @@ import { validateProductionPrompt } from "@/lib/generation/production-prompt-saf
 import { listLocalImageResults } from "@/lib/local-lab/local-results";
 import { longVideoUploadExists } from "@/lib/long-video/uploads";
 import type { TaskMediaType } from "@/lib/generation/gallery-routing";
-import { manualRealGpuRentalEnabled } from "@/lib/local-lab/manual-real-gpu";
+import { manualRealGpuReadiness, manualRealGpuRentalEnabled } from "@/lib/local-lab/manual-real-gpu";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -194,17 +195,14 @@ export async function POST(request: NextRequest) {
   }
   if (payload.action === "start_manual_silent_4090_batch") {
     if (!manualRealGpuRentalEnabled()) return NextResponse.json({ error: "本地真实 GPU 租用尚未启用。", provider_mutations: 0, create_order_called: false }, { status: 423 });
+    const readiness = manualRealGpuReadiness();
+    if (!readiness.ready) return NextResponse.json({ error: readiness.message, readiness, provider_mutations: 0, create_order_called: false }, { status: 423 });
     try {
-      const created = createManualSilent4090Batch();
-      const next = beginConfirmedQueueExecution({
-        generationFamily: "video",
-        gpuClass: "rtx4090",
-        operationId: randomUUID(),
-        manualRentalIntentVerified: true,
-        modelKey: "video_wan_silent",
-        taskIds: created.batch.taskIds,
-      });
-      return NextResponse.json({ pool: generationPoolSummary(next), batch: created.batch, paid_execution_authorized: true, provider_mutations: 0, create_order_called: false }, { status: 202 });
+      createManualSilent4090Batch();
+      const authorized = authorizeManualSilent4090Batch();
+      // The request ends after durable authorization.  The local loopback runner
+      // owns candidate lookup and is the only code path allowed to mutate Clore.
+      return NextResponse.json({ pool: generationPoolSummary(authorized.state), batch: authorized.batch, paid_execution_authorized: true, start_intent_persisted: true, runner_wake_requested: true, provider_mutations: 0, create_order_called: false }, { status: 202 });
     } catch (error) {
       return NextResponse.json({ error: error instanceof Error ? error.message : "无法创建手动 GPU 批次。", provider_mutations: 0, create_order_called: false }, { status: 409 });
     }
