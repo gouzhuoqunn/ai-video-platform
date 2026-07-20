@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "runtime": "RVC-Boss/GPT-SoVITS",
+  "releaseTag": "20250606v2pro",
+  "sourceCommit": "d7c2210da8c013e81a94bfc7b811a477c99fd506",
+  "sourceLicense": "MIT",
+  "selectedModel": "V2ProPlus",
+  "python": "3.10.11",
+  "torch": "2.6.0+cpu",
+  "torchaudio": "2.6.0+cpu",
+  "device": "cpu",
+  "apiEntrypoint": "api_v2.py",
+  "bindAddress": "127.0.0.1",
+  "officialModelRepository": "https://huggingface.co/lj1995/GPT-SoVITS",
+  "requiredModelFiles": [
+    { "path": "v2Pro/s2Dv2ProPlus.pth", "sha256": null },
+    { "path": "v2Pro/s2Gv2ProPlus.pth", "sha256": null },
+    { "path": "sv/pretrained_eres2netv2w24s4ep4.ckpt", "sha256": null },
+    { "path": "G2PWModel.zip", "sha256": null }
+  ],
+  "status": "blocked",
+  "blockers": [
+    "official_pyopenjtalk_0_4_1_requires_a_windows_c_cpp_toolchain_not_present_in_the_isolated_runtime",
+    "official_model_files_have_not_been_downloaded_or_hash_verified"
+  ]
+}

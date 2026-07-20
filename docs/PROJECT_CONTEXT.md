@@ -1,5 +1,10 @@
 # Project Context
 
+## 2026-07-21 GPT-SoVITS Stage 3A.2 local CPU setup attempt
+
+- Official GPT-SoVITS source is checked out only beneath ignored `local-data/voice/runtime-sources/gpt-sovits` at signed release `20250606v2pro`, commit `d7c2210da8c013e81a94bfc7b811a477c99fd506`. An isolated project-local Python 3.10.11 environment contains CPU-only Torch/Torchaudio 2.6.0; system Python 3.14 and global PATH were not modified.
+- Official dependency closure is fail-closed: `pyopenjtalk==0.4.1` requires a Windows C/C++ toolchain that is absent. No unofficial replacement was installed, no official model weights were downloaded, and no GPT-SoVITS inference/worker/API is considered ready. A Windows SAPI synthetic `系统测试声线` WAV exists only in ignored local data for future technical verification.
+
 ## 2026-07-20 Audible Video Pipeline Correction Stage 3A.1
 
 - The production video selector now has exactly seven profiles: the four existing silent Wan profiles plus audible low 720p/RTX4090, audible medium 720p/RTX5090, and audible high 1080p/RTX5090. Audible work has `audioOrigin=local_voice_conditioning`; it is not model-native TTS.
