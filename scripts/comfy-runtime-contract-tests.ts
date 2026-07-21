@@ -74,7 +74,7 @@ function main() {
 
   const controller = read("comfy-runtime/controller.py");
   assert.match(controller, /\/healthz/);
-  assert.match(controller, /\/interrupt/);
+  assert.match(controller, /\/restore/);
   assert.match(controller, /\/system_stats/);
   assert.match(controller, /0\.0\.0\.0/);
 
@@ -94,7 +94,7 @@ function main() {
   assert.match(workflow, /database_preflight_ok/);
   assert.match(workflow, /gpu_preflight_failed/);
   assert.match(workflow, /object_info/);
-  assert.match(workflow, /\/interrupt/);
+  assert.match(workflow, /\/free/);
   assert.match(workflow, /START_GPU_WORKER=false/);
   assert.ok(!workflow.includes("context: ./gpu-worker"));
   assert.ok(!workflow.includes(":latest"));

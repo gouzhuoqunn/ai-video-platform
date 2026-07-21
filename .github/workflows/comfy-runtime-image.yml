@@ -289,7 +289,7 @@ jobs:
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/dev/null
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/dev/null
           docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/dev/null
-          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/interrupt >/dev/null
+          docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/dev/null
           docker exec -i "${container}" python3.11 - <<'PY'
           import base64, os, socket
           key = base64.b64encode(os.urandom(16)).decode()
