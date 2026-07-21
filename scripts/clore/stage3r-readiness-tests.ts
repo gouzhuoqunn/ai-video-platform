@@ -18,6 +18,7 @@ const live = parseCloreOrder({ id: 1957892, si: 28726, expired: false, mon_conta
 assert.deepEqual(live.ssh, { host: "n1.msk.cloreai.ru", port: 1584, user: "root" });
 assert.equal(live.sshSource, "structured");
 assert.equal(readinessIssue(live, { tcpReached: true, authSucceeded: true, authFailed: false }), "ssh_ready");
+assert.equal(readinessIssue({ ...live, deploymentReady: false }, { tcpReached: true, authSucceeded: true, authFailed: false }), "ssh_ready", "a live endpoint with successful key auth must not wait for a stale deployment label");
 assert.equal(readinessIssue({ ...live, ssh: null }, { tcpReached: false, authSucceeded: false, authFailed: false }), "deployed_without_ssh_endpoint");
 assert.equal(readinessIssue(live, { tcpReached: false, authSucceeded: false, authFailed: false }), "ssh_tcp_unreachable");
 assert.equal(readinessIssue(live, { tcpReached: true, authSucceeded: false, authFailed: true }), "ssh_auth_failed");

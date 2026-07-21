@@ -81,7 +81,10 @@ async function main() {
     if (latest?.terminal) break;
     if (latest) {
       issue = readinessIssue(latest, { tcpReached, authSucceeded: keyAuthSucceeded, authFailed });
-      if (latest.deploymentReady && latest.ssh) {
+      // The provider may retain the textual "deploying" status after it has
+      // published a live SSH endpoint. TCP plus project-key authentication is
+      // stronger evidence than that lagging status field.
+      if (latest.active && latest.ssh) {
         let sshTarget = latest.ssh;
         const endpoint = `${sshTarget.host}:${sshTarget.port}`;
         if (preparedEndpoint !== endpoint) { refreshEphemeralProxyKnownHost(sshTarget, knownHostsPath); preparedEndpoint = endpoint; }
@@ -93,7 +96,7 @@ async function main() {
             windowMs: Math.min(120_000, Math.max(1, deadline - Date.now())),
             readProviderState: async () => {
               const current = await readLatest();
-              return { deploymentReady: Boolean(current?.active && current.deploymentReady), target: current?.ssh ?? null };
+              return { deploymentReady: Boolean(current?.active && current?.ssh), target: current?.ssh ?? null };
             },
             tcpProbe: tcpReachable,
             keyProbe: async (target, scopedPath) => keySsh(target, "true", scopedPath),

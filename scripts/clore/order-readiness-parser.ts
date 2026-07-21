@@ -120,7 +120,7 @@ export function parseCloreOrder(order: Record<string, unknown>): ParsedCloreOrde
 }
 
 export function readinessIssue(order: ParsedCloreOrder | null, probes: { tcpReached: boolean; authSucceeded: boolean; authFailed: boolean }): CloreReadinessIssue {
-  if (!order || !order.active || !order.deploymentReady) return "order_not_deployed";
+  if (!order || !order.active) return "order_not_deployed";
   if (!order.ssh) return "deployed_without_ssh_endpoint";
   if (!probes.tcpReached) return "ssh_tcp_unreachable";
   if (probes.authFailed || !probes.authSucceeded) return "ssh_auth_failed";
