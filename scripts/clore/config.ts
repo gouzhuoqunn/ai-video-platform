@@ -7,7 +7,7 @@ const CLORE_TEMP_EXCLUDED_SERVERS_PATH = path.join(process.cwd(), ".secrets", "c
 export const PROJECT_TAG = "ai-video-platform-wan22";
 export const DEFAULT_DOCKER_IMAGE = "nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04";
 export const COMFY_RUNTIME_IMAGE =
-  "ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:187a7eb304075863dbd3f7a1b527530a06783ad8ea0fec5e51e2b9725d1bf137";
+  "ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:78c9964cc5c0fc3b1be081df09c8bee225e7c0b175844e321f3175671cfa6a3d";
 
 function parseEnvFile(filePath: string) {
   if (!existsSync(filePath)) {

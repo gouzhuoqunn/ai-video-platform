@@ -43,10 +43,10 @@ function sanitizedOrderPayload(input: {
   createResponseStatus?: string | null;
 }) {
   return {
-    image: "cloreai/ubuntu22.04-cuda12",
-    ports: ["22/tcp"],
+    image: "ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:78c9964cc5c0fc3b1be081df09c8bee225e7c0b175844e321f3175671cfa6a3d",
+    ports: ["8080/http"],
     commandPresent: false,
-    autosshEntrypoint: true,
+    autosshEntrypoint: null,
     serverId: input.serverId,
     orderId: input.orderId,
     requiredPrice: input.requiredPrice,

@@ -16,7 +16,7 @@ export type ActiveCloreOrder = {
   usd_per_hour: number;
   max_price_usd_per_hour: number;
   order_type: "on-demand";
-  open_ports: ["ssh/tcp"] | ["ssh/tcp", "controller/http:8080"];
+  open_ports: ["ssh/tcp"] | ["controller/http:8080"] | ["ssh/tcp", "controller/http:8080"];
   gpu_type?: string;
   gpu_profile?: GpuProfile;
   bootstrap_image?: string;

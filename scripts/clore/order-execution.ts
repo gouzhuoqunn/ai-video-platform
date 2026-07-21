@@ -240,9 +240,11 @@ export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) 
     throw new Error("Wallet balance is insufficient after reserve.");
   }
 
-  const ssh = inspectSshPublicKey(input.config.sshPublicKeyPath ?? "");
-  if (!ssh.exists || !ssh.formatValid) {
-    throw new Error("SSH public key is missing or invalid.");
+  if (input.orderProfile !== "http_runtime") {
+    const ssh = inspectSshPublicKey(input.config.sshPublicKeyPath ?? "");
+    if (!ssh.exists || !ssh.formatValid) {
+      throw new Error("SSH public key is missing or invalid.");
+    }
   }
   if (input.orderProfile !== "cuda_base") {
     if (input.config.dockerImage === DEFAULT_DOCKER_IMAGE) {
@@ -287,7 +289,7 @@ export async function createCloreOrder(input: {
     throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false.");
   }
   assertCreateOrderBodySafe(input.requestBody);
-  if (!input.request) assertCreateOrderUsesCanonicalIdentity(input.requestBody);
+  if (!input.request && input.requestBody.ssh_key) assertCreateOrderUsesCanonicalIdentity(input.requestBody);
   const lock = acquireOrderCreateLock(input.requestId ?? crypto.randomUUID());
   try {
     if (readActiveOrder()) {
@@ -295,7 +297,7 @@ export async function createCloreOrder(input: {
     }
     await sleep(5000);
     await input.beforeCreateRequest?.();
-    if (!input.request) assertCreateOrderUsesCanonicalIdentity(input.requestBody);
+    if (!input.request && input.requestBody.ssh_key) assertCreateOrderUsesCanonicalIdentity(input.requestBody);
     let response: unknown;
     try {
       response = input.request
@@ -353,7 +355,7 @@ export async function createCloreOrder(input: {
       usd_per_hour: input.candidate.priceUsdPerHour ?? input.requestBody.required_price ?? 0,
       max_price_usd_per_hour: input.candidate.priceUsdPerHour ?? input.requestBody.required_price ?? 0,
       order_type: "on-demand",
-      open_ports: input.requestBody.ports["8080"] === "http" ? ["ssh/tcp", "controller/http:8080"] : ["ssh/tcp"],
+      open_ports: input.requestBody.ports["8080"] === "http" ? ["controller/http:8080"] : ["ssh/tcp"],
       gpu_type: input.sessionMetadata?.gpuType ?? input.candidate.gpu,
       gpu_profile: input.sessionMetadata?.gpuProfile ?? "rtx4090",
       bootstrap_image: input.sessionMetadata?.bootstrapImage ?? input.requestBody.image,
@@ -396,14 +398,14 @@ export async function prepareCreateOrderFromLive(input: {
     orderProfile: input.orderProfile,
     verifyWatchdogs: () => assertWatchdogsReadyForCreate(input.serverId),
   });
-  const publicKey = ensureValidatedProjectSshKey().normalizedPublicKey;
+  const publicKey = input.orderProfile === "http_runtime" ? null : ensureValidatedProjectSshKey().normalizedPublicKey;
   const requestBody = input.orderProfile === "http_runtime"
     ? buildHttpRuntimeCreateOrderBody({ serverId: input.serverId, currency: input.config.rentalCurrency, requiredPrice: candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null ? candidate.priceOriginalAmount : input.maxPriceUsdPerHour })
     : input.orderProfile === "cuda_base"
     ? buildCudaBaseCreateOrderBody({
       serverId: input.serverId,
       currency: input.config.rentalCurrency,
-      sshPublicKey: publicKey,
+      sshPublicKey: publicKey ?? "",
       // Clore locks this field in the marketplace's original unit (USD/day),
       // while the Studio ceiling remains the independently frozen USD/hour cap.
       requiredPrice: candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null
@@ -414,7 +416,7 @@ export async function prepareCreateOrderFromLive(input: {
       serverId: input.serverId,
       image: input.config.dockerImage,
       currency: input.config.rentalCurrency,
-      sshPublicKey: publicKey,
+      sshPublicKey: publicKey ?? "",
       maxPriceUsdPerHour: input.maxPriceUsdPerHour,
       requiredPriceForApi:
         candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null
