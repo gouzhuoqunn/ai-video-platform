@@ -98,7 +98,9 @@ function manualBatchCloreConfig(maxEffectiveHourlyUsd = 0.7): CloreConfig {
   return {
     ...config,
     targetGpu: "NVIDIA GeForce RTX 4090",
-    minGpuVramGb: 24,
+    minGpuVramGb: 23,
+    minRamGb: 31,
+    minRating: 4.5,
     maxGpuPricePerHour: maxEffectiveHourlyUsd / (1 + CLORE_RENTER_FEE_RATE),
   };
 }
@@ -119,7 +121,11 @@ function safeCandidateList(rawServers: RawCloreServer[], availableUsdBalance: nu
   const candidates = applyWalletBalance(evaluated.candidates, availableUsdBalance)
     .filter((candidate) => !isDeploymentHostBlacklisted(candidate.serverId));
   const matches = applyWalletBalance(evaluated.matches, availableUsdBalance)
-    .filter((candidate) => !isDeploymentHostBlacklisted(candidate.serverId));
+    .filter((candidate) => !isDeploymentHostBlacklisted(candidate.serverId))
+    .sort((left, right) => {
+      const preferred = (candidate: typeof left) => candidate.serverId === "99515" ? 0 : candidate.serverId === "104474" ? 1 : 2;
+      return preferred(left) - preferred(right) || (left.priceUsdPerHour ?? Number.POSITIVE_INFINITY) - (right.priceUsdPerHour ?? Number.POSITIVE_INFINITY);
+    });
   const targetGpuLabel = target === "manual_silent_4090" ? "RTX 4090" : "RTX 5090";
   const rejected5090 = candidates
     .filter((candidate) => target === "manual_silent_4090" ? /rtx\s+4090/i.test(candidate.gpu) : /rtx\s+5090/i.test(candidate.gpu))

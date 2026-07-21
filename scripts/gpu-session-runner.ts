@@ -337,11 +337,12 @@ export async function runGpuSessionRunnerTick(readCandidates: CandidateReader | 
       updateManualGpuBatch({ status: "order_pending" }, poolPath);
     }
     const { loadCloreExecutionConfig } = await import("./clore/execution-config");
+    const { COMFY_RUNTIME_IMAGE, loadCloreConfig } = await import("./clore/config");
     const { createCloreOrder, prepareCreateOrderFromLive } = await import("./clore/order-execution");
     report(batch.id, "creating_order", "恢复订单监控", poolPath);
     rearmWatchdogsBeforeCreate(candidate.server_id);
     const execution = loadCloreExecutionConfig();
-    const config = { ...(await import("./clore/config")).loadCloreConfig(), targetGpu: "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: 24, maxGpuPricePerHour: batch.startIntent.maxEffectiveHourlyUsd };
+    const config = { ...loadCloreConfig(), dockerImage: COMFY_RUNTIME_IMAGE, targetGpu: "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: 23, minRamGb: 31, minRating: 4.5, maxGpuPricePerHour: batch.startIntent.maxEffectiveHourlyUsd };
     const prepared = await prepareCreateOrderFromLive({
       config,
       execution,
