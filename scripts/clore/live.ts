@@ -79,6 +79,10 @@ export type CloreOrderSummary = {
   active: boolean;
   deploymentState?: string;
   sshEndpointPublished?: boolean;
+  startedAt?: string | null;
+  sshHost?: string | null;
+  sshPort?: number | null;
+  controllerUrl?: string | null;
 };
 
 export function summarizeOrdersPayload(data: unknown): CloreOrderSummary[] {
@@ -101,6 +105,10 @@ export function summarizeOrdersPayload(data: unknown): CloreOrderSummary[] {
       active: parsed.active,
       deploymentState: parsed.deploymentState,
       sshEndpointPublished: Boolean(parsed.ssh),
+      startedAt: firstString(value, ["started_at", "startedAt", "start_time"]) ?? null,
+      sshHost: parsed.ssh?.host ?? null,
+      sshPort: parsed.ssh?.port ?? null,
+      controllerUrl: parsed.controllerUrl,
     };
   });
 }

@@ -1,10 +1,11 @@
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { scpFile, sshCommand } from "./gpu-providers/common";
 import type { GpuTarget } from "./gpu-providers/types";
 import { archiveStage3OWanVideo, buildStage3OWanWorkflow, validateStage3OWanWorkflow } from "./stage3o-wan-executor";
 import { downloadRemoteRunnerOutput, runRemoteComfyWorkflow, websocketCapabilityEvidence } from "./comfy-remote-runner";
-import { writeStage3OWanBundle } from "./stage3o-wan-bundle";
+import { buildStage3OWanBundle, writeStage3OWanBundle } from "./stage3o-wan-bundle";
 
 type CommandResult = { status: number | null; stderr?: string | Buffer | null; stdout?: string | Buffer | null };
 function requireSuccess(result: CommandResult, code: string) {
@@ -56,5 +57,46 @@ export function createRealWanTransport(target: GpuTarget, dependencies: WanTrans
     } finally { rmSync(localWebm, { force: true }); }
   }
   async function stop() { requireSuccess(dependencies.ssh(target, "curl -fsS -X POST -H 'Content-Type: application/json' -d '{\"unload_models\":true,\"free_memory\":true}' http://127.0.0.1:8188/free >/dev/null", 60_000), "wan_unload_failed"); }
+  return { ensureRestored, run, stop };
+}
+
+async function controllerJson(baseUrl: string, pathName: string, method = "GET", payload?: unknown) {
+  const response = await fetch(`${baseUrl}${pathName}`, { method, headers: payload === undefined ? undefined : { "content-type": "application/json" }, body: payload === undefined ? undefined : JSON.stringify(payload) });
+  const text = await response.text(); let parsed: unknown = {};
+  try { parsed = text ? JSON.parse(text) : {}; } catch { parsed = { error: text.slice(-500) }; }
+  if (!response.ok) throw new Error(`controller_${pathName.replace(/[^a-z]/g, "_")}_http_${response.status}:${JSON.stringify(parsed).slice(-700)}`);
+  return parsed as Record<string, unknown>;
+}
+
+/** HTTP-only counterpart of the existing SSH transport.  The Clore proxy exposes
+ * the controller; ComfyUI itself remains loopback-only inside the runtime. */
+export function createHttpWanTransport(baseUrl: string) {
+  let restored: Record<string, unknown> | null = null;
+  async function ensureRestored() {
+    if (!restored) restored = await controllerJson(baseUrl, "/restore", "POST", buildStage3OWanBundle());
+    return restored;
+  }
+  async function run(task: WanTransportTask) {
+    const restore = await ensureRestored(); let workflow = buildStage3OWanWorkflow(); if (task.prompt.trim()) workflow["6"].inputs.text = task.prompt.trim();
+    const validation = validateStage3OWanWorkflow(workflow);
+    const submitted = await controllerJson(baseUrl, "/prompt", "POST", { prompt: workflow, client_id: task.id });
+    const promptId = String(submitted.prompt_id ?? ""); if (!promptId) throw new Error("controller_prompt_missing_prompt_id");
+    const deadline = Date.now() + 90 * 60_000; let history: Record<string, unknown> | null = null;
+    while (Date.now() < deadline) {
+      history = await controllerJson(baseUrl, `/history/${encodeURIComponent(promptId)}`);
+      const item = history[promptId] as Record<string, unknown> | undefined;
+      if (item?.status && (item.status as Record<string, unknown>).completed === true) break;
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+    const outputs = ((history?.[promptId] as Record<string, unknown> | undefined)?.outputs ?? {}) as Record<string, { videos?: Array<Record<string, string>>; images?: Array<Record<string, string>> }>;
+    const output = Object.values(outputs).flatMap((value) => value.videos ?? value.images ?? [])[0];
+    if (!output?.filename) throw new Error("controller_history_missing_output");
+    const query = new URLSearchParams({ filename: output.filename, subfolder: output.subfolder ?? "", type: output.type ?? "output" });
+    const response = await fetch(`${baseUrl}/view?${query}`); if (!response.ok) throw new Error(`controller_view_http_${response.status}`);
+    const dir = mkdtempSync(path.join(os.tmpdir(), "wan-http-")); const localWebm = path.join(dir, path.basename(output.filename)); writeFileSync(localWebm, Buffer.from(await response.arrayBuffer()));
+    try { return { restore, generated: archiveStage3OWanVideo({ sourceWebm: localWebm, workflow, promptId, validation, oomFallbackUsed: false, jobId: task.id, seed: task.seed, runtimeEvidence: { controller_http: true } }) }; }
+    finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+  async function stop() { await controllerJson(baseUrl, "/free", "POST", { unload_models: true, free_memory: true }); }
   return { ensureRestored, run, stop };
 }

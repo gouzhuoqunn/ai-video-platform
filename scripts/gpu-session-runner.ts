@@ -6,7 +6,10 @@ import { GENERATION_POOL_PATH, readGenerationPool, updateManualGpuBatch, type Ma
 import { runManualSilent4090Batch } from "../src/lib/generation/manual-gpu-batch-runner";
 import { getGpuProvider } from "./gpu-providers";
 import type { GpuTarget } from "./gpu-providers/types";
-import { createRealWanTransport } from "./wan-real-transport";
+import { scpFile, sshCommand } from "./gpu-providers/common";
+import { createHttpWanTransport, createRealWanTransport } from "./wan-real-transport";
+import { buildRuntimeOverlay } from "./runtime-overlay";
+import { installRemoteComfyRunner, runRemoteComfyProbe } from "./comfy-remote-runner";
 import { isDeploymentHostBlacklisted, recordDeploymentFailure } from "./clore/deployment-host-blacklist";
 import { installLocalWatchdogTask } from "./clore/watchdog-io";
 import { assertWatchdogsReadyForCreate } from "./clore/watchdog-preflight";
@@ -15,12 +18,56 @@ const STATE_DIR = path.join(process.cwd(), ".secrets", "gpu-session-runner");
 const PID_PATH = path.join(STATE_DIR, "runner.pid");
 const STATUS_PATH = path.join(STATE_DIR, "status.json");
 const INTERVAL_MS = 3_000;
-const DEPLOYMENT_TIMEOUT_MS = 20 * 60_000;
+const SSH_AUTH_TIMEOUT_MS = 40 * 60_000;
 
 type RunnerStatus = { pid: number; updatedAt: string; state: "idle" | "searching" | "candidate_selected" | "blocked" | "order_created" | "error"; batchId: string | null; message: string };
 type Candidate = { server_id: string; base_usd_per_hour?: number | null; effective_usd_per_hour?: number | null; gpu?: string | null };
 type CandidateReader = () => Promise<{ selected?: Candidate | null } | Record<string, unknown>>;
 type WanSession = { ensureRestored(): Promise<unknown>; run(task: { id: string; prompt: string; seed?: number }): Promise<{ generated: { outputPath: string; thumbnailPath: string } }>; stop(): Promise<void> };
+
+function commandOutput(result: ReturnType<typeof sshCommand | typeof scpFile>) {
+  return String(result.stderr ?? result.stdout ?? result.error?.message ?? `exit_${result.status}`).trim().slice(-1_500);
+}
+function requireRemoteSuccess(result: ReturnType<typeof sshCommand | typeof scpFile>, code: string) {
+  if (result.status !== 0) throw new Error(`${code}:${commandOutput(result)}`);
+}
+function sanitizedOrderPayload(input: {
+  serverId: string | null;
+  orderId: string | null;
+  requiredPrice: number | null;
+  deploymentState?: string | null;
+  startedAt?: string | null;
+  sshHost?: string | null;
+  sshPort?: number | null;
+  latestSshAuthError?: string | null;
+  createResponseStatus?: string | null;
+}) {
+  return {
+    image: "cloreai/ubuntu22.04-cuda12",
+    ports: ["22/tcp"],
+    commandPresent: false,
+    autosshEntrypoint: true,
+    serverId: input.serverId,
+    orderId: input.orderId,
+    requiredPrice: input.requiredPrice,
+    deploymentState: input.deploymentState ?? null,
+    startedAt: input.startedAt ?? null,
+    sshHost: input.sshHost ?? null,
+    sshPort: input.sshPort ?? null,
+    latestSshAuthError: input.latestSshAuthError ?? null,
+    createResponseStatus: input.createResponseStatus ?? null,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function readableSshError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/fetch failed/i.test(message)) return "fetch failed";
+  if (/ssh_tcp_not_ready/i.test(message)) return "ssh_tcp_not_ready";
+  if (/ssh_public_key_rejected/i.test(message)) return "ssh_public_key_rejected";
+  if (/order_not_deployed/i.test(message)) return "order_not_deployed";
+  return message.slice(-500);
+}
 
 function statusPath() { mkdirSync(STATE_DIR, { recursive: true }); return STATUS_PATH; }
 function writeStatus(status: Omit<RunnerStatus, "pid" | "updatedAt">) {
@@ -73,6 +120,57 @@ function rearmWatchdogsBeforeCreate(serverId: string) {
   }
 }
 
+function inspectCudaBaseHost(target: GpuTarget) {
+  const inspection = sshCommand(target, "set -e; nvidia-smi; free -b; df -B1 /workspace 2>/dev/null || df -B1 /", 60_000);
+  requireRemoteSuccess(inspection, "cuda_base_hardware_check_failed");
+  return String(inspection.stdout ?? "").trim();
+}
+
+function bootstrapCudaBaseWanRuntime(target: GpuTarget) {
+  const overlay = buildRuntimeOverlay();
+  const bootstrap = path.join(process.cwd(), "scripts", "clore", "clore-light-bootstrap.sh");
+  requireRemoteSuccess(sshCommand(target, "mkdir -p /workspace", 30_000), "cuda_base_workspace_create_failed");
+  requireRemoteSuccess(scpFile(target, overlay.outputPath, "/workspace/runtime-overlay.tgz", 5 * 60_000), "cuda_base_overlay_copy_failed");
+  requireRemoteSuccess(scpFile(target, bootstrap, "/workspace/clore-light-bootstrap.sh", 2 * 60_000), "cuda_base_bootstrap_copy_failed");
+  requireRemoteSuccess(sshCommand(target, "set -e; sed -i 's/\\r$//' /workspace/clore-light-bootstrap.sh; chmod 700 /workspace/clore-light-bootstrap.sh; /workspace/clore-light-bootstrap.sh prepare /workspace/runtime-overlay.tgz rtx4090", 55 * 60_000), "cuda_base_runtime_prepare_failed");
+  requireRemoteSuccess(sshCommand(target, "/workspace/clore-light-bootstrap.sh start rtx4090", 90_000), "cuda_base_runtime_start_failed");
+  installRemoteComfyRunner(target);
+  runRemoteComfyProbe(target);
+}
+
+async function refreshOrderPayload(input: {
+  batch: ManualGpuExecutionBatch;
+  orderId: string;
+  poolPath: string;
+  latestSshAuthError?: string | null;
+  target?: GpuTarget | null;
+}) {
+  const latest = readGenerationPool(input.poolPath).scheduler.manualBatch;
+  if (!latest?.startIntent || latest.id !== input.batch.id) return;
+  const existing = latest.startIntent.orderPayload;
+  let live: { deploymentState?: string; startedAt?: string | null; sshHost?: string | null; sshPort?: number | null } | null = null;
+  try {
+    const { loadCloreConfig } = await import("./clore/config");
+    const { readLiveOrdersSummary } = await import("./clore/live");
+    live = (await readLiveOrdersSummary(loadCloreConfig(), { forceRefresh: true })).find((order) => order.orderId === input.orderId) ?? null;
+  } catch {
+    // The persisted payload still captures the local evidence if Clore status is briefly unavailable.
+  }
+  updateIntent(latest, {
+    orderPayload: sanitizedOrderPayload({
+      serverId: latest.startIntent.selectedServerId ?? existing?.serverId ?? null,
+      orderId: input.orderId,
+      requiredPrice: existing?.requiredPrice ?? latest.startIntent.maxEffectiveHourlyUsd,
+      deploymentState: live?.deploymentState ?? existing?.deploymentState ?? null,
+      startedAt: live?.startedAt ?? existing?.startedAt ?? latest.startIntent.orderCreatedAt ?? null,
+      sshHost: input.target?.host ?? live?.sshHost ?? existing?.sshHost ?? null,
+      sshPort: input.target?.port ?? live?.sshPort ?? existing?.sshPort ?? null,
+      latestSshAuthError: input.latestSshAuthError ?? existing?.latestSshAuthError ?? null,
+      createResponseStatus: existing?.createResponseStatus ?? null,
+    }),
+  }, input.poolPath);
+}
+
 export async function executeFrozenWanBatch(input: { target: GpuTarget; poolPath?: string; transport?: WanSession; onStage?: (stage: ManualGpuRunnerStage, message: string, taskNumber?: number | null) => void }) {
   const poolPath = input.poolPath ?? GENERATION_POOL_PATH;
   const transport = input.transport ?? createRealWanTransport(input.target);
@@ -91,9 +189,10 @@ export async function executeFrozenWanBatch(input: { target: GpuTarget; poolPath
 
 async function resumeCreatedWanBatch(input: { batch: ManualGpuExecutionBatch; orderId: string; poolPath: string }) {
   const orderCreatedAt = input.batch.startIntent?.orderCreatedAt ?? input.batch.createdAt;
-  if (Date.now() - Date.parse(orderCreatedAt) >= DEPLOYMENT_TIMEOUT_MS) {
-    const message = "Clore 部署超过 20 分钟仍未开放 SSH，已取消本次未运行订单。";
+  if (Date.now() - Date.parse(orderCreatedAt) >= SSH_AUTH_TIMEOUT_MS) {
+    const message = "Clore 在 40 分钟内未开放 HTTP runtime，已取消本次未运行订单。";
     report(input.batch.id, "error", message, input.poolPath, message);
+    await refreshOrderPayload({ batch: input.batch, orderId: input.orderId, poolPath: input.poolPath, latestSshAuthError: input.batch.startIntent?.orderPayload?.latestSshAuthError ?? message });
     recordDeploymentFailure({
       serverId: input.batch.startIntent?.selectedServerId ?? "",
       orderId: input.orderId,
@@ -109,25 +208,34 @@ async function resumeCreatedWanBatch(input: { batch: ManualGpuExecutionBatch; or
     }
     return { action: "deployment_timeout" as const, orderId: input.orderId };
   }
-  report(input.batch.id, "waiting_deployment", "等待部署", input.poolPath);
+  report(input.batch.id, "waiting_deployment", "等待 HTTP runtime", input.poolPath);
   const provider = getGpuProvider("clore");
   const session = await provider.recoverExistingSession(input.orderId);
   if (!session) throw new Error("runner_created_order_not_recoverable");
-  // Do not let one readiness probe cross the deployment cancellation deadline.
-  const remainingDeploymentMs = Math.max(1_000, DEPLOYMENT_TIMEOUT_MS - (Date.now() - Date.parse(orderCreatedAt)));
-  const target = await provider.waitForSsh(session, Math.min(10 * 60_000, remainingDeploymentMs));
   try {
-    report(input.batch.id, "checking_host", "检查主机", input.poolPath);
-    report(input.batch.id, "pulling_runtime", "拉取运行环境", input.poolPath);
-    const completed = await executeFrozenWanBatch({ target, poolPath: input.poolPath, onStage: (stage, message, taskNumber) => report(input.batch.id, stage, message, input.poolPath, null, taskNumber ?? null) });
+    const { loadCloreConfig } = await import("./clore/config"); const { readLiveOrdersSummary } = await import("./clore/live");
+    const deadline = Date.now() + Math.max(1_000, SSH_AUTH_TIMEOUT_MS - (Date.now() - Date.parse(orderCreatedAt)));
+    let controllerUrl = "";
+    while (Date.now() < deadline) {
+      const live = (await readLiveOrdersSummary(loadCloreConfig(), { forceRefresh: true })).find((order) => order.orderId === input.orderId);
+      controllerUrl = live?.controllerUrl ?? "";
+      if (controllerUrl) {
+        try { const health = await fetch(`${controllerUrl}/healthz`); if (health.ok) break; } catch { /* deployment is still converging */ }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+    }
+    if (!controllerUrl) throw new Error("http_runtime_endpoint_not_published");
+    report(input.batch.id, "pulling_runtime", "HTTP runtime ready", input.poolPath);
+    const target = { provider: "clore" as const, host: "http-runtime", port: 0, username: "", sshKeyPath: "", gpuProfile: "rtx4090" as const, runtimeDigest: "http-controller" };
+    const completed = await executeFrozenWanBatch({ target, poolPath: input.poolPath, transport: createHttpWanTransport(controllerUrl), onStage: (stage, message, taskNumber) => report(input.batch.id, stage, message, input.poolPath, null, taskNumber ?? null) });
     report(input.batch.id, "terminating", "退租", input.poolPath);
     await provider.terminateSession(session);
     report(input.batch.id, "completed", "批次已完成", input.poolPath);
     return { action: "batch_completed" as const, orderId: input.orderId, completed };
   } catch (error) {
     const message = error instanceof Error ? error.message : "runner_session_failed";
-    if (/ssh_tcp_not_ready|order_not_deployed|deployment/i.test(message)) {
-      report(input.batch.id, "waiting_deployment", "Clore 仍在部署，SSH 尚未开放", input.poolPath, null);
+    if (/http_runtime_endpoint_not_published|fetch failed|deployment/i.test(message)) {
+      report(input.batch.id, "waiting_deployment", "HTTP runtime 尚未就绪", input.poolPath, null);
       return { action: "awaiting_deployment" as const, orderId: input.orderId };
     }
     report(input.batch.id, "error", message, input.poolPath, message);
@@ -233,12 +341,36 @@ export async function runGpuSessionRunnerTick(readCandidates: CandidateReader | 
     report(batch.id, "creating_order", "恢复订单监控", poolPath);
     rearmWatchdogsBeforeCreate(candidate.server_id);
     const execution = loadCloreExecutionConfig();
-    const config = { ...(await import("./clore/config")).loadCloreConfig(), targetGpu: "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: 24, maxGpuPricePerHour: batch.startIntent.maxEffectiveHourlyUsd / 1.05 };
-    const prepared = await prepareCreateOrderFromLive({ config, execution, serverId: candidate.server_id, maxPriceUsdPerHour: candidate.base_usd_per_hour, queuedJobCount: batch.taskCount });
+    const config = { ...(await import("./clore/config")).loadCloreConfig(), targetGpu: "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: 24, maxGpuPricePerHour: batch.startIntent.maxEffectiveHourlyUsd };
+    const prepared = await prepareCreateOrderFromLive({
+      config,
+      execution,
+      serverId: candidate.server_id,
+      // This is deliberately the frozen user-entered ceiling, not a derived
+      // marketplace or fee-adjusted number.
+      maxPriceUsdPerHour: batch.startIntent.maxEffectiveHourlyUsd,
+      queuedJobCount: batch.taskCount,
+      orderProfile: "http_runtime",
+    });
+    const beforeCreate = readGenerationPool(poolPath).scheduler.manualBatch;
+    if (beforeCreate?.startIntent) {
+      updateIntent(beforeCreate, { orderPayload: sanitizedOrderPayload({ serverId: candidate.server_id, orderId: null, requiredPrice: prepared.requestBody.required_price ?? batch.startIntent.maxEffectiveHourlyUsd }) }, poolPath);
+    }
     const created = await createCloreOrder({ config, execution, candidate: prepared.candidate, requestBody: prepared.requestBody });
     if (!created.order_created || !created.order_id) throw new Error("runner_order_not_created");
     const latest = readGenerationPool(poolPath).scheduler.manualBatch!;
-    updateIntent(latest, { status: "order_created", orderCreatedAt: new Date().toISOString(), lastError: null }, poolPath);
+    updateIntent(latest, {
+      status: "order_created",
+      orderCreatedAt: new Date().toISOString(),
+      orderPayload: sanitizedOrderPayload({
+        serverId: candidate.server_id,
+        orderId: created.order_id,
+        requiredPrice: prepared.requestBody.required_price ?? batch.startIntent.maxEffectiveHourlyUsd,
+        deploymentState: created.status,
+        createResponseStatus: created.create_response_status,
+      }),
+      lastError: null,
+    }, poolPath);
     updateManualGpuBatch({ status: "provisioning", providerOrderId: created.order_id }, poolPath);
     writeStatus({ state: "order_created", batchId: batch.id, message: "租用成功，正在等待主机" });
     return resumeCreatedWanBatch({ batch: readGenerationPool(poolPath).scheduler.manualBatch!, orderId: created.order_id, poolPath });

@@ -153,6 +153,22 @@ export type PersistedProductionSession = {
 export type ManualGpuExecutionBatchStatus = "searching" | "awaiting_confirmation" | "order_pending" | "provisioning" | "running" | "paused" | "completed" | "canceled" | "failed" | "no_candidate";
 export type ManualGpuRunnerStage = "search_candidates" | "creating_order" | "waiting_deployment" | "getting_ssh" | "checking_host" | "pulling_runtime" | "restoring_wan" | "starting_worker" | "generating" | "uploading" | "idle_countdown" | "terminating" | "completed" | "error";
 export type ManualGpuRunnerProgress = { stage: ManualGpuRunnerStage; updatedAt: string; message: string; error: string | null; taskNumber: number | null };
+export type ManualGpuOrderPayload = {
+  image: string;
+  ports: string[];
+  commandPresent: boolean;
+  autosshEntrypoint: boolean | null;
+  serverId: string | null;
+  orderId: string | null;
+  requiredPrice: number | null;
+  deploymentState: string | null;
+  startedAt: string | null;
+  sshHost: string | null;
+  sshPort: number | null;
+  latestSshAuthError: string | null;
+  createResponseStatus: string | null;
+  updatedAt: string;
+};
 export type ManualGpuStartIntent = {
   id: string;
   idempotencyKey: string;
@@ -171,6 +187,7 @@ export type ManualGpuStartIntent = {
   selectedEffectiveHourlyUsd?: number | null;
   selectedHost?: Record<string, unknown> | null;
   orderCreatedAt?: string | null;
+  orderPayload?: ManualGpuOrderPayload | null;
   lastError: string | null;
 };
 export type ManualGpuExecutionBatch = {

@@ -14,6 +14,7 @@ export type ParsedCloreOrder = {
   sshSource: "structured" | "ssh_command" | null;
   fullSshCommandPresent: boolean;
   forwardedPorts: string[];
+  controllerUrl: string | null;
   rawFieldNames: string[];
 };
 
@@ -112,10 +113,12 @@ export function parseCloreOrder(order: Record<string, unknown>): ParsedCloreOrde
   const command = exactSshCommand(order);
   if (!ssh && command) { ssh = parseSshCommand(command); if (ssh) sshSource = "ssh_command"; }
   const forwardedPorts = Array.isArray(order.tcp_ports) ? order.tcp_ports.map(String) : [];
+  const httpCandidate = [connection.web, connection.http_url, connection.url, order.web, order.http_url, order.url]
+    .find((value): value is string => typeof value === "string" && /^https:\/\/[A-Za-z0-9.-]+(?:\/[^\s]*)?$/i.test(value));
   return {
     orderId: firstString(order, ["id", "order_id"]), serverId: firstString(order, ["si", "server_id", "renting_server"]), active, terminal,
     lifecycleStatus: explicitLifecycle?.toLowerCase() ?? (expired ? "expired" : "active"), deploymentState, deploymentReady, ssh, sshSource,
-    fullSshCommandPresent: Boolean(command), forwardedPorts, rawFieldNames: Object.keys(order).sort(),
+    fullSshCommandPresent: Boolean(command), forwardedPorts, controllerUrl: httpCandidate ?? null, rawFieldNames: Object.keys(order).sort(),
   };
 }
 

@@ -21,6 +21,10 @@ import {
 } from "./ssh-identity";
 import { ensureValidatedProjectSshKey } from "./ssh-key-validation";
 
+/** The first-principles Clore image used for the real Wan session.  Runtime
+ * setup happens only after key-authenticated SSH is proven. */
+export const CLORE_CUDA_BASE_IMAGE = "cloreai/ubuntu22.04-cuda12";
+
 export type LoadedCloreConfig = ReturnType<typeof loadCloreConfig>;
 
 export type CreateOrderRequest = {
@@ -55,6 +59,7 @@ export type CreateOrderPreflightInput = {
   execution: CloreExecutionConfig;
   verifyImage?: typeof verifyDockerImage;
   verifyWatchdogs?: () => Promise<void> | void;
+  orderProfile?: "cuda_base" | "http_runtime";
 };
 
 export function validateCreatedOrderPricing(input: {
@@ -118,6 +123,30 @@ export function buildKeyOnlyCreateOrderBody(input: { serverId: string; currency:
   return { currency: input.currency, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, renting_server: Number(input.serverId), type: "on-demand", ports: { "22": "tcp" }, ssh_key: input.sshPublicKey, required_price: input.requiredPriceForApi, autossh_entrypoint: true };
 }
 
+export function buildCudaBaseCreateOrderBody(input: { serverId: string; currency: string; sshPublicKey: string; requiredPrice: number }): CreateOrderRequest {
+  return {
+    currency: input.currency,
+    image: CLORE_CUDA_BASE_IMAGE,
+    renting_server: Number(input.serverId),
+    type: "on-demand",
+    ports: { "22": "tcp" },
+    ssh_key: input.sshPublicKey,
+    required_price: input.requiredPrice,
+    // The official CUDA base image has no project SSH daemon of its own.
+    // Clore's documented entrypoint installs the SSH endpoint for this image.
+    autossh_entrypoint: true,
+  };
+}
+
+export function buildHttpRuntimeCreateOrderBody(input: { serverId: string; currency: string; requiredPrice: number }): CreateOrderRequest {
+  return {
+    currency: input.currency, image: COMFY_RUNTIME_IMAGE, renting_server: Number(input.serverId), type: "on-demand",
+    ports: { "8080": "http" },
+    env: { PROJECT_TAG, COMFY_RUNTIME_MODE: "gpu", COMFY_GPU_PROFILE: "rtx4090", COMFY_NODE_PROFILE: "production_minimal", START_GPU_WORKER: "false" },
+    required_price: input.requiredPrice,
+  };
+}
+
 export function buildKeyWithPasswordFallbackCreateOrderBody(input: { serverId: string; currency: string; sshPassword: string; sshPublicKey: string; requiredPriceForApi: number }): CreateOrderRequest {
   return { currency: input.currency, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, renting_server: Number(input.serverId), type: "on-demand", ports: { "22": "tcp" }, ssh_password: input.sshPassword, ssh_key: input.sshPublicKey, required_price: input.requiredPriceForApi, autossh_entrypoint: true };
 }
@@ -138,14 +167,17 @@ export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
   const manualParity = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.ssh_password !== undefined && body.env === undefined && body.command === undefined && body.required_price === undefined && body.autossh_entrypoint === true;
   const passwordFallback = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.ssh_password !== undefined && body.env === undefined && body.command === undefined && body.required_price !== undefined && body.autossh_entrypoint === true;
   const keyOnly = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.ssh_password === undefined && body.env === undefined && body.command === undefined && body.required_price !== undefined && body.autossh_entrypoint === true;
-  if (!fixedRuntime && !lightBootstrap && !manualParity && !passwordFallback && !keyOnly) throw new Error("Clore order image must be the pinned Runtime or an approved light bootstrap profile.");
+  const cudaBase = body.image === CLORE_CUDA_BASE_IMAGE && body.ssh_password === undefined && body.env === undefined && body.command === undefined && body.required_price !== undefined && body.autossh_entrypoint === true;
+  const httpRuntime = body.image === COMFY_RUNTIME_IMAGE && body.ssh_key === undefined && body.ssh_password === undefined && body.command === undefined && body.ports["8080"] === "http";
+  if (!fixedRuntime && !httpRuntime && !lightBootstrap && !manualParity && !passwordFallback && !keyOnly && !cudaBase) throw new Error("Clore order image must be the pinned Runtime, approved light bootstrap, or CUDA base profile.");
   const ports = Object.keys(body.ports);
-  if (body.ports["22"] !== "tcp" || body.ports["8188"] !== undefined || ports.some((port) => !["22", "8080"].includes(port)) || ports.filter((port) => body.ports[port] === "http").length > 1) {
+  if ((!httpRuntime && body.ports["22"] !== "tcp") || body.ports["8188"] !== undefined || ports.some((port) => !["22", "8080"].includes(port)) || ports.filter((port) => body.ports[port] === "http").length > 1) {
     throw new Error("Order must expose SSH and at most one HTTP port; ComfyUI 8188 is forbidden.");
   }
-  if ((lightBootstrap || manualParity || passwordFallback || keyOnly) && ports.length !== 1) {
+  if ((lightBootstrap || manualParity || passwordFallback || keyOnly || cudaBase) && ports.length !== 1) {
     throw new Error("clore_light_bootstrap exposes SSH only.");
   }
+  if (httpRuntime) return;
   try {
     const parsed = parseNormalizedOpenSshPublicKey(body.ssh_key ?? "");
     if (body.ssh_key !== parsed.normalizedPublicKey) throw new Error("not_normalized");
@@ -175,12 +207,6 @@ export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) 
   if (input.queuedJobCount <= 0) {
     throw new Error("At least one queued job is required.");
   }
-  if (input.config.dockerImage === DEFAULT_DOCKER_IMAGE) {
-    throw new Error("Runtime image is not published/configured; refusing real create_order.");
-  }
-  if (input.config.dockerImage !== COMFY_RUNTIME_IMAGE) {
-    throw new Error("CLORE_DOCKER_IMAGE must equal the fixed Comfy Runtime digest for this session.");
-  }
   if (input.config.rentalCurrency !== "USD-Blockchain") {
     throw new Error("CLORE_RENTAL_CURRENCY must be USD-Blockchain for real create_order.");
   }
@@ -204,8 +230,8 @@ export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) 
     throw new Error("Current price exceeds the user's confirmed maximum.");
   }
   const projected = computeCloreProjectedCost(selected.priceUsdPerHour, input.execution.hardSessionLimitMinutes / 60);
-  if (projected.effectiveHourlyUsd === null || projected.effectiveHourlyUsd > input.execution.maxGpuPricePerHour) {
-    throw new Error("Current price exceeds the system hourly cap.");
+  if (projected.effectiveHourlyUsd === null || projected.effectiveHourlyUsd > input.confirmedMaxPriceUsdPerHour) {
+    throw new Error("Current price exceeds the user's confirmed maximum.");
   }
   if ((projected.projectedTotalUsd ?? Number.POSITIVE_INFINITY) > input.execution.firstSessionMaxBudgetUsd) {
     throw new Error("Projected Clore total cost exceeds the first-session budget.");
@@ -218,9 +244,17 @@ export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) 
   if (!ssh.exists || !ssh.formatValid) {
     throw new Error("SSH public key is missing or invalid.");
   }
-  const image = await (input.verifyImage ?? verifyDockerImage)(input.config.dockerImage);
-  if (!image.exists || !image.linuxAmd64) {
-    throw new Error("Docker image was not verified for linux/amd64.");
+  if (input.orderProfile !== "cuda_base") {
+    if (input.config.dockerImage === DEFAULT_DOCKER_IMAGE) {
+      throw new Error("Runtime image is not published/configured; refusing real create_order.");
+    }
+    if (input.config.dockerImage !== COMFY_RUNTIME_IMAGE) {
+      throw new Error("CLORE_DOCKER_IMAGE must equal the fixed Comfy Runtime digest for this session.");
+    }
+    const image = await (input.verifyImage ?? verifyDockerImage)(input.config.dockerImage);
+    if (!image.exists || !image.linuxAmd64) {
+      throw new Error("Docker image was not verified for linux/amd64.");
+    }
   }
   await input.verifyWatchdogs?.();
 
@@ -329,6 +363,7 @@ export async function createCloreOrder(input: {
       order_id: orderId,
       create_order_called: true,
       status: "order_pending",
+      create_response_status: String(created.raw_status ?? "created"),
     };
   } finally {
     lock.release();
@@ -341,6 +376,7 @@ export async function prepareCreateOrderFromLive(input: {
   serverId: string;
   maxPriceUsdPerHour: number;
   queuedJobCount: number;
+  orderProfile?: "cuda_base" | "http_runtime";
 }) {
   const liveOrders = await readLiveOrdersSummary(input.config);
   const activeLiveOrder = liveOrders.find((order) => order.active);
@@ -357,20 +393,34 @@ export async function prepareCreateOrderFromLive(input: {
     availableUsdBalance: wallet.availableUsdBalance,
     config: input.config,
     execution: input.execution,
+    orderProfile: input.orderProfile,
     verifyWatchdogs: () => assertWatchdogsReadyForCreate(input.serverId),
   });
   const publicKey = ensureValidatedProjectSshKey().normalizedPublicKey;
-  const requestBody = buildCreateOrderBody({
-    serverId: input.serverId,
-    image: input.config.dockerImage,
-    currency: input.config.rentalCurrency,
-    sshPublicKey: publicKey,
-    maxPriceUsdPerHour: input.maxPriceUsdPerHour,
-    requiredPriceForApi:
-      candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null
+  const requestBody = input.orderProfile === "http_runtime"
+    ? buildHttpRuntimeCreateOrderBody({ serverId: input.serverId, currency: input.config.rentalCurrency, requiredPrice: candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null ? candidate.priceOriginalAmount : input.maxPriceUsdPerHour })
+    : input.orderProfile === "cuda_base"
+    ? buildCudaBaseCreateOrderBody({
+      serverId: input.serverId,
+      currency: input.config.rentalCurrency,
+      sshPublicKey: publicKey,
+      // Clore locks this field in the marketplace's original unit (USD/day),
+      // while the Studio ceiling remains the independently frozen USD/hour cap.
+      requiredPrice: candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null
         ? candidate.priceOriginalAmount
         : input.maxPriceUsdPerHour,
-  });
+    })
+    : buildCreateOrderBody({
+      serverId: input.serverId,
+      image: input.config.dockerImage,
+      currency: input.config.rentalCurrency,
+      sshPublicKey: publicKey,
+      maxPriceUsdPerHour: input.maxPriceUsdPerHour,
+      requiredPriceForApi:
+        candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null
+          ? candidate.priceOriginalAmount
+          : input.maxPriceUsdPerHour,
+    });
   assertCreateOrderBodySafe(requestBody);
   return { candidate, requestBody, wallet };
 }
