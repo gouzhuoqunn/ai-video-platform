@@ -39,8 +39,8 @@ fi
 
 python3 --version
 ram_gb="$(awk '/MemTotal/ { printf \"%d\", $2 / 1024 / 1024 }' /proc/meminfo)"
-if [ "${ram_gb:-0}" -lt 64 ]; then
-  echo "System RAM is below 64GB. Refusing to continue."
+if [ "${ram_gb:-0}" -lt 32 ]; then
+  echo "System RAM is below 32GB. Refusing to continue."
   exit 1
 fi
 

@@ -8,7 +8,7 @@ const fixtures = [
   ["RTX 4090 minor variance", "RTX[[:space:]]*4090", "23000"],
   ["wrong RTX 3090", "Expected $expected_gpu_class was not detected", "RTX[[:space:]]*4090"],
   ["RTX 5090", "rtx5090:rtx5090", "32000"],
-  ["insufficient RAM", "below 64GB", "MemTotal"],
+  ["insufficient RAM", "below 32GB", "MemTotal"],
   ["insufficient disk", "below 200GB", "/workspace"],
   ["CUDA unavailable", "CUDA visibility is unavailable", "compute_mode"],
   ["conflicting process", "conflicting GPU process", "query-compute-apps"],

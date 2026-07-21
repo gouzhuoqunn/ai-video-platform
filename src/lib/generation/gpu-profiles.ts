@@ -31,7 +31,7 @@ export const GPU_PROFILES: Record<GpuProfileKey, GpuProfile> = {
     exactGpuName: "NVIDIA GeForce RTX 4090",
     minimumVramGb: 24,
     allowDisplayVramTolerance: false,
-    hardMinimumRamGb: 64,
+    hardMinimumRamGb: 32,
     preferredRamGb: 96,
     hardMinimumDiskGb: 200,
     preferredDiskGb: 250,

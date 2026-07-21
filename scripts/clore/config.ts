@@ -103,7 +103,7 @@ export function loadCloreConfig(): CloreConfig {
     minReliability: readNumber("CLORE_MIN_RELIABILITY", 0.99, fileValues),
     minRating: readNumber("CLORE_MIN_RATING", 4.7, fileValues),
     minRatingCount: readNumber("CLORE_MIN_RATING_COUNT", 3, fileValues),
-    minRamGb: readNumber("CLORE_MIN_RAM_GB", 64, fileValues),
+    minRamGb: readNumber("CLORE_MIN_RAM_GB", 32, fileValues),
     minCpuCores: readNumber("CLORE_MIN_CPU_CORES", 8, fileValues),
     minDiskGb: readNumber("CLORE_MIN_DISK_GB", 200, fileValues),
     minDownloadMbps: readNumber("CLORE_MIN_DOWNLOAD_MBPS", 300, fileValues),

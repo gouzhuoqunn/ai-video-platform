@@ -42,7 +42,7 @@ Potential shared components are FLUX VAE files, FLUX Qwen text encoders, and Wan
 
 ## Hardware Gates
 
-- RTX 4090: exact model, 24 GB VRAM, 64 GB RAM hard / 96 GB preferred, 200 GB disk hard, aggressive offload.
+- RTX 4090: exact model, 24 GB VRAM, 32 GB RAM hard / 96 GB preferred, 200 GB disk hard, aggressive offload.
 - RTX 5090: exact model, 31/32 GB display-memory tolerance only for exact RTX 5090, 80 GB RAM hard / 128 GB preferred, 250 GB disk hard, balanced offload.
 - The scheduling helper takes the larger of the hard disk floor and the model-sync total plus 20%. The current hard floors remain larger than the incomplete first-round session estimates.
 - Image and video models are not resident together: batch images, unload and clear CUDA cache, then load video.

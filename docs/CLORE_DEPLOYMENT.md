@@ -160,7 +160,7 @@ Clore candidates must satisfy all of these filters:
 - Exactly 1 GPU.
 - Currently rentable.
 - On-demand only; spot is rejected.
-- At least 64GB RAM, 8 CPU cores, 200GB disk, and 32GB GPU memory.
+- At least 32GB RAM, 8 CPU cores, 200GB disk, and 32GB GPU memory.
 - Reliability at least 0.99.
 - Rating at least 4.7 with at least 3 ratings.
 - At least 300Mbps download and 100Mbps upload.
