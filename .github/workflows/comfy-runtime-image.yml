@@ -1,6 +1,7 @@
 name: Comfy Runtime Image
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - stage-two-five-comfy-runtime
@@ -28,7 +29,7 @@ concurrency:
 jobs:
   runtime-hygiene-gate:
     name: Runtime hygiene gate
-    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && github.ref == 'refs/heads/stage-two-five-comfy-runtime' && contains(github.event.head_commit.message, '[runtime-hygiene]') }}
+    if: ${{ github.repository == 'gouzhuoqunn/ai-video-platform' && (github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/stage-two-five-comfy-runtime' && contains(github.event.head_commit.message, '[runtime-hygiene]'))) }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
