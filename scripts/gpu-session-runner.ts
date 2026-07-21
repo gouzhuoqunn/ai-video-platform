@@ -113,7 +113,9 @@ async function resumeCreatedWanBatch(input: { batch: ManualGpuExecutionBatch; or
   const provider = getGpuProvider("clore");
   const session = await provider.recoverExistingSession(input.orderId);
   if (!session) throw new Error("runner_created_order_not_recoverable");
-  const target = await provider.waitForSsh(session, 10 * 60_000);
+  // Do not let one readiness probe cross the deployment cancellation deadline.
+  const remainingDeploymentMs = Math.max(1_000, DEPLOYMENT_TIMEOUT_MS - (Date.now() - Date.parse(orderCreatedAt)));
+  const target = await provider.waitForSsh(session, Math.min(10 * 60_000, remainingDeploymentMs));
   try {
     report(input.batch.id, "checking_host", "检查主机", input.poolPath);
     report(input.batch.id, "pulling_runtime", "拉取运行环境", input.poolPath);
