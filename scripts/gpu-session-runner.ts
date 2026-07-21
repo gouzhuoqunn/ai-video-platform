@@ -6,6 +6,7 @@ import { runManualSilent4090Batch } from "../src/lib/generation/manual-gpu-batch
 import { getGpuProvider } from "./gpu-providers";
 import type { GpuTarget } from "./gpu-providers/types";
 import { createRealWanTransport } from "./wan-real-transport";
+import { assertDeploymentHostAllowed, recordDeploymentFailure } from "./clore/deployment-host-blacklist";
 
 const STATE_DIR = path.join(process.cwd(), ".secrets", "gpu-session-runner");
 const PID_PATH = path.join(STATE_DIR, "runner.pid");
@@ -72,6 +73,11 @@ async function resumeCreatedWanBatch(input: { batch: ManualGpuExecutionBatch; or
   if (Date.now() - Date.parse(orderCreatedAt) >= DEPLOYMENT_TIMEOUT_MS) {
     const message = "Clore 部署超过 20 分钟仍未开放 SSH，已取消本次未运行订单。";
     report(input.batch.id, "error", message, input.poolPath, message);
+    recordDeploymentFailure({
+      serverId: input.batch.startIntent?.selectedServerId ?? "",
+      orderId: input.orderId,
+      reason: "deployment_timeout_without_ssh",
+    });
     const provider = getGpuProvider("clore");
     const session = await provider.recoverExistingSession(input.orderId);
     if (session) await provider.terminateSession(session);
@@ -160,6 +166,7 @@ export async function runGpuSessionRunnerTick(readCandidates: CandidateReader | 
     const market = await candidateReader();
     const candidate = ("selected" in market ? market.selected : null) as Candidate | null;
     if (!candidate?.server_id || !candidate.base_usd_per_hour) throw new Error("runner_candidate_lost_before_create");
+    assertDeploymentHostAllowed(candidate.server_id);
     const latestCandidateState = readGenerationPool(poolPath).scheduler.manualBatch;
     if (latestCandidateState?.startIntent) {
       updateIntent(latestCandidateState, {

@@ -12,6 +12,7 @@
     "gpu:session-runner:stop": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/gpu-session-runner.ts stop",
     "gpu:session-runner:recover": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/gpu-session-runner.ts recover",
     "gpu:session-runner:test": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/gpu-session-runner-tests.ts",
+    "clore:deployment-host-blacklist:test": "tsx scripts/clore/deployment-host-blacklist-tests.ts",
     "gpu:bootstrap-profile:test": "tsx scripts/clore/bootstrap-worker-profile-tests.ts",
     "build": "next build",
     "lint": "eslint .",

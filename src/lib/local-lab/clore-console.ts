@@ -15,6 +15,7 @@ import { DEFAULT_DOCKER_IMAGE } from "../../../scripts/clore/config";
 import { loadModelCacheConfig } from "../../../scripts/model-cache/config";
 import { MODEL_CACHE_CURRENT_KEY } from "../../../scripts/model-cache/manifest";
 import { getCloreDeploymentHold } from "../../../scripts/clore/deployment-hold";
+import { isDeploymentHostBlacklisted } from "../../../scripts/clore/deployment-host-blacklist";
 import {
   readGenerationPool,
   recordConfirmedQueueRentalSuccess,
@@ -113,8 +114,12 @@ function safeCandidateList(rawServers: RawCloreServer[], availableUsdBalance: nu
       : manualCandidateBasePriceCeiling(CLORE_RENTER_FEE_RATE),
   };
   const evaluated = evaluateMarketplace(rawServers, displayConfig);
-  const candidates = applyWalletBalance(evaluated.candidates, availableUsdBalance);
-  const matches = applyWalletBalance(evaluated.matches, availableUsdBalance);
+  // Deployment-failed hosts are deliberately omitted rather than surfaced as a
+  // sidebar rejection reason. The persistent history stays local to the runner.
+  const candidates = applyWalletBalance(evaluated.candidates, availableUsdBalance)
+    .filter((candidate) => !isDeploymentHostBlacklisted(candidate.serverId));
+  const matches = applyWalletBalance(evaluated.matches, availableUsdBalance)
+    .filter((candidate) => !isDeploymentHostBlacklisted(candidate.serverId));
   const targetGpuLabel = target === "manual_silent_4090" ? "RTX 4090" : "RTX 5090";
   const rejected5090 = candidates
     .filter((candidate) => target === "manual_silent_4090" ? /rtx\s+4090/i.test(candidate.gpu) : /rtx\s+5090/i.test(candidate.gpu))
