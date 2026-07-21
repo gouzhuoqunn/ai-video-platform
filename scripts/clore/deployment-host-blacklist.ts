@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-export const DEPLOYMENT_FAILURE_BLACKLIST_THRESHOLD = 3;
+export const DEPLOYMENT_FAILURE_BLACKLIST_THRESHOLD = 2;
 
 export type DeploymentFailure = {
   failedAt: string;

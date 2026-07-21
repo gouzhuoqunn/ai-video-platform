@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { getLocalLabCloreCandidates } from "../src/lib/local-lab/clore-console";
@@ -6,7 +7,9 @@ import { runManualSilent4090Batch } from "../src/lib/generation/manual-gpu-batch
 import { getGpuProvider } from "./gpu-providers";
 import type { GpuTarget } from "./gpu-providers/types";
 import { createRealWanTransport } from "./wan-real-transport";
-import { assertDeploymentHostAllowed, recordDeploymentFailure } from "./clore/deployment-host-blacklist";
+import { isDeploymentHostBlacklisted, recordDeploymentFailure } from "./clore/deployment-host-blacklist";
+import { installLocalWatchdogTask } from "./clore/watchdog-io";
+import { assertWatchdogsReadyForCreate } from "./clore/watchdog-preflight";
 
 const STATE_DIR = path.join(process.cwd(), ".secrets", "gpu-session-runner");
 const PID_PATH = path.join(STATE_DIR, "runner.pid");
@@ -50,6 +53,24 @@ function mutationsEnabled() {
     && process.env.NEXT_PUBLIC_APP_MODE === "local_lab"
     && process.env.LOCAL_REAL_GPU_RENTAL_ENABLED === "true"
     && process.env.CLORE_ORDER_EXECUTION_ENABLED === "true";
+}
+
+function rearmWatchdogsBeforeCreate(serverId: string) {
+  try {
+    assertWatchdogsReadyForCreate(serverId);
+    return;
+  } catch {
+    // A stale local heartbeat commonly means Windows has disabled the scheduled
+    // task. Recreating it re-enables the task, then the arm command writes both
+    // fresh local and remote watchdog state before any order can be created.
+    installLocalWatchdogTask();
+    const command = process.platform === "win32"
+      ? { file: "cmd.exe", args: ["/c", "npm", "run", "clore:watchdog:remote:arm", "--", `--server-id=${serverId}`, "--hard-deadline-minutes=180", "--hard-budget-usd=4.5"] }
+      : { file: "npm", args: ["run", "clore:watchdog:remote:arm", "--", `--server-id=${serverId}`, "--hard-deadline-minutes=180", "--hard-budget-usd=4.5"] };
+    const armed = spawnSync(command.file, command.args, { cwd: process.cwd(), encoding: "utf8", stdio: "pipe", timeout: 180_000 });
+    if (armed.status !== 0) throw new Error("订单监控恢复失败，未创建 Clore 订单。");
+    assertWatchdogsReadyForCreate(serverId);
+  }
 }
 
 export async function executeFrozenWanBatch(input: { target: GpuTarget; poolPath?: string; transport?: WanSession; onStage?: (stage: ManualGpuRunnerStage, message: string, taskNumber?: number | null) => void }) {
@@ -165,8 +186,36 @@ export async function runGpuSessionRunnerTick(readCandidates: CandidateReader | 
     report(batch.id, "creating_order", "创建订单", poolPath);
     const market = await candidateReader();
     const candidate = ("selected" in market ? market.selected : null) as Candidate | null;
-    if (!candidate?.server_id || !candidate.base_usd_per_hour) throw new Error("runner_candidate_lost_before_create");
-    assertDeploymentHostAllowed(candidate.server_id);
+    if (!candidate?.server_id || !candidate.base_usd_per_hour) {
+      const latest = readGenerationPool(poolPath).scheduler.manualBatch;
+      if (latest?.startIntent) {
+        updateIntent(latest, {
+          status: "requested",
+          selectedServerId: null,
+          selectedEffectiveHourlyUsd: null,
+          selectedHost: null,
+          lastError: null,
+        }, poolPath);
+        updateManualGpuBatch({ status: "searching" }, poolPath);
+        report(batch.id, "search_candidates", "候选已变化，重新搜索", poolPath);
+      }
+      return { action: "candidate_lost_research" as const };
+    }
+    if (isDeploymentHostBlacklisted(candidate.server_id)) {
+      const latest = readGenerationPool(poolPath).scheduler.manualBatch;
+      if (latest?.startIntent) {
+        updateIntent(latest, {
+          status: "requested",
+          selectedServerId: null,
+          selectedEffectiveHourlyUsd: null,
+          selectedHost: null,
+          lastError: null,
+        }, poolPath);
+        updateManualGpuBatch({ status: "searching" }, poolPath);
+        report(batch.id, "search_candidates", "已跳过近期部署失败主机，重新搜索候选", poolPath);
+      }
+      return { action: "candidate_blacklisted" as const };
+    }
     const latestCandidateState = readGenerationPool(poolPath).scheduler.manualBatch;
     if (latestCandidateState?.startIntent) {
       updateIntent(latestCandidateState, {
@@ -179,6 +228,8 @@ export async function runGpuSessionRunnerTick(readCandidates: CandidateReader | 
     }
     const { loadCloreExecutionConfig } = await import("./clore/execution-config");
     const { createCloreOrder, prepareCreateOrderFromLive } = await import("./clore/order-execution");
+    report(batch.id, "creating_order", "恢复订单监控", poolPath);
+    rearmWatchdogsBeforeCreate(candidate.server_id);
     const execution = loadCloreExecutionConfig();
     const config = { ...(await import("./clore/config")).loadCloreConfig(), targetGpu: "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: 24, maxGpuPricePerHour: batch.startIntent.maxEffectiveHourlyUsd / 1.05 };
     const prepared = await prepareCreateOrderFromLive({ config, execution, serverId: candidate.server_id, maxPriceUsdPerHour: candidate.base_usd_per_hour, queuedJobCount: batch.taskCount });
@@ -190,6 +241,10 @@ export async function runGpuSessionRunnerTick(readCandidates: CandidateReader | 
     writeStatus({ state: "order_created", batchId: batch.id, message: "租用成功，正在等待主机" });
     return resumeCreatedWanBatch({ batch: readGenerationPool(poolPath).scheduler.manualBatch!, orderId: created.order_id, poolPath });
   }
+  if (batch.startIntent.status === "blocked") {
+    writeStatus({ state: "blocked", batchId: batch.id, message: batch.startIntent.lastError ?? "没有可用候选主机" });
+    return { action: "no_candidate" as const };
+  }
   writeStatus({ state: "idle", batchId: batch.id, message: "批次已由 runner 接管" });
   return { action: "already_reconciled" as const };
 }
@@ -199,7 +254,17 @@ export function runnerStatus() { return existsSync(STATUS_PATH) ? JSON.parse(rea
 async function main() {
   const action = process.argv[2] ?? "start";
   if (action === "status") { console.log(JSON.stringify(runnerStatus() ?? { state: "stopped" }, null, 2)); return; }
-  if (action === "stop") { if (existsSync(PID_PATH)) rmSync(PID_PATH, { force: true }); writeStatus({ state: "idle", batchId: null, message: "已请求 runner 停止" }); return; }
+  if (action === "stop") {
+    if (existsSync(PID_PATH)) {
+      const pid = Number(readFileSync(PID_PATH, "utf8"));
+      if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
+        try { process.kill(pid, "SIGTERM"); } catch { /* A stale PID is safe to clear. */ }
+      }
+      rmSync(PID_PATH, { force: true });
+    }
+    writeStatus({ state: "idle", batchId: null, message: "已请求 runner 停止" });
+    return;
+  }
   if (action === "recover") { await runGpuSessionRunnerTick(); return; }
   mkdirSync(STATE_DIR, { recursive: true });
   if (existsSync(PID_PATH) && Number(readFileSync(PID_PATH, "utf8")) !== process.pid) { console.log("runner_already_recorded"); return; }

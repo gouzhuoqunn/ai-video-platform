@@ -14,17 +14,15 @@ const root = mkdtempSync(path.join(os.tmpdir(), "clore-deployment-blacklist-"));
 const historyPath = path.join(root, "history.json");
 
 try {
-  assert.equal(DEPLOYMENT_FAILURE_BLACKLIST_THRESHOLD, 3);
+  assert.equal(DEPLOYMENT_FAILURE_BLACKLIST_THRESHOLD, 2);
   assert.equal(isDeploymentHostBlacklisted("98682", historyPath), false);
   recordDeploymentFailure({ serverId: "98682", orderId: "first", reason: "deployment_timeout" }, historyPath);
   recordDeploymentFailure({ serverId: "98682", orderId: "second", reason: "deployment_timeout" }, historyPath);
   assert.equal(deploymentFailureCount("98682", historyPath), 2);
-  assert.equal(isDeploymentHostBlacklisted("98682", historyPath), false);
-  recordDeploymentFailure({ serverId: "98682", orderId: "third", reason: "deployment_timeout" }, historyPath);
   assert.equal(isDeploymentHostBlacklisted("98682", historyPath), true);
   const previousPath = process.env.CLORE_DEPLOYMENT_FAILURE_HISTORY_PATH;
   process.env.CLORE_DEPLOYMENT_FAILURE_HISTORY_PATH = historyPath;
-  assert.throws(() => assertDeploymentHostAllowed("98682"), /excluded after 3 deployment failures/);
+  assert.throws(() => assertDeploymentHostAllowed("98682"), /excluded after 2 deployment failures/);
   if (previousPath === undefined) delete process.env.CLORE_DEPLOYMENT_FAILURE_HISTORY_PATH;
   else process.env.CLORE_DEPLOYMENT_FAILURE_HISTORY_PATH = previousPath;
   assert.equal(recordDeploymentFailure({ serverId: "not-a-server", reason: "ignored" }, historyPath), null);
