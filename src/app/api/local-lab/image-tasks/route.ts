@@ -1,12 +1,16 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { NextResponse, type NextRequest } from "next/server";
 import { FLUX_IMAGE_STACK, classifyImageGpu, type ImageGpuClass, type ImageTaskSettings } from "@/lib/image-generation/flux-stack";
+import { finiteNumber } from "@/lib/image-generation/formatters";
 import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/route-guard";
-import { loadCloreConfig } from "../../../../../scripts/clore/config";
-import { readLiveOrdersSummary } from "../../../../../scripts/clore/live";
+import { COMFY_RUNTIME_IMAGE, loadCloreConfig } from "../../../../../scripts/clore/config";
+import { cloreRequest } from "../../../../../scripts/clore/client";
+import { loadCloreExecutionConfig } from "../../../../../scripts/clore/execution-config";
+import { readLiveOrdersSummary, type CloreOrderSummary } from "../../../../../scripts/clore/live";
+import { ACTIVE_ORDER_PATH, clearActiveOrder, readActiveOrder } from "../../../../../scripts/clore/order-state";
 import { finalSanitizedLogLines, imageExecutorReadiness, processExists, STALE_RUNNER_NO_ORDER_MESSAGE } from "../../../../../scripts/image-executor/readiness";
 
 export const dynamic = "force-dynamic";
@@ -48,9 +52,9 @@ export type ImageRunnerSession = {
   startedAt: string | null;
   updatedAt: string;
   host: {
-    gpu: string;
-    priceHourly: number;
-    serverId: string;
+    gpu: string | null;
+    priceHourly: number | null;
+    serverId: string | null;
     orderId: string | null;
     vram: string | null;
     cpu: string | null;
@@ -66,6 +70,7 @@ export type ImageRunnerSession = {
   blocker: string | null;
   pid?: number | null;
   logPath?: string | null;
+  lastCancellation?: { at: string; orderId: string | null; message: string };
 };
 
 const DATA_DIR = path.join(process.cwd(), ".secrets", "image-studio");
@@ -78,6 +83,7 @@ const SOURCE_MANIFEST_PATH = path.join(process.cwd(), "comfy-runtime", "image-so
 const DEFAULT_MAX_HOURLY_PRICE = 0.6;
 const KONTEXT_BLOCKER = "FLUX Kontext 执行器尚未完成";
 const RTX5090_BLOCKER = "RTX 5090 高分辨率执行器尚未完成";
+const DUPLICATE_START_MESSAGE = "已有图像批次正在启动或执行，请先等待或退租。";
 
 function readJson<T>(filePath: string, fallback: T): T {
   try {
@@ -93,16 +99,16 @@ function writeJson(filePath: string, value: unknown) {
 }
 
 function readTasks() {
-  return readJson<ImageTask[]>(DATA_PATH, []);
+  return readJson<ImageTask[]>(DATA_PATH, []).filter((task, index, all) => task?.id && all.findIndex((candidate) => candidate.id === task.id) === index);
 }
 
 function saveTasks(tasks: ImageTask[]) {
-  writeJson(DATA_PATH, tasks);
+  writeJson(DATA_PATH, tasks.filter((task, index, all) => task?.id && all.findIndex((candidate) => candidate.id === task.id) === index));
 }
 
 function readPrice() {
-  const value = Number(readJson<{ maxHourlyPrice?: unknown }>(PREFERENCES_PATH, {}).maxHourlyPrice);
-  return Number.isFinite(value) && value > 0 ? value : DEFAULT_MAX_HOURLY_PRICE;
+  const value = finiteNumber(readJson<{ maxHourlyPrice?: unknown }>(PREFERENCES_PATH, {}).maxHourlyPrice);
+  return value !== null && value > 0 ? value : DEFAULT_MAX_HOURLY_PRICE;
 }
 
 function readinessBlocker() {
@@ -130,18 +136,67 @@ function defaultRunner(): ImageRunnerSession {
   };
 }
 
+function stringOrNull(value: unknown) {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function normalizeHost(value: unknown): ImageRunnerSession["host"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const host = value as Record<string, unknown>;
+  return {
+    gpu: stringOrNull(host.gpu),
+    priceHourly: finiteNumber(host.priceHourly),
+    serverId: stringOrNull(host.serverId),
+    orderId: stringOrNull(host.orderId),
+    vram: stringOrNull(host.vram),
+    cpu: stringOrNull(host.cpu),
+    ram: stringOrNull(host.ram),
+    disk: stringOrNull(host.disk),
+    network: stringOrNull(host.network),
+    location: stringOrNull(host.location),
+    runtimeDigest: stringOrNull(host.runtimeDigest),
+    httpState: stringOrNull(host.httpState),
+    sshDiagnostic: stringOrNull(host.sshDiagnostic),
+  };
+}
+
+function normalizeRunner(input: Partial<ImageRunnerSession>): ImageRunnerSession {
+  const fallback = defaultRunner();
+  const state = ["idle", "running", "failed", "completed", "cancelling"].includes(String(input.state)) ? input.state! : fallback.state;
+  const maxHourly = finiteNumber(input.maxHourlyPrice);
+  return {
+    ...fallback,
+    ...input,
+    state,
+    stage: stringOrNull(input.stage) ?? fallback.stage,
+    frozenTaskIds: [...new Set(Array.isArray(input.frozenTaskIds) ? input.frozenTaskIds.map(String).filter(Boolean) : [])],
+    gpuClass: input.gpuClass === "rtx4090" || input.gpuClass === "rtx5090" ? input.gpuClass : null,
+    maxHourlyPrice: maxHourly !== null && maxHourly > 0 ? maxHourly : readPrice(),
+    currentTaskIndex: Number.isInteger(input.currentTaskIndex) ? input.currentTaskIndex! : null,
+    currentModel: stringOrNull(input.currentModel),
+    promptSummary: stringOrNull(input.promptSummary),
+    startedAt: stringOrNull(input.startedAt),
+    updatedAt: stringOrNull(input.updatedAt) ?? new Date().toISOString(),
+    host: normalizeHost(input.host),
+    error: input.error ?? null,
+    blocker: input.blocker ?? null,
+    pid: Number.isInteger(input.pid) ? input.pid : null,
+    logPath: stringOrNull(input.logPath),
+  };
+}
+
+function terminalRunnerState(state: ImageRunnerSession["state"]) {
+  return state === "idle" || state === "failed" || state === "completed";
+}
+
 function readRunner() {
-  const runner = { ...defaultRunner(), ...readJson<Partial<ImageRunnerSession>>(RUNNER_PATH, {}) } as ImageRunnerSession;
+  const runner = normalizeRunner(readJson<Partial<ImageRunnerSession>>(RUNNER_PATH, {}));
   if (terminalRunnerState(runner.state)) return { ...runner, blocker: readinessBlocker() };
   return runner;
 }
 
 function saveRunner(runner: ImageRunnerSession) {
-  writeJson(RUNNER_PATH, { ...runner, updatedAt: new Date().toISOString() });
-}
-
-function terminalRunnerState(state: ImageRunnerSession["state"]) {
-  return state === "idle" || state === "failed" || state === "completed";
+  writeJson(RUNNER_PATH, { ...normalizeRunner(runner), updatedAt: new Date().toISOString() });
 }
 
 function appendRunnerLog(kind: "stdout" | "stderr" | "event", text: string) {
@@ -151,9 +206,13 @@ function appendRunnerLog(kind: "stdout" | "stderr" | "event", text: string) {
   appendFileSync(RUNNER_LOG_PATH, lines.map((line) => JSON.stringify({ at: new Date().toISOString(), stream: kind, line })).join("\n") + "\n", "utf8");
 }
 
+async function activeCloreOrders() {
+  return (await readLiveOrdersSummary(loadCloreConfig(), { forceRefresh: true })).filter((order) => order.active);
+}
+
 async function activeCloreOrderCount() {
   try {
-    return (await readLiveOrdersSummary(loadCloreConfig(), { forceRefresh: true })).filter((order) => order.active).length;
+    return (await activeCloreOrders()).length;
   } catch {
     return null;
   }
@@ -175,7 +234,7 @@ async function reconcileStaleRunner(runner: ImageRunnerSession) {
   return readRunner();
 }
 
-async function responsePayload() {
+async function responsePayload(extra: Record<string, unknown> = {}) {
   const blocker = readinessBlocker();
   const runner = await reconcileStaleRunner(readRunner());
   return {
@@ -183,6 +242,7 @@ async function responsePayload() {
     runner: terminalRunnerState(runner.state) ? { ...runner, blocker } : runner,
     executionReady: blocker === null,
     maxHourlyPrice: readPrice(),
+    ...extra,
   };
 }
 
@@ -254,6 +314,100 @@ function assertStartableBatch(batch: ImageTask[], maxHourlyPrice: number) {
   }
 }
 
+function activeStateLooksImageOrder() {
+  const active = readActiveOrder();
+  if (!active) return null;
+  const imageRuntime = active.bootstrap_image === COMFY_RUNTIME_IMAGE;
+  const imagePort = Array.isArray(active.open_ports) && active.open_ports.map(String).includes("controller/http:8080");
+  const imageGpu = active.gpu_profile === "rtx4090" || /4090/.test(active.gpu_type ?? "");
+  return imageRuntime || imagePort || imageGpu ? active : null;
+}
+
+function matchingImageOrder(runner: ImageRunnerSession, orders: CloreOrderSummary[]) {
+  const active = orders.filter((order) => order.active && order.orderId);
+  const activeState = activeStateLooksImageOrder();
+  if (activeState) {
+    const byId = active.find((order) => order.orderId === activeState.order_id);
+    if (byId) return byId;
+    const byServer = active.find((order) => order.serverId === activeState.server_id);
+    if (byServer) return byServer;
+  }
+  if (runner.gpuClass !== "rtx4090" || !runner.frozenTaskIds.length) return null;
+  if (runner.host?.orderId) return active.find((order) => order.orderId === runner.host?.orderId) ?? null;
+  if (runner.host?.serverId) {
+    const matches = active.filter((order) => order.serverId === runner.host?.serverId);
+    return matches.length === 1 ? matches[0] : null;
+  }
+  return null;
+}
+
+function resetRunnerAfterCancel(message: string, orderId: string | null) {
+  const now = new Date().toISOString();
+  saveRunner({
+    ...defaultRunner(),
+    state: "idle",
+    stage: "当前未租用显卡",
+    frozenTaskIds: [],
+    gpuClass: null,
+    currentTaskIndex: null,
+    currentModel: null,
+    promptSummary: null,
+    startedAt: null,
+    host: null,
+    error: null,
+    blocker: readinessBlocker(),
+    pid: null,
+    logPath: null,
+    lastCancellation: { at: now, orderId, message },
+    updatedAt: now,
+  });
+}
+
+async function cancelCurrentImageBatch() {
+  const runner = readRunner();
+  if (processExists(runner.pid)) {
+    try {
+      process.kill(Number(runner.pid), "SIGTERM");
+    } catch {
+      // Cancellation does not depend on the process signal.
+    }
+  }
+  const orders = await activeCloreOrders();
+  const order = matchingImageOrder(runner, orders);
+  if (!order?.orderId) {
+    const activeState = activeStateLooksImageOrder();
+    if (activeState && existsSync(ACTIVE_ORDER_PATH)) {
+      try {
+        clearActiveOrder(activeState.order_id);
+      } catch {
+        rmSync(ACTIVE_ORDER_PATH, { force: true });
+      }
+    }
+    const message = "没有活跃图像订单，已清理本地批次状态。";
+    resetRunnerAfterCancel(message, null);
+    return { orderId: null, cancelled: false, message };
+  }
+  const execution = loadCloreExecutionConfig();
+  if (!execution.enabled) throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false，无法执行真实退租。");
+  await cloreRequest<unknown>(loadCloreConfig(), "/cancel_order", {
+    method: "POST",
+    body: JSON.stringify({ id: order.orderId, issue: "image_session_cancel" }),
+  });
+  const activeAfter = await activeCloreOrders();
+  if (activeAfter.some((candidate) => candidate.orderId === order.orderId)) throw new Error(`退租后订单仍活跃：${order.orderId}`);
+  const activeState = activeStateLooksImageOrder();
+  if (activeState?.order_id === order.orderId && existsSync(ACTIVE_ORDER_PATH)) {
+    try {
+      clearActiveOrder(order.orderId);
+    } catch {
+      rmSync(ACTIVE_ORDER_PATH, { force: true });
+    }
+  }
+  const message = `已退租图像订单 ${order.orderId}。`;
+  resetRunnerAfterCancel(message, order.orderId);
+  return { orderId: order.orderId, cancelled: true, message };
+}
+
 export async function GET(request: NextRequest) {
   const guard = guardLocalLabRequest(request);
   return guard ?? NextResponse.json(await responsePayload(), { headers: { "cache-control": "no-store" } });
@@ -267,9 +421,14 @@ export async function POST(request: NextRequest) {
   const action = String(body.action ?? "create");
   let tasks = readTasks();
   try {
+    if (action === "cancel_batch") {
+      const cancellation = await cancelCurrentImageBatch();
+      return NextResponse.json(await responsePayload({ cancellation }));
+    }
+
     if (action === "create") {
       const task = taskFrom(body);
-      tasks = [task, ...tasks];
+      tasks = [task, ...tasks.filter((candidate) => candidate.id !== task.id)];
       saveTasks(tasks);
       return NextResponse.json({ task, ...(await responsePayload()) });
     }
@@ -284,19 +443,20 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === "start_batch") {
-      const ids = Array.isArray(body.taskIds) ? [...new Set(body.taskIds.map(String))] : [];
+      const ids = [...new Set(Array.isArray(body.taskIds) ? body.taskIds.map(String).filter(Boolean) : [])];
       const maxHourlyPrice = Number(body.maxHourlyPrice);
+      const previous = await reconcileStaleRunner(readRunner());
+      if (previous.state === "running" || previous.state === "cancelling" || processExists(previous.pid)) throw new Error(DUPLICATE_START_MESSAGE);
+      if ((await activeCloreOrderCount()) !== 0) throw new Error(DUPLICATE_START_MESSAGE);
       const batch = tasks.filter((task) => ids.includes(task.id) && task.status === "waiting_for_gpu");
       assertStartableBatch(batch, maxHourlyPrice);
-      const previous = await reconcileStaleRunner(readRunner());
-      if (previous.state === "running" || previous.state === "cancelling") throw new Error("已有图像批次正在运行");
       const startedAt = new Date().toISOString();
       writeJson(PREFERENCES_PATH, { maxHourlyPrice });
       saveRunner({
         ...previous,
         state: "running",
         stage: "正在寻找显卡",
-        frozenTaskIds: batch.map((task) => task.id),
+        frozenTaskIds: [...new Set(batch.map((task) => task.id))],
         gpuClass: "rtx4090",
         maxHourlyPrice,
         currentTaskIndex: null,
@@ -371,7 +531,7 @@ export async function POST(request: NextRequest) {
       ...runner,
       state: "failed",
       stage: "执行失败",
-      error: { stage: "开始批次", message, at: new Date().toISOString() },
+      error: { stage: action === "cancel_batch" ? "退租" : "开始批次", message, at: new Date().toISOString() },
     });
     return NextResponse.json({ error: message, ...(await responsePayload()) }, { status: 400 });
   }

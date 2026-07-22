@@ -375,7 +375,7 @@ async function main() {
 
   const route = readFileSync("src/app/api/local-lab/image-tasks/route.ts", "utf8");
   const studio = readFileSync("src/components/ImageCreationStudio.tsx", "utf8");
-  assert.match(route, /frozenTaskIds: batch\.map/);
+  assert.match(route, /frozenTaskIds: \[\.\.\.new Set\(batch\.map/);
   assert.match(route, /writeJson\(PREFERENCES_PATH, \{ maxHourlyPrice \}\)/);
   assert.match(route, /executionReady: blocker === null/);
   assert.match(route, /stdio: \["ignore", "pipe", "pipe"\]/);
