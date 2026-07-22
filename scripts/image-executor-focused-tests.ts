@@ -206,10 +206,6 @@ function depsFor(input: { healthFails?: boolean; restoreFails?: boolean; generat
     },
     cloreRequest: async () => ({ orders: [{ id: "2001", si: "99515", status: "running", web: "https://runtime.invalid" }] }),
     fetchJson: async (url) => {
-      if (url.endsWith("/healthz")) {
-        if (input.healthFails) throw new Error("health_timeout_fixture");
-        return { ok: true };
-      }
       if (url.endsWith("/restore")) {
         if (input.restoreFails) throw new Error("restore_failed_fixture");
         return { restore_complete: true };
@@ -221,6 +217,7 @@ function depsFor(input: { healthFails?: boolean; restoreFails?: boolean; generat
       if (url.includes("/jobs/")) return { status: "completed" };
       return {};
     },
+    fetchHealth: async () => input.healthFails ? { ok: false, status: 503, error: "health_timeout_fixture" } : { ok: true, status: 200, error: null },
     fetchBinary: async () => input.resultPng ?? Buffer.from("not-png"),
     sleep: async () => undefined,
   };
@@ -233,7 +230,7 @@ async function assertCancellationOn(kind: "health" | "restore" | "generation") {
     await seedRunnerState();
     const png = await sharp({ create: { width: 768, height: 768, channels: 3, background: "#223344" } }).png().toBuffer();
     const harness = depsFor({ healthFails: kind === "health", restoreFails: kind === "restore", generateFails: kind === "generation", resultPng: png });
-    await assert.rejects(() => runImage4090Batch(harness.deps), kind === "health" ? /health_timeout_fixture|15 分钟/ : kind === "restore" ? /restore_failed_fixture/ : /generate_failed_fixture/);
+    await assert.rejects(() => runImage4090Batch(harness.deps), kind === "health" ? /health_timeout_fixture|12 分钟/ : kind === "restore" ? /restore_failed_fixture/ : /generate_failed_fixture/);
     assert.equal(harness.cancelCount(), 1, `${kind} failure should attempt cancellation exactly once`);
     const session = readJson<ImageRunnerSession>(path.join(".secrets", "image-studio", "runner-session.json"));
     assert.equal(session.state, "failed");

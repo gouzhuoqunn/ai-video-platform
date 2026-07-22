@@ -56,6 +56,17 @@ type Runner = {
     runtimeDigest?: string | null;
     httpState?: string | null;
     sshDiagnostic?: string | null;
+    orderStatus?: string | null;
+    deploymentState?: string | null;
+    clorePorts?: string[] | null;
+    cloreHttpUrls?: string[] | null;
+    controllerUrl?: string | null;
+    httpExternalPort?: number | string | null;
+    lastHealthStatus?: number | string | null;
+    lastHealthError?: string | null;
+    readinessElapsedSeconds?: number | string | null;
+    lastPollAt?: string | null;
+    message?: string | null;
   } | null;
   error?: { stage?: string; message?: string; at?: string; cancellationError?: string; billingRisk?: string } | null;
   blocker?: string | null;
@@ -96,6 +107,34 @@ function displayDate(value: string | null | undefined) {
   if (!value) return "—";
   const date = new Date(value);
   return Number.isFinite(date.getTime()) ? date.toLocaleString() : "—";
+}
+
+function stageLabel(stage: string | null | undefined, orderId?: string | null) {
+  const labels: Record<string, string> = {
+    creating_order: "正在创建订单",
+    order_created_waiting_http: "订单已创建，正在等待图片运行环境",
+    order_created_waiting_deployment: "订单已创建，正在等待部署",
+    waiting_http_endpoint: "订单已创建，正在等待 HTTP 地址",
+    checking_http_health: "正在检查 /healthz",
+    runtime_ready: "图片运行环境已就绪",
+    runner_exited_order_active: "Runner 已退出，订单仍活跃",
+    runner_exited: "Runner 已退出",
+    http_readiness_timeout_cancel_failed: "HTTP 未就绪，退租失败",
+  };
+  if (orderId && stage === "creating_order") return "订单已创建，正在等待图片运行环境";
+  return labels[String(stage ?? "")] ?? stage ?? "当前未租用显卡";
+}
+
+function secondsLabel(value: unknown) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.floor(seconds % 60);
+  return minutes ? `${minutes}分${rest}秒` : `${rest}秒`;
+}
+
+function listLabel(value: unknown) {
+  return Array.isArray(value) && value.length ? value.join(", ") : "—";
 }
 
 export function ImageCreationStudio() {
@@ -236,7 +275,8 @@ export function ImageCreationStudio() {
   const currentClass = runner?.gpuClass ?? selectedBatch[0]?.gpuClass ?? draftGpuClass;
   const runnerError = runner?.error ?? null;
   const host = runner?.host ?? null;
-  const stage = runner?.stage ?? "当前未租用显卡";
+  const rawStage = runner?.stage ?? "当前未租用显卡";
+  const stage = stageLabel(rawStage, host?.orderId);
 
   const panel = (
     <aside className="h-fit border-r border-stone-700 bg-stone-900 p-4 lg:sticky lg:top-0 lg:max-h-screen lg:overflow-y-auto" aria-label="显卡状态">
@@ -268,6 +308,15 @@ export function ImageCreationStudio() {
       {host ? (
         <section className="mt-3 rounded-lg border border-stone-700 p-3 text-sm">
           <p>{host.gpu ?? "RTX 4090"} · {formatHourlyPrice(host.priceHourly)} · 主机 {host.serverId ?? "—"} · {stage}</p>
+          <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-stone-300">
+            <span>订单已创建</span><b>{host.orderId ? "是" : "否"}</b>
+            <span>订单 ID</span><b>{host.orderId ?? "—"}</b>
+            <span>Clore 部署</span><b>{host.deploymentState ?? "—"}</b>
+            <span>HTTP 地址</span><b>{host.controllerUrl ? "已获得" : "正在等待"}</b>
+            <span>/healthz</span><b>{host.httpState ?? "—"}</b>
+            <span>等待时间</span><b>{secondsLabel(host.readinessElapsedSeconds)}</b>
+          </div>
+          {host.lastHealthError ? <p className="mt-2 break-words text-xs text-amber-200">最新错误：{host.lastHealthError}</p> : null}
           <button className="mt-2 text-xs text-indigo-300" type="button" onClick={() => setHostDetails(!hostDetails)}>查看详细配置</button>
           {hostDetails ? (
             <dl className="mt-2 grid grid-cols-2 gap-1 text-xs text-stone-300">
@@ -282,6 +331,15 @@ export function ImageCreationStudio() {
                 ["订单", host.orderId],
                 ["Runtime", host.runtimeDigest],
                 ["HTTP", host.httpState],
+                ["订单状态", host.orderStatus],
+                ["部署状态", host.deploymentState],
+                ["Clore 端口", listLabel(host.clorePorts)],
+                ["HTTP URLs", listLabel(host.cloreHttpUrls)],
+                ["Controller", host.controllerUrl],
+                ["外部 8080 端口", host.httpExternalPort],
+                ["Health 状态码", host.lastHealthStatus],
+                ["Health 错误", host.lastHealthError],
+                ["最后轮询", displayDate(host.lastPollAt)],
                 ["SSH（诊断）", host.sshDiagnostic],
               ].map(([key, value]) => <div key={String(key)}><dt className="text-stone-500">{key}</dt><dd>{value ?? "—"}</dd></div>)}
             </dl>
@@ -291,9 +349,12 @@ export function ImageCreationStudio() {
       <section className="mt-3 rounded-lg border border-stone-700 p-3 text-sm">
         <h3 className="font-medium">运行进程</h3>
         <p className="mt-1">{stage}</p>
+        {host?.message ? <p className="mt-1 text-xs text-stone-300">{host.message}</p> : null}
+        {host?.orderId ? <p className="mt-1 text-xs text-stone-400">订单 {host.orderId} · 部署 {host.deploymentState ?? "—"} · HTTP {host.controllerUrl ? "已获得" : "等待中"} · /healthz {host.lastHealthStatus ?? host.lastHealthError ?? "—"}</p> : null}
         <p className="mt-1 text-xs text-stone-400">任务 {runner?.currentTaskIndex === null || runner?.currentTaskIndex === undefined ? "—" : runner.currentTaskIndex + 1}/{runner?.frozenTaskIds?.length ?? 0} · {runner?.currentModel ?? "—"}</p>
         <p className="mt-1 line-clamp-2 text-xs text-stone-400">{runner?.promptSummary ?? "尚未冻结图像批次"}</p>
-        <p className="mt-1 text-xs text-stone-500">已用时 {elapsed(runner?.startedAt)} · 更新于 {displayDate(runner?.updatedAt)}</p>
+        <p className="mt-1 text-xs text-stone-500">已用时 {elapsed(runner?.startedAt)} · HTTP 等待 {secondsLabel(host?.readinessElapsedSeconds)} · 更新于 {displayDate(runner?.updatedAt)}</p>
+        {host?.lastPollAt ? <p className="mt-1 text-xs text-stone-500">最后轮询 {displayDate(host.lastPollAt)}</p> : null}
       </section>
       {runnerError ? (
         <section className="mt-3 rounded-lg border border-rose-700/60 bg-rose-950/20 p-3 text-sm">

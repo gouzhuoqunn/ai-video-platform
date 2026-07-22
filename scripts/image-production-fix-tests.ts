@@ -8,6 +8,7 @@ function read(path: string) {
 
 const studio = read("src/components/ImageCreationStudio.tsx");
 const route = read("src/app/api/local-lab/image-tasks/route.ts");
+const runner = read("scripts/image-4090-runner.ts");
 
 assert.equal(safeFixed(undefined, 2), "—", "nullable numeric UI render test: undefined must not crash");
 assert.equal(safeFixed(null, 2), "—", "nullable numeric UI render test: null must not crash");
@@ -36,5 +37,20 @@ assert.match(route, /DUPLICATE_START_MESSAGE/, "duplicate start request test: ba
 assert.match(route, /processExists\(previous\.pid\)/, "duplicate start request test: stale/live runner PID is checked");
 assert.match(route, /activeCloreOrderCount\(\)/, "duplicate start request test: active Clore order gate exists");
 assert.match(route, /\[\.\.\.new Set\(batch\.map\(\(task\) => task\.id\)\)\]/, "duplicate task ID freeze test: frozen IDs are deduplicated");
+assert.match(route, /runner_exited_order_active/, "dead-runner cancellation result: stale runner with an active image order is surfaced to the panel");
+assert.match(route, /frozenTaskIds: \[\]/, "dead-runner no-order fixture: stale execution state is cleared when no order exists");
+assert.match(runner, /CREATE_ORDER_HARD_TIMEOUT_MS = 60_000/, "create_order timeout test: image runner has a hard create_order timeout");
+assert.match(runner, /postCreateOrderOnce/, "create_order timeout test: image runner uses a bounded single create_order request");
+assert.match(runner, /reconcileCreatedOrder\(deps, config, selectedServerId\)/, "create_order timeout test: timeout reconciles my_orders before failing");
+assert.match(runner, /order_created_waiting_http/, "create_order reconciliation test: created orders immediately update the UI out of creating_order");
+assert.match(runner, /HTTP_READINESS_TIMEOUT_MS = 12 \* 60 \* 1000/, "12-minute timeout fixture cancels order: readiness has a hard deadline");
+assert.match(runner, /order_created_waiting_deployment/, "missing HTTP URL updates waiting state: deployment wait is distinct");
+assert.match(runner, /waiting_http_endpoint/, "HTTP endpoint extraction result: missing URL has a distinct stage");
+assert.match(runner, /checking_http_health/, "health polling result: health checks have a distinct stage");
+assert.match(runner, /runtime_ready/, "successful /healthz fixture reaches runtime_ready");
+assert.match(runner, /logEndpointDiagnostics/, "endpoint diagnostics are sanitized and logged");
+assert.match(studio, /stageLabel/, "UI renders all intermediate states without nullable crashes");
+assert.match(studio, /lastHealthError/, "UI renders latest health error");
+assert.match(studio, /readinessElapsedSeconds/, "UI renders readiness elapsed time");
 
 console.log("image production fix focused tests: ok");

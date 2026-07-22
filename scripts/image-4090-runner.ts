@@ -2,13 +2,14 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadCloreConfig, COMFY_RUNTIME_IMAGE } from "./clore/config";
+import { loadCloreConfig, COMFY_RUNTIME_IMAGE, PROJECT_TAG } from "./clore/config";
 import { loadCloreExecutionConfig } from "./clore/execution-config";
 import { readLiveMarketplace, readLiveOrdersSummary } from "./clore/live";
 import { evaluateMarketplace } from "./clore/marketplace";
 import { buildHttpRuntimeCreateOrderBody, createCloreOrder } from "./clore/order-execution";
 import { cancelCloreOrder } from "./clore/cancel-execution";
-import { cloreRequest, sleep } from "./clore/client";
+import { buildCloreUrl, cloreRequest, createCloreHeaders, sleep } from "./clore/client";
+import { writeActiveOrder } from "./clore/order-state";
 import { orderRecords, parseCloreOrder } from "./clore/order-readiness-parser";
 import { persistImageResult } from "./image-executor/result-persistence";
 import { readSourceAcquisitionManifest, readValidatedRestoreManifest, validateValidatedRestoreManifest, type SourceAcquisitionManifest, type ValidatedRestoreManifest } from "./image-executor/manifests";
@@ -62,6 +63,27 @@ type CloreConfig = ReturnType<typeof loadCloreConfig>;
 type CloreExecution = ReturnType<typeof loadCloreExecutionConfig>;
 type OrderSummary = Awaited<ReturnType<typeof readLiveOrdersSummary>>[number];
 type MarketplacePayload = Awaited<ReturnType<typeof readLiveMarketplace>>;
+type RuntimeCandidate = ReturnType<typeof evaluateMarketplace>["matches"][number];
+
+const CREATE_ORDER_HARD_TIMEOUT_MS = 60_000;
+const HTTP_READINESS_TIMEOUT_MS = 12 * 60 * 1000;
+const HTTP_READINESS_POLL_MS = 10_000;
+
+class CreateOrderHardTimeoutError extends Error {
+  constructor() {
+    super(`create_order timed out after ${CREATE_ORDER_HARD_TIMEOUT_MS}ms; reconciling /my_orders before failure.`);
+    this.name = "CreateOrderHardTimeoutError";
+  }
+}
+
+class HttpReadinessTimeoutError extends Error {
+  readonly orderId: string;
+  constructor(orderId: string) {
+    super("订单已创建，但图片运行环境在 12 分钟内未就绪，系统已自动退租。");
+    this.name = "HttpReadinessTimeoutError";
+    this.orderId = orderId;
+  }
+}
 
 export type RunnerDeps = {
   loadConfig: () => CloreConfig;
@@ -72,6 +94,7 @@ export type RunnerDeps = {
   cancelOrder: typeof cancelCloreOrder;
   fetchJson: (url: string, init?: RequestInit) => Promise<Record<string, unknown>>;
   fetchBinary: (url: string, init?: RequestInit) => Promise<Buffer>;
+  fetchHealth?: (url: string) => Promise<{ ok: boolean; status: number | null; error: string | null }>;
   cloreRequest: typeof cloreRequest;
   sleep: (ms: number) => Promise<void>;
 };
@@ -244,35 +267,225 @@ async function defaultFetchBinary(url: string, init?: RequestInit) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId: string) {
-  for (let attempt = 0; attempt < 90; attempt += 1) {
-    const raw = await deps.cloreRequest<unknown>(config, "/my_orders", {}, { forceRefresh: true });
-    const entry = orderRecords(raw).find((value) => String(value.id ?? value.order_id) === orderId);
-    const parsed = entry ? parseCloreOrder(entry) : null;
-    if (parsed?.terminal) throw new Error(`订单已终止，HTTP 运行环境未启动：${parsed.deploymentState}`);
-    if (parsed?.controllerUrl) {
-      const base = parsed.controllerUrl.replace(/\/$/, "");
-      updateRunner({
-        stage: "等待图像运行环境",
-        host: {
-          ...(readRunner().host ?? {}),
-          orderId,
-          serverId: parsed.serverId ?? readRunner().host?.serverId ?? "未知",
-          runtimeDigest: COMFY_RUNTIME_IMAGE,
-          httpState: "等待 /healthz",
-          sshDiagnostic: "未使用；HTTP 是唯一就绪条件",
-        },
-      });
-      try {
-        await deps.fetchJson(`${base}/healthz`);
-        return base;
-      } catch {
-        // Clore can publish the HTTP URL before the controller finishes booting.
-      }
-    }
-    await deps.sleep(10_000);
+async function defaultFetchHealth(url: string) {
+  try {
+    const response = await fetch(url);
+    return { ok: response.ok, status: response.status, error: response.ok ? null : `http_${response.status}` };
+  } catch (error) {
+    return { ok: false, status: null, error: error instanceof Error ? error.message : String(error) };
   }
-  throw new Error("15 分钟内未获得可用 HTTP 图像运行环境");
+}
+
+function sanitizeHttpUrl(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+
+function collectStrings(value: unknown, output: string[] = [], depth = 0) {
+  if (depth > 5) return output;
+  if (typeof value === "string") output.push(value);
+  else if (Array.isArray(value)) value.forEach((item) => collectStrings(item, output, depth + 1));
+  else if (value && typeof value === "object") Object.values(value as Record<string, unknown>).forEach((item) => collectStrings(item, output, depth + 1));
+  return output;
+}
+
+function collectPortEntries(value: unknown, output: string[] = [], depth = 0) {
+  if (depth > 5 || !value || typeof value !== "object") return output;
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (/ports?/i.test(key)) {
+      if (Array.isArray(item)) output.push(...item.map(String));
+      else if (item && typeof item === "object") output.push(...Object.entries(item as Record<string, unknown>).map(([left, right]) => `${left}:${String(right)}`));
+      else if (typeof item === "string" || typeof item === "number") output.push(String(item));
+    }
+    if (item && typeof item === "object") collectPortEntries(item, output, depth + 1);
+  }
+  return [...new Set(output.map((entry) => entry.trim()).filter(Boolean))];
+}
+
+function externalControllerPort(entries: string[]) {
+  for (const entry of entries) {
+    const match = /(\d{1,5})\D+(\d{1,5})/.exec(entry);
+    if (!match) continue;
+    const left = Number(match[1]);
+    const right = Number(match[2]);
+    if (left === 8080 && right > 0 && right <= 65535) return right;
+    if (right === 8080 && left > 0 && left <= 65535) return left;
+  }
+  return null;
+}
+
+function httpDiagnostics(order: Record<string, unknown>, parsed: ReturnType<typeof parseCloreOrder> | null) {
+  const allUrls = collectStrings(order)
+    .map(sanitizeHttpUrl)
+    .filter((value): value is string => Boolean(value));
+  const httpUrls = [...new Set([parsed?.controllerUrl ? sanitizeHttpUrl(parsed.controllerUrl) : null, ...allUrls].filter((value): value is string => Boolean(value)))];
+  const ports = collectPortEntries(order);
+  return {
+    clorePorts: ports,
+    httpUrls,
+    controllerUrl: httpUrls[0] ?? null,
+    externalPort: externalControllerPort(ports),
+  };
+}
+
+function logEndpointDiagnostics(input: {
+  orderId: string;
+  serverId: string | null;
+  deploymentState: string | null;
+  clorePorts: string[];
+  httpUrls: string[];
+  selectedControllerUrl: string | null;
+  healthStatus: number | null;
+  healthError: string | null;
+}) {
+  console.info(JSON.stringify({
+    event: "image_http_readiness",
+    at: new Date().toISOString(),
+    order_id: input.orderId,
+    server_id: input.serverId,
+    runtime_image: COMFY_RUNTIME_IMAGE,
+    deployment_state: input.deploymentState,
+    clore_ports: input.clorePorts,
+    http_urls: input.httpUrls,
+    selected_controller_url: input.selectedControllerUrl,
+    health_status: input.healthStatus,
+    health_error: input.healthError,
+  }));
+}
+
+function cloreCreatePayloadError(payload: Record<string, unknown>, status: number) {
+  const safe = JSON.stringify({
+    status,
+    code: payload.code ?? null,
+    error: payload.error ?? null,
+    message: payload.message ?? null,
+    details: payload.details ?? payload.errors ?? null,
+  }).replace(/ssh-(?:ed25519|rsa)\s+[A-Za-z0-9+/=]+(?:\s+\S+)?/g, "<redacted-ssh-key>");
+  return new Error(`create_order_api_error:${safe}`);
+}
+
+async function postCreateOrderOnce(config: CloreConfig, body: ReturnType<typeof buildHttpRuntimeCreateOrderBody>) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CREATE_ORDER_HARD_TIMEOUT_MS);
+  try {
+    const response = await fetch(buildCloreUrl(config, "/create_order"), {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: createCloreHeaders(config.apiKey!),
+      signal: controller.signal,
+    });
+    const raw = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    const code = typeof raw.code === "number" ? raw.code : response.ok ? 0 : response.status;
+    console.info(JSON.stringify({ endpoint: "/create_order", at: new Date().toISOString(), status: response.status, retry: 0, hardTimeoutMs: CREATE_ORDER_HARD_TIMEOUT_MS }));
+    if (code !== 0) throw cloreCreatePayloadError(raw, response.status);
+    return "data" in raw ? raw.data : raw;
+  } catch (error) {
+    if (controller.signal.aborted) throw new CreateOrderHardTimeoutError();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function persistRecoveredActiveOrder(orderId: string, candidate: RuntimeCandidate, requestBody: ReturnType<typeof buildHttpRuntimeCreateOrderBody>) {
+  writeActiveOrder({
+    order_id: orderId,
+    server_id: candidate.serverId,
+    project_tag: PROJECT_TAG,
+    created_at: new Date().toISOString(),
+    status: "order_pending",
+    usd_per_hour: candidate.priceUsdPerHour ?? requestBody.required_price ?? 0,
+    max_price_usd_per_hour: candidate.priceUsdPerHour ?? requestBody.required_price ?? 0,
+    order_type: "on-demand",
+    open_ports: ["controller/http:8080"],
+    gpu_type: candidate.gpu,
+    gpu_profile: "rtx4090",
+    bootstrap_image: COMFY_RUNTIME_IMAGE,
+  });
+}
+
+async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId: string) {
+  const attempts = Math.ceil(HTTP_READINESS_TIMEOUT_MS / HTTP_READINESS_POLL_MS);
+  const started = Date.now();
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const pollAt = new Date().toISOString();
+    const elapsedSeconds = Math.min(Math.floor((Date.now() - started + attempt * HTTP_READINESS_POLL_MS) / 1000), Math.floor(HTTP_READINESS_TIMEOUT_MS / 1000));
+    const raw = await deps.cloreRequest<unknown>(config, "/my_orders", {}, { forceRefresh: true });
+    const entry = orderRecords(raw).find((value) => String(value.id ?? value.order_id) === orderId) ?? null;
+    const parsed = entry ? parseCloreOrder(entry) : null;
+    const diagnostics = entry ? httpDiagnostics(entry, parsed) : { clorePorts: [], httpUrls: [], controllerUrl: null, externalPort: null };
+    if (parsed?.terminal) throw new Error(`订单已终止，HTTP 运行环境未启动：${parsed.deploymentState}`);
+
+    const base = diagnostics.controllerUrl;
+    const waitingStage = !parsed?.deploymentReady
+      ? "order_created_waiting_deployment"
+      : !base
+        ? "waiting_http_endpoint"
+        : "checking_http_health";
+    const host = {
+      ...(readRunner().host ?? {}),
+      orderId,
+      serverId: parsed?.serverId ?? readRunner().host?.serverId ?? "未知",
+      runtimeDigest: COMFY_RUNTIME_IMAGE,
+      orderStatus: parsed?.lifecycleStatus ?? "unknown",
+      deploymentState: parsed?.deploymentState ?? "unknown",
+      clorePorts: diagnostics.clorePorts,
+      cloreHttpUrls: diagnostics.httpUrls,
+      controllerUrl: base,
+      httpExternalPort: diagnostics.externalPort,
+      httpState: base ? "checking /healthz" : "waiting_http_endpoint",
+      lastHealthStatus: null,
+      lastHealthError: base ? null : "Clore 尚未返回 HTTP controller 地址",
+      readinessElapsedSeconds: elapsedSeconds,
+      lastPollAt: pollAt,
+      message: base ? "已获得 HTTP 地址，正在检查 /healthz" : "订单已创建，正在等待图片运行环境",
+      sshDiagnostic: "未使用；HTTP 是唯一就绪条件",
+    };
+    updateRunner({ stage: waitingStage, host });
+
+    let health = { ok: false, status: null as number | null, error: base ? null : "http_endpoint_missing" };
+    if (base) {
+      health = deps.fetchHealth ? await deps.fetchHealth(`${base}/healthz`) : await defaultFetchHealth(`${base}/healthz`);
+    }
+    logEndpointDiagnostics({
+      orderId,
+      serverId: parsed?.serverId ?? null,
+      deploymentState: parsed?.deploymentState ?? null,
+      clorePorts: diagnostics.clorePorts,
+      httpUrls: diagnostics.httpUrls,
+      selectedControllerUrl: base,
+      healthStatus: health.status,
+      healthError: health.error,
+    });
+    updateRunner({
+      stage: health.ok ? "runtime_ready" : waitingStage,
+      host: {
+        ...host,
+        httpState: health.ok ? "healthz ok" : base ? "healthz not ready" : "waiting_http_endpoint",
+        lastHealthStatus: health.status,
+        lastHealthError: health.error,
+        readinessElapsedSeconds: elapsedSeconds,
+        lastPollAt: new Date().toISOString(),
+        message: health.ok ? "图片运行环境已就绪" : host.message,
+      },
+    });
+    if (health.ok && base) {
+      await deps.sleep(0);
+      return base;
+    }
+    await deps.sleep(HTTP_READINESS_POLL_MS);
+  }
+  throw new HttpReadinessTimeoutError(orderId);
 }
 
 function defaultDeps(): RunnerDeps {
@@ -285,6 +498,7 @@ function defaultDeps(): RunnerDeps {
     cancelOrder: cancelCloreOrder,
     fetchJson: defaultFetchJson,
     fetchBinary: defaultFetchBinary,
+    fetchHealth: defaultFetchHealth,
     cloreRequest,
     sleep,
   };
@@ -324,10 +538,37 @@ async function cancelAndVerify(deps: RunnerDeps, config: CloreConfig, execution:
   }
 
   if (cancellationError) {
+    if (originalError instanceof HttpReadinessTimeoutError) {
+      const message = "图片运行环境未就绪，且自动退租失败，订单可能仍在计费。";
+      updateRunner({
+        state: "failed",
+        stage: "http_readiness_timeout_cancel_failed",
+        pid: null,
+        blocker: "http_readiness_timeout_cancel_failed",
+        error: {
+          stage: "HTTP readiness",
+          message: `${message} 订单 ${orderId}。`,
+          at: new Date().toISOString(),
+          cancellationError: cancellationError instanceof Error ? cancellationError.message : String(cancellationError),
+          billingRisk: "订单可能仍在计费",
+        },
+      });
+      return false;
+    }
     failRunner("退租", originalError, cancellationError);
     return false;
   }
-  updateRunner({ state: originalError ? "failed" : "completed", stage: "已退租", host: null });
+  updateRunner({
+    state: originalError ? "failed" : "completed",
+    stage: "已退租",
+    host: null,
+    frozenTaskIds: originalError ? [] : readRunner().frozenTaskIds,
+    gpuClass: originalError ? null : readRunner().gpuClass,
+    currentTaskIndex: null,
+    currentModel: null,
+    promptSummary: null,
+    pid: null,
+  });
   return true;
 }
 
@@ -408,24 +649,44 @@ export async function runImage4090Batch(deps = defaultDeps()) {
       },
     });
     attemptedCreate = true;
-    const order = await deps.createOrder({
-      config,
-      execution,
-      candidate,
-      requestBody: buildHttpRuntimeCreateOrderBody({
-        serverId: candidate.serverId,
-        currency: config.rentalCurrency,
-        requiredPrice:
-          candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null
-            ? candidate.priceOriginalAmount
-            : session.maxHourlyPrice,
-      }),
-      sessionMetadata: { gpuType: candidate.gpu, gpuProfile: "rtx4090", bootstrapImage: COMFY_RUNTIME_IMAGE },
+    const requestBody = buildHttpRuntimeCreateOrderBody({
+      serverId: candidate.serverId,
+      currency: config.rentalCurrency,
+      requiredPrice:
+        candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null
+          ? candidate.priceOriginalAmount
+          : session.maxHourlyPrice,
     });
-    orderId = order.order_id;
+    try {
+      const order = await deps.createOrder({
+        config,
+        execution,
+        candidate,
+        requestBody,
+        request: (body) => postCreateOrderOnce(config!, body),
+        readOrders: (nextConfig) => deps.readOrders(nextConfig),
+        sessionMetadata: { gpuType: candidate.gpu, gpuProfile: "rtx4090", bootstrapImage: COMFY_RUNTIME_IMAGE },
+      });
+      orderId = order.order_id;
+    } catch (error) {
+      if (!(error instanceof CreateOrderHardTimeoutError)) throw error;
+      orderId = await reconcileCreatedOrder(deps, config, selectedServerId);
+      if (!orderId) throw error;
+      persistRecoveredActiveOrder(orderId, candidate, requestBody);
+    }
+    updateRunner({
+      state: "running",
+      stage: "order_created_waiting_http",
+      host: {
+        ...(readRunner().host ?? {}),
+        orderId,
+        httpState: "waiting_for_deployment",
+        message: "订单已创建，正在等待图片运行环境",
+      },
+    });
 
     const base = await waitForController(deps, config, orderId);
-    updateRunner({ stage: "图片运行环境已启动", host: { ...(readRunner().host ?? {}), orderId, httpState: "healthz 已连接" } });
+    updateRunner({ stage: "runtime_ready", host: { ...(readRunner().host ?? {}), orderId, httpState: "healthz ok", message: "图片运行环境已就绪" } });
 
     if (restore.source === "first_run_source_bootstrap") {
       updateRunner({ stage: "正在下载 Fluxed Up 10.2", currentModel: "Fluxed Up 10.2" });

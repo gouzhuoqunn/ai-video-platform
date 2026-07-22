@@ -65,6 +65,17 @@ export type ImageRunnerSession = {
     runtimeDigest: string | null;
     httpState: string | null;
     sshDiagnostic: string | null;
+    orderStatus?: string | null;
+    deploymentState?: string | null;
+    clorePorts?: string[] | null;
+    cloreHttpUrls?: string[] | null;
+    controllerUrl?: string | null;
+    httpExternalPort?: number | null;
+    lastHealthStatus?: number | null;
+    lastHealthError?: string | null;
+    readinessElapsedSeconds?: number | null;
+    lastPollAt?: string | null;
+    message?: string | null;
   } | null;
   error: { stage: string; message: string; at: string; cancellationError?: string; billingRisk?: string } | null;
   blocker: string | null;
@@ -140,6 +151,12 @@ function stringOrNull(value: unknown) {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
+function stringArrayOrNull(value: unknown) {
+  if (!Array.isArray(value)) return null;
+  const values = [...new Set(value.map(String).filter(Boolean))];
+  return values.length ? values : null;
+}
+
 function normalizeHost(value: unknown): ImageRunnerSession["host"] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const host = value as Record<string, unknown>;
@@ -157,6 +174,17 @@ function normalizeHost(value: unknown): ImageRunnerSession["host"] {
     runtimeDigest: stringOrNull(host.runtimeDigest),
     httpState: stringOrNull(host.httpState),
     sshDiagnostic: stringOrNull(host.sshDiagnostic),
+    orderStatus: stringOrNull(host.orderStatus),
+    deploymentState: stringOrNull(host.deploymentState),
+    clorePorts: stringArrayOrNull(host.clorePorts),
+    cloreHttpUrls: stringArrayOrNull(host.cloreHttpUrls),
+    controllerUrl: stringOrNull(host.controllerUrl),
+    httpExternalPort: finiteNumber(host.httpExternalPort),
+    lastHealthStatus: finiteNumber(host.lastHealthStatus),
+    lastHealthError: stringOrNull(host.lastHealthError),
+    readinessElapsedSeconds: finiteNumber(host.readinessElapsedSeconds),
+    lastPollAt: stringOrNull(host.lastPollAt),
+    message: stringOrNull(host.message),
   };
 }
 
@@ -220,13 +248,53 @@ async function activeCloreOrderCount() {
 
 async function reconcileStaleRunner(runner: ImageRunnerSession) {
   if (terminalRunnerState(runner.state) || processExists(runner.pid)) return runner;
-  const activeOrders = await activeCloreOrderCount();
-  if (activeOrders !== 0) return runner;
+  const activeOrders = await activeCloreOrders().catch(() => null);
+  if (activeOrders === null) return runner;
+  const activeImageOrder = matchingImageOrder(runner, activeOrders);
+  if (activeImageOrder?.orderId) {
+    const failedWithOrder = {
+      ...runner,
+      state: "failed" as const,
+      stage: "runner_exited_order_active",
+      pid: null,
+      host: normalizeHost({
+        ...(runner.host ?? {}),
+        orderId: activeImageOrder.orderId,
+        serverId: activeImageOrder.serverId ?? runner.host?.serverId ?? null,
+        orderStatus: activeImageOrder.status,
+        deploymentState: activeImageOrder.deploymentState ?? null,
+        controllerUrl: activeImageOrder.controllerUrl ?? null,
+        message: "图像 runner 已退出，但订单仍活跃",
+      }),
+      error: {
+        stage: "runner_exited_order_active",
+        message: `图像 runner 已退出，但 Clore 图像订单 ${activeImageOrder.orderId} 仍活跃，请点击“停止并退租 / 取消本批次”。`,
+        at: new Date().toISOString(),
+        billingRisk: "订单可能仍在计费",
+      },
+      blocker: "image_runner_exited_with_active_order",
+    };
+    saveRunner(failedWithOrder);
+    return readRunner();
+  }
+  if (activeStateLooksImageOrder()) {
+    try {
+      clearActiveOrder(activeStateLooksImageOrder()!.order_id);
+    } catch {
+      rmSync(ACTIVE_ORDER_PATH, { force: true });
+    }
+  }
   const failed = {
     ...runner,
     state: "failed" as const,
     stage: "runner_exited",
     host: null,
+    frozenTaskIds: [],
+    gpuClass: null,
+    currentTaskIndex: null,
+    currentModel: null,
+    promptSummary: null,
+    pid: null,
     error: { stage: "runner_exited", message: STALE_RUNNER_NO_ORDER_MESSAGE, at: new Date().toISOString() },
     blocker: STALE_RUNNER_NO_ORDER_MESSAGE,
   };
