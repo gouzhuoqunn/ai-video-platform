@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "profile": "image-flux",
+  "profileName": "image-flux",
+  "purpose": "Image-only FLUX text generation. No Wan, LTX, video, or custom nodes.",
+  "comfyuiCommit": "da2608926eaf68fd532bba4e1ace3402c5d21399",
+  "loadBaseNodes": true,
+  "disableCustomNodes": true,
+  "baseNodeClasses": [
+    "CLIPTextEncode",
+    "DualCLIPLoader",
+    "EmptySD3LatentImage",
+    "KSampler",
+    "LoraLoader",
+    "SaveImage",
+    "UNETLoader",
+    "VAEDecode",
+    "VAELoader"
+  ],
+  "builtinExtraFiles": [
+    "comfy_extras/nodes_flux.py"
+  ],
+  "requiredNodeClasses": [
+    "CLIPTextEncode",
+    "DualCLIPLoader",
+    "EmptySD3LatentImage",
+    "FluxGuidance",
+    "KSampler",
+    "LoraLoader",
+    "SaveImage",
+    "UNETLoader",
+    "VAEDecode",
+    "VAELoader"
+  ]
+}

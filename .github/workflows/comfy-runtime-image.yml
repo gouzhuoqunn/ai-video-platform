@@ -107,11 +107,11 @@ jobs:
             --entrypoint /bin/bash \
             -e START_GPU_WORKER=false \
             -e COMFY_RUNTIME_MODE=smoke_cpu \
-            -e COMFY_NODE_PROFILE=production_minimal \
+            -e COMFY_NODE_PROFILE=image-flux \
             -p 127.0.0.1:8080:8080 \
-            -v "${GITHUB_WORKSPACE}/comfy-runtime:/opt/comfy-runtime:ro" \
+            -v "${GITHUB_WORKSPACE}/comfy-runtime:/opt/image-runtime:ro" \
             "${OLD_RUNTIME_IMAGE}" \
-            -lc 'exec /bin/bash /opt/comfy-runtime/entrypoint.sh'
+            -lc 'exec /bin/bash /opt/image-runtime/entrypoint.sh'
           cleanup() {
             docker logs --tail 200 "${container}" || true
             docker rm -f "${container}" >/dev/null 2>&1 || true
@@ -124,7 +124,7 @@ jobs:
             sleep 5
           done
           docker exec "${container}" sh -lc 'test -d /workspace/comfy-user && test -f /workspace/comfy-user/comfyui.db'
-          docker exec -i "${container}" python3.11 - <<'PY'
+          docker exec -i "${container}" python3 - <<'PY'
           import sqlite3
           database = "/workspace/comfy-user/comfyui.db"
           connection = sqlite3.connect(database)
@@ -137,7 +137,7 @@ jobs:
           docker logs "${container}" | grep -F 'database_preflight_ok user_directory=/workspace/comfy-user database_url=sqlite:////workspace/comfy-user/comfyui.db'
           ! docker logs "${container}" | grep -F 'unable to open database file'
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >"${object_info}"
-          python3 scripts/verify-comfy-object-info.py --input "${object_info}" --profile comfy-runtime/node-profiles/production-minimal.json
+          python3 scripts/verify-comfy-object-info.py --input "${object_info}" --profile comfy-runtime/node-profiles/image-flux.json
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/dev/null
           top_output="$(docker top "${container}")"
           ! printf '%s\n' "${top_output}" | grep -Eq 'python(3(\.11)?)?[[:space:]]+/app/worker\.py|wan_runner\.py|gpu-worker'
@@ -147,7 +147,7 @@ jobs:
             test "${attempt}" -lt 60
             sleep 5
           done
-          docker exec "${container}" python3.11 -c 'import sqlite3; connection=sqlite3.connect("/workspace/comfy-user/comfyui.db"); connection.execute("SELECT 1"); connection.close()'
+          docker exec "${container}" python3 -c 'import sqlite3; connection=sqlite3.connect("/workspace/comfy-user/comfyui.db"); connection.execute("SELECT 1"); connection.close()'
           echo "gate_passed=true" >> "$GITHUB_OUTPUT"
           echo "confirmed_removal_paths=/app/worker.py" >> "$GITHUB_OUTPUT"
 
@@ -214,8 +214,8 @@ jobs:
           cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
           trap cleanup EXIT
           docker exec "${container}" sh -lc 'test ! -e /app/worker.py'
-          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" -o -name "*.gguf" \) | grep .'
-          docker exec "${container}" sh -lc '! find /workspace /opt/comfy-runtime -type f -path "*/models/*" -name "*.bin" -size +50M | grep .'
+          docker exec "${container}" sh -lc '! find /workspace /opt/image-runtime -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pth" -o -name "*.gguf" \) | grep .'
+          docker exec "${container}" sh -lc '! find /workspace /opt/image-runtime -type f -path "*/models/*" -name "*.bin" -size +50M | grep .'
           docker exec "${container}" sh -lc 'test ! -e /.env && test ! -e /.env.local && test ! -e /.secrets'
           docker exec "${container}" sh -lc '! printenv | grep -E "SUPABASE_SERVICE_ROLE|SUPABASE_SECRET|CLORE_API_KEY|R2_ACCESS_KEY|R2_SECRET|SSH_PRIVATE"'
 
@@ -254,7 +254,7 @@ jobs:
           docker run -d --name "${container}" \
             -e START_GPU_WORKER=false \
             -e COMFY_RUNTIME_MODE=smoke_cpu \
-            -e COMFY_NODE_PROFILE=production_minimal \
+            -e COMFY_NODE_PROFILE=image-flux \
             -p 127.0.0.1:8080:8080 "${image}"
           cleanup() {
             docker logs --tail 200 "${container}" || true
@@ -268,13 +268,13 @@ jobs:
             sleep 5
           done
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/object_info >"${object_info}"
-          python3 scripts/verify-comfy-object-info.py --input "${object_info}" --profile comfy-runtime/node-profiles/production-minimal.json
+          python3 scripts/verify-comfy-object-info.py --input "${object_info}" --profile comfy-runtime/node-profiles/image-flux.json
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/system_stats >/dev/null
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/queue >/dev/null
           docker exec "${container}" curl -fsS http://127.0.0.1:8188/history >/dev/null
           docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8188/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/dev/null
           docker exec "${container}" curl -fsS -X POST http://127.0.0.1:8080/free -H 'Content-Type: application/json' -d '{"unload_models":false,"free_memory":false}' >/dev/null
-          docker exec -i "${container}" python3.11 - <<'PY'
+          docker exec -i "${container}" python3 - <<'PY'
           import base64, os, socket
           key = base64.b64encode(os.urandom(16)).decode()
           request = "GET /ws?clientId=runtime-hygiene HTTP/1.1\r\nHost: 127.0.0.1:8188\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " + key + "\r\nSec-WebSocket-Version: 13\r\n\r\n"
@@ -282,7 +282,7 @@ jobs:
               sock.sendall(request.encode())
               assert " 101 " in sock.recv(512).decode(errors="replace").split("\r\n", 1)[0]
           PY
-          docker exec -i "${container}" python3.11 - <<'PY'
+          docker exec -i "${container}" python3 - <<'PY'
           import json, urllib.error, urllib.request
           request = urllib.request.Request("http://127.0.0.1:8188/prompt", data=json.dumps({"prompt":{"bad":{"class_type":"MissingNodeForSmoke","inputs":{}}}}).encode(), headers={"Content-Type":"application/json"}, method="POST")
           try:
@@ -292,7 +292,7 @@ jobs:
               assert error.code == 400 and "MissingNodeForSmoke" in error.read().decode(errors="replace")
           PY
           docker exec "${container}" sh -lc 'test -f /workspace/comfy-user/comfyui.db && test ! -e /app/worker.py'
-          docker exec "${container}" python3.11 -c 'import sqlite3; connection=sqlite3.connect("/workspace/comfy-user/comfyui.db"); connection.execute("CREATE TABLE IF NOT EXISTS verify_database_probe (id INTEGER PRIMARY KEY)"); connection.execute("SELECT COUNT(*) FROM verify_database_probe").fetchone(); connection.close()'
+          docker exec "${container}" python3 -c 'import sqlite3; connection=sqlite3.connect("/workspace/comfy-user/comfyui.db"); connection.execute("CREATE TABLE IF NOT EXISTS verify_database_probe (id INTEGER PRIMARY KEY)"); connection.execute("SELECT COUNT(*) FROM verify_database_probe").fetchone(); connection.close()'
           ! docker logs "${container}" | grep -F 'unable to open database file'
           top_output="$(docker top "${container}")"
           ! printf '%s\n' "${top_output}" | grep -Eq 'python(3(\.11)?)?[[:space:]]+/app/worker\.py|wan_runner\.py|gpu-worker'
@@ -304,7 +304,7 @@ jobs:
             test "${attempt}" -lt 60
             sleep 5
           done
-          docker exec "${container}" python3.11 -c 'import sqlite3; connection=sqlite3.connect("/workspace/comfy-user/comfyui.db"); connection.execute("SELECT 1"); connection.close()'
+          docker exec "${container}" python3 -c 'import sqlite3; connection=sqlite3.connect("/workspace/comfy-user/comfyui.db"); connection.execute("SELECT 1"); connection.close()'
           docker stop --time 15 "${container}" >/dev/null
           test "$(docker inspect --format '{{.State.Status}}' "${container}")" = exited
           echo "CPU_NO_MODEL_SMOKE_COMPLETE=true"
@@ -314,7 +314,7 @@ jobs:
           set -euo pipefail
           image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
           set +e
-          docker run --rm -e START_GPU_WORKER=false -e COMFY_RUNTIME_MODE=gpu -e COMFY_GPU_PROFILE=rtx4090 -e COMFY_NODE_PROFILE=production_minimal "${image}" >/tmp/runtime-hygiene-gpu.log 2>&1
+          docker run --rm -e START_GPU_WORKER=false -e COMFY_RUNTIME_MODE=gpu -e COMFY_GPU_PROFILE=rtx4090 -e COMFY_NODE_PROFILE=image-flux "${image}" >/tmp/runtime-hygiene-gpu.log 2>&1
           code=$?
           set -e
           test "${code}" -ne 0

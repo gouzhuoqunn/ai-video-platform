@@ -13,7 +13,7 @@ from typing import Any
 
 
 COMFY_DIR = Path(os.environ.get("COMFYUI_DIR", "/opt/ComfyUI"))
-RUNTIME_DIR = Path(os.environ.get("COMFY_RUNTIME_DIR", "/opt/comfy-runtime"))
+RUNTIME_DIR = Path(os.environ.get("COMFY_RUNTIME_DIR", "/opt/image-runtime"))
 PROFILE_DIR = Path(os.environ.get("COMFY_NODE_PROFILE_DIR", RUNTIME_DIR / "node-profiles"))
 
 
@@ -214,7 +214,7 @@ def patch_node_profile(profile: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--node-profile", default=os.environ.get("COMFY_NODE_PROFILE", "production_minimal"))
+    parser.add_argument("--node-profile", default=os.environ.get("COMFY_NODE_PROFILE", "image-flux"))
     args, comfy_args = parser.parse_known_args()
 
     profile = load_profile(args.node_profile)

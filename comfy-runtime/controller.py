@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import signal
@@ -14,6 +13,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from image_workflow import assert_node_classes, build_text_workflow, validate_request, workflow_metadata
 
 
 class ControllerState:
@@ -140,39 +140,30 @@ def make_handler(state: ControllerState):
                 manifest.parent.mkdir(parents=True, exist_ok=True)
                 manifest.write_text(json.dumps(payload), encoding="utf-8")
                 env = {**os.environ, "STAGE3O_R2_RESTORE_MANIFEST": str(manifest)}
-                result = subprocess.run([os.environ.get("COMFY_PYTHON", "python3.11"), "/opt/comfy-runtime/restore_r2.py"], env=env, capture_output=True, text=True, timeout=90 * 60)
+                result = subprocess.run([os.environ.get("COMFY_PYTHON", "python3"), "/opt/image-runtime/restore_r2.py"], env=env, capture_output=True, text=True, timeout=90 * 60)
                 if result.returncode != 0:
                     self.send_json(502, {"error": "restore_failed", "detail": result.stderr.strip().splitlines()[-1:]})
                     return
                 self.send_json(200, json_payload(result.stdout.encode()))
                 return
             if self.path == "/image/generate":
-                if not isinstance(payload, dict) or payload.get("mode") not in {"text_generation", "kontext_edit"} or not isinstance(payload.get("workflow"), dict):
-                    self.send_json(400, {"error": "invalid_image_generation_request"})
-                    return
-                if payload["mode"] == "kontext_edit" and not payload.get("reference_image"):
-                    self.send_json(400, {"error": "kontext_requires_reference_image"})
+                try:
+                    options = validate_request(payload)
+                    status, _headers, response = request_upstream(f"{state.comfy_base_url}/object_info")
+                    if status != 200:
+                        raise ValueError("runtime_node_introspection_failed")
+                    assert_node_classes(json_payload(response))
+                except ValueError as error:
+                    self.send_json(400, {"error": str(error)})
                     return
                 job_id = str(payload.get("task_id") or uuid.uuid4())
-                workflow = payload["workflow"]
-                if payload["mode"] == "kontext_edit":
-                    try:
-                        header, encoded = str(payload["reference_image"]).split(",", 1)
-                        if not header.startswith("data:image/"):
-                            raise ValueError("reference_image_not_image")
-                        suffix = header.split(";", 1)[0].split("/", 1)[1].replace("jpeg", "jpg")
-                        filename = f"{job_id}.{suffix}"
-                        (Path("/workspace/comfy-input") / filename).write_bytes(base64.b64decode(encoded, validate=True))
-                        workflow = json.loads(json.dumps(workflow).replace("__REFERENCE_IMAGE__", filename))
-                    except Exception as error:
-                        self.send_json(400, {"error": "invalid_reference_image", "detail": str(error)})
-                        return
+                workflow = build_text_workflow(job_id, options)
                 status, _headers, response = request_upstream(f"{state.comfy_base_url}/prompt", "POST", {"prompt": workflow, "client_id": job_id})
                 upstream = json_payload(response)
                 if status >= 300 or not isinstance(upstream, dict) or not upstream.get("prompt_id"):
                     self.send_json(status, {"error": "comfy_prompt_failed", "upstream": upstream})
                     return
-                state.jobs[job_id] = {"job_id": job_id, "task_id": payload.get("task_id"), "mode": payload["mode"], "status": "generating", "prompt_id": upstream["prompt_id"], "created_at": int(time.time())}
+                state.jobs[job_id] = {"job_id": job_id, "task_id": payload.get("task_id"), "mode": "text_generation", "status": "generating", "prompt_id": upstream["prompt_id"], "metadata": workflow_metadata(options), "created_at": int(time.time())}
                 self.send_json(202, state.jobs[job_id])
                 return
             if self.path == "/shutdown":

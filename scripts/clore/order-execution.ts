@@ -105,7 +105,7 @@ export function buildCreateOrderBody(input: {
     ports: bootstrapProfile === CLORE_LIGHT_BOOTSTRAP_PROFILE ? { "22": "tcp" } : { "22": "tcp", "8080": "http" },
     env: bootstrapProfile === CLORE_LIGHT_BOOTSTRAP_PROFILE
       ? { PROJECT_TAG, RUNTIME_BOOTSTRAP_PROFILE: CLORE_LIGHT_BOOTSTRAP_PROFILE, HF_HUB_DISABLE_TELEMETRY: "1", DO_NOT_TRACK: "1" }
-      : { PROJECT_TAG, COMFY_RUNTIME_MODE: "gpu", COMFY_GPU_PROFILE: "rtx4090", COMFY_NODE_PROFILE: "production_minimal", START_GPU_WORKER: "false", HF_HUB_DISABLE_TELEMETRY: "1", DO_NOT_TRACK: "1" },
+        : { PROJECT_TAG, COMFY_RUNTIME_MODE: "gpu", COMFY_GPU_PROFILE: "rtx4090", COMFY_NODE_PROFILE: "image-flux", START_GPU_WORKER: "false", HF_HUB_DISABLE_TELEMETRY: "1", DO_NOT_TRACK: "1" },
     ssh_key: input.sshPublicKey,
     command: bootstrapProfile === CLORE_LIGHT_BOOTSTRAP_PROFILE
       ? "bash -lc 'mkdir -p /workspace/ai-runtime /workspace/models /workspace/jobs /workspace/logs; while sleep 3600; do :; done'"
@@ -142,7 +142,7 @@ export function buildHttpRuntimeCreateOrderBody(input: { serverId: string; curre
   return {
     currency: input.currency, image: COMFY_RUNTIME_IMAGE, renting_server: Number(input.serverId), type: "on-demand",
     ports: { "8080": "http" },
-    env: { PROJECT_TAG, COMFY_RUNTIME_MODE: "gpu", COMFY_GPU_PROFILE: "rtx4090", COMFY_NODE_PROFILE: "production_minimal", START_GPU_WORKER: "false" },
+    env: { PROJECT_TAG, COMFY_RUNTIME_MODE: "gpu", COMFY_GPU_PROFILE: "rtx4090", COMFY_NODE_PROFILE: "image-flux", START_GPU_WORKER: "false" },
     required_price: input.requiredPrice,
   };
 }
@@ -170,6 +170,16 @@ export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
   const cudaBase = body.image === CLORE_CUDA_BASE_IMAGE && body.ssh_password === undefined && body.env === undefined && body.command === undefined && body.required_price !== undefined && body.autossh_entrypoint === true;
   const httpRuntime = body.image === COMFY_RUNTIME_IMAGE && body.ssh_key === undefined && body.ssh_password === undefined && body.command === undefined && body.ports["8080"] === "http";
   if (!fixedRuntime && !httpRuntime && !lightBootstrap && !manualParity && !passwordFallback && !keyOnly && !cudaBase) throw new Error("Clore order image must be the pinned Runtime, approved light bootstrap, or CUDA base profile.");
+  if (httpRuntime) {
+    const activeRuntimeText = JSON.stringify({
+      COMFY_RUNTIME_MODE: body.env?.COMFY_RUNTIME_MODE,
+      COMFY_GPU_PROFILE: body.env?.COMFY_GPU_PROFILE,
+      COMFY_NODE_PROFILE: body.env?.COMFY_NODE_PROFILE,
+    });
+    if (body.env?.COMFY_NODE_PROFILE !== "image-flux" || /production_minimal|Wan|LTX|video/i.test(activeRuntimeText)) {
+      throw new Error("Image HTTP runtime orders must use only COMFY_NODE_PROFILE=image-flux.");
+    }
+  }
   const ports = Object.keys(body.ports);
   if ((!httpRuntime && body.ports["22"] !== "tcp") || body.ports["8188"] !== undefined || ports.some((port) => !["22", "8080"].includes(port)) || ports.filter((port) => body.ports[port] === "http").length > 1) {
     throw new Error("Order must expose SSH and at most one HTTP port; ComfyUI 8188 is forbidden.");

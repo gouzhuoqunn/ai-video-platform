@@ -16,8 +16,8 @@ LOG_DIR = WORKSPACE / "logs"
 COMFY_USER_DIR = WORKSPACE / "comfy-user"
 COMFY_DATABASE_PATH = COMFY_USER_DIR / "comfyui.db"
 COMFY_DIR = Path(os.environ.get("COMFYUI_DIR", "/opt/ComfyUI"))
-RUNTIME_DIR = Path(os.environ.get("COMFY_RUNTIME_DIR", "/opt/comfy-runtime"))
-COMFY_PYTHON = os.environ.get("COMFY_PYTHON", "python3.11")
+RUNTIME_DIR = Path(os.environ.get("COMFY_RUNTIME_DIR", "/opt/image-runtime"))
+COMFY_PYTHON = os.environ.get("COMFY_PYTHON", "python3")
 SMOKE_IMPORT_BLOCKER = RUNTIME_DIR / "smoke_import_blocker"
 GPU_PROFILES = {"rtx4090", "rtx5090", "ampere_image_gpu"}
 REQUIRED_DIRS = [
@@ -168,7 +168,7 @@ def gpu_preflight() -> None:
 def comfy_args(mode: str) -> list[str]:
     host = os.environ.get("COMFYUI_HOST", "127.0.0.1")
     port = os.environ.get("COMFYUI_PORT", "8188")
-    node_profile = os.environ.get("COMFY_NODE_PROFILE", "production_minimal")
+    node_profile = os.environ.get("COMFY_NODE_PROFILE", "image-flux")
     args = [
         COMFY_PYTHON,
         str(RUNTIME_DIR / "launch_comfy.py"),
@@ -269,7 +269,7 @@ def main() -> int:
     if mode == "gpu":
         gpu_preflight()
 
-    node_profile = os.environ.get("COMFY_NODE_PROFILE", "production_minimal")
+    node_profile = os.environ.get("COMFY_NODE_PROFILE", "image-flux")
     log(
         "starting ComfyUI runtime at commit "
         f"{os.environ.get('COMFYUI_COMMIT')} mode={mode} node_profile={node_profile}"
