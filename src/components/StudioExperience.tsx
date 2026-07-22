@@ -1,7 +1,7 @@
 "use client";
 
-import { LocalCreationStudio } from "@/components/LocalCreationStudio";
+import { ImageCreationStudio } from "@/components/ImageCreationStudio";
 
 export function StudioExperience() {
-  return <LocalCreationStudio />;
+  return <ImageCreationStudio />;
 }

@@ -37,6 +37,8 @@
   ],
   "exclude": [
     "node_modules",
-    "local-data"
+    "local-data",
+    "scripts",
+    "视频部分"
   ]
 }
