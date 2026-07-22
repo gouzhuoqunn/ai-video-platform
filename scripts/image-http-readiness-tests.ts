@@ -219,7 +219,7 @@ async function main() {
       await assert.rejects(() => runImage4090Batch(harness.deps), /调用 Clore 创建订单接口失败/);
       const session = readJson<ImageRunnerSession>(path.join(".secrets", "image-studio", "runner-session.json"));
       assert.equal(harness.createCount(), 2, "transient create_order network error retries exactly once after reconciliation");
-      assert.equal(session.state, "idle", "confirmed no-order create failure returns runner to idle");
+      assert.equal(session.state, "failed", "confirmed no-order create failure reaches terminal failed state");
       assert.equal(session.stage, "create_order_failed", "before order ID, failed create stage is explicit");
       assert.equal(session.host, null, "no HTTP endpoint is displayed when order was not created");
       assert.match(session.error?.technicalCause ?? "", /UND_ERR_CONNECT_TIMEOUT/, "nested fetch cause is persisted for copy");

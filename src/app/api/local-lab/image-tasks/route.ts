@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -10,7 +10,7 @@ import { COMFY_RUNTIME_IMAGE, loadCloreConfig } from "../../../../../scripts/clo
 import { cloreRequest } from "../../../../../scripts/clore/client";
 import { loadCloreExecutionConfig } from "../../../../../scripts/clore/execution-config";
 import { readLiveOrdersSummary, type CloreOrderSummary } from "../../../../../scripts/clore/live";
-import { ACTIVE_ORDER_PATH, clearActiveOrder, readActiveOrder } from "../../../../../scripts/clore/order-state";
+import { ACTIVE_ORDER_PATH, LEGACY_ORDER_CREATE_LOCK_PATH, ORDER_CREATE_LOCK_PATH, clearActiveOrder, clearOrderCreateLocks, readActiveOrder } from "../../../../../scripts/clore/order-state";
 import { finalSanitizedLogLines, imageExecutorReadiness, processExists, STALE_RUNNER_NO_ORDER_MESSAGE } from "../../../../../scripts/image-executor/readiness";
 
 export const dynamic = "force-dynamic";
@@ -110,6 +110,7 @@ const DEFAULT_MAX_HOURLY_PRICE = 0.6;
 const KONTEXT_BLOCKER = "FLUX Kontext 执行器尚未完成";
 const RTX5090_BLOCKER = "RTX 5090 高分辨率执行器尚未完成";
 const DUPLICATE_START_MESSAGE = "已有图像批次正在启动或执行，请先等待或退租。";
+const CREATE_ORDER_STALE_MS = 3 * 60 * 1000;
 
 function readJson<T>(filePath: string, fallback: T): T {
   try {
@@ -284,25 +285,110 @@ async function activeCloreOrders() {
   return (await readLiveOrdersSummary(loadCloreConfig(), { forceRefresh: true })).filter((order) => order.active);
 }
 
-async function activeCloreOrderCount() {
+async function assertNoActiveProviderOrderBeforeStart(runner: ImageRunnerSession) {
+  const activeOrders = await activeCloreOrders();
+  if (activeOrders.length === 0) {
+    clearLocalActiveImageState();
+    return;
+  }
+  const matching = matchingImageOrder(runner, activeOrders);
+  if (matching?.orderId) throw new Error(`检测到真实活动订单：${matching.orderId}`);
+  throw new Error(`已有其他活动订单：${activeOrders[0].orderId ?? "未知"}`);
+}
+
+function runnerTimestampMs(runner: ImageRunnerSession) {
+  const updated = new Date(runner.updatedAt).getTime();
+  const started = runner.startedAt ? new Date(runner.startedAt).getTime() : Number.NaN;
+  const timestamp = Number.isFinite(updated) ? updated : started;
+  return Number.isFinite(timestamp) ? timestamp : Date.now();
+}
+
+function creatingOrderLooksStale(runner: ImageRunnerSession) {
+  return runner.stage === "creating_order" && Date.now() - runnerTimestampMs(runner) > CREATE_ORDER_STALE_MS;
+}
+
+function clearStaleCreateLocks() {
+  if (existsSync(ORDER_CREATE_LOCK_PATH) || existsSync(LEGACY_ORDER_CREATE_LOCK_PATH)) clearOrderCreateLocks();
+}
+
+function stopRunnerProcessTree(pid: number | null | undefined) {
+  // Cancellation does not depend on the process signal; provider reconciliation
+  // and local state cleanup still run even if this PID is stale or already dead.
+  if (!Number.isInteger(pid) || !processExists(pid)) return false;
   try {
-    return (await activeCloreOrders()).length;
+    if (process.platform === "win32") {
+      const result = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
+      return result.status === 0;
+    }
+    process.kill(Number(pid), "SIGTERM");
+    return true;
   } catch {
-    return null;
+    try {
+      process.kill(Number(pid), "SIGTERM");
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
+function returnFrozenTasksToWaiting(runner: ImageRunnerSession) {
+  const ids = new Set(runner.frozenTaskIds);
+  if (!ids.size) return;
+  const now = new Date().toISOString();
+  saveTasks(readTasks().map((task) => (ids.has(task.id) && task.status === "generating" ? { ...task, status: "waiting_for_gpu", updatedAt: now } : task)));
+}
+
+function clearLocalActiveImageState() {
+  const activeState = activeStateLooksImageOrder();
+  if (activeState && existsSync(ACTIVE_ORDER_PATH)) {
+    try {
+      clearActiveOrder(activeState.order_id);
+    } catch {
+      rmSync(ACTIVE_ORDER_PATH, { force: true });
+    }
+  }
+  clearStaleCreateLocks();
+}
+
+function resetRunnerToIdleAfterLocalCleanup(runner: ImageRunnerSession, message: string) {
+  returnFrozenTasksToWaiting(runner);
+  const now = new Date().toISOString();
+  saveRunner({
+    ...defaultRunner(),
+    state: "idle",
+    stage: message,
+    frozenTaskIds: [],
+    gpuClass: null,
+    currentTaskIndex: null,
+    currentModel: null,
+    promptSummary: null,
+    startedAt: null,
+    host: null,
+    error: null,
+    blocker: null,
+    pid: null,
+    logPath: null,
+    lastCancellation: { at: now, orderId: null, message },
+    updatedAt: now,
+  });
+}
+
 async function reconcileStaleRunner(runner: ImageRunnerSession) {
-  if (terminalRunnerState(runner.state) || processExists(runner.pid)) return runner;
+  const localActive = activeStateLooksImageOrder();
+  const pidLive = processExists(runner.pid);
+  const staleCreatingOrder = creatingOrderLooksStale(runner);
+  const shouldReconcile = Boolean(localActive) || (!terminalRunnerState(runner.state) && !pidLive) || staleCreatingOrder;
+  if (!shouldReconcile) return runner;
   const activeOrders = await activeCloreOrders().catch(() => null);
   if (activeOrders === null) return runner;
   const activeImageOrder = matchingImageOrder(runner, activeOrders);
   if (activeImageOrder?.orderId) {
-    const failedWithOrder = {
+    const adopted = {
       ...runner,
-      state: "failed" as const,
-      stage: "runner_exited_order_active",
-      pid: null,
+      state: "running" as const,
+      stage: "order_created_waiting_http",
+      pid: pidLive ? runner.pid : null,
       host: normalizeHost({
         ...(runner.host ?? {}),
         orderId: activeImageOrder.orderId,
@@ -310,41 +396,49 @@ async function reconcileStaleRunner(runner: ImageRunnerSession) {
         orderStatus: activeImageOrder.status,
         deploymentState: activeImageOrder.deploymentState ?? null,
         controllerUrl: activeImageOrder.controllerUrl ?? null,
-        message: "图像 runner 已退出，但订单仍活跃",
+        message: `检测到真实活动订单：${activeImageOrder.orderId}`,
       }),
-      error: {
-        stage: "runner_exited_order_active",
-        message: `图像 runner 已退出，但 Clore 图像订单 ${activeImageOrder.orderId} 仍活跃，请点击“停止并退租 / 取消本批次”。`,
-        at: new Date().toISOString(),
-        billingRisk: "订单可能仍在计费",
-      },
-      blocker: "image_runner_exited_with_active_order",
+      error: null,
+      blocker: null,
     };
-    saveRunner(failedWithOrder);
+    saveRunner(adopted);
     return readRunner();
   }
-  if (activeStateLooksImageOrder()) {
-    try {
-      clearActiveOrder(activeStateLooksImageOrder()!.order_id);
-    } catch {
-      rmSync(ACTIVE_ORDER_PATH, { force: true });
-    }
+  if (activeOrders.length > 0) {
+    stopRunnerProcessTree(runner.pid);
+    returnFrozenTasksToWaiting(runner);
+    const order = activeOrders[0];
+    const failedWithOtherOrder = {
+      ...runner,
+      state: "failed" as const,
+      stage: "active_order_conflict",
+      host: null,
+      frozenTaskIds: [],
+      gpuClass: null,
+      currentTaskIndex: null,
+      currentModel: null,
+      promptSummary: null,
+      pid: null,
+      error: {
+        stage: "active_order_conflict",
+        message: `已有其他活动订单：${order.orderId ?? "未知"}`,
+        at: new Date().toISOString(),
+        billingRisk: "未自动取消非当前图像批次订单",
+      },
+      blocker: `已有其他活动订单：${order.orderId ?? "未知"}`,
+    };
+    saveRunner(failedWithOtherOrder);
+    return readRunner();
   }
-  const failed = {
-    ...runner,
-    state: "failed" as const,
-    stage: "runner_exited",
-    host: null,
-    frozenTaskIds: [],
-    gpuClass: null,
-    currentTaskIndex: null,
-    currentModel: null,
-    promptSummary: null,
-    pid: null,
-    error: { stage: "runner_exited", message: STALE_RUNNER_NO_ORDER_MESSAGE, at: new Date().toISOString() },
-    blocker: STALE_RUNNER_NO_ORDER_MESSAGE,
-  };
-  saveRunner(failed);
+  stopRunnerProcessTree(runner.pid);
+  const hadStaleLock = existsSync(ORDER_CREATE_LOCK_PATH) || existsSync(LEGACY_ORDER_CREATE_LOCK_PATH);
+  clearLocalActiveImageState();
+  const message = localActive || hadStaleLock
+    ? "检测到本地残留订单状态，已自动清理"
+    : staleCreatingOrder
+      ? "创建订单失败，未产生订单"
+      : STALE_RUNNER_NO_ORDER_MESSAGE;
+  resetRunnerToIdleAfterLocalCleanup(runner, message);
   return readRunner();
 }
 
@@ -456,11 +550,12 @@ function matchingImageOrder(runner: ImageRunnerSession, orders: CloreOrderSummar
 }
 
 function resetRunnerAfterCancel(message: string, orderId: string | null) {
+  returnFrozenTasksToWaiting(readRunner());
   const now = new Date().toISOString();
   saveRunner({
     ...defaultRunner(),
     state: "idle",
-    stage: "当前未租用显卡",
+    stage: message,
     frozenTaskIds: [],
     gpuClass: null,
     currentTaskIndex: null,
@@ -479,24 +574,11 @@ function resetRunnerAfterCancel(message: string, orderId: string | null) {
 
 async function cancelCurrentImageBatch() {
   const runner = readRunner();
-  if (processExists(runner.pid)) {
-    try {
-      process.kill(Number(runner.pid), "SIGTERM");
-    } catch {
-      // Cancellation does not depend on the process signal.
-    }
-  }
+  stopRunnerProcessTree(runner.pid);
   const orders = await activeCloreOrders();
   const order = matchingImageOrder(runner, orders);
   if (!order?.orderId) {
-    const activeState = activeStateLooksImageOrder();
-    if (activeState && existsSync(ACTIVE_ORDER_PATH)) {
-      try {
-        clearActiveOrder(activeState.order_id);
-      } catch {
-        rmSync(ACTIVE_ORDER_PATH, { force: true });
-      }
-    }
+    clearLocalActiveImageState();
     const message = "没有活跃图像订单，已清理本地批次状态。";
     resetRunnerAfterCancel(message, null);
     return { orderId: null, cancelled: false, message };
@@ -518,6 +600,7 @@ async function cancelCurrentImageBatch() {
     }
   }
   const message = `已退租图像订单 ${order.orderId}。`;
+  clearStaleCreateLocks();
   resetRunnerAfterCancel(message, order.orderId);
   return { orderId: order.orderId, cancelled: true, message };
 }
@@ -561,7 +644,7 @@ export async function POST(request: NextRequest) {
       const maxHourlyPrice = Number(body.maxHourlyPrice);
       const previous = await reconcileStaleRunner(readRunner());
       if (previous.state === "running" || previous.state === "cancelling" || processExists(previous.pid)) throw new Error(DUPLICATE_START_MESSAGE);
-      if ((await activeCloreOrderCount()) !== 0) throw new Error(DUPLICATE_START_MESSAGE);
+      await assertNoActiveProviderOrderBeforeStart(previous);
       const batch = tasks.filter((task) => ids.includes(task.id) && task.status === "waiting_for_gpu");
       assertStartableBatch(batch, maxHourlyPrice);
       const startedAt = new Date().toISOString();

@@ -671,7 +671,7 @@ function persistCreateOrderAttempt(input: {
 function persistCreateOrderNoOrderFailure(detail: SanitizedFetchFailure) {
   const current = readRunner();
   updateRunner({
-    state: "idle",
+    state: "failed",
     stage: "create_order_failed",
     host: null,
     frozenTaskIds: [],
@@ -960,10 +960,6 @@ export async function runImage4090Batch(deps = defaultDeps()) {
     if (!candidate) throw new Error("未找到符合价格、显存、内存与磁盘条件的 RTX 4090 主机");
     selectedServerId = candidate.serverId;
 
-    if ((await deps.readOrders(config)).some((order) => order.active)) {
-      throw new Error("已有活跃 Clore 订单，拒绝创建第二个订单");
-    }
-
     updateRunner({
       stage: "creating_order",
       host: {
@@ -984,7 +980,6 @@ export async function runImage4090Batch(deps = defaultDeps()) {
         message: "正在调用 Clore 创建订单接口",
       },
     });
-    attemptedCreate = true;
     const requestBody = buildHttpRuntimeCreateOrderBody({
       serverId: candidate.serverId,
       currency: config.rentalCurrency,
@@ -993,7 +988,32 @@ export async function runImage4090Batch(deps = defaultDeps()) {
           ? candidate.priceOriginalAmount
           : session.maxHourlyPrice,
     });
-    orderId = await createOrderWithNetworkRetry({ deps, config, execution, candidate, requestBody, selectedServerId });
+    const activeBeforeCreate = (await deps.readOrders(config)).filter((order) => order.active && order.orderId);
+    const matchingBeforeCreate =
+      activeBeforeCreate.find((order) => order.serverId === selectedServerId) ??
+      (activeBeforeCreate.length === 1 ? activeBeforeCreate[0] : null);
+    if (matchingBeforeCreate?.orderId) {
+      orderId = matchingBeforeCreate.orderId;
+      persistRecoveredActiveOrder(orderId, candidate, requestBody);
+      updateRunner({
+        state: "running",
+        stage: "order_created_waiting_http",
+        host: {
+          ...(readRunner().host ?? {}),
+          orderId,
+          serverId: matchingBeforeCreate.serverId ?? selectedServerId,
+          orderStatus: matchingBeforeCreate.status,
+          controllerUrl: matchingBeforeCreate.controllerUrl ?? null,
+          httpState: "waiting_for_deployment",
+          message: `检测到真实活动订单：${orderId}`,
+        },
+      });
+    } else if (activeBeforeCreate.length > 0) {
+      throw new Error(`已有其他活动订单：${activeBeforeCreate[0].orderId ?? "未知"}`);
+    } else {
+      attemptedCreate = true;
+      orderId = await createOrderWithNetworkRetry({ deps, config, execution, candidate, requestBody, selectedServerId });
+    }
     updateRunner({
       state: "running",
       stage: "order_created_waiting_http",

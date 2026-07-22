@@ -133,6 +133,7 @@ function stageLabel(stage: string | null | undefined, orderId?: string | null) {
     checking_http_health: "正在检查 /healthz",
     runtime_ready: "图片运行环境已就绪",
     create_order_failed: "创建订单失败",
+    active_order_conflict: "检测到活动订单冲突",
     runner_exited_order_active: "Runner 已退出，订单仍活跃",
     runner_exited: "Runner 已退出",
     http_readiness_timeout_cancel_failed: "HTTP 未就绪，退租失败",

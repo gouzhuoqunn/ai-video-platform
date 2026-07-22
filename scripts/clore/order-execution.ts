@@ -7,7 +7,7 @@ import { readLiveOrdersSummary, readWalletSummary } from "./live";
 import { CLORE_CREATION_FEE_USD, CLORE_RENTER_FEE_RATE, computeCloreProjectedCost, applyWalletBalance, evaluateMarketplace } from "./marketplace";
 import { inspectSshPublicKey } from "./ssh";
 import type { CloreCandidate, RawCloreServer } from "./types";
-import { acquireOrderCreateLock, readActiveOrder, writeActiveOrder } from "./order-state";
+import { acquireOrderCreateLock, clearActiveOrder, clearLocalActiveOrderState, clearOrderCreateLocks, readActiveOrder, writeActiveOrder } from "./order-state";
 import type { CloreExecutionConfig } from "./execution-config";
 import { loadModelCacheConfig } from "../model-cache/config";
 import { assertWatchdogsReadyForCreate } from "./watchdog-preflight";
@@ -211,9 +211,7 @@ export async function runCreateOrderPreflight(input: CreateOrderPreflightInput) 
   if (!input.execution.enabled) {
     throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false.");
   }
-  if (readActiveOrder()) {
-    throw new Error("A project active Clore order already exists.");
-  }
+  await reconcileProjectActiveOrderBeforeCreate({ config: input.config, clearLocks: true });
   if (input.queuedJobCount <= 0) {
     throw new Error("At least one queued job is required.");
   }
@@ -281,6 +279,29 @@ function summarizeCreatedOrder(payload: unknown) {
   };
 }
 
+async function reconcileProjectActiveOrderBeforeCreate(input: {
+  config: LoadedCloreConfig;
+  readOrders?: typeof readLiveOrdersSummary;
+  clearLocks?: boolean;
+}) {
+  const local = readActiveOrder();
+  if (!local) return;
+  const liveOrders = await (input.readOrders ?? readLiveOrdersSummary)(input.config);
+  const active = liveOrders.filter((order) => order.active && order.orderId);
+  if (active.length === 0) {
+    try {
+      clearActiveOrder(local.order_id);
+    } catch {
+      clearLocalActiveOrderState();
+    }
+    if (input.clearLocks) clearOrderCreateLocks();
+    console.info(JSON.stringify({ event: "clore_stale_active_order_cleared", at: new Date().toISOString(), local_order_id: local.order_id, source: "provider_zero_active_orders" }));
+    return;
+  }
+  const matching = active.find((order) => order.orderId === local.order_id) ?? active.find((order) => order.serverId === local.server_id) ?? active[0];
+  throw new Error(`A project active Clore order already exists: ${matching.orderId ?? local.order_id}`);
+}
+
 export async function createCloreOrder(input: {
   config: LoadedCloreConfig;
   execution: CloreExecutionConfig;
@@ -302,9 +323,7 @@ export async function createCloreOrder(input: {
   if (!input.request && input.requestBody.ssh_key) assertCreateOrderUsesCanonicalIdentity(input.requestBody);
   const lock = acquireOrderCreateLock(input.requestId ?? crypto.randomUUID());
   try {
-    if (readActiveOrder()) {
-      throw new Error("A project active Clore order already exists.");
-    }
+    await reconcileProjectActiveOrderBeforeCreate({ config: input.config, readOrders: input.readOrders, clearLocks: false });
     await sleep(5000);
     await input.beforeCreateRequest?.();
     if (!input.request && input.requestBody.ssh_key) assertCreateOrderUsesCanonicalIdentity(input.requestBody);

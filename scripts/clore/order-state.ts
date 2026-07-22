@@ -5,6 +5,7 @@ import type { GpuProfile } from "../gpu-providers/types";
 
 export const ACTIVE_ORDER_PATH = path.join(process.cwd(), ".secrets", "clore-active-order.json");
 export const ORDER_CREATE_LOCK_PATH = path.join(process.cwd(), ".secrets", "clore-order-create.lock");
+export const LEGACY_ORDER_CREATE_LOCK_PATH = path.join(process.cwd(), ".secrets", "clore-create.lock");
 const LOCK_TTL_MS = 20 * 60 * 1000;
 
 export type ActiveCloreOrder = {
@@ -40,6 +41,15 @@ export function clearActiveOrder(orderId: string) {
     throw new Error("Refusing to clear an order that does not belong to this project.");
   }
   rmSync(ACTIVE_ORDER_PATH, { force: true });
+}
+
+export function clearLocalActiveOrderState() {
+  rmSync(ACTIVE_ORDER_PATH, { force: true });
+}
+
+export function clearOrderCreateLocks() {
+  rmSync(ORDER_CREATE_LOCK_PATH, { force: true });
+  rmSync(LEGACY_ORDER_CREATE_LOCK_PATH, { force: true });
 }
 
 function lockIsStale() {

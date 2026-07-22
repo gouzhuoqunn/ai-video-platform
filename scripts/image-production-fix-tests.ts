@@ -30,14 +30,15 @@ assert.match(route, /function normalizeHost/, "legacy/incomplete runner-session 
 assert.match(route, /priceHourly: finiteNumber/, "legacy/incomplete runner-session render test: priceHourly normalizes to number or null");
 assert.match(route, /action === "cancel_batch"/, "cancel with live runner test fixture: route exposes cancel action");
 assert.match(route, /cloreRequest<unknown>\(loadCloreConfig\(\), "\/cancel_order"/, "cancel with live runner test fixture: cancel calls provider directly");
-assert.match(route, /process\.kill/, "cancel with live runner test fixture: route also attempts to stop live runner");
+assert.match(route, /stopRunnerProcessTree/, "cancel with live runner test fixture: route stops the runner process tree");
 assert.match(route, /Cancellation does not depend on the process signal/, "cancel with dead runner test fixture: provider cancellation does not depend on PID");
 assert.match(route, /没有活跃图像订单，已清理本地批次状态。/, "already-cancelled idempotency test: missing order is idempotent");
 assert.match(route, /DUPLICATE_START_MESSAGE/, "duplicate start request test: backend has clear duplicate message");
 assert.match(route, /processExists\(previous\.pid\)/, "duplicate start request test: stale/live runner PID is checked");
-assert.match(route, /activeCloreOrderCount\(\)/, "duplicate start request test: active Clore order gate exists");
+assert.match(route, /assertNoActiveProviderOrderBeforeStart\(previous\)/, "duplicate start request test: active Clore order gate reconciles provider state");
 assert.match(route, /\[\.\.\.new Set\(batch\.map\(\(task\) => task\.id\)\)\]/, "duplicate task ID freeze test: frozen IDs are deduplicated");
-assert.match(route, /runner_exited_order_active/, "dead-runner cancellation result: stale runner with an active image order is surfaced to the panel");
+assert.match(route, /检测到真实活动订单：\$\{activeImageOrder\.orderId\}/, "real active order adoption: stale runner with a matching active image order is surfaced to the panel");
+assert.match(route, /active_order_conflict/, "unrelated active order blocks with ID");
 assert.match(route, /frozenTaskIds: \[\]/, "dead-runner no-order fixture: stale execution state is cleared when no order exists");
 assert.match(runner, /CREATE_ORDER_HARD_TIMEOUT_MS = 60_000/, "create_order timeout test: image runner has a hard create_order timeout");
 assert.match(runner, /postCreateOrderOnce/, "create_order timeout test: image runner uses a bounded single create_order request");
@@ -57,7 +58,7 @@ assert.match(studio, /const httpAddressState = !orderCreated \? "—"/, "UI stat
 assert.match(studio, /lastCreateOrderError/, "UI state fix: create_order errors are shown before HTTP readiness");
 assert.match(studio, /technicalCause/, "copy error action includes the nested technical cause");
 assert.match(route, /function normalizeError/, "API preserves sanitized technical errors");
-assert.match(runner, /CreateOrderNoOrderFailure/, "create_order failure returns to idle after confirmed no-order");
+assert.match(runner, /CreateOrderNoOrderFailure/, "create_order failure reaches a terminal no-order state");
 assert.match(runner, /isTransientCreateOrderFailure/, "transient create_order failures are classified before retry");
 assert.match(runner, /CREATE_ORDER_RETRY_DELAY_MS = 3_000/, "transient create_order failures retry once after reconciliation");
 
