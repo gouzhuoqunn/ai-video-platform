@@ -76,8 +76,23 @@ export type ImageRunnerSession = {
     readinessElapsedSeconds?: number | null;
     lastPollAt?: string | null;
     message?: string | null;
+    lastCreateOrderError?: string | null;
+    lastCreateOrderTechnicalCause?: string | null;
+    createOrderAttempts?: Record<string, unknown>[] | null;
   } | null;
-  error: { stage: string; message: string; at: string; cancellationError?: string; billingRisk?: string } | null;
+  error: {
+    stage: string;
+    message: string;
+    at: string;
+    cancellationError?: string;
+    billingRisk?: string;
+    operation?: string;
+    method?: string;
+    targetHost?: string;
+    targetPath?: string;
+    classification?: string;
+    technicalCause?: string;
+  } | null;
   blocker: string | null;
   pid?: number | null;
   logPath?: string | null;
@@ -157,6 +172,34 @@ function stringArrayOrNull(value: unknown) {
   return values.length ? values : null;
 }
 
+function recordArrayOrNull(value: unknown) {
+  if (!Array.isArray(value)) return null;
+  const values = value.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry));
+  return values.length ? values : null;
+}
+
+function normalizeError(value: unknown): ImageRunnerSession["error"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const error = value as Record<string, unknown>;
+  const stage = stringOrNull(error.stage);
+  const message = stringOrNull(error.message);
+  const at = stringOrNull(error.at);
+  if (!stage || !message || !at) return null;
+  return {
+    stage,
+    message,
+    at,
+    cancellationError: stringOrNull(error.cancellationError) ?? undefined,
+    billingRisk: stringOrNull(error.billingRisk) ?? undefined,
+    operation: stringOrNull(error.operation) ?? undefined,
+    method: stringOrNull(error.method) ?? undefined,
+    targetHost: stringOrNull(error.targetHost) ?? undefined,
+    targetPath: stringOrNull(error.targetPath) ?? undefined,
+    classification: stringOrNull(error.classification) ?? undefined,
+    technicalCause: stringOrNull(error.technicalCause) ?? undefined,
+  };
+}
+
 function normalizeHost(value: unknown): ImageRunnerSession["host"] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const host = value as Record<string, unknown>;
@@ -185,6 +228,9 @@ function normalizeHost(value: unknown): ImageRunnerSession["host"] {
     readinessElapsedSeconds: finiteNumber(host.readinessElapsedSeconds),
     lastPollAt: stringOrNull(host.lastPollAt),
     message: stringOrNull(host.message),
+    lastCreateOrderError: stringOrNull(host.lastCreateOrderError),
+    lastCreateOrderTechnicalCause: stringOrNull(host.lastCreateOrderTechnicalCause),
+    createOrderAttempts: recordArrayOrNull(host.createOrderAttempts),
   };
 }
 
@@ -206,7 +252,7 @@ function normalizeRunner(input: Partial<ImageRunnerSession>): ImageRunnerSession
     startedAt: stringOrNull(input.startedAt),
     updatedAt: stringOrNull(input.updatedAt) ?? new Date().toISOString(),
     host: normalizeHost(input.host),
-    error: input.error ?? null,
+    error: normalizeError(input.error),
     blocker: input.blocker ?? null,
     pid: Number.isInteger(input.pid) ? input.pid : null,
     logPath: stringOrNull(input.logPath),

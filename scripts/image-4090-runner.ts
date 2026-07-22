@@ -53,7 +53,19 @@ export type ImageRunnerSession = {
   startedAt: string | null;
   updatedAt: string;
   host: Record<string, unknown> | null;
-  error: { stage: string; message: string; at: string; cancellationError?: string; billingRisk?: string } | null;
+  error: {
+    stage: string;
+    message: string;
+    at: string;
+    cancellationError?: string;
+    billingRisk?: string;
+    operation?: string;
+    method?: string;
+    targetHost?: string;
+    targetPath?: string;
+    classification?: string;
+    technicalCause?: string;
+  } | null;
   blocker: string | null;
   pid?: number | null;
   logPath?: string | null;
@@ -66,13 +78,34 @@ type MarketplacePayload = Awaited<ReturnType<typeof readLiveMarketplace>>;
 type RuntimeCandidate = ReturnType<typeof evaluateMarketplace>["matches"][number];
 
 const CREATE_ORDER_HARD_TIMEOUT_MS = 60_000;
+const CREATE_ORDER_RETRY_DELAY_MS = 3_000;
 const HTTP_READINESS_TIMEOUT_MS = 12 * 60 * 1000;
 const HTTP_READINESS_POLL_MS = 10_000;
 
 class CreateOrderHardTimeoutError extends Error {
-  constructor() {
+  readonly detail: SanitizedFetchFailure;
+  constructor(detail?: SanitizedFetchFailure) {
     super(`create_order timed out after ${CREATE_ORDER_HARD_TIMEOUT_MS}ms; reconciling /my_orders before failure.`);
     this.name = "CreateOrderHardTimeoutError";
+    this.detail = detail ?? createOrderFailureDetail(new Error("create_order_hard_timeout"), defaultCreateOrderContext());
+  }
+}
+
+class CreateOrderRequestError extends Error {
+  readonly detail: SanitizedFetchFailure;
+  constructor(detail: SanitizedFetchFailure) {
+    super(detail.readableMessage);
+    this.name = "CreateOrderRequestError";
+    this.detail = detail;
+  }
+}
+
+class CreateOrderNoOrderFailure extends Error {
+  readonly detail: SanitizedFetchFailure;
+  constructor(detail: SanitizedFetchFailure) {
+    super(detail.readableMessage);
+    this.name = "CreateOrderNoOrderFailure";
+    this.detail = detail;
   }
 }
 
@@ -151,6 +184,8 @@ function updateRunner(patch: Partial<ImageRunnerSession>) {
 }
 
 function readableError(error: unknown) {
+  const detail = createOrderFailureDetailFromError(error);
+  if (detail) return detail.readableMessage;
   const message = error instanceof Error ? error.message : String(error);
   if (message === "validated_restore_manifest_missing_and_bootstrap_not_configured" || message === RESTORE_OR_BOOTSTRAP_BLOCKER) {
     return "未找到已验证的 FLUX 模型恢复清单，且首次模型下载配置尚未完成。";
@@ -158,8 +193,151 @@ function readableError(error: unknown) {
   return message;
 }
 
+type SanitizedFetchFailure = {
+  operation: string;
+  stage: string;
+  method: string;
+  targetHost: string;
+  targetPath: string;
+  timeoutMs: number | null;
+  httpStatus: number | null;
+  responseBody: string | null;
+  causeCode: string | null;
+  errno: string | number | null;
+  syscall: string | null;
+  address: string | null;
+  port: number | string | null;
+  classification: "dns" | "tls" | "timeout" | "reset" | "rate_limited" | "server_error" | "connection_refused" | "network_error" | "http_error";
+  readableMessage: string;
+  rawMessage: string;
+};
+
+type CreateOrderFailureContext = {
+  operation: string;
+  stage: string;
+  method: string;
+  url: string;
+  timeoutMs: number | null;
+  httpStatus?: number | null;
+  responseBody?: unknown;
+};
+
+function defaultCreateOrderContext(): CreateOrderFailureContext {
+  return {
+    operation: "clore.create_order",
+    stage: "creating_order",
+    method: "POST",
+    url: "https://api.clore.ai/v1/create_order",
+    timeoutMs: CREATE_ORDER_HARD_TIMEOUT_MS,
+  };
+}
+
+function createOrderContext(config: CloreConfig): CreateOrderFailureContext {
+  return {
+    ...defaultCreateOrderContext(),
+    url: buildCloreUrl(config, "/create_order"),
+  };
+}
+
+function truncateForUi(value: unknown, max = 1200) {
+  if (value === undefined || value === null) return null;
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  const sanitized = text
+    .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer <redacted>")
+    .replace(/api[_-]?key["'\s:=]+[A-Za-z0-9._~+/-]+=*/gi, "api_key=<redacted>")
+    .replace(/ssh-(?:ed25519|rsa)\s+[A-Za-z0-9+/=]+(?:\s+\S+)?/g, "<redacted-ssh-key>");
+  return sanitized.length > max ? `${sanitized.slice(0, max)}…` : sanitized;
+}
+
+function sanitizedUrlParts(urlString: string) {
+  try {
+    const url = new URL(urlString);
+    return {
+      host: url.host,
+      path: url.pathname || "/",
+    };
+  } catch {
+    return { host: "unknown", path: "/" };
+  }
+}
+
+function pickCause(error: unknown) {
+  const record = error && typeof error === "object" ? (error as Record<string, unknown>) : {};
+  const cause = record.cause && typeof record.cause === "object" ? (record.cause as Record<string, unknown>) : record;
+  return { record, cause };
+}
+
+function classifyFetchFailure(input: { status?: number | null; code?: string | null; message: string }) {
+  const code = String(input.code ?? "").toUpperCase();
+  const message = input.message.toLowerCase();
+  if (input.status === 429) return "rate_limited" as const;
+  if (typeof input.status === "number" && input.status >= 500) return "server_error" as const;
+  if (typeof input.status === "number") return "http_error" as const;
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN" || message.includes("getaddrinfo")) return "dns" as const;
+  if (code.includes("CERT") || code.includes("TLS") || code.includes("SSL") || message.includes("tls") || message.includes("certificate")) return "tls" as const;
+  if (code === "UND_ERR_CONNECT_TIMEOUT" || code === "ETIMEDOUT" || code === "ABORT_ERR" || message.includes("timeout") || message.includes("timed out")) return "timeout" as const;
+  if (code === "ECONNRESET" || message.includes("reset")) return "reset" as const;
+  if (code === "ECONNREFUSED") return "connection_refused" as const;
+  return "network_error" as const;
+}
+
+function readableCreateOrderMessage(classification: SanitizedFetchFailure["classification"], status: number | null) {
+  if (classification === "timeout") return "调用 Clore 创建订单接口失败：连接超时。";
+  if (classification === "dns") return "调用 Clore 创建订单接口失败：DNS 解析失败。";
+  if (classification === "tls") return "调用 Clore 创建订单接口失败：TLS 握手失败。";
+  if (classification === "reset") return "调用 Clore 创建订单接口失败：连接被重置。";
+  if (classification === "connection_refused") return "调用 Clore 创建订单接口失败：连接被拒绝。";
+  if (classification === "rate_limited") return "调用 Clore 创建订单接口失败：Clore 接口限流。";
+  if (classification === "server_error") return `调用 Clore 创建订单接口失败：Clore 服务端错误${status ? ` ${status}` : ""}。`;
+  if (classification === "http_error") return `调用 Clore 创建订单接口失败：Clore 返回 HTTP ${status ?? "错误"}。`;
+  return "调用 Clore 创建订单接口失败：网络请求失败。";
+}
+
+function createOrderFailureDetail(error: unknown, context: CreateOrderFailureContext): SanitizedFetchFailure {
+  const { record, cause } = pickCause(error);
+  const status = typeof context.httpStatus === "number" ? context.httpStatus : null;
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const causeMessage = typeof cause.message === "string" ? cause.message : rawMessage;
+  const code = typeof cause.code === "string" ? cause.code : typeof record.code === "string" ? record.code : null;
+  const classification = classifyFetchFailure({ status, code, message: `${rawMessage} ${causeMessage}` });
+  const url = sanitizedUrlParts(context.url);
+  return {
+    operation: context.operation,
+    stage: context.stage,
+    method: context.method,
+    targetHost: url.host,
+    targetPath: url.path,
+    timeoutMs: context.timeoutMs,
+    httpStatus: status,
+    responseBody: truncateForUi(context.responseBody),
+    causeCode: code,
+    errno: typeof cause.errno === "string" || typeof cause.errno === "number" ? cause.errno : null,
+    syscall: typeof cause.syscall === "string" ? cause.syscall : null,
+    address: typeof cause.address === "string" ? cause.address : null,
+    port: typeof cause.port === "string" || typeof cause.port === "number" ? cause.port : null,
+    classification,
+    readableMessage: readableCreateOrderMessage(classification, status),
+    rawMessage: truncateForUi(causeMessage || rawMessage, 400) ?? rawMessage,
+  };
+}
+
+function createOrderFailureDetailFromError(error: unknown): SanitizedFetchFailure | null {
+  if (error instanceof CreateOrderHardTimeoutError || error instanceof CreateOrderRequestError || error instanceof CreateOrderNoOrderFailure) return error.detail;
+  const maybe = error && typeof error === "object" ? (error as { detail?: unknown }) : {};
+  return maybe.detail && typeof maybe.detail === "object" ? (maybe.detail as SanitizedFetchFailure) : null;
+}
+
+function isTransientCreateOrderFailure(detail: SanitizedFetchFailure) {
+  return ["dns", "tls", "timeout", "reset", "connection_refused", "network_error"].includes(detail.classification);
+}
+
+function technicalCauseText(detail: SanitizedFetchFailure, extra: Record<string, unknown> = {}) {
+  return JSON.stringify({ ...detail, ...extra }, null, 2);
+}
+
 function failRunner(stage: string, error: unknown, cancellationError?: unknown, blocker?: string) {
   const machine = error instanceof Error ? error.message : String(error);
+  const detail = createOrderFailureDetailFromError(error);
   updateRunner({
     state: "failed",
     stage,
@@ -170,6 +348,12 @@ function failRunner(stage: string, error: unknown, cancellationError?: unknown, 
       at: new Date().toISOString(),
       cancellationError: cancellationError ? (cancellationError instanceof Error ? cancellationError.message : String(cancellationError)) : undefined,
       billingRisk: cancellationError ? "订单可能仍在计费" : undefined,
+      operation: detail?.operation,
+      method: detail?.method,
+      targetHost: detail?.targetHost,
+      targetPath: detail?.targetPath,
+      classification: detail?.classification,
+      technicalCause: detail ? technicalCauseText(detail) : undefined,
     },
   });
 }
@@ -363,22 +547,25 @@ function logEndpointDiagnostics(input: {
   }));
 }
 
-function cloreCreatePayloadError(payload: Record<string, unknown>, status: number) {
-  const safe = JSON.stringify({
+function cloreCreatePayloadError(payload: Record<string, unknown>, status: number, context: CreateOrderFailureContext) {
+  const safePayload = {
     status,
     code: payload.code ?? null,
     error: payload.error ?? null,
     message: payload.message ?? null,
     details: payload.details ?? payload.errors ?? null,
-  }).replace(/ssh-(?:ed25519|rsa)\s+[A-Za-z0-9+/=]+(?:\s+\S+)?/g, "<redacted-ssh-key>");
-  return new Error(`create_order_api_error:${safe}`);
+  };
+  const safe = JSON.stringify(safePayload).replace(/ssh-(?:ed25519|rsa)\s+[A-Za-z0-9+/=]+(?:\s+\S+)?/g, "<redacted-ssh-key>");
+  const detail = createOrderFailureDetail(new Error(`create_order_api_error:${safe}`), { ...context, httpStatus: status, responseBody: safePayload });
+  return new CreateOrderRequestError(detail);
 }
 
 async function postCreateOrderOnce(config: CloreConfig, body: ReturnType<typeof buildHttpRuntimeCreateOrderBody>) {
+  const context = createOrderContext(config);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), CREATE_ORDER_HARD_TIMEOUT_MS);
   try {
-    const response = await fetch(buildCloreUrl(config, "/create_order"), {
+    const response = await fetch(context.url, {
       method: "POST",
       body: JSON.stringify(body),
       headers: createCloreHeaders(config.apiKey!),
@@ -387,11 +574,14 @@ async function postCreateOrderOnce(config: CloreConfig, body: ReturnType<typeof 
     const raw = (await response.json().catch(() => ({}))) as Record<string, unknown>;
     const code = typeof raw.code === "number" ? raw.code : response.ok ? 0 : response.status;
     console.info(JSON.stringify({ endpoint: "/create_order", at: new Date().toISOString(), status: response.status, retry: 0, hardTimeoutMs: CREATE_ORDER_HARD_TIMEOUT_MS }));
-    if (code !== 0) throw cloreCreatePayloadError(raw, response.status);
+    if (code !== 0) throw cloreCreatePayloadError(raw, response.status, context);
     return "data" in raw ? raw.data : raw;
   } catch (error) {
-    if (controller.signal.aborted) throw new CreateOrderHardTimeoutError();
-    throw error;
+    if (error instanceof CreateOrderRequestError) throw error;
+    const detail = createOrderFailureDetail(error, context);
+    console.info(JSON.stringify({ event: "image_create_order_failure", at: new Date().toISOString(), ...detail }));
+    if (controller.signal.aborted) throw new CreateOrderHardTimeoutError(detail);
+    throw new CreateOrderRequestError(detail);
   } finally {
     clearTimeout(timer);
   }
@@ -412,6 +602,151 @@ function persistRecoveredActiveOrder(orderId: string, candidate: RuntimeCandidat
     gpu_profile: "rtx4090",
     bootstrap_image: COMFY_RUNTIME_IMAGE,
   });
+}
+
+function existingCreateOrderAttempts(host: Record<string, unknown> | null) {
+  return Array.isArray(host?.createOrderAttempts) ? host.createOrderAttempts.filter((entry) => entry && typeof entry === "object") : [];
+}
+
+function persistCreateOrderAttempt(input: {
+  attempt: number;
+  detail: SanitizedFetchFailure;
+  reconciliation: "checking" | "no_order" | "reused_order" | "retrying" | "failed";
+  matchedOrderId?: string | null;
+}) {
+  const current = readRunner();
+  const attempts = [
+    ...existingCreateOrderAttempts(current.host),
+    {
+      attempt: input.attempt,
+      at: new Date().toISOString(),
+      reconciliation: input.reconciliation,
+      matchedOrderId: input.matchedOrderId ?? null,
+      operation: input.detail.operation,
+      method: input.detail.method,
+      targetHost: input.detail.targetHost,
+      targetPath: input.detail.targetPath,
+      timeoutMs: input.detail.timeoutMs,
+      httpStatus: input.detail.httpStatus,
+      classification: input.detail.classification,
+      causeCode: input.detail.causeCode,
+      syscall: input.detail.syscall,
+      address: input.detail.address,
+      port: input.detail.port,
+      message: input.detail.readableMessage,
+    },
+  ].slice(-4);
+  updateRunner({
+    state: "running",
+    stage: "creating_order",
+    host: {
+      ...(current.host ?? {}),
+      orderId: null,
+      httpState: null,
+      controllerUrl: null,
+      message:
+        input.reconciliation === "retrying"
+          ? "创建订单请求失败，已核对没有新订单，正在自动重试一次"
+          : input.reconciliation === "reused_order"
+            ? "创建订单请求异常，但已在 Clore 找到对应订单，正在接管"
+            : "创建订单请求失败，正在核对 Clore 是否已创建订单",
+      lastCreateOrderError: input.detail.readableMessage,
+      lastCreateOrderTechnicalCause: technicalCauseText(input.detail, { attempt: input.attempt, reconciliation: input.reconciliation, matchedOrderId: input.matchedOrderId ?? null }),
+      createOrderAttempts: attempts,
+    },
+    error: {
+      stage: "creating_order",
+      message: input.detail.readableMessage,
+      at: new Date().toISOString(),
+      operation: input.detail.operation,
+      method: input.detail.method,
+      targetHost: input.detail.targetHost,
+      targetPath: input.detail.targetPath,
+      classification: input.detail.classification,
+      technicalCause: technicalCauseText(input.detail, { attempt: input.attempt, reconciliation: input.reconciliation, matchedOrderId: input.matchedOrderId ?? null }),
+    },
+  });
+}
+
+function persistCreateOrderNoOrderFailure(detail: SanitizedFetchFailure) {
+  const current = readRunner();
+  updateRunner({
+    state: "idle",
+    stage: "create_order_failed",
+    host: null,
+    frozenTaskIds: [],
+    gpuClass: null,
+    currentTaskIndex: null,
+    currentModel: null,
+    promptSummary: null,
+    pid: null,
+    blocker: null,
+    error: {
+      stage: "create_order_failed",
+      message: detail.readableMessage,
+      at: new Date().toISOString(),
+      operation: detail.operation,
+      method: detail.method,
+      targetHost: detail.targetHost,
+      targetPath: detail.targetPath,
+      classification: detail.classification,
+      technicalCause: technicalCauseText(detail, {
+        previousHost: current.host
+          ? { serverId: current.host.serverId ?? null, priceHourly: current.host.priceHourly ?? null, gpu: current.host.gpu ?? null }
+          : null,
+        noOrderConfirmed: true,
+      }),
+    },
+  });
+}
+
+async function createOrderWithNetworkRetry(input: {
+  deps: RunnerDeps;
+  config: CloreConfig;
+  execution: CloreExecution;
+  candidate: RuntimeCandidate;
+  requestBody: ReturnType<typeof buildHttpRuntimeCreateOrderBody>;
+  selectedServerId: string | null;
+}) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const order = await input.deps.createOrder({
+        config: input.config,
+        execution: input.execution,
+        candidate: input.candidate,
+        requestBody: input.requestBody,
+        request: (body) => postCreateOrderOnce(input.config, body),
+        readOrders: (nextConfig) => input.deps.readOrders(nextConfig),
+        sessionMetadata: { gpuType: input.candidate.gpu, gpuProfile: "rtx4090", bootstrapImage: COMFY_RUNTIME_IMAGE },
+      });
+      return order.order_id;
+    } catch (error) {
+      const detail = createOrderFailureDetailFromError(error);
+      if (!detail) throw error;
+      persistCreateOrderAttempt({ attempt, detail, reconciliation: "checking" });
+      const reconciledOrderId = await reconcileCreatedOrder(input.deps, input.config, input.selectedServerId).catch((reconcileError) => {
+        const reconcileDetail = createOrderFailureDetail(reconcileError, { ...defaultCreateOrderContext(), operation: "clore.my_orders_reconcile", method: "GET", url: buildCloreUrl(input.config, "/my_orders"), timeoutMs: null });
+        persistCreateOrderAttempt({ attempt, detail: reconcileDetail, reconciliation: "failed" });
+        return null;
+      });
+      if (reconciledOrderId) {
+        persistRecoveredActiveOrder(reconciledOrderId, input.candidate, input.requestBody);
+        persistCreateOrderAttempt({ attempt, detail, reconciliation: "reused_order", matchedOrderId: reconciledOrderId });
+        return reconciledOrderId;
+      }
+      persistCreateOrderAttempt({ attempt, detail, reconciliation: "no_order" });
+      if (attempt === 1 && isTransientCreateOrderFailure(detail)) {
+        persistCreateOrderAttempt({ attempt, detail, reconciliation: "retrying" });
+        await input.deps.sleep(CREATE_ORDER_RETRY_DELAY_MS);
+        continue;
+      }
+      persistCreateOrderNoOrderFailure(detail);
+      throw new CreateOrderNoOrderFailure(detail);
+    }
+  }
+  const detail = createOrderFailureDetail(new Error("create_order_retry_exhausted"), createOrderContext(input.config));
+  persistCreateOrderNoOrderFailure(detail);
+  throw new CreateOrderNoOrderFailure(detail);
 }
 
 async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId: string) {
@@ -630,7 +965,7 @@ export async function runImage4090Batch(deps = defaultDeps()) {
     }
 
     updateRunner({
-      stage: "正在创建订单",
+      stage: "creating_order",
       host: {
         gpu: "RTX 4090",
         priceHourly: candidate.priceUsdPerHour ?? 0,
@@ -643,9 +978,10 @@ export async function runImage4090Batch(deps = defaultDeps()) {
         network: candidate.downloadMbps ? `${candidate.downloadMbps} Mbps` : null,
         location: candidate.country,
         runtimeDigest: COMFY_RUNTIME_IMAGE,
-        httpState: "等待",
+        httpState: null,
         sshDiagnostic: "未使用；HTTP 是唯一就绪条件",
         restoreSource: restore.source,
+        message: "正在调用 Clore 创建订单接口",
       },
     });
     attemptedCreate = true;
@@ -657,23 +993,7 @@ export async function runImage4090Batch(deps = defaultDeps()) {
           ? candidate.priceOriginalAmount
           : session.maxHourlyPrice,
     });
-    try {
-      const order = await deps.createOrder({
-        config,
-        execution,
-        candidate,
-        requestBody,
-        request: (body) => postCreateOrderOnce(config!, body),
-        readOrders: (nextConfig) => deps.readOrders(nextConfig),
-        sessionMetadata: { gpuType: candidate.gpu, gpuProfile: "rtx4090", bootstrapImage: COMFY_RUNTIME_IMAGE },
-      });
-      orderId = order.order_id;
-    } catch (error) {
-      if (!(error instanceof CreateOrderHardTimeoutError)) throw error;
-      orderId = await reconcileCreatedOrder(deps, config, selectedServerId);
-      if (!orderId) throw error;
-      persistRecoveredActiveOrder(orderId, candidate, requestBody);
-    }
+    orderId = await createOrderWithNetworkRetry({ deps, config, execution, candidate, requestBody, selectedServerId });
     updateRunner({
       state: "running",
       stage: "order_created_waiting_http",
@@ -750,6 +1070,7 @@ export async function runImage4090Batch(deps = defaultDeps()) {
     updateRunner({ state: "completed", stage: "本批次已完成", currentTaskIndex: null, error: null, blocker: null });
   } catch (error) {
     rootError = error;
+    if (error instanceof CreateOrderNoOrderFailure) throw error;
     if (attemptedCreate && !orderId && config) orderId = await reconcileCreatedOrder(deps, config, selectedServerId).catch(() => null);
     failRunner(attemptedCreate ? "RTX 4090 图像 Runner" : IMAGE_RUNNER_PRECHECK_STAGE, error);
     throw error;

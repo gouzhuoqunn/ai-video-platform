@@ -114,12 +114,22 @@ function seed() {
   });
 }
 
-function depsFor(input: { controllerUrlAfter?: number; healthOkAfter?: number; cancelFails?: boolean; onFirstOrderPoll?: (session: ImageRunnerSession) => void; onSleep?: (session: ImageRunnerSession) => void; onRestore?: (session: ImageRunnerSession) => void }) {
+function depsFor(input: {
+  controllerUrlAfter?: number;
+  healthOkAfter?: number;
+  cancelFails?: boolean;
+  createRequestFailures?: number;
+  reconcileOrderAfterFailure?: boolean;
+  onFirstOrderPoll?: (session: ImageRunnerSession) => void;
+  onSleep?: (session: ImageRunnerSession) => void;
+  onRestore?: (session: ImageRunnerSession) => void;
+}) {
   let created = false;
   let cancelled = false;
   let orderPolls = 0;
   let healthPolls = 0;
   let cancelCount = 0;
+  let createCount = 0;
   const pngPromise = sharp({ create: { width: 768, height: 768, channels: 3, background: "#123456" } }).png().toBuffer();
   const session = () => readJson<ImageRunnerSession>(path.join(".secrets", "image-studio", "runner-session.json"));
   const rawOrder = () => ({
@@ -134,8 +144,13 @@ function depsFor(input: { controllerUrlAfter?: number; healthOkAfter?: number; c
     loadConfig: config,
     loadExecution: () => ({ enabled: true, firstSessionMaxBudgetUsd: 4.5, balanceReserveUsd: 0, maxGpuPricePerHour: 0.6, hardSessionLimitMinutes: 40, orderStartTimeoutMinutes: 15, workerReadyTimeoutMinutes: 15, firstGpuSession: true, deploymentHold: false }),
     readMarketplace: async () => [candidateRaw()],
-    readOrders: async () => (created && !cancelled ? [{ orderId: "1972821", serverId: "79245", status: "running", currency: "USD", price: 0.17, fee: null, creationFee: null, spend: null, createdTimestamp: null, expired: false, active: true, controllerUrl: rawOrder().web ?? null }] : []),
-    createOrder: async () => {
+    readOrders: async () => ((created || (input.reconcileOrderAfterFailure && createCount > 0)) && !cancelled ? [{ orderId: "1972821", serverId: "79245", status: "running", currency: "USD", price: 0.17, fee: null, creationFee: null, spend: null, createdTimestamp: null, expired: false, active: true, controllerUrl: rawOrder().web ?? null }] : []),
+    createOrder: async (createInput) => {
+      createCount += 1;
+      if (createCount <= (input.createRequestFailures ?? 0)) {
+        await createInput.request?.(createInput.requestBody);
+        throw new Error("unreachable_create_request_failure_fixture");
+      }
       created = true;
       return { order_created: true, order_id: "1972821", create_order_called: true, status: "order_pending", create_response_status: "created" };
     },
@@ -167,7 +182,7 @@ function depsFor(input: { controllerUrlAfter?: number; healthOkAfter?: number; c
     fetchBinary: async () => await pngPromise,
     sleep: async () => input.onSleep?.(session()),
   };
-  return { deps, cancelCount: () => cancelCount };
+  return { deps, cancelCount: () => cancelCount, createCount: () => createCount };
 }
 
 async function withSeeded<T>(fn: () => Promise<T>) {
@@ -190,6 +205,43 @@ async function main() {
     await runImage4090Batch(harness.deps);
     assert.equal(immediate?.stage, "order_created_waiting_http", "order ID immediately advances session stage");
     assert.equal(immediate?.host?.orderId, "1972821", "order ID immediately persists");
+  });
+
+  await withSeeded(async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => {
+        const error = new TypeError("fetch failed") as Error & { cause?: unknown };
+        error.cause = { code: "UND_ERR_CONNECT_TIMEOUT", syscall: "connect", address: "203.0.113.10", port: 443 };
+        throw error;
+      }) as typeof fetch;
+      const harness = depsFor({ createRequestFailures: 2 });
+      await assert.rejects(() => runImage4090Batch(harness.deps), /调用 Clore 创建订单接口失败/);
+      const session = readJson<ImageRunnerSession>(path.join(".secrets", "image-studio", "runner-session.json"));
+      assert.equal(harness.createCount(), 2, "transient create_order network error retries exactly once after reconciliation");
+      assert.equal(session.state, "idle", "confirmed no-order create failure returns runner to idle");
+      assert.equal(session.stage, "create_order_failed", "before order ID, failed create stage is explicit");
+      assert.equal(session.host, null, "no HTTP endpoint is displayed when order was not created");
+      assert.match(session.error?.technicalCause ?? "", /UND_ERR_CONNECT_TIMEOUT/, "nested fetch cause is persisted for copy");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  await withSeeded(async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => {
+        const error = new TypeError("fetch failed") as Error & { cause?: unknown };
+        error.cause = { code: "ECONNRESET", syscall: "read" };
+        throw error;
+      }) as typeof fetch;
+      const harness = depsFor({ createRequestFailures: 1, reconcileOrderAfterFailure: true, controllerUrlAfter: 1, healthOkAfter: 1 });
+      await runImage4090Batch(harness.deps);
+      assert.equal(harness.createCount(), 1, "reconciled create_order never sends a duplicate create request");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   await withSeeded(async () => {

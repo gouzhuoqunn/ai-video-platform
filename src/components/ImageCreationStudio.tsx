@@ -67,8 +67,23 @@ type Runner = {
     readinessElapsedSeconds?: number | string | null;
     lastPollAt?: string | null;
     message?: string | null;
+    lastCreateOrderError?: string | null;
+    lastCreateOrderTechnicalCause?: string | null;
+    createOrderAttempts?: Record<string, unknown>[] | null;
   } | null;
-  error?: { stage?: string; message?: string; at?: string; cancellationError?: string; billingRisk?: string } | null;
+  error?: {
+    stage?: string;
+    message?: string;
+    at?: string;
+    cancellationError?: string;
+    billingRisk?: string;
+    operation?: string;
+    method?: string;
+    targetHost?: string;
+    targetPath?: string;
+    classification?: string;
+    technicalCause?: string;
+  } | null;
   blocker?: string | null;
 };
 
@@ -117,6 +132,7 @@ function stageLabel(stage: string | null | undefined, orderId?: string | null) {
     waiting_http_endpoint: "订单已创建，正在等待 HTTP 地址",
     checking_http_health: "正在检查 /healthz",
     runtime_ready: "图片运行环境已就绪",
+    create_order_failed: "创建订单失败",
     runner_exited_order_active: "Runner 已退出，订单仍活跃",
     runner_exited: "Runner 已退出",
     http_readiness_timeout_cancel_failed: "HTTP 未就绪，退租失败",
@@ -275,6 +291,19 @@ export function ImageCreationStudio() {
   const currentClass = runner?.gpuClass ?? selectedBatch[0]?.gpuClass ?? draftGpuClass;
   const runnerError = runner?.error ?? null;
   const host = runner?.host ?? null;
+  const orderCreated = Boolean(host?.orderId);
+  const httpAddressState = !orderCreated ? "—" : host?.controllerUrl ? "已获得" : "正在等待";
+  const copiedRunnerError = runnerError
+    ? [
+        runnerError.stage ?? "执行错误",
+        runnerError.message ?? "未知错误",
+        runnerError.at ?? "",
+        runnerError.operation ? `operation=${runnerError.operation}` : null,
+        runnerError.method && runnerError.targetHost ? `${runnerError.method} ${runnerError.targetHost}${runnerError.targetPath ?? ""}` : null,
+        runnerError.classification ? `classification=${runnerError.classification}` : null,
+        runnerError.technicalCause ?? null,
+      ].filter(Boolean).join("\n")
+    : "";
   const rawStage = runner?.stage ?? "当前未租用显卡";
   const stage = stageLabel(rawStage, host?.orderId);
 
@@ -309,14 +338,16 @@ export function ImageCreationStudio() {
         <section className="mt-3 rounded-lg border border-stone-700 p-3 text-sm">
           <p>{host.gpu ?? "RTX 4090"} · {formatHourlyPrice(host.priceHourly)} · 主机 {host.serverId ?? "—"} · {stage}</p>
           <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-stone-300">
-            <span>订单已创建</span><b>{host.orderId ? "是" : "否"}</b>
+            <span>订单已创建</span><b>{orderCreated ? "是" : "否"}</b>
             <span>订单 ID</span><b>{host.orderId ?? "—"}</b>
             <span>Clore 部署</span><b>{host.deploymentState ?? "—"}</b>
-            <span>HTTP 地址</span><b>{host.controllerUrl ? "已获得" : "正在等待"}</b>
+            <span>HTTP 地址</span><b>{httpAddressState}</b>
             <span>/healthz</span><b>{host.httpState ?? "—"}</b>
             <span>等待时间</span><b>{secondsLabel(host.readinessElapsedSeconds)}</b>
           </div>
           {host.lastHealthError ? <p className="mt-2 break-words text-xs text-amber-200">最新错误：{host.lastHealthError}</p> : null}
+          {!orderCreated && host.lastCreateOrderError ? <p className="mt-2 break-words text-xs text-amber-200">创建订单错误：{host.lastCreateOrderError}</p> : null}
+          {!orderCreated && host.createOrderAttempts?.length ? <p className="mt-1 text-xs text-stone-400">创建尝试 {host.createOrderAttempts.length} 次；已先核对 Clore 订单列表。</p> : null}
           <button className="mt-2 text-xs text-indigo-300" type="button" onClick={() => setHostDetails(!hostDetails)}>查看详细配置</button>
           {hostDetails ? (
             <dl className="mt-2 grid grid-cols-2 gap-1 text-xs text-stone-300">
@@ -340,6 +371,8 @@ export function ImageCreationStudio() {
                 ["Health 状态码", host.lastHealthStatus],
                 ["Health 错误", host.lastHealthError],
                 ["最后轮询", displayDate(host.lastPollAt)],
+                ["创建订单错误", host.lastCreateOrderError],
+                ["创建订单技术原因", host.lastCreateOrderTechnicalCause],
                 ["SSH（诊断）", host.sshDiagnostic],
               ].map(([key, value]) => <div key={String(key)}><dt className="text-stone-500">{key}</dt><dd>{value ?? "—"}</dd></div>)}
             </dl>
@@ -360,10 +393,11 @@ export function ImageCreationStudio() {
         <section className="mt-3 rounded-lg border border-rose-700/60 bg-rose-950/20 p-3 text-sm">
           <p className="font-medium text-rose-200">{runnerError.stage ?? "执行错误"}</p>
           <p className="mt-1 break-words text-rose-100">{runnerError.message ?? "未知错误"}</p>
+          {runnerError.operation ? <p className="mt-1 break-words text-xs text-rose-200/80">{runnerError.method ?? "请求"} {runnerError.targetHost ?? ""}{runnerError.targetPath ?? ""} · {runnerError.classification ?? "unknown"}</p> : null}
           {runnerError.billingRisk ? <p className="mt-1 text-xs text-amber-200">{runnerError.billingRisk}</p> : null}
           {runnerError.cancellationError ? <p className="mt-1 break-words text-xs text-rose-200">退租错误：{runnerError.cancellationError}</p> : null}
           <p className="mt-1 text-xs text-rose-200/70">{displayDate(runnerError.at)}</p>
-          <button className="mt-2 text-xs text-rose-100 underline" type="button" onClick={() => void navigator.clipboard.writeText(`${runnerError.stage ?? "执行错误"}\n${runnerError.message ?? "未知错误"}\n${runnerError.at ?? ""}`)}>复制错误</button>
+          <button className="mt-2 text-xs text-rose-100 underline" type="button" onClick={() => void navigator.clipboard.writeText(copiedRunnerError)}>复制错误</button>
         </section>
       ) : null}
     </aside>

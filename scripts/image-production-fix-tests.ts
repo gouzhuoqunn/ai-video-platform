@@ -52,5 +52,13 @@ assert.match(runner, /logEndpointDiagnostics/, "endpoint diagnostics are sanitiz
 assert.match(studio, /stageLabel/, "UI renders all intermediate states without nullable crashes");
 assert.match(studio, /lastHealthError/, "UI renders latest health error");
 assert.match(studio, /readinessElapsedSeconds/, "UI renders readiness elapsed time");
+assert.match(studio, /const orderCreated = Boolean\(host\?\.orderId\)/, "UI state fix: orderCreated is derived only from orderId");
+assert.match(studio, /const httpAddressState = !orderCreated \? "—"/, "UI state fix: HTTP waiting is not shown before an order exists");
+assert.match(studio, /lastCreateOrderError/, "UI state fix: create_order errors are shown before HTTP readiness");
+assert.match(studio, /technicalCause/, "copy error action includes the nested technical cause");
+assert.match(route, /function normalizeError/, "API preserves sanitized technical errors");
+assert.match(runner, /CreateOrderNoOrderFailure/, "create_order failure returns to idle after confirmed no-order");
+assert.match(runner, /isTransientCreateOrderFailure/, "transient create_order failures are classified before retry");
+assert.match(runner, /CREATE_ORDER_RETRY_DELAY_MS = 3_000/, "transient create_order failures retry once after reconciliation");
 
 console.log("image production fix focused tests: ok");
