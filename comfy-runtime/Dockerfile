@@ -8,6 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     COMFYUI_COMMIT=da2608926eaf68fd532bba4e1ace3402c5d21399 \
     PYTORCH_VERSION=2.5.1 \
     TORCHVISION_VERSION=0.20.1 \
+    TORCHAUDIO_VERSION=2.5.1 \
     COMFYUI_HOST=127.0.0.1 \
     COMFYUI_PORT=8188 \
     COMFY_CONTROLLER_HOST=0.0.0.0 \
@@ -20,7 +21,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-pip \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m pip install --upgrade pip setuptools wheel \
-    && python3 -m pip install --index-url https://download.pytorch.org/whl/cu124 "torch==${PYTORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"
+    && python3 -m pip install --index-url https://download.pytorch.org/whl/cu124 "torch==${PYTORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}"
 
 WORKDIR /opt
 COPY requirements.lock /opt/image-runtime/requirements.lock
@@ -28,6 +29,7 @@ RUN git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
     && cd /opt/ComfyUI \
     && git checkout "${COMFYUI_COMMIT}" \
     && python3 -m pip install -r requirements.txt \
+    && python3 -m pip install --index-url https://download.pytorch.org/whl/cu124 --force-reinstall --no-deps "torch==${PYTORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
     && python3 -m pip install -r /opt/image-runtime/requirements.lock \
     && mkdir -p /workspace/models /workspace/comfy-input /workspace/comfy-output /workspace/comfy-user /workspace/logs /workspace/r2-cache \
     && find /opt/ComfyUI -type d -name ".git" -prune -exec rm -rf {} +
