@@ -14,6 +14,8 @@ export const dynamic = "force-dynamic";
 
 type ImageTask = ImageTaskSettings & {
   id: string;
+  seed: number;
+  mode: "text_generation" | "kontext_edit";
   referenceImage: string | null;
   gpuClass: ImageGpuClass;
   badge: "低" | "高";
@@ -50,6 +52,7 @@ function taskFrom(input: Record<string, unknown>): ImageTask {
   const loraStrength = Number(input.loraStrength);
   const cfg = Number(input.cfg);
   const sampler = String(input.sampler);
+  const seed = Number.isInteger(Number(input.seed)) ? Number(input.seed) : Math.floor(Math.random() * 2_147_483_647);
 
   if (
     !prompt ||
@@ -79,6 +82,8 @@ function taskFrom(input: Record<string, unknown>): ImageTask {
 
   return {
     id: randomUUID(),
+    seed,
+    mode: referenceImage ? "kontext_edit" : "text_generation",
     prompt,
     referenceImage,
     steps,

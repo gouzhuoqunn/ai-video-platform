@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "text_generation": {
+    "architecture": "FLUX.1-D complete BF16 checkpoint; replaces the vanilla transformer",
+    "artifacts": [
+      {"source":"civitai", "model_id":847101, "version_id":2925935, "file_id":2804853, "filename":"fluxedUpFluxNSFW_102BF16.safetensors", "size_bytes":23802958296, "sha256":"92efbd0f58900ab899fecc80b143eba332f0079faa9749f989f23521088c6165", "runtime_path":"/workspace/models/checkpoints/fluxedUpFluxNSFW_102BF16.safetensors"},
+      {"source":"civitai", "model_id":674027, "version_id":780667, "file_id":694003, "filename":"aidmaNSFWunlock-FLUX-V0.2.safetensors", "size_bytes":19268648, "sha256":"7d3408f4a7b7890f470c1cce7f7255b6d8e03ea770a2829066c1ce41145562ec", "runtime_path":"/workspace/models/loras/aidmaNSFWunlock-FLUX-V0.2.safetensors"}
+    ]
+  },
+  "kontext_edit": {
+    "repository":"black-forest-labs/FLUX.1-Kontext-dev",
+    "revision":"24e9dedc4ef646698dc8eb4e18ae2cec3c9fea0d",
+    "gated":true,
+    "architecture":"FLUX.1 Kontext 12B image-conditioned rectified-flow transformer",
+    "artifacts":[
+      {"filename":"flux1-kontext-dev.safetensors","size_bytes":23802947360,"runtime_path":"/workspace/models/diffusion_models/flux1-kontext-dev.safetensors"},
+      {"filename":"ae.safetensors","size_bytes":335304388,"runtime_path":"/workspace/models/vae/ae.safetensors"},
+      {"filename":"text_encoder/model.safetensors","size_bytes":246144352,"runtime_path":"/workspace/models/text_encoders/clip_l.safetensors"},
+      {"filename":"text_encoder_2/model-00001-of-00002.safetensors","size_bytes":4994582224,"runtime_path":"/workspace/models/text_encoders/t5xxl/model-00001-of-00002.safetensors"},
+      {"filename":"text_encoder_2/model-00002-of-00002.safetensors","size_bytes":4530066360,"runtime_path":"/workspace/models/text_encoders/t5xxl/model-00002-of-00002.safetensors"}
+    ]
+  }
+}
