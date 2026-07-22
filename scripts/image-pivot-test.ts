@@ -18,6 +18,7 @@ const config = createFluxExecutionConfig({
 });
 
 assert.deepEqual(config.stack, FLUX_IMAGE_STACK);
+assert.equal(config.mode, "kontext_edit");
 assert.equal(config.referenceMode, "flux_kontext_reference_aware");
 assert.deepEqual(config.resolution, { width: 768, height: 1280 });
 assert.equal(config.gpuClass, "rtx4090");
