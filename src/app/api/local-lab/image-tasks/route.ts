@@ -1,10 +1,13 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { NextResponse, type NextRequest } from "next/server";
 import { FLUX_IMAGE_STACK, classifyImageGpu, type ImageGpuClass, type ImageTaskSettings } from "@/lib/image-generation/flux-stack";
 import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/route-guard";
+import { loadCloreConfig } from "../../../../../scripts/clore/config";
+import { readLiveOrdersSummary } from "../../../../../scripts/clore/live";
+import { finalSanitizedLogLines, imageExecutorReadiness, processExists, STALE_RUNNER_NO_ORDER_MESSAGE } from "../../../../../scripts/image-executor/readiness";
 
 export const dynamic = "force-dynamic";
 
@@ -61,14 +64,18 @@ export type ImageRunnerSession = {
   } | null;
   error: { stage: string; message: string; at: string; cancellationError?: string; billingRisk?: string } | null;
   blocker: string | null;
+  pid?: number | null;
+  logPath?: string | null;
 };
 
 const DATA_DIR = path.join(process.cwd(), ".secrets", "image-studio");
 const DATA_PATH = path.join(DATA_DIR, "tasks.json");
 const RUNNER_PATH = path.join(DATA_DIR, "runner-session.json");
+const RUNNER_LOG_PATH = path.join(DATA_DIR, "image-runner.log");
 const PREFERENCES_PATH = path.join(DATA_DIR, "preferences.json");
+const RESTORE_MANIFEST_PATH = path.join(DATA_DIR, "fluxed-up-10.2-rtx4090-text.restore.json");
+const SOURCE_MANIFEST_PATH = path.join(process.cwd(), "comfy-runtime", "image-source-artifacts.json");
 const DEFAULT_MAX_HOURLY_PRICE = 0.6;
-const EXECUTOR_NOT_READY_BLOCKER = "图像执行器尚未通过完整发布校验：等待 Runtime digest、模型清单、取消保护和结果保存测试全部通过。";
 const KONTEXT_BLOCKER = "FLUX Kontext 执行器尚未完成";
 const RTX5090_BLOCKER = "RTX 5090 高分辨率执行器尚未完成";
 
@@ -81,7 +88,7 @@ function readJson<T>(filePath: string, fallback: T): T {
 }
 
 function writeJson(filePath: string, value: unknown) {
-  mkdirSync(DATA_DIR, { recursive: true });
+  mkdirSync(path.dirname(filePath), { recursive: true });
   writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
 }
 
@@ -98,12 +105,9 @@ function readPrice() {
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_MAX_HOURLY_PRICE;
 }
 
-function executorReady() {
-  return process.env.IMAGE_4090_EXECUTOR_READY === "true";
-}
-
 function readinessBlocker() {
-  return executorReady() ? null : EXECUTOR_NOT_READY_BLOCKER;
+  const readiness = imageExecutorReadiness({ restoreManifestPath: RESTORE_MANIFEST_PATH, sourceManifestPath: SOURCE_MANIFEST_PATH });
+  return readiness.ready ? null : readiness.blocker;
 }
 
 function defaultRunner(): ImageRunnerSession {
@@ -121,14 +125,14 @@ function defaultRunner(): ImageRunnerSession {
     host: null,
     error: null,
     blocker: readinessBlocker(),
+    pid: null,
+    logPath: null,
   };
 }
 
 function readRunner() {
   const runner = { ...defaultRunner(), ...readJson<Partial<ImageRunnerSession>>(RUNNER_PATH, {}) } as ImageRunnerSession;
-  if (runner.state === "idle" || runner.state === "completed" || runner.state === "failed") {
-    return { ...runner, blocker: readinessBlocker() };
-  }
+  if (terminalRunnerState(runner.state)) return { ...runner, blocker: readinessBlocker() };
   return runner;
 }
 
@@ -136,9 +140,50 @@ function saveRunner(runner: ImageRunnerSession) {
   writeJson(RUNNER_PATH, { ...runner, updatedAt: new Date().toISOString() });
 }
 
-function responsePayload() {
+function terminalRunnerState(state: ImageRunnerSession["state"]) {
+  return state === "idle" || state === "failed" || state === "completed";
+}
+
+function appendRunnerLog(kind: "stdout" | "stderr" | "event", text: string) {
+  mkdirSync(DATA_DIR, { recursive: true });
+  const lines = finalSanitizedLogLines(text, 50);
+  if (!lines.length) return;
+  appendFileSync(RUNNER_LOG_PATH, lines.map((line) => JSON.stringify({ at: new Date().toISOString(), stream: kind, line })).join("\n") + "\n", "utf8");
+}
+
+async function activeCloreOrderCount() {
+  try {
+    return (await readLiveOrdersSummary(loadCloreConfig(), { forceRefresh: true })).filter((order) => order.active).length;
+  } catch {
+    return null;
+  }
+}
+
+async function reconcileStaleRunner(runner: ImageRunnerSession) {
+  if (terminalRunnerState(runner.state) || processExists(runner.pid)) return runner;
+  const activeOrders = await activeCloreOrderCount();
+  if (activeOrders !== 0) return runner;
+  const failed = {
+    ...runner,
+    state: "failed" as const,
+    stage: "runner_exited",
+    host: null,
+    error: { stage: "runner_exited", message: STALE_RUNNER_NO_ORDER_MESSAGE, at: new Date().toISOString() },
+    blocker: STALE_RUNNER_NO_ORDER_MESSAGE,
+  };
+  saveRunner(failed);
+  return readRunner();
+}
+
+async function responsePayload() {
   const blocker = readinessBlocker();
-  return { tasks: readTasks(), runner: readRunner(), executionReady: blocker === null, maxHourlyPrice: readPrice() };
+  const runner = await reconcileStaleRunner(readRunner());
+  return {
+    tasks: readTasks(),
+    runner: terminalRunnerState(runner.state) ? { ...runner, blocker } : runner,
+    executionReady: blocker === null,
+    maxHourlyPrice: readPrice(),
+  };
 }
 
 function imageDimension(value: unknown) {
@@ -211,7 +256,7 @@ function assertStartableBatch(batch: ImageTask[], maxHourlyPrice: number) {
 
 export async function GET(request: NextRequest) {
   const guard = guardLocalLabRequest(request);
-  return guard ?? NextResponse.json(responsePayload(), { headers: { "cache-control": "no-store" } });
+  return guard ?? NextResponse.json(await responsePayload(), { headers: { "cache-control": "no-store" } });
 }
 
 export async function POST(request: NextRequest) {
@@ -226,7 +271,7 @@ export async function POST(request: NextRequest) {
       const task = taskFrom(body);
       tasks = [task, ...tasks];
       saveTasks(tasks);
-      return NextResponse.json({ task, ...responsePayload() });
+      return NextResponse.json({ task, ...(await responsePayload()) });
     }
 
     if (action === "set_price") {
@@ -235,7 +280,7 @@ export async function POST(request: NextRequest) {
       writeJson(PREFERENCES_PATH, { maxHourlyPrice });
       const runner = readRunner();
       if (runner.state === "idle") saveRunner({ ...runner, maxHourlyPrice });
-      return NextResponse.json(responsePayload());
+      return NextResponse.json(await responsePayload());
     }
 
     if (action === "start_batch") {
@@ -243,8 +288,9 @@ export async function POST(request: NextRequest) {
       const maxHourlyPrice = Number(body.maxHourlyPrice);
       const batch = tasks.filter((task) => ids.includes(task.id) && task.status === "waiting_for_gpu");
       assertStartableBatch(batch, maxHourlyPrice);
-      const previous = readRunner();
+      const previous = await reconcileStaleRunner(readRunner());
       if (previous.state === "running" || previous.state === "cancelling") throw new Error("已有图像批次正在运行");
+      const startedAt = new Date().toISOString();
       writeJson(PREFERENCES_PATH, { maxHourlyPrice });
       saveRunner({
         ...previous,
@@ -256,19 +302,57 @@ export async function POST(request: NextRequest) {
         currentTaskIndex: null,
         currentModel: null,
         promptSummary: null,
-        startedAt: new Date().toISOString(),
+        startedAt,
+        host: null,
         error: null,
         blocker: null,
-        updatedAt: new Date().toISOString(),
+        pid: null,
+        logPath: RUNNER_LOG_PATH,
+        updatedAt: startedAt,
       });
       const child = spawn(process.execPath, [path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs"), path.join(process.cwd(), "scripts", "image-4090-runner.ts")], {
         cwd: process.cwd(),
-        detached: true,
-        stdio: "ignore",
+        detached: false,
+        stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
-      child.unref();
-      return NextResponse.json(responsePayload());
+      saveRunner({ ...readRunner(), pid: child.pid ?? null, startedAt, logPath: RUNNER_LOG_PATH });
+      child.stdout?.on("data", (chunk) => appendRunnerLog("stdout", String(chunk)));
+      child.stderr?.on("data", (chunk) => appendRunnerLog("stderr", String(chunk)));
+      child.on("error", (error) => {
+        appendRunnerLog("event", `child_error:${error.message}`);
+        const current = readRunner();
+        if (!terminalRunnerState(current.state)) {
+          saveRunner({
+            ...current,
+            state: "failed",
+            stage: "runner_exited",
+            host: null,
+            error: { stage: "runner_exited", message: `image runner failed to start: ${error.message}`, at: new Date().toISOString() },
+            blocker: "image_runner_start_failed",
+          });
+        }
+      });
+      child.on("exit", (code, signal) => {
+        appendRunnerLog("event", `child_exit code=${code ?? "null"} signal=${signal ?? "null"}`);
+        const current = readRunner();
+        if (!terminalRunnerState(current.state) && current.pid === child.pid) {
+          const stderr = existsSync(RUNNER_LOG_PATH) ? finalSanitizedLogLines(readFileSync(RUNNER_LOG_PATH, "utf8"), 8).join("\n") : "";
+          saveRunner({
+            ...current,
+            state: "failed",
+            stage: "runner_exited",
+            host: null,
+            error: {
+              stage: "runner_exited",
+              message: `image runner exited before completion: code=${code ?? "null"} signal=${signal ?? "null"}${stderr ? `\n${stderr}` : ""}`,
+              at: new Date().toISOString(),
+            },
+            blocker: "image_runner_exited_nonzero",
+          });
+        }
+      });
+      return NextResponse.json(await responsePayload());
     }
 
     const id = String(body.id ?? "");
@@ -279,7 +363,7 @@ export async function POST(request: NextRequest) {
     else if (action === "retry") tasks = tasks.map((task) => (task.id === id ? { ...task, status: "pending_confirmation", attempts: task.attempts + 1, updatedAt } : task));
     else return NextResponse.json({ error: "invalid_action" }, { status: 400 });
     saveTasks(tasks);
-    return NextResponse.json(responsePayload());
+    return NextResponse.json(await responsePayload());
   } catch (error) {
     const message = error instanceof Error ? error.message : "image_task_failed";
     const runner = readRunner();
@@ -289,6 +373,6 @@ export async function POST(request: NextRequest) {
       stage: "执行失败",
       error: { stage: "开始批次", message, at: new Date().toISOString() },
     });
-    return NextResponse.json({ error: message, ...responsePayload() }, { status: 400 });
+    return NextResponse.json({ error: message, ...(await responsePayload()) }, { status: 400 });
   }
 }

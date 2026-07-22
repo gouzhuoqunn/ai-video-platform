@@ -16,6 +16,7 @@ The active product is an image-only, local-first FLUX creation workspace. The on
 - The Studio left GPU panel persists maximum hourly price, runner session state, host details, stage, timestamps, and copyable backend errors.
 - The paid rental button remains disabled by default until the image executor readiness gate is explicitly satisfied.
 - The HTTP-first RTX 4090 runner has a no-order dry mode, freezes selected task IDs and maximum hourly price, uses `COMFY_NODE_PROFILE=image-flux`, and never waits for SSH.
+- RTX 4090 readiness now requires `IMAGE_4090_EXECUTOR_READY=true` plus either a strict local validated restore manifest or a complete first-run bootstrap configuration. Runner preflight failures are persisted to the Studio session instead of leaving stale searching progress.
 - After an order ID is known or reconciled, every post-order failure path attempts cancellation and verifies active Clore orders return to zero.
 - Source acquisition manifests are separate from validated R2 restore manifests. Source manifests may omit unavailable hashes; restore manifests require exact size, SHA-256, runtime destination, cache key, and presigned download URL.
 - Successful PNG results are validated for signature and exact dimensions, hashed, thumbnailed, and persisted under ignored `local-data/image-results/`.

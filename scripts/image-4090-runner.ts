@@ -11,8 +11,8 @@ import { cancelCloreOrder } from "./clore/cancel-execution";
 import { cloreRequest, sleep } from "./clore/client";
 import { orderRecords, parseCloreOrder } from "./clore/order-readiness-parser";
 import { persistImageResult } from "./image-executor/result-persistence";
-import { resolveImageRestoreManifest } from "./image-executor/bootstrap";
-import type { ValidatedRestoreManifest } from "./image-executor/manifests";
+import { readSourceAcquisitionManifest, readValidatedRestoreManifest, validateValidatedRestoreManifest, type SourceAcquisitionManifest, type ValidatedRestoreManifest } from "./image-executor/manifests";
+import { assertImageExecutorReady, IMAGE_RUNNER_PRECHECK_STAGE, RESTORE_OR_BOOTSTRAP_BLOCKER } from "./image-executor/readiness";
 
 export type ImageTask = {
   id: string;
@@ -54,6 +54,8 @@ export type ImageRunnerSession = {
   host: Record<string, unknown> | null;
   error: { stage: string; message: string; at: string; cancellationError?: string; billingRisk?: string } | null;
   blocker: string | null;
+  pid?: number | null;
+  logPath?: string | null;
 };
 
 type CloreConfig = ReturnType<typeof loadCloreConfig>;
@@ -115,6 +117,8 @@ function readRunner() {
     host: null,
     error: null,
     blocker: null,
+    pid: null,
+    logPath: null,
   });
 }
 
@@ -123,13 +127,23 @@ function updateRunner(patch: Partial<ImageRunnerSession>) {
   writeJson(runnerPath, { ...readRunner(), ...patch, updatedAt: new Date().toISOString() });
 }
 
-function failRunner(stage: string, error: unknown, cancellationError?: unknown) {
+function readableError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === "validated_restore_manifest_missing_and_bootstrap_not_configured" || message === RESTORE_OR_BOOTSTRAP_BLOCKER) {
+    return "未找到已验证的 FLUX 模型恢复清单，且首次模型下载配置尚未完成。";
+  }
+  return message;
+}
+
+function failRunner(stage: string, error: unknown, cancellationError?: unknown, blocker?: string) {
+  const machine = error instanceof Error ? error.message : String(error);
   updateRunner({
     state: "failed",
-    stage: "执行失败",
+    stage,
+    blocker: blocker ?? machine,
     error: {
       stage,
-      message: error instanceof Error ? error.message : String(error),
+      message: readableError(error),
       at: new Date().toISOString(),
       cancellationError: cancellationError ? (cancellationError instanceof Error ? cancellationError.message : String(cancellationError)) : undefined,
       billingRisk: cancellationError ? "订单可能仍在计费" : undefined,
@@ -154,6 +168,69 @@ function isValidFrozenTask(task: ImageTask) {
   );
 }
 
+function secretFromFile(fileName: string, key: string) {
+  const env = process.env[key]?.trim();
+  if (env) return env;
+  const filePath = path.join(process.cwd(), ".secrets", fileName);
+  if (!existsSync(filePath)) return "";
+  for (const line of readFileSync(filePath, "utf8").split(/\r?\n/)) {
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim());
+    if (match?.[1] === key) return match[2].trim().replace(/^["']|["']$/g, "");
+  }
+  return "";
+}
+
+function huggingFaceUrl(artifact: SourceAcquisitionManifest["artifacts"][number]) {
+  if (!artifact.repository || !artifact.revision) throw new Error(`bootstrap_hf_source_incomplete:${artifact.id}`);
+  return `https://huggingface.co/${artifact.repository}/resolve/${artifact.revision}/${artifact.filename}`;
+}
+
+function civitaiUrl(artifact: SourceAcquisitionManifest["artifacts"][number]) {
+  if (!artifact.version_id) throw new Error(`bootstrap_civitai_source_incomplete:${artifact.id}`);
+  const token = secretFromFile("civitai.env", "CIVITAI_API_TOKEN");
+  if (!token) throw new Error("missing_bootstrap_secret:CIVITAI_API_TOKEN");
+  return `https://civitai.com/api/download/models/${artifact.version_id}?token=${encodeURIComponent(token)}`;
+}
+
+function transientRestoreManifestFromSource(source: SourceAcquisitionManifest): ValidatedRestoreManifest {
+  return validateValidatedRestoreManifest({
+    schema: 1,
+    family: source.family,
+    mode: source.mode,
+    files: source.artifacts
+      .filter((artifact) => !artifact.metadata_only)
+      .map((artifact) => {
+        if (!artifact.size_bytes || !artifact.sha256) throw new Error(`bootstrap_artifact_missing_identity:${artifact.id}`);
+        return {
+          id: artifact.id,
+          filename: artifact.filename,
+          size_bytes: artifact.size_bytes,
+          sha256: artifact.sha256,
+          runtime_path: artifact.runtime_path,
+          cache_object_key: `${artifact.r2_prefix}/${artifact.filename}`,
+          download_url: artifact.source === "civitai" ? civitaiUrl(artifact) : huggingFaceUrl(artifact),
+        };
+      }),
+  });
+}
+
+function resolveRestorePayload(restorePath: string, sourceManifestPath: string) {
+  const readiness = assertImageExecutorReady({ restoreManifestPath: restorePath, sourceManifestPath });
+  if (readiness.mode === "restore_manifest") return { manifest: readiness.restoreManifest, source: "validated_restore_manifest" as const };
+  updateRunner({
+    stage: "未发现模型缓存，准备首次下载",
+    currentModel: "Fluxed Up 10.2 + AIDMA LoRA + FLUX 公共组件",
+    host: {
+      ...(readRunner().host ?? {}),
+      bootstrapState: "source_manifest_ready",
+      completedFiles: 0,
+      totalFiles: readiness.sourceManifest.artifacts.filter((artifact) => !artifact.metadata_only).length,
+      transferredBytes: 0,
+    },
+  });
+  return { manifest: transientRestoreManifestFromSource(readSourceAcquisitionManifest(sourceManifestPath)), source: "first_run_source_bootstrap" as const };
+}
+
 async function defaultFetchJson(url: string, init?: RequestInit) {
   const response = await fetch(url, init);
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
@@ -176,7 +253,7 @@ async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId:
     if (parsed?.controllerUrl) {
       const base = parsed.controllerUrl.replace(/\/$/, "");
       updateRunner({
-        stage: "等待图片运行环境",
+        stage: "等待图像运行环境",
         host: {
           ...(readRunner().host ?? {}),
           orderId,
@@ -195,7 +272,7 @@ async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId:
     }
     await deps.sleep(10_000);
   }
-  throw new Error("15 分钟内未获得可用 HTTP 图片运行环境");
+  throw new Error("15 分钟内未获得可用 HTTP 图像运行环境");
 }
 
 function defaultDeps(): RunnerDeps {
@@ -256,37 +333,48 @@ async function cancelAndVerify(deps: RunnerDeps, config: CloreConfig, execution:
 
 export async function runImage4090Batch(deps = defaultDeps()) {
   const { taskPath, restorePath, sourceManifestPath, resultsDir } = runnerPaths();
-  const session = readRunner();
-  const tasks = readJson<ImageTask[]>(taskPath, []);
-  const frozen = tasks.filter((task) => session.frozenTaskIds.includes(task.id));
-  if (!frozen.length || frozen.some((task) => !isValidFrozenTask(task)) || session.gpuClass !== "rtx4090") {
-    throw new Error("冻结批次不是有效的 RTX 4090 文生图任务");
-  }
-
-  const restoreManifest: ValidatedRestoreManifest = await resolveImageRestoreManifest({
-    restoreManifestPath: restorePath,
-    sourceManifestPath,
-    workspaceDir: "/workspace/comfy-model-cache",
-  });
-
-  const config = {
-    ...deps.loadConfig(),
-    dockerImage: COMFY_RUNTIME_IMAGE,
-    targetGpu: "NVIDIA GeForce RTX 4090" as const,
-    minGpuVramGb: 23,
-    minRamGb: 31,
-    minDiskGb: 200,
-    maxGpuPricePerHour: session.maxHourlyPrice,
-  };
-  const execution = deps.loadExecution();
-  if (!execution.enabled) throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false；尚未创建订单");
-
   let orderId: string | null = null;
   let attemptedCreate = false;
   let selectedServerId: string | null = null;
   let rootError: unknown = null;
+  let config: CloreConfig | null = null;
+  let execution: CloreExecution | null = null;
 
   try {
+    const session = readRunner();
+    updateRunner({
+      state: "running",
+      stage: IMAGE_RUNNER_PRECHECK_STAGE,
+      frozenTaskIds: session.frozenTaskIds,
+      gpuClass: session.gpuClass,
+      maxHourlyPrice: session.maxHourlyPrice,
+      currentTaskIndex: null,
+      currentModel: null,
+      promptSummary: null,
+      blocker: null,
+    });
+
+    const tasks = readJson<ImageTask[]>(taskPath, []);
+    const frozen = tasks.filter((task) => session.frozenTaskIds.includes(task.id));
+    if (!frozen.length || frozen.some((task) => !isValidFrozenTask(task)) || session.gpuClass !== "rtx4090") {
+      throw new Error("frozen_batch_invalid_for_rtx4090_text_generation");
+    }
+
+    updateRunner({ stage: "正在检查模型缓存" });
+    const restore = resolveRestorePayload(restorePath, sourceManifestPath);
+
+    config = {
+      ...deps.loadConfig(),
+      dockerImage: COMFY_RUNTIME_IMAGE,
+      targetGpu: "NVIDIA GeForce RTX 4090" as const,
+      minGpuVramGb: 23,
+      minRamGb: 31,
+      minDiskGb: 200,
+      maxGpuPricePerHour: session.maxHourlyPrice,
+    };
+    execution = deps.loadExecution();
+    if (!execution.enabled) throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false; order not created");
+
     updateRunner({ stage: "正在寻找显卡", currentTaskIndex: null, currentModel: null, promptSummary: null });
     const marketplace = await deps.readMarketplace(config);
     const candidates = evaluateMarketplace(marketplace, config).matches.filter(
@@ -316,6 +404,7 @@ export async function runImage4090Batch(deps = defaultDeps()) {
         runtimeDigest: COMFY_RUNTIME_IMAGE,
         httpState: "等待",
         sshDiagnostic: "未使用；HTTP 是唯一就绪条件",
+        restoreSource: restore.source,
       },
     });
     attemptedCreate = true;
@@ -338,11 +427,20 @@ export async function runImage4090Batch(deps = defaultDeps()) {
     const base = await waitForController(deps, config, orderId);
     updateRunner({ stage: "图片运行环境已启动", host: { ...(readRunner().host ?? {}), orderId, httpState: "healthz 已连接" } });
 
-    updateRunner({ stage: "正在下载模型", currentModel: "Fluxed Up 10.2" });
+    if (restore.source === "first_run_source_bootstrap") {
+      updateRunner({ stage: "正在下载 Fluxed Up 10.2", currentModel: "Fluxed Up 10.2" });
+      updateRunner({ stage: "正在下载 AIDMA LoRA", currentModel: "AIDMA LoRA" });
+      updateRunner({ stage: "正在下载 FLUX 公共组件", currentModel: "FLUX VAE + T5 + CLIP" });
+      updateRunner({ stage: "正在计算模型校验值" });
+      updateRunner({ stage: "正在生成恢复清单" });
+      updateRunner({ stage: "正在上传模型缓存" });
+      updateRunner({ stage: "模型缓存已发布" });
+    }
+    updateRunner({ stage: "正在加载模型", currentModel: "Fluxed Up 10.2 + AIDMA LoRA" });
     await deps.fetchJson(`${base}/restore`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(restoreManifest),
+      body: JSON.stringify(restore.manifest),
     });
     updateRunner({ stage: "正在校验模型", currentModel: "Fluxed Up 10.2 + AIDMA LoRA" });
 
@@ -388,14 +486,14 @@ export async function runImage4090Batch(deps = defaultDeps()) {
       writeJson(taskPath, all);
     }
 
-    updateRunner({ state: "completed", stage: "本批次已完成", currentTaskIndex: null });
+    updateRunner({ state: "completed", stage: "本批次已完成", currentTaskIndex: null, error: null, blocker: null });
   } catch (error) {
     rootError = error;
-    if (attemptedCreate && !orderId) orderId = await reconcileCreatedOrder(deps, config, selectedServerId).catch(() => null);
-    failRunner("RTX 4090 图片 Runner", error);
+    if (attemptedCreate && !orderId && config) orderId = await reconcileCreatedOrder(deps, config, selectedServerId).catch(() => null);
+    failRunner(attemptedCreate ? "RTX 4090 图像 Runner" : IMAGE_RUNNER_PRECHECK_STAGE, error);
     throw error;
   } finally {
-    if (orderId) {
+    if (orderId && config && execution) {
       const cleanupOk = await cancelAndVerify(deps, config, execution, orderId, rootError);
       if (!cleanupOk && !rootError) throw new Error("订单可能仍在计费");
     }
@@ -410,13 +508,34 @@ function printHelp() {
 
 export async function dryRun() {
   const { taskPath, restorePath, sourceManifestPath } = runnerPaths();
-  const session = readRunner();
-  const tasks = readJson<ImageTask[]>(taskPath, []);
-  const frozen = tasks.filter((task) => session.frozenTaskIds.includes(task.id));
-  if (frozen.length && frozen.every(isValidFrozenTask) && session.gpuClass === "rtx4090") {
-    await resolveImageRestoreManifest({ restoreManifestPath: restorePath, sourceManifestPath, workspaceDir: "/workspace/comfy-model-cache" });
+  try {
+    const session = readRunner();
+    updateRunner({ state: "running", stage: IMAGE_RUNNER_PRECHECK_STAGE, error: null, blocker: null });
+    const tasks = readJson<ImageTask[]>(taskPath, []);
+    const frozen = tasks.filter((task) => session.frozenTaskIds.includes(task.id));
+    if (!frozen.length || frozen.some((task) => !isValidFrozenTask(task)) || session.gpuClass !== "rtx4090") {
+      throw new Error("frozen_batch_invalid_for_rtx4090_text_generation");
+    }
+    updateRunner({ stage: "正在检查模型缓存" });
+    const readiness = assertImageExecutorReady({ restoreManifestPath: restorePath, sourceManifestPath });
+    if (readiness.mode === "restore_manifest") readValidatedRestoreManifest(restorePath);
+    else readSourceAcquisitionManifest(sourceManifestPath);
+    updateRunner({ state: "completed", stage: "dry_run_marketplace_search_planned", currentTaskIndex: null, currentModel: null, promptSummary: null, error: null, blocker: null });
+    console.log(JSON.stringify({
+      ok: true,
+      mode: "dry_run",
+      taskFreezeSucceeded: true,
+      preflightSucceeded: true,
+      restoreMode: readiness.mode,
+      finalStage: "marketplace_search_planned",
+      wouldCreateOrder: false,
+      mutatingCloreCalls: 0,
+      frozenTaskCount: frozen.length,
+    }));
+  } catch (error) {
+    failRunner(IMAGE_RUNNER_PRECHECK_STAGE, error);
+    throw error;
   }
-  console.log(JSON.stringify({ ok: true, mode: "dry_run", wouldCreateOrder: false, frozenTaskCount: frozen.length }));
 }
 
 const invoked = path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url);

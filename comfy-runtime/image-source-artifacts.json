@@ -16,7 +16,8 @@
       "sha256": "92efbd0f58900ab899fecc80b143eba332f0079faa9749f989f23521088c6165",
       "runtime_path": "diffusion_models/fluxedUpFluxNSFW_102BF16.safetensors",
       "r2_prefix": "fluxed-up-10.2",
-      "auth": "civitai_token"
+      "auth": "civitai_token",
+      "auth_env": "CIVITAI_API_TOKEN"
     },
     {
       "id": "aidma-lora",
@@ -29,7 +30,8 @@
       "sha256": "7d3408f4a7b7890f470c1cce7f7255b6d8e03ea770a2829066c1ce41145562ec",
       "runtime_path": "loras/aidmaNSFWunlock-FLUX-V0.2.safetensors",
       "r2_prefix": "aidma-lora",
-      "auth": "civitai_token"
+      "auth": "civitai_token",
+      "auth_env": "CIVITAI_API_TOKEN"
     },
     {
       "id": "flux-vae",
@@ -76,6 +78,7 @@
       "runtime_path": "tokenizers/t5/tokenizer_config.json",
       "r2_prefix": "shared-flux-components",
       "auth": "huggingface_token",
+      "auth_env": "HF_TOKEN",
       "metadata_only": true
     }
   ]

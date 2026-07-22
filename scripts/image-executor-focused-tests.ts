@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
@@ -9,6 +9,7 @@ import { buildHttpRuntimeCreateOrderBody, assertCreateOrderBodySafe } from "./cl
 import { COMFY_RUNTIME_IMAGE, PROJECT_TAG } from "./clore/config";
 import { validateImageSourceManifest, resolveImageRestoreManifest } from "./image-executor/bootstrap";
 import { buildValidatedRestoreManifestFromFiles, validateValidatedRestoreManifest, type SourceAcquisitionManifest } from "./image-executor/manifests";
+import { imageExecutorReadiness, processExists, RESTORE_OR_BOOTSTRAP_BLOCKER, STALE_RUNNER_NO_ORDER_MESSAGE } from "./image-executor/readiness";
 import { persistImageResult } from "./image-executor/result-persistence";
 import { runImage4090Batch, writeJson, type ImageRunnerSession, type ImageTask, type RunnerDeps } from "./image-4090-runner";
 import type { CloreCandidate, CloreConfig } from "./clore/types";
@@ -159,10 +160,13 @@ function fixtureSession(): ImageRunnerSession {
     host: null,
     error: null,
     blocker: null,
+    pid: null,
+    logPath: null,
   };
 }
 
 async function seedRunnerState() {
+  process.env.IMAGE_4090_EXECUTOR_READY = "true";
   writeJson(path.join(".secrets", "image-studio", "tasks.json"), [fixtureTask()]);
   writeJson(path.join(".secrets", "image-studio", "runner-session.json"), fixtureSession());
   writeJson(path.join(".secrets", "image-studio", "fluxed-up-10.2-rtx4090-text.restore.json"), {
@@ -256,12 +260,12 @@ async function main() {
       family: "fluxed-up-10.2-rtx4090-text",
       mode: "text_generation",
       artifacts: [
-        { id: "fluxed-up-10.2", source: "civitai", model_id: 1, version_id: 1, file_id: 1, filename: "a.bin", runtime_path: "diffusion_models/a.bin", r2_prefix: "fluxed-up-10.2", auth: "civitai_token" },
-        { id: "aidma-lora", source: "civitai", model_id: 1, version_id: 1, file_id: 1, filename: "b.bin", runtime_path: "loras/b.bin", r2_prefix: "aidma-lora", auth: "civitai_token" },
+        { id: "fluxed-up-10.2", source: "civitai", model_id: 1, version_id: 1, file_id: 1, filename: "a.bin", runtime_path: "diffusion_models/a.bin", r2_prefix: "fluxed-up-10.2", auth: "civitai_token", auth_env: "CIVITAI_API_TOKEN" },
+        { id: "aidma-lora", source: "civitai", model_id: 1, version_id: 1, file_id: 1, filename: "b.bin", runtime_path: "loras/b.bin", r2_prefix: "aidma-lora", auth: "civitai_token", auth_env: "CIVITAI_API_TOKEN" },
         { id: "flux-vae", source: "huggingface", repository: "r", revision: "rev", filename: "c.bin", runtime_path: "vae/c.bin", r2_prefix: "shared-flux-components", auth: "public" },
         { id: "flux-clip-l", source: "huggingface", repository: "r", revision: "rev", filename: "d.bin", runtime_path: "text_encoders/d.bin", r2_prefix: "shared-flux-components", auth: "public" },
         { id: "flux-t5xxl-fp8", source: "huggingface", repository: "r", revision: "rev", filename: "e.bin", runtime_path: "text_encoders/e.bin", r2_prefix: "shared-flux-components", auth: "public" },
-        { id: "flux-tokenizer-config", source: "huggingface", repository: "r", revision: "rev", filename: "config.json", runtime_path: "tokenizers/t5/config.json", r2_prefix: "shared-flux-components", auth: "huggingface_token", metadata_only: true },
+        { id: "flux-tokenizer-config", source: "huggingface", repository: "r", revision: "rev", filename: "config.json", runtime_path: "tokenizers/t5/config.json", r2_prefix: "shared-flux-components", auth: "huggingface_token", auth_env: "HF_TOKEN", metadata_only: true },
       ],
     };
     writeJson("source.json", acquisition);
@@ -290,13 +294,68 @@ async function main() {
 
     const direct = buildValidatedRestoreManifestFromFiles({ source: acquisition, downloadedRoot: "downloaded" });
     assert.match(direct.files[0].sha256, /^[a-f0-9]{64}$/);
+    assert.equal(direct.files[0].size_bytes, readFileSync(path.join("downloaded", direct.files[0].runtime_path)).length);
   } finally {
     cleanup();
+  }
+
+  const readinessCleanup = chdirTemp();
+  try {
+    const sourcePath = path.join("comfy-runtime", "image-source-artifacts.json");
+    const restorePath = path.join(".secrets", "image-studio", "fluxed-up-10.2-rtx4090-text.restore.json");
+    writeJson(sourcePath, {
+      schema: 1,
+      family: "fluxed-up-10.2-rtx4090-text",
+      mode: "text_generation",
+      artifacts: [
+        { id: "fluxed-up-10.2", source: "civitai", model_id: 1, version_id: 1, file_id: 1, filename: "a.bin", size_bytes: 1, sha256: "00".repeat(32), runtime_path: "diffusion_models/a.bin", r2_prefix: "fluxed-up-10.2", auth: "civitai_token", auth_env: "CIVITAI_API_TOKEN" },
+        { id: "aidma-lora", source: "civitai", model_id: 1, version_id: 1, file_id: 1, filename: "b.bin", size_bytes: 1, sha256: "11".repeat(32), runtime_path: "loras/b.bin", r2_prefix: "aidma-lora", auth: "civitai_token", auth_env: "CIVITAI_API_TOKEN" },
+        { id: "flux-vae", source: "huggingface", repository: "r", revision: "rev", filename: "c.bin", size_bytes: 1, sha256: "22".repeat(32), runtime_path: "vae/c.bin", r2_prefix: "shared-flux-components", auth: "public" },
+        { id: "flux-clip-l", source: "huggingface", repository: "r", revision: "rev", filename: "d.bin", size_bytes: 1, sha256: "33".repeat(32), runtime_path: "text_encoders/d.bin", r2_prefix: "shared-flux-components", auth: "public" },
+        { id: "flux-t5xxl-fp8", source: "huggingface", repository: "r", revision: "rev", filename: "e.bin", size_bytes: 1, sha256: "44".repeat(32), runtime_path: "text_encoders/e.bin", r2_prefix: "shared-flux-components", auth: "public" },
+        { id: "flux-tokenizer-config", source: "huggingface", repository: "r", revision: "rev", filename: "config.json", runtime_path: "tokenizers/t5/config.json", r2_prefix: "shared-flux-components", auth: "huggingface_token", auth_env: "HF_TOKEN", metadata_only: true },
+      ],
+    });
+    const previousFlag = process.env.IMAGE_4090_EXECUTOR_READY;
+    delete process.env.IMAGE_4090_EXECUTOR_READY;
+    assert.equal(imageExecutorReadiness({ restoreManifestPath: restorePath, sourceManifestPath: sourcePath }).ready, false);
+    process.env.IMAGE_4090_EXECUTOR_READY = "true";
+    assert.equal(imageExecutorReadiness({ restoreManifestPath: restorePath, sourceManifestPath: sourcePath }).blocker, RESTORE_OR_BOOTSTRAP_BLOCKER);
+    writeJson(restorePath, { schema: 1, family: "fluxed-up-10.2-rtx4090-text", mode: "text_generation", files: [{ id: "tiny", filename: "tiny.bin", size_bytes: 1, sha256: "55".repeat(32), runtime_path: "diffusion_models/tiny.bin", cache_object_key: "fluxed-up-10.2/tiny.bin", download_url: "https://cache.invalid/tiny.bin" }] });
+    assert.equal(imageExecutorReadiness({ restoreManifestPath: restorePath, sourceManifestPath: sourcePath }).mode, "restore_manifest");
+    rmSync(restorePath, { force: true });
+    writeJson(path.join(".secrets", "civitai.env"), { ignored: true });
+    writeFileSync(path.join(".secrets", "civitai.env"), "CIVITAI_API_TOKEN=test\n", "utf8");
+    writeFileSync(path.join(".secrets", "huggingface.env"), "HF_TOKEN=test\n", "utf8");
+    writeFileSync(path.join(".secrets", "model-cache-admin.env"), "MODEL_CACHE_ACCESS_KEY_ID=a\nMODEL_CACHE_SECRET_ACCESS_KEY=b\nMODEL_CACHE_BUCKET=c\n", "utf8");
+    writeFileSync(path.join(".secrets", "model-cache-readonly.env"), "MODEL_CACHE_ACCESS_KEY_ID=a\nMODEL_CACHE_SECRET_ACCESS_KEY=b\nMODEL_CACHE_BUCKET=c\n", "utf8");
+    assert.equal(imageExecutorReadiness({ restoreManifestPath: restorePath, sourceManifestPath: sourcePath }).mode, "first_run_bootstrap");
+    assert.equal(processExists(99999999), false);
+    assert.equal(STALE_RUNNER_NO_ORDER_MESSAGE.includes("意外退出"), true);
+    if (previousFlag === undefined) delete process.env.IMAGE_4090_EXECUTOR_READY;
+    else process.env.IMAGE_4090_EXECUTOR_READY = previousFlag;
+  } finally {
+    readinessCleanup();
   }
 
   await assertCancellationOn("health");
   await assertCancellationOn("restore");
   await assertCancellationOn("generation");
+
+  const preflightCleanup = chdirTemp();
+  try {
+    process.env.IMAGE_4090_EXECUTOR_READY = "true";
+    writeJson(path.join(".secrets", "image-studio", "tasks.json"), [fixtureTask()]);
+    writeJson(path.join(".secrets", "image-studio", "runner-session.json"), fixtureSession());
+    await assert.rejects(() => runImage4090Batch(depsFor({}).deps), /未找到已验证|restore_manifest_missing|invalid_source_acquisition_manifest/);
+    const session = readJson<ImageRunnerSession>(path.join(".secrets", "image-studio", "runner-session.json"));
+    assert.equal(session.state, "failed");
+    assert.equal(session.stage, "preflight");
+    assert.ok(session.error?.message);
+    assert.equal(session.host, null);
+  } finally {
+    preflightCleanup();
+  }
 
   const pngCleanup = chdirTemp();
   try {
@@ -319,6 +378,11 @@ async function main() {
   assert.match(route, /frozenTaskIds: batch\.map/);
   assert.match(route, /writeJson\(PREFERENCES_PATH, \{ maxHourlyPrice \}\)/);
   assert.match(route, /executionReady: blocker === null/);
+  assert.match(route, /stdio: \["ignore", "pipe", "pipe"\]/);
+  assert.match(route, /child\.on\("exit"/);
+  assert.match(route, /child\.on\("error"/);
+  assert.match(route, /image_runner_exited_nonzero/);
+  assert.match(route, /reconcileStaleRunner/);
   assert.match(studio, /task\.result/);
 
   const workflow = readFileSync("comfy-runtime/image_workflow.py", "utf8");

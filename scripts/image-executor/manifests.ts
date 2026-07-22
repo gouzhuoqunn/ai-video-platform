@@ -11,6 +11,7 @@ export type SourceArtifact = {
   runtime_path: string;
   r2_prefix: "fluxed-up-10.2" | "aidma-lora" | "shared-flux-components";
   auth: "civitai_token" | "huggingface_token" | "public";
+  auth_env?: "CIVITAI_API_TOKEN" | "HF_TOKEN";
   size_bytes?: number;
   sha256?: string;
   model_id?: number;
@@ -79,6 +80,10 @@ export function validateSourceAcquisitionManifest(value: unknown): SourceAcquisi
     if (!safeRuntimePath(artifact.runtime_path)) throw new Error(`invalid_runtime_path:${artifact.id}`);
     if (!["fluxed-up-10.2", "aidma-lora", "shared-flux-components"].includes(artifact.r2_prefix)) throw new Error(`invalid_r2_prefix:${artifact.id}`);
     if (!["civitai_token", "huggingface_token", "public"].includes(artifact.auth)) throw new Error(`invalid_auth:${artifact.id}`);
+    if (artifact.auth_env !== undefined && !["CIVITAI_API_TOKEN", "HF_TOKEN"].includes(artifact.auth_env)) throw new Error(`invalid_auth_env:${artifact.id}`);
+    if (artifact.auth === "civitai_token" && artifact.auth_env !== "CIVITAI_API_TOKEN") throw new Error(`invalid_auth_env:${artifact.id}`);
+    if (artifact.auth === "huggingface_token" && artifact.auth_env !== "HF_TOKEN") throw new Error(`invalid_auth_env:${artifact.id}`);
+    if (artifact.auth === "public" && artifact.auth_env !== undefined) throw new Error(`invalid_public_auth_env:${artifact.id}`);
     if (artifact.size_bytes !== undefined && !positiveInt(artifact.size_bytes)) throw new Error(`invalid_size:${artifact.id}`);
     if (artifact.sha256 !== undefined && !isSha(artifact.sha256)) throw new Error(`invalid_sha:${artifact.id}`);
     if (artifact.source === "civitai" && (!positiveInt(artifact.model_id) || !positiveInt(artifact.version_id) || !positiveInt(artifact.file_id))) {
