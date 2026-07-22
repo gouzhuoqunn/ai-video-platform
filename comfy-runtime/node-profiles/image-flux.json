@@ -4,6 +4,7 @@
   "profileName": "image-flux",
   "purpose": "Image-only FLUX text generation. No Wan, LTX, video, or custom nodes.",
   "comfyuiCommit": "da2608926eaf68fd532bba4e1ace3402c5d21399",
+  "profileSha256": "9e4ee1da4363fd5bf070f3a9337267890ef4a1b70dbcf62848b08e6c1afa0290",
   "loadBaseNodes": true,
   "disableCustomNodes": true,
   "baseNodeClasses": [
