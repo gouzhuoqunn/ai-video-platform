@@ -9,7 +9,7 @@
   "baseNodeClasses": [
     "CLIPTextEncode",
     "DualCLIPLoader",
-    "EmptySD3LatentImage",
+    "EmptyFlux2LatentImage",
     "KSampler",
     "LoraLoader",
     "SaveImage",
@@ -23,7 +23,7 @@
   "requiredNodeClasses": [
     "CLIPTextEncode",
     "DualCLIPLoader",
-    "EmptySD3LatentImage",
+    "EmptyFlux2LatentImage",
     "FluxGuidance",
     "KSampler",
     "LoraLoader",
