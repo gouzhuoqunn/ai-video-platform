@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { COMFY_RUNTIME_IMAGE, PROJECT_TAG } from "./clore/config";
+import { isDeploymentHostBlacklisted, readTemporaryDeploymentDeniedServerIds } from "./clore/deployment-host-blacklist";
 import type { CloreConfig } from "./clore/types";
 import { runImage4090Batch, writeJson, type ImageRunnerSession, type ImageTask, type RunnerDeps } from "./image-4090-runner";
 
@@ -126,6 +127,7 @@ function depsFor(input: {
   cancelFails?: boolean;
   createRequestFailures?: number;
   reconcileOrderAfterFailure?: boolean;
+  alwaysDeploying?: boolean;
   onFirstOrderPoll?: (session: ImageRunnerSession) => void;
   onSleep?: (session: ImageRunnerSession) => void;
   onRestore?: (session: ImageRunnerSession) => void;
@@ -143,7 +145,7 @@ function depsFor(input: {
     id: "1972821",
     si: "79245",
     status: "running",
-    mon_container: orderPolls > 1 ? 2 : 0,
+    mon_container: input.alwaysDeploying ? 0 : orderPolls > 1 ? 2 : 0,
     tcp_ports: input.tcpPorts ?? ["8080:24123"],
     pub_cluster: input.pubCluster ?? ["legacy.invalid"],
     http_pub: input.controllerUrlAfter !== undefined && orderPolls >= input.controllerUrlAfter ? input.httpPub ?? undefined : undefined,
@@ -340,6 +342,20 @@ async function main() {
     assert.equal(health?.stage, "checking_http_health", "health polling enters checking state");
     assert.ok(health?.host?.lastPollAt, "health polling updates timestamps");
     assert.equal(health?.host?.lastHealthStatus, 502, "502 continues polling and persists status code");
+  });
+
+  await withSeeded(async () => {
+    const harness = depsFor({
+      controllerUrlAfter: 1,
+      httpPub: "runtime-502.example.invalid",
+      web: null,
+      healthStatusBeforeOk: 502,
+      alwaysDeploying: true,
+    });
+    await assert.rejects(() => runImage4090Batch(harness.deps), /代理层 502/);
+    assert.equal(harness.cancelCount(), 1, "deploying plus proxy-level 502 for 6 minutes cancels order");
+    assert.deepEqual(readTemporaryDeploymentDeniedServerIds(), ["79245"], "deployment timeout adds host to 24h temporary denylist");
+    assert.equal(isDeploymentHostBlacklisted("79245"), false, "one timeout is temporarily denied without reaching permanent 2-failure threshold");
   });
 
 await withSeeded(async () => {

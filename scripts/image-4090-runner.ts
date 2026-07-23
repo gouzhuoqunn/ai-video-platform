@@ -11,6 +11,7 @@ import { cancelCloreOrder } from "./clore/cancel-execution";
 import { buildCloreUrl, cloreRequest, createCloreHeaders, sleep } from "./clore/client";
 import { writeActiveOrder } from "./clore/order-state";
 import { orderRecords, parseCloreOrder } from "./clore/order-readiness-parser";
+import { recordDeploymentFailure, recordTemporaryDeploymentDeny } from "./clore/deployment-host-blacklist";
 import { persistImageResult } from "./image-executor/result-persistence";
 import { readSourceAcquisitionManifest, readValidatedRestoreManifest, validateValidatedRestoreManifest, type SourceAcquisitionManifest, type ValidatedRestoreManifest } from "./image-executor/manifests";
 import { assertImageExecutorReady, IMAGE_RUNNER_PRECHECK_STAGE, RESTORE_OR_BOOTSTRAP_BLOCKER } from "./image-executor/readiness";
@@ -80,6 +81,7 @@ type RuntimeCandidate = ReturnType<typeof evaluateMarketplace>["matches"][number
 const CREATE_ORDER_HARD_TIMEOUT_MS = 60_000;
 const CREATE_ORDER_RETRY_DELAY_MS = 3_000;
 const HTTP_READINESS_TIMEOUT_MS = 12 * 60 * 1000;
+const DEPLOYING_PROXY_502_TIMEOUT_MS = 6 * 60 * 1000;
 const HTTP_READINESS_POLL_MS = 10_000;
 
 class CreateOrderHardTimeoutError extends Error {
@@ -115,6 +117,17 @@ class HttpReadinessTimeoutError extends Error {
     super("订单已创建，但图片运行环境在 12 分钟内未就绪，系统已自动退租。");
     this.name = "HttpReadinessTimeoutError";
     this.orderId = orderId;
+  }
+}
+
+class DeployingProxy502TimeoutError extends Error {
+  readonly orderId: string;
+  readonly serverId: string | null;
+  constructor(orderId: string, serverId: string | null) {
+    super("订单已创建，但 Clore 部署状态持续 deploying 且 /healthz 代理层 502 超过 6 分钟，系统已自动退租。");
+    this.name = "DeployingProxy502TimeoutError";
+    this.orderId = orderId;
+    this.serverId = serverId;
   }
 }
 
@@ -766,9 +779,11 @@ async function createOrderWithNetworkRetry(input: {
 async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId: string) {
   const attempts = Math.ceil(HTTP_READINESS_TIMEOUT_MS / HTTP_READINESS_POLL_MS);
   const started = Date.now();
+  let deployingProxy502SinceMs: number | null = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const pollAt = new Date().toISOString();
-    const elapsedSeconds = Math.min(Math.floor((Date.now() - started + attempt * HTTP_READINESS_POLL_MS) / 1000), Math.floor(HTTP_READINESS_TIMEOUT_MS / 1000));
+    const elapsedMs = Math.max(Date.now() - started, attempt * HTTP_READINESS_POLL_MS);
+    const elapsedSeconds = Math.min(Math.floor(elapsedMs / 1000), Math.floor(HTTP_READINESS_TIMEOUT_MS / 1000));
     const raw = await deps.cloreRequest<unknown>(config, "/my_orders", {}, { forceRefresh: true });
     const entry = orderRecords(raw).find((value) => String(value.id ?? value.order_id) === orderId) ?? null;
     const parsed = entry ? parseCloreOrder(entry) : null;
@@ -841,6 +856,21 @@ async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId:
     if (health.ok && base) {
       await deps.sleep(0);
       return base;
+    }
+    const providerStillDeploying = parsed?.deploymentState === "deploying";
+    const proxyLevel502 = base !== null && health.status === 502;
+    if (providerStillDeploying && proxyLevel502) {
+      deployingProxy502SinceMs ??= elapsedMs;
+      if (elapsedMs - deployingProxy502SinceMs >= DEPLOYING_PROXY_502_TIMEOUT_MS) {
+        const serverId = parsed?.serverId ?? (typeof readRunner().host?.serverId === "string" ? readRunner().host.serverId : null);
+        if (serverId) {
+          recordDeploymentFailure({ serverId, orderId, reason: "deploying_proxy_502_timeout" });
+          recordTemporaryDeploymentDeny({ serverId, orderId, reason: "deploying_proxy_502_timeout" });
+        }
+        throw new DeployingProxy502TimeoutError(orderId, serverId);
+      }
+    } else {
+      deployingProxy502SinceMs = null;
     }
     await deps.sleep(HTTP_READINESS_POLL_MS);
   }

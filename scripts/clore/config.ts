@@ -1,9 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { CloreConfig } from "./types";
+import { readTemporaryDeploymentDeniedServerIds, temporaryDeploymentDenylistPath } from "./deployment-host-blacklist";
 
 const CLORE_ENV_PATH = path.join(process.cwd(), ".secrets", "clore.env");
-const CLORE_TEMP_EXCLUDED_SERVERS_PATH = path.join(process.cwd(), ".secrets", "clore-temp-excluded-servers.json");
 export const PROJECT_TAG = "ai-video-platform-wan22";
 export const DEFAULT_DOCKER_IMAGE = "nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04";
 export const COMFY_RUNTIME_IMAGE =
@@ -69,23 +69,9 @@ function readExcludedServerIds(fileValues: Map<string, string>) {
     .split(",")
     .map((serverId) => serverId.trim())
     .filter((serverId) => /^\d+$/.test(serverId));
-  if (!existsSync(CLORE_TEMP_EXCLUDED_SERVERS_PATH)) {
-    return [...new Set(fromEnv)];
-  }
-  try {
-    const parsed = JSON.parse(readFileSync(CLORE_TEMP_EXCLUDED_SERVERS_PATH, "utf8")) as unknown;
-    const values = Array.isArray(parsed)
-      ? parsed
-      : parsed && typeof parsed === "object" && Array.isArray((parsed as { servers?: unknown[] }).servers)
-        ? (parsed as { servers: unknown[] }).servers
-        : [];
-    const fromFile = values
-      .map((value) => (typeof value === "string" || typeof value === "number" ? String(value).trim() : ""))
-      .filter((serverId) => /^\d+$/.test(serverId));
-    return [...new Set([...fromEnv, ...fromFile])];
-  } catch {
-    return [...new Set(fromEnv)];
-  }
+  const denylistPath = temporaryDeploymentDenylistPath();
+  const fromFile = existsSync(denylistPath) ? readTemporaryDeploymentDeniedServerIds(denylistPath) : [];
+  return [...new Set([...fromEnv, ...fromFile])];
 }
 
 export function loadCloreConfig(): CloreConfig {

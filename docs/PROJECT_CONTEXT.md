@@ -23,6 +23,7 @@ The active product is an image-only, local-first FLUX creation workspace. The on
 - Before an order ID exists, the image runner may only show `creating_order` or `create_order_failed`; HTTP endpoint waiting is shown only after a real order ID exists. Transient create-order network errors persist sanitized nested fetch cause details, reconcile `/my_orders`, then retry exactly once only if no order was created.
 - A local active-order JSON file or create lock is never trusted by itself. Studio refresh/start/cancel and the low-level create-order guard reconcile Clore `/my_orders`; if the provider has zero active orders, stale local order/lock/session execution state is cleared while preserving confirmed image tasks.
 - After an order ID is known or reconciled, every post-order failure path attempts cancellation and verifies active Clore orders return to zero.
+- If a Clore image order has an HTTP public hostname but remains `deploying` with only proxy-level `/healthz` 502 responses for 6 minutes, the runner cancels the order, preserves the image task, records a deployment failure, and temporarily denies that host for 24 hours.
 - Source acquisition manifests are separate from validated R2 restore manifests. Source manifests may omit unavailable hashes; restore manifests require exact size, SHA-256, runtime destination, cache key, and presigned download URL.
 - Successful PNG results are validated for signature and exact dimensions, hashed, thumbnailed, and persisted under ignored `local-data/image-results/`.
 
