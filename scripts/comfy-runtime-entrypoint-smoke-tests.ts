@@ -36,8 +36,14 @@ async function pollJson(url: string, predicate: (payload: Record<string, unknown
   throw new Error(`timed out waiting for ${url}: ${JSON.stringify(last)}`);
 }
 
-function stop(process: ChildProcessWithoutNullStreams) {
-  if (process.exitCode === null && !process.killed) process.kill();
+async function stop(process: ChildProcessWithoutNullStreams) {
+  if (process.exitCode !== null || process.killed) return;
+  await new Promise<void>((resolve) => {
+    const done = () => resolve();
+    process.once("exit", done);
+    process.kill();
+    setTimeout(done, 2_000).unref();
+  });
 }
 
 async function controllerHealthContract() {
@@ -65,7 +71,7 @@ async function controllerHealthContract() {
     const failed = await pollJson(`http://127.0.0.1:${port}/healthz`, (payload) => payload.stage === "runtime_failed");
     assert.equal(failed.error, "simulated comfy failure", "failed-ComfyUI health returns runtime_failed JSON");
   } finally {
-    stop(child);
+    await stop(child);
     rmSync(temp, { recursive: true, force: true });
   }
 }
@@ -104,11 +110,53 @@ async function entrypointKeepsControllerAliveWhenComfyFails() {
     assert.match(String(failed.error), /comfyui_unhealthy|No such file|FileNotFound|main\.py|supervisor_process_failure/, "first internal ComfyUI failure is surfaced");
     assert.equal(child.exitCode, null, "container supervisor remains alive after ComfyUI failure");
   } finally {
-    stop(child);
+    await stop(child);
     rmSync(temp, { recursive: true, force: true });
     if (!/supervisor_process_failure|FileNotFound|comfyui_unhealthy|database_preflight_failed/.test(output)) {
       throw new Error(`expected supervised failure logs, got: ${output.slice(-2000)}`);
     }
+  }
+}
+
+async function controllerStartsBeforeWorkspacePreparation() {
+  const temp = mkdtempSync(path.join(os.tmpdir(), "entrypoint-unwritable-workspace-"));
+  const port = await freePort();
+  const comfyPort = await freePort();
+  const blockedParent = path.join(temp, "workspace-parent-file");
+  writeFileSync(blockedParent, "not a directory", "utf8");
+  const unwritableWorkspace = path.join(blockedParent, "workspace");
+  const child = spawn("python", ["comfy-runtime/supervisor.py"], {
+    cwd: root,
+    env: {
+      ...process.env,
+      COMFY_WORKSPACE: unwritableWorkspace,
+      COMFY_BOOTSTRAP_DIR: path.join(temp, "bootstrap"),
+      COMFY_RUNTIME_DIR: path.join(root, "comfy-runtime"),
+      COMFY_PYTHON: "python",
+      COMFY_RUNTIME_MODE: "smoke_cpu",
+      COMFY_NODE_PROFILE: "image-flux",
+      COMFY_CONTROLLER_HOST: "127.0.0.1",
+      COMFY_CONTROLLER_PORT: String(port),
+      COMFYUI_PORT: String(comfyPort),
+      START_GPU_WORKER: "false",
+    },
+    stdio: "pipe",
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += String(chunk); });
+  child.stderr.on("data", (chunk) => { output += String(chunk); });
+  try {
+    const failed = await pollJson(`http://127.0.0.1:${port}/healthz`, (payload) => payload.controller === "alive" && payload.stage === "workspace_failed", 30_000);
+    assert.equal(failed.ready, false, "unwritable workspace is not considered ready");
+    assert.match(String(failed.error), /Not a directory|workspace-parent-file|WinError|Errno/, "workspace failure exposes exact sanitized exception");
+    const diagnostics = failed.diagnostics as { workspace?: Record<string, unknown> };
+    assert.equal(diagnostics.workspace?.workspace_path, unwritableWorkspace, "workspace path is exposed in diagnostics");
+    assert.equal(typeof diagnostics.workspace?.runtime_uid, "number", "runtime uid is exposed where available");
+    assert.ok("disk_free_bytes" in (diagnostics.workspace ?? {}) || "disk_error" in (diagnostics.workspace ?? {}), "disk diagnostics are exposed");
+    assert.equal(child.exitCode, null, `container supervisor remains alive after workspace failure: ${output.slice(-2000)}`);
+  } finally {
+    await stop(child);
+    rmSync(temp, { recursive: true, force: true });
   }
 }
 
@@ -122,7 +170,10 @@ async function main() {
   assert.match(dockerfile, /EXPOSE 8080/, "Dockerfile exposes controller port 8080");
   assert.ok(!entrypoint.includes("\r\n"), "entrypoint.sh has LF line endings");
   assert.match(execFileSync("git", ["ls-files", "--stage", "comfy-runtime/entrypoint.sh"], { cwd: root, encoding: "utf8" }), /^100755\s/, "entrypoint.sh is executable");
-  assert.ok(supervisor.indexOf('start_controller()') < supervisor.indexOf('start_process("comfyui"'), "controller starts before ComfyUI");
+  const mainBody = supervisor.slice(supervisor.indexOf("def main()"));
+  assert.ok(mainBody.indexOf('start_controller()') < mainBody.indexOf('start_process("comfyui"'), "controller starts before ComfyUI");
+  assert.ok(mainBody.indexOf('start_controller()') < mainBody.indexOf('prepare_workspace()'), "controller starts before workspace preparation");
+  assert.match(supervisor, /\/tmp\/image-runtime-bootstrap/, "initial controller state and logs use /tmp bootstrap storage");
   assert.match(controller, /ThreadingHTTPServer\(\(args\.host, args\.port\)/, "controller binds requested host and port");
   assert.match(controller, /"controller": "alive"/, "health reports controller alive");
   assert.match(controller, /"ready": ready/, "health separates readiness");
@@ -131,6 +182,7 @@ async function main() {
 
   execFileSync("python", ["-m", "py_compile", "comfy-runtime/supervisor.py", "comfy-runtime/controller.py", "comfy-runtime/healthcheck.py"], { cwd: root, stdio: "pipe" });
   await controllerHealthContract();
+  await controllerStartsBeforeWorkspacePreparation();
   await entrypointKeepsControllerAliveWhenComfyFails();
   console.log("comfy runtime entrypoint smoke tests: ok");
 }
