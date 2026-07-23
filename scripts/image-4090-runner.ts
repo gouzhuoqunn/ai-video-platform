@@ -514,10 +514,13 @@ function httpDiagnostics(order: Record<string, unknown>, parsed: ReturnType<type
     .filter((value): value is string => Boolean(value));
   const httpUrls = [...new Set([parsed?.controllerUrl ? sanitizeHttpUrl(parsed.controllerUrl) : null, ...allUrls].filter((value): value is string => Boolean(value)))];
   const ports = collectPortEntries(order);
+  const controllerUrl = parsed?.controllerUrl ? sanitizeHttpUrl(parsed.controllerUrl) : httpUrls[0] ?? null;
   return {
     clorePorts: ports,
     httpUrls,
-    controllerUrl: httpUrls[0] ?? null,
+    controllerUrl,
+    rawHttpPub: parsed?.httpPub ?? null,
+    endpointSource: parsed?.controllerUrlSource ?? (controllerUrl ? "alternate_http_public" : null),
     externalPort: externalControllerPort(ports),
   };
 }
@@ -529,6 +532,9 @@ function logEndpointDiagnostics(input: {
   clorePorts: string[];
   httpUrls: string[];
   selectedControllerUrl: string | null;
+  healthUrl: string | null;
+  endpointSource: string | null;
+  rawHttpPub: string | null;
   healthStatus: number | null;
   healthError: string | null;
 }) {
@@ -542,6 +548,9 @@ function logEndpointDiagnostics(input: {
     clore_ports: input.clorePorts,
     http_urls: input.httpUrls,
     selected_controller_url: input.selectedControllerUrl,
+    health_url: input.healthUrl,
+    endpoint_source: input.endpointSource,
+    http_pub: input.rawHttpPub,
     health_status: input.healthStatus,
     health_error: input.healthError,
   }));
@@ -758,7 +767,9 @@ async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId:
     const raw = await deps.cloreRequest<unknown>(config, "/my_orders", {}, { forceRefresh: true });
     const entry = orderRecords(raw).find((value) => String(value.id ?? value.order_id) === orderId) ?? null;
     const parsed = entry ? parseCloreOrder(entry) : null;
-    const diagnostics = entry ? httpDiagnostics(entry, parsed) : { clorePorts: [], httpUrls: [], controllerUrl: null, externalPort: null };
+    const diagnostics = entry
+      ? httpDiagnostics(entry, parsed)
+      : { clorePorts: [], httpUrls: [], controllerUrl: null, rawHttpPub: null, endpointSource: null, externalPort: null };
     if (parsed?.terminal) throw new Error(`订单已终止，HTTP 运行环境未启动：${parsed.deploymentState}`);
 
     const base = diagnostics.controllerUrl;
@@ -767,6 +778,7 @@ async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId:
       : !base
         ? "waiting_http_endpoint"
         : "checking_http_health";
+    const healthUrl = base ? `${base}/healthz` : null;
     const host = {
       ...(readRunner().host ?? {}),
       orderId,
@@ -777,6 +789,10 @@ async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId:
       clorePorts: diagnostics.clorePorts,
       cloreHttpUrls: diagnostics.httpUrls,
       controllerUrl: base,
+      selectedControllerUrl: base,
+      healthUrl,
+      endpointSource: diagnostics.endpointSource,
+      rawHttpPub: diagnostics.rawHttpPub,
       httpExternalPort: diagnostics.externalPort,
       httpState: base ? "checking /healthz" : "waiting_http_endpoint",
       lastHealthStatus: null,
@@ -790,7 +806,7 @@ async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId:
 
     let health = { ok: false, status: null as number | null, error: base ? null : "http_endpoint_missing" };
     if (base) {
-      health = deps.fetchHealth ? await deps.fetchHealth(`${base}/healthz`) : await defaultFetchHealth(`${base}/healthz`);
+      health = deps.fetchHealth ? await deps.fetchHealth(healthUrl ?? `${base}/healthz`) : await defaultFetchHealth(healthUrl ?? `${base}/healthz`);
     }
     logEndpointDiagnostics({
       orderId,
@@ -799,6 +815,9 @@ async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId:
       clorePorts: diagnostics.clorePorts,
       httpUrls: diagnostics.httpUrls,
       selectedControllerUrl: base,
+      healthUrl,
+      endpointSource: diagnostics.endpointSource,
+      rawHttpPub: diagnostics.rawHttpPub,
       healthStatus: health.status,
       healthError: health.error,
     });

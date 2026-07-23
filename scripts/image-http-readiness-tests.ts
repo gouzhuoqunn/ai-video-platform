@@ -116,13 +116,19 @@ function seed() {
 
 function depsFor(input: {
   controllerUrlAfter?: number;
+  httpPub?: string | null;
+  web?: string | null;
+  tcpPorts?: string[];
+  pubCluster?: string[];
   healthOkAfter?: number;
+  healthStatusBeforeOk?: number;
   cancelFails?: boolean;
   createRequestFailures?: number;
   reconcileOrderAfterFailure?: boolean;
   onFirstOrderPoll?: (session: ImageRunnerSession) => void;
   onSleep?: (session: ImageRunnerSession) => void;
   onRestore?: (session: ImageRunnerSession) => void;
+  onFetchHealth?: (url: string) => void;
 }) {
   let created = false;
   let cancelled = false;
@@ -137,8 +143,10 @@ function depsFor(input: {
     si: "79245",
     status: "running",
     mon_container: orderPolls > 1 ? 2 : 0,
-    tcp_ports: ["8080:24123"],
-    web: input.controllerUrlAfter !== undefined && orderPolls >= input.controllerUrlAfter ? "https://runtime.invalid/secret?token=redacted" : undefined,
+    tcp_ports: input.tcpPorts ?? ["8080:24123"],
+    pub_cluster: input.pubCluster ?? ["legacy.invalid"],
+    http_pub: input.controllerUrlAfter !== undefined && orderPolls >= input.controllerUrlAfter ? input.httpPub ?? undefined : undefined,
+    web: input.controllerUrlAfter !== undefined && orderPolls >= input.controllerUrlAfter ? input.web === null ? undefined : input.web ?? "https://runtime.invalid/secret?token=redacted" : undefined,
   });
   const deps: RunnerDeps = {
     loadConfig: config,
@@ -165,10 +173,12 @@ function depsFor(input: {
       if (orderPolls === 1) input.onFirstOrderPoll?.(session());
       return { orders: [rawOrder()] };
     },
-    fetchHealth: async () => {
+    fetchHealth: async (url) => {
+      input.onFetchHealth?.(url);
       healthPolls += 1;
       const ok = input.healthOkAfter !== undefined && healthPolls >= input.healthOkAfter;
-      return { ok, status: ok ? 200 : 503, error: ok ? null : "health_not_ready_fixture" };
+      const status = ok ? 200 : input.healthStatusBeforeOk ?? 503;
+      return { ok, status, error: ok ? null : `http_${status}` };
     },
     fetchJson: async (url) => {
       if (url.endsWith("/restore")) {
@@ -205,6 +215,56 @@ async function main() {
     await runImage4090Batch(harness.deps);
     assert.equal(immediate?.stage, "order_created_waiting_http", "order ID immediately advances session stage");
     assert.equal(immediate?.host?.orderId, "1972821", "order ID immediately persists");
+  });
+
+  await withSeeded(async () => {
+    let healthUrl: string | null = null;
+    let restoreSession: ImageRunnerSession | null = null;
+    const harness = depsFor({
+      controllerUrlAfter: 1,
+      httpPub: "2i451z7dttj3i.cloreai.ru",
+      web: null,
+      tcpPorts: [],
+      pubCluster: ["n1.msk.cloreai.ru"],
+      healthOkAfter: 1,
+      onFetchHealth: (url) => { healthUrl = url; },
+      onRestore: (session) => { restoreSession = session; },
+    });
+    await runImage4090Batch(harness.deps);
+    assert.equal(healthUrl, "https://2i451z7dttj3i.cloreai.ru/healthz", "http_pub hostname + empty mapped ports resolves successfully");
+    assert.equal(restoreSession?.host?.controllerUrl, "https://2i451z7dttj3i.cloreai.ru", "empty mapped ports are accepted for HTTP-only orders");
+    assert.equal(restoreSession?.host?.endpointSource, "http_pub", "endpoint source is persisted as http_pub");
+    assert.equal(restoreSession?.host?.rawHttpPub, "https://2i451z7dttj3i.cloreai.ru", "sanitized http_pub is persisted");
+    assert.ok(!String(restoreSession?.host?.controllerUrl).includes(":8080"), "no :8080 appended to HTTP proxy hostname");
+  });
+
+  await withSeeded(async () => {
+    let healthUrl: string | null = null;
+    const harness = depsFor({
+      controllerUrlAfter: 1,
+      httpPub: "https://runtime.example.invalid",
+      web: null,
+      tcpPorts: [],
+      healthOkAfter: 1,
+      onFetchHealth: (url) => { healthUrl = url; },
+    });
+    await runImage4090Batch(harness.deps);
+    assert.equal(healthUrl, "https://runtime.example.invalid/healthz", "http_pub full URL resolves without duplicate scheme");
+  });
+
+  await withSeeded(async () => {
+    let healthUrl: string | null = null;
+    const harness = depsFor({
+      controllerUrlAfter: 1,
+      httpPub: "right-runtime.example.invalid",
+      web: "https://wrong-runtime.example.invalid",
+      tcpPorts: ["8080:12345"],
+      pubCluster: ["wrong-cluster.example.invalid"],
+      healthOkAfter: 1,
+      onFetchHealth: (url) => { healthUrl = url; },
+    });
+    await runImage4090Batch(harness.deps);
+    assert.equal(healthUrl, "https://right-runtime.example.invalid/healthz", "pub_cluster is not treated as the HTTP URL when http_pub exists");
   });
 
   await withSeeded(async () => {
@@ -246,19 +306,20 @@ async function main() {
 
   await withSeeded(async () => {
     let waiting: ImageRunnerSession | null = null;
-    const harness = depsFor({ onSleep: (session) => { waiting ??= session; } });
+    const harness = depsFor({ tcpPorts: [], pubCluster: [], onSleep: (session) => { waiting ??= session; } });
     await assert.rejects(() => runImage4090Batch(harness.deps), /12 分钟内未就绪/);
     assert.equal(waiting?.stage, "waiting_http_endpoint", "missing HTTP URL updates waiting state");
+    assert.equal(waiting?.host?.lastHealthError, "http_endpoint_missing", "missing all endpoint fields returns http_endpoint_missing");
     assert.equal(harness.cancelCount(), 1, "12-minute timeout fixture cancels order");
   });
 
   await withSeeded(async () => {
     let health: ImageRunnerSession | null = null;
-    const harness = depsFor({ controllerUrlAfter: 1, onSleep: (session) => { health ??= session; } });
+    const harness = depsFor({ controllerUrlAfter: 1, healthStatusBeforeOk: 502, onSleep: (session) => { health ??= session; } });
     await assert.rejects(() => runImage4090Batch(harness.deps), /12 分钟内未就绪/);
     assert.equal(health?.stage, "checking_http_health", "health polling enters checking state");
     assert.ok(health?.host?.lastPollAt, "health polling updates timestamps");
-    assert.equal(health?.host?.lastHealthStatus, 503, "health polling persists status code");
+    assert.equal(health?.host?.lastHealthStatus, 502, "502 continues polling and persists status code");
   });
 
 await withSeeded(async () => {
@@ -269,7 +330,7 @@ await withSeeded(async () => {
 });
 
   const studio = readFileSync(path.join(process.cwd(), "src", "components", "ImageCreationStudio.tsx"), "utf8");
-  for (const token of ["order_created_waiting_deployment", "waiting_http_endpoint", "checking_http_health", "runtime_ready", "lastHealthError", "readinessElapsedSeconds"]) {
+  for (const token of ["order_created_waiting_deployment", "waiting_http_endpoint", "checking_http_health", "runtime_ready", "lastHealthError", "readinessElapsedSeconds", "selectedControllerUrl", "healthUrl", "endpointSource", "rawHttpPub"]) {
     assert.match(studio, new RegExp(token), `UI renders ${token} without nullable crashes`);
   }
   } finally {

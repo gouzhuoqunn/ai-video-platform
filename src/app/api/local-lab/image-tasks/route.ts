@@ -70,6 +70,10 @@ export type ImageRunnerSession = {
     clorePorts?: string[] | null;
     cloreHttpUrls?: string[] | null;
     controllerUrl?: string | null;
+    selectedControllerUrl?: string | null;
+    healthUrl?: string | null;
+    endpointSource?: string | null;
+    rawHttpPub?: string | null;
     httpExternalPort?: number | null;
     lastHealthStatus?: number | null;
     lastHealthError?: string | null;
@@ -223,6 +227,10 @@ function normalizeHost(value: unknown): ImageRunnerSession["host"] {
     clorePorts: stringArrayOrNull(host.clorePorts),
     cloreHttpUrls: stringArrayOrNull(host.cloreHttpUrls),
     controllerUrl: stringOrNull(host.controllerUrl),
+    selectedControllerUrl: stringOrNull(host.selectedControllerUrl),
+    healthUrl: stringOrNull(host.healthUrl),
+    endpointSource: stringOrNull(host.endpointSource),
+    rawHttpPub: stringOrNull(host.rawHttpPub),
     httpExternalPort: finiteNumber(host.httpExternalPort),
     lastHealthStatus: finiteNumber(host.lastHealthStatus),
     lastHealthError: stringOrNull(host.lastHealthError),

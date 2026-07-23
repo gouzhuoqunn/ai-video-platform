@@ -15,6 +15,8 @@ export type ParsedCloreOrder = {
   fullSshCommandPresent: boolean;
   forwardedPorts: string[];
   controllerUrl: string | null;
+  controllerUrlSource: "http_pub" | "alternate_http_public" | "legacy_mapped_port" | null;
+  httpPub: string | null;
   rawFieldNames: string[];
 };
 
@@ -34,6 +36,22 @@ function firstString(record: Record<string, unknown>, names: string[]) {
 function firstPort(record: Record<string, unknown>, names: string[]) {
   const port = Number(firstString(record, names));
   return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+}
+
+function sanitizeHttpUrl(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const input = value.trim();
+    const url = new URL(/^https?:\/\//i.test(input) ? input : `https://${input}`);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
 }
 
 export function validSshHost(value: string) {
@@ -77,6 +95,57 @@ function exactSshCommand(order: Record<string, unknown>) {
   return null;
 }
 
+function mappedControllerPort(value: unknown) {
+  const entries = Array.isArray(value)
+    ? value.map(String)
+    : value && typeof value === "object"
+      ? Object.entries(value as Record<string, unknown>).map(([left, right]) => `${left}:${String(right)}`)
+      : [];
+  for (const entry of entries) {
+    const match = /^(\d{1,5}):(\d{1,5})$/.exec(entry.trim());
+    if (!match) continue;
+    const left = Number(match[1]); const right = Number(match[2]);
+    if (left === 8080 && right > 0 && right <= 65535) return right;
+    if (right === 8080 && left > 0 && left <= 65535) return left;
+  }
+  return null;
+}
+
+function resolveHttpControllerUrl(order: Record<string, unknown>, clusters: string[]) {
+  const connection = asRecord(order.connection);
+  const httpPub = sanitizeHttpUrl(firstString(order, ["http_pub"]));
+  if (httpPub) return { controllerUrl: httpPub, controllerUrlSource: "http_pub" as const, httpPub };
+
+  const alternate = [
+    connection.web,
+    connection.http_url,
+    connection.http_pub,
+    connection.http_public,
+    connection.http_public_url,
+    connection.http_proxy,
+    connection.http_host,
+    connection.http_hostname,
+    connection.http_domain,
+    connection.http_endpoint,
+    connection.url,
+    order.web,
+    order.http_url,
+    order.http_public,
+    order.http_public_url,
+    order.http_proxy,
+    order.http_host,
+    order.http_hostname,
+    order.http_domain,
+    order.http_endpoint,
+    order.url,
+  ].map(sanitizeHttpUrl).find((value): value is string => Boolean(value));
+  if (alternate) return { controllerUrl: alternate, controllerUrlSource: "alternate_http_public" as const, httpPub };
+
+  const port = mappedControllerPort(order.tcp_ports);
+  if (clusters[0] && port) return { controllerUrl: `https://${clusters[0]}:${port}`, controllerUrlSource: "legacy_mapped_port" as const, httpPub };
+  return { controllerUrl: null, controllerUrlSource: null, httpPub };
+}
+
 export function orderRecords(payload: unknown) {
   const record = asRecord(payload);
   const values = Array.isArray(record.orders) ? record.orders : Array.isArray(record.data) ? record.data : Array.isArray(payload) ? payload : [];
@@ -113,12 +182,11 @@ export function parseCloreOrder(order: Record<string, unknown>): ParsedCloreOrde
   const command = exactSshCommand(order);
   if (!ssh && command) { ssh = parseSshCommand(command); if (ssh) sshSource = "ssh_command"; }
   const forwardedPorts = Array.isArray(order.tcp_ports) ? order.tcp_ports.map(String) : [];
-  const httpCandidate = [connection.web, connection.http_url, connection.url, order.web, order.http_url, order.url]
-    .find((value): value is string => typeof value === "string" && /^https:\/\/[A-Za-z0-9.-]+(?:\/[^\s]*)?$/i.test(value));
+  const http = resolveHttpControllerUrl(order, clusters);
   return {
     orderId: firstString(order, ["id", "order_id"]), serverId: firstString(order, ["si", "server_id", "renting_server"]), active, terminal,
     lifecycleStatus: explicitLifecycle?.toLowerCase() ?? (expired ? "expired" : "active"), deploymentState, deploymentReady, ssh, sshSource,
-    fullSshCommandPresent: Boolean(command), forwardedPorts, controllerUrl: httpCandidate ?? null, rawFieldNames: Object.keys(order).sort(),
+    fullSshCommandPresent: Boolean(command), forwardedPorts, controllerUrl: http.controllerUrl, controllerUrlSource: http.controllerUrlSource, httpPub: http.httpPub, rawFieldNames: Object.keys(order).sort(),
   };
 }
 

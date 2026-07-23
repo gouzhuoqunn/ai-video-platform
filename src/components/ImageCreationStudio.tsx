@@ -61,6 +61,10 @@ type Runner = {
     clorePorts?: string[] | null;
     cloreHttpUrls?: string[] | null;
     controllerUrl?: string | null;
+    selectedControllerUrl?: string | null;
+    healthUrl?: string | null;
+    endpointSource?: string | null;
+    rawHttpPub?: string | null;
     httpExternalPort?: number | string | null;
     lastHealthStatus?: number | string | null;
     lastHealthError?: string | null;
@@ -294,6 +298,7 @@ export function ImageCreationStudio() {
   const host = runner?.host ?? null;
   const orderCreated = Boolean(host?.orderId);
   const httpAddressState = !orderCreated ? "—" : host?.controllerUrl ? "已获得" : "正在等待";
+  const controllerDisplay = host?.selectedControllerUrl ?? host?.controllerUrl ?? host?.rawHttpPub ?? null;
   const copiedRunnerError = runnerError
     ? [
         runnerError.stage ?? "执行错误",
@@ -343,6 +348,7 @@ export function ImageCreationStudio() {
             <span>订单 ID</span><b>{host.orderId ?? "—"}</b>
             <span>Clore 部署</span><b>{host.deploymentState ?? "—"}</b>
             <span>HTTP 地址</span><b>{httpAddressState}</b>
+            <span>HTTP 主机</span><b className="break-all">{controllerDisplay ?? "—"}</b>
             <span>/healthz</span><b>{host.httpState ?? "—"}</b>
             <span>等待时间</span><b>{secondsLabel(host.readinessElapsedSeconds)}</b>
           </div>
@@ -368,6 +374,10 @@ export function ImageCreationStudio() {
                 ["Clore 端口", listLabel(host.clorePorts)],
                 ["HTTP URLs", listLabel(host.cloreHttpUrls)],
                 ["Controller", host.controllerUrl],
+                ["Selected Controller", host.selectedControllerUrl],
+                ["Health URL", host.healthUrl],
+                ["Endpoint Source", host.endpointSource],
+                ["HTTP Pub", host.rawHttpPub],
                 ["外部 8080 端口", host.httpExternalPort],
                 ["Health 状态码", host.lastHealthStatus],
                 ["Health 错误", host.lastHealthError],
