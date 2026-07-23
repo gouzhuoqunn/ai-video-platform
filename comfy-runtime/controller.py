@@ -18,6 +18,7 @@ from image_workflow import assert_node_classes, build_text_workflow, validate_re
 
 STARTED_AT = time.time()
 WORKSPACE = Path(os.environ.get("COMFY_WORKSPACE", "/workspace"))
+BOOTSTRAP_DIR = Path(os.environ.get("COMFY_BOOTSTRAP_DIR", "/tmp/image-runtime-bootstrap"))
 
 
 def sanitize_text(value: object, limit: int = 4000) -> str:
@@ -83,6 +84,11 @@ class ControllerState:
             "runtime_mode": payload.get("runtime_mode") or os.environ.get("COMFY_RUNTIME_MODE", "gpu"),
             "gpu_profile": payload.get("gpu_profile") or os.environ.get("COMFY_GPU_PROFILE", ""),
             "model_directories": payload.get("model_directories") or [str(WORKSPACE / "models")],
+            "workspace": payload.get("workspace") or {
+                "workspace_path": str(WORKSPACE),
+                "runtime_uid": os.getuid() if hasattr(os, "getuid") else -1,
+                "runtime_gid": os.getgid() if hasattr(os, "getgid") else -1,
+            },
             "uptime_seconds": max(0, int(time.time() - STARTED_AT)),
             "port_binding": f"{self.bind_host}:{self.bind_port}",
             "comfyui_base_url": self.comfy_base_url,
@@ -250,8 +256,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--comfy-host", default="127.0.0.1")
     parser.add_argument("--comfy-port", type=int, default=8188)
-    parser.add_argument("--state-path", default=os.environ.get("COMFY_RUNTIME_STATE_PATH", str(WORKSPACE / "logs" / "runtime-state.json")))
-    parser.add_argument("--log-dir", default=os.environ.get("COMFY_LOG_DIR", str(WORKSPACE / "logs")))
+    parser.add_argument("--state-path", default=os.environ.get("COMFY_RUNTIME_STATE_PATH", str(BOOTSTRAP_DIR / "runtime-state.json")))
+    parser.add_argument("--log-dir", default=os.environ.get("COMFY_LOG_DIR", str(BOOTSTRAP_DIR / "logs")))
     args = parser.parse_args()
     if args.comfy_host == "0.0.0.0":
         raise SystemExit("ComfyUI must not bind to 0.0.0.0")

@@ -9,18 +9,21 @@ import sys
 import threading
 import time
 import urllib.request
+import shutil
 from pathlib import Path
 
 
 WORKSPACE = Path(os.environ.get("COMFY_WORKSPACE", "/workspace"))
-LOG_DIR = Path(os.environ.get("COMFY_LOG_DIR", str(WORKSPACE / "logs")))
+BOOTSTRAP_DIR = Path(os.environ.get("COMFY_BOOTSTRAP_DIR", "/tmp/image-runtime-bootstrap"))
+BOOTSTRAP_LOG_DIR = BOOTSTRAP_DIR / "logs"
+LOG_DIR = Path(os.environ.get("COMFY_LOG_DIR", str(BOOTSTRAP_LOG_DIR)))
 COMFY_USER_DIR = WORKSPACE / "comfy-user"
 COMFY_DATABASE_PATH = COMFY_USER_DIR / "comfyui.db"
 COMFY_DIR = Path(os.environ.get("COMFYUI_DIR", "/opt/ComfyUI"))
 RUNTIME_DIR = Path(os.environ.get("COMFY_RUNTIME_DIR", "/opt/image-runtime"))
 COMFY_PYTHON = os.environ.get("COMFY_PYTHON", "python3")
 SMOKE_IMPORT_BLOCKER = RUNTIME_DIR / "smoke_import_blocker"
-RUNTIME_STATE_PATH = Path(os.environ.get("COMFY_RUNTIME_STATE_PATH", str(LOG_DIR / "runtime-state.json")))
+RUNTIME_STATE_PATH = Path(os.environ.get("COMFY_RUNTIME_STATE_PATH", str(BOOTSTRAP_DIR / "runtime-state.json")))
 GPU_PROFILES = {"rtx4090", "rtx5090", "ampere_image_gpu"}
 REQUIRED_DIRS = [
     WORKSPACE / "models",
@@ -48,6 +51,67 @@ def sanitize_text(value: object, limit: int = 2000) -> str:
     for marker in ["CLORE_API_KEY", "SUPABASE_SECRET_KEY", "SUPABASE_SERVICE_ROLE_KEY", "R2_SECRET", "SSH_PRIVATE"]:
         text = text.replace(marker, "<redacted>")
     return text[-limit:]
+
+
+def uid_gid() -> dict[str, int]:
+    return {
+        "uid": os.getuid() if hasattr(os, "getuid") else -1,
+        "gid": os.getgid() if hasattr(os, "getgid") else -1,
+    }
+
+
+def mount_info(path: Path) -> dict[str, object]:
+    best: dict[str, object] = {"mount_point": None, "filesystem": None, "mount_options": None}
+    try:
+        resolved = path.resolve(strict=False)
+        if Path("/proc/mounts").exists():
+            for line in Path("/proc/mounts").read_text(encoding="utf-8", errors="replace").splitlines():
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                mount_point = parts[1].replace("\\040", " ")
+                try:
+                    if str(resolved).startswith(str(Path(mount_point).resolve(strict=False))) and (
+                        best["mount_point"] is None or len(mount_point) > len(str(best["mount_point"]))
+                    ):
+                        best = {"mount_point": mount_point, "filesystem": parts[2], "mount_options": parts[3]}
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return best
+
+
+def workspace_diagnostics(error: object | None = None) -> dict[str, object]:
+    diagnostics: dict[str, object] = {
+        "workspace_path": str(WORKSPACE),
+        "runtime_uid": uid_gid()["uid"],
+        "runtime_gid": uid_gid()["gid"],
+        "error": sanitize_text(error) if error else None,
+    }
+    try:
+        stat_result = WORKSPACE.stat()
+        diagnostics.update({
+            "workspace_exists": True,
+            "workspace_owner_uid": stat_result.st_uid,
+            "workspace_owner_gid": stat_result.st_gid,
+            "workspace_mode": f"{stat_result.st_mode & 0o777:o}",
+        })
+    except Exception as stat_error:
+        diagnostics.update({
+            "workspace_exists": False,
+            "workspace_stat_error": sanitize_text(stat_error, 500),
+        })
+    try:
+        usage = shutil.disk_usage(WORKSPACE if WORKSPACE.exists() else WORKSPACE.parent)
+        diagnostics.update({
+            "disk_total_bytes": usage.total,
+            "disk_free_bytes": usage.free,
+        })
+    except Exception as disk_error:
+        diagnostics["disk_error"] = sanitize_text(disk_error, 500)
+    diagnostics.update(mount_info(WORKSPACE))
+    return diagnostics
 
 
 def write_state(stage: str, error: object | None = None, extra: dict[str, object] | None = None) -> None:
@@ -79,6 +143,7 @@ def write_state(stage: str, error: object | None = None, extra: dict[str, object
 
 
 def ensure_directories() -> None:
+    write_state("preparing_workspace", extra={"workspace": workspace_diagnostics()})
     for directory in REQUIRED_DIRS:
         directory.mkdir(parents=True, exist_ok=True)
         probe = directory / ".write-test"
@@ -121,7 +186,16 @@ def ensure_database_preflight() -> None:
         )
     except Exception as error:
         log(f"database_preflight_failed: {error}")
-        write_state("runtime_failed", f"database_preflight_failed: {error}")
+        raise
+
+
+def prepare_workspace() -> None:
+    try:
+        ensure_directories()
+        ensure_database_preflight()
+        write_state("workspace_ready", extra={"workspace": workspace_diagnostics()})
+    except Exception as error:
+        write_state("workspace_failed", error, {"workspace": workspace_diagnostics(error)})
         raise
 
 
@@ -262,6 +336,7 @@ def start_process(
     cwd: Path,
     log_file: str,
     env: dict[str, str] | None = None,
+    write_start_state: bool = True,
 ) -> subprocess.Popen[str]:
     process = subprocess.Popen(
         args,
@@ -274,7 +349,8 @@ def start_process(
     )
     children[name] = process
     threading.Thread(target=stream_output, args=(name, process, LOG_DIR / log_file), daemon=True).start()
-    write_state(f"{name}_started")
+    if write_start_state:
+        write_state(f"{name}_started")
     return process
 
 
@@ -301,6 +377,7 @@ def start_controller() -> subprocess.Popen[str]:
         ],
         RUNTIME_DIR,
         "controller.log",
+        write_start_state=False,
     )
 
 
@@ -334,16 +411,16 @@ def main() -> int:
         log(f"invalid_comfy_runtime_mode: {mode}")
         return 2
 
-    ensure_directories()
     signal.signal(signal.SIGTERM, stop_children)
     signal.signal(signal.SIGINT, stop_children)
 
-    write_state("starting_controller")
+    write_state("preparing_workspace", extra={"workspace": workspace_diagnostics()})
     start_controller()
-    write_state("starting_comfyui")
+    write_state("preparing_workspace", extra={"workspace": workspace_diagnostics()})
 
     try:
-        ensure_database_preflight()
+        prepare_workspace()
+        write_state("starting_comfyui")
         if mode == "gpu":
             gpu_preflight()
         node_profile = os.environ.get("COMFY_NODE_PROFILE", "image-flux")
@@ -359,7 +436,16 @@ def main() -> int:
             code = comfy.poll()
             supervise_failure(f"supervisor_process_failure: comfyui_unhealthy exit_code={code}")
     except Exception as error:
-        supervise_failure(error)
+        current_stage = ""
+        try:
+            if RUNTIME_STATE_PATH.exists():
+                current_stage = str(json.loads(RUNTIME_STATE_PATH.read_text(encoding="utf-8")).get("stage") or "")
+        except Exception:
+            current_stage = ""
+        if current_stage == "workspace_failed":
+            log(f"workspace_failed: {sanitize_text(str(error))}")
+        else:
+            supervise_failure(error)
 
     while not stopping:
         controller = children.get("controller")

@@ -253,6 +253,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "CPU smoke validates controller/ComfyUI lifecycle without GPU; it is not a real Clore deployment or inference test."
           image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
           container="runtime-hygiene-smoke-${GITHUB_RUN_ID}"
           object_info="${RUNNER_TEMP}/runtime-hygiene-object-info-${GITHUB_RUN_ID}.json"
@@ -323,6 +324,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "Entrypoint smoke validates lifecycle failure handling; it is not a real Clore deployment or inference test."
           image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
           container="runtime-entrypoint-smoke-${GITHUB_RUN_ID}"
           cleanup() {
@@ -344,10 +346,43 @@ jobs:
           docker ps --format '{{.Names}}' | grep -Fx "${container}"
           docker logs "${container}" | grep -E 'supervisor_process_failure|runtime_failed|No such file|FileNotFound|comfyui_unhealthy'
           echo "RUNTIME_ENTRYPOINT_SMOKE_COMPLETE=true"
+      - name: Runtime entrypoint smoke keeps controller alive on unwritable workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Unwritable workspace smoke reproduces Clore pre-controller coverage; it is not a real Clore deployment or inference test."
+          image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
+          container="runtime-unwritable-workspace-${GITHUB_RUN_ID}"
+          workspace="${RUNNER_TEMP}/readonly-workspace-${GITHUB_RUN_ID}"
+          mkdir -p "${workspace}"
+          chmod 0555 "${workspace}"
+          cleanup() {
+            docker logs --tail 200 "${container}" || true
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+            chmod 0755 "${workspace}" || true
+            rm -rf "${workspace}" || true
+          }
+          trap cleanup EXIT
+          docker run -d --name "${container}" \
+            -e START_GPU_WORKER=false \
+            -e COMFY_RUNTIME_MODE=smoke_cpu \
+            -e COMFY_NODE_PROFILE=image-flux \
+            -p 127.0.0.1:18082:8080 \
+            --mount "type=bind,source=${workspace},target=/workspace,readonly" \
+            "${image}"
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18082/healthz | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("controller")=="alive" and p.get("stage")=="workspace_failed" and p.get("ready") is False and p.get("diagnostics",{}).get("workspace",{}).get("workspace_path")=="/workspace"'; then break; fi
+            test "${attempt}" -lt 30
+            sleep 1
+          done
+          docker ps --format '{{.Names}}' | grep -Fx "${container}"
+          docker logs "${container}" | grep -E 'workspace_failed|Permission denied|Read-only file system'
+          echo "RUNTIME_UNWRITABLE_WORKSPACE_SMOKE_COMPLETE=true"
       - name: GPU no-device fail closed
         shell: bash
         run: |
           set -euo pipefail
+          echo "GPU no-device smoke validates GPU preflight failure handling; it is not a real Clore deployment or inference test."
           image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
           container="runtime-gpu-no-device-${GITHUB_RUN_ID}"
           cleanup() {
