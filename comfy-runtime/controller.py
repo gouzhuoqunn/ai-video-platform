@@ -16,15 +16,85 @@ from pathlib import Path
 from image_workflow import assert_node_classes, build_text_workflow, validate_request, workflow_metadata
 
 
+STARTED_AT = time.time()
+WORKSPACE = Path(os.environ.get("COMFY_WORKSPACE", "/workspace"))
+
+
+def sanitize_text(value: object, limit: int = 4000) -> str:
+    text = str(value)
+    replacements = [
+        "CLORE_API_KEY",
+        "SUPABASE_SECRET_KEY",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_SECRET",
+        "R2_SECRET",
+        "SSH_PRIVATE",
+        "TOKEN=",
+        "PASSWORD=",
+    ]
+    for marker in replacements:
+        text = text.replace(marker, "<redacted>")
+    return text[-limit:]
+
+
+def tail_lines(path: Path, max_lines: int = 12) -> list[str]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return []
+    return [sanitize_text(line, 500) for line in lines[-max_lines:]]
+
+
 class ControllerState:
-    def __init__(self, comfy_host: str, comfy_port: int) -> None:
+    def __init__(self, comfy_host: str, comfy_port: int, state_path: Path, log_dir: Path, bind_host: str, bind_port: int) -> None:
         self.comfy_host = comfy_host
         self.comfy_port = comfy_port
+        self.state_path = state_path
+        self.log_dir = log_dir
+        self.bind_host = bind_host
+        self.bind_port = bind_port
         self.jobs: dict[str, dict[str, object]] = {}
 
     @property
     def comfy_base_url(self) -> str:
         return f"http://{self.comfy_host}:{self.comfy_port}"
+
+    def runtime_state(self) -> dict[str, object]:
+        payload: dict[str, object] = {}
+        try:
+            if self.state_path.is_file():
+                loaded = json.loads(self.state_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    payload = loaded
+        except Exception as error:
+            payload = {"stage": "state_read_failed", "error": sanitize_text(error)}
+
+        stage = str(payload.get("stage") or "starting_comfyui")
+        ready = payload.get("ready") is True
+        error = payload.get("error")
+        diagnostics = {
+            "controller_pid": os.getpid(),
+            "supervisor_controller_pid": payload.get("controller_pid"),
+            "comfyui_pid": payload.get("comfyui_pid"),
+            "stage": stage,
+            "comfyui_exit_code": payload.get("comfyui_exit_code"),
+            "last_stderr_lines": tail_lines(self.log_dir / "comfyui.log"),
+            "node_profile": payload.get("node_profile") or os.environ.get("COMFY_NODE_PROFILE", "image-flux"),
+            "runtime_mode": payload.get("runtime_mode") or os.environ.get("COMFY_RUNTIME_MODE", "gpu"),
+            "gpu_profile": payload.get("gpu_profile") or os.environ.get("COMFY_GPU_PROFILE", ""),
+            "model_directories": payload.get("model_directories") or [str(WORKSPACE / "models")],
+            "uptime_seconds": max(0, int(time.time() - STARTED_AT)),
+            "port_binding": f"{self.bind_host}:{self.bind_port}",
+            "comfyui_base_url": self.comfy_base_url,
+            "last_state_update": payload.get("updated_at"),
+        }
+        return {
+            "controller": "alive",
+            "ready": ready,
+            "stage": "runtime_ready" if ready else stage,
+            "error": sanitize_text(error) if error else None,
+            "diagnostics": diagnostics,
+        }
 
 
 def request_upstream(url: str, method: str = "GET", body: bytes | None = None) -> tuple[int, dict[str, str], bytes]:
@@ -75,8 +145,7 @@ def make_handler(state: ControllerState):
         def do_GET(self) -> None:
             parsed = urllib.parse.urlsplit(self.path)
             if parsed.path == "/healthz":
-                status, _headers, response = request_upstream(f"{state.comfy_base_url}/system_stats")
-                self.send_json(200 if status == 200 else 503, {"ok": status == 200, "comfyui_status": status, "comfyui": json_payload(response)})
+                self.send_json(200, state.runtime_state())
                 return
             if parsed.path == "/queue":
                 self.proxy_json("/queue")
@@ -181,10 +250,12 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--comfy-host", default="127.0.0.1")
     parser.add_argument("--comfy-port", type=int, default=8188)
+    parser.add_argument("--state-path", default=os.environ.get("COMFY_RUNTIME_STATE_PATH", str(WORKSPACE / "logs" / "runtime-state.json")))
+    parser.add_argument("--log-dir", default=os.environ.get("COMFY_LOG_DIR", str(WORKSPACE / "logs")))
     args = parser.parse_args()
     if args.comfy_host == "0.0.0.0":
         raise SystemExit("ComfyUI must not bind to 0.0.0.0")
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(ControllerState(args.comfy_host, args.comfy_port)))
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(ControllerState(args.comfy_host, args.comfy_port, Path(args.state_path), Path(args.log_dir), args.host, args.port)))
     signal.signal(signal.SIGTERM, lambda *_args: server.shutdown())
     signal.signal(signal.SIGINT, lambda *_args: server.shutdown())
     server.serve_forever()

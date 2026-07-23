@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -205,6 +206,25 @@ async function withSeeded<T>(fn: () => Promise<T>) {
   }
 }
 
+async function withHealthServer(handler: (hit: number) => Record<string, unknown>, fn: (baseUrl: string, hits: () => number) => Promise<void>) {
+  let hit = 0;
+  const server = http.createServer((request, response) => {
+    hit += 1;
+    const payload = request.url === "/healthz" ? handler(hit) : { error: "not_found" };
+    response.writeHead(request.url === "/healthz" ? 200 : 404, { "content-type": "application/json" });
+    response.end(JSON.stringify(payload));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  assert.ok(address);
+  try {
+    await fn(`http://127.0.0.1:${address.port}`, () => hit);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
 async function main() {
   const originalInfo = console.info;
   console.info = () => undefined;
@@ -328,6 +348,25 @@ await withSeeded(async () => {
   await runImage4090Batch(harness.deps);
   assert.equal(ready?.stage, "runtime_ready", "successful /healthz fixture reaches runtime_ready");
 });
+
+  await withSeeded(async () => {
+    await withHealthServer((hit) => hit < 2
+      ? { controller: "alive", ready: false, stage: "starting_comfyui", error: null }
+      : { controller: "alive", ready: true, stage: "runtime_ready", error: null }, async (baseUrl, hits) => {
+      let ready: ImageRunnerSession | null = null;
+      const harness = depsFor({
+        controllerUrlAfter: 1,
+        httpPub: baseUrl,
+        web: null,
+        tcpPorts: [],
+        onSleep: (session) => { if (session.stage === "runtime_ready") ready = session; },
+      });
+      delete (harness.deps as { fetchHealth?: unknown }).fetchHealth;
+      await runImage4090Batch(harness.deps);
+      assert.equal(ready?.stage, "runtime_ready", "runner waits for health ready=true, not only HTTP 200");
+      assert.ok(hits() >= 2, "ready=false health response is polled again");
+    });
+  });
 
   const studio = readFileSync(path.join(process.cwd(), "src", "components", "ImageCreationStudio.tsx"), "utf8");
   for (const token of ["order_created_waiting_deployment", "waiting_http_endpoint", "checking_http_health", "runtime_ready", "lastHealthError", "readinessElapsedSeconds", "selectedControllerUrl", "healthUrl", "endpointSource", "rawHttpPub"]) {

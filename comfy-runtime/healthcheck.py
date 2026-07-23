@@ -14,7 +14,7 @@ def main() -> int:
     try:
         with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8"))
-            return 0 if response.status == 200 and payload.get("ok") is True else 1
+            return 0 if response.status == 200 and payload.get("controller") == "alive" else 1
     except Exception:
         return 1
 

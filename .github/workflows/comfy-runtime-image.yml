@@ -14,6 +14,7 @@ on:
       - "scripts/verify-comfy-object-info.py"
       - "scripts/comfy-d4-acceptance-tests.ts"
       - "scripts/comfy-runtime-contract-tests.ts"
+      - "scripts/comfy-runtime-entrypoint-smoke-tests.ts"
       - "scripts/comfy-runtime-mode-tests.ts"
       - "scripts/comfy-node-profile-tests.ts"
       - "package.json"
@@ -119,7 +120,12 @@ jobs:
           }
           trap cleanup EXIT
           for attempt in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8080/healthz | grep -F '"ok": true'; then break; fi
+            if curl -fsS http://127.0.0.1:8080/healthz | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("controller")=="alive"'; then break; fi
+            test "${attempt}" -lt 60
+            sleep 5
+          done
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/healthz | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("ready") is True'; then break; fi
             test "${attempt}" -lt 60
             sleep 5
           done
@@ -143,7 +149,7 @@ jobs:
           ! printf '%s\n' "${top_output}" | grep -Eq 'python(3(\.11)?)?[[:space:]]+/app/worker\.py|wan_runner\.py|gpu-worker'
           docker restart "${container}" >/dev/null
           for attempt in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8080/healthz | grep -F '"ok": true'; then break; fi
+            if curl -fsS http://127.0.0.1:8080/healthz | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("controller")=="alive" and p.get("ready") is True'; then break; fi
             test "${attempt}" -lt 60
             sleep 5
           done
@@ -262,8 +268,13 @@ jobs:
             rm -f -- "${object_info}"
           }
           trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("controller")=="alive"'; then break; fi
+            test "${attempt}" -lt 30
+            sleep 5
+          done
           for attempt in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8080/healthz | grep -F '"ok": true'; then break; fi
+            if curl -fsS http://127.0.0.1:8080/healthz | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("ready") is True and p.get("stage")=="runtime_ready"'; then break; fi
             test "${attempt}" -lt 60
             sleep 5
           done
@@ -300,7 +311,7 @@ jobs:
           ! docker port "${container}" 8188
           docker restart "${container}" >/dev/null
           for attempt in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8080/healthz | grep -F '"ok": true'; then break; fi
+            if curl -fsS http://127.0.0.1:8080/healthz | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("controller")=="alive" and p.get("ready") is True'; then break; fi
             test "${attempt}" -lt 60
             sleep 5
           done
@@ -308,17 +319,50 @@ jobs:
           docker stop --time 15 "${container}" >/dev/null
           test "$(docker inspect --format '{{.State.Status}}' "${container}")" = exited
           echo "CPU_NO_MODEL_SMOKE_COMPLETE=true"
+      - name: Runtime entrypoint smoke keeps controller alive on ComfyUI failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
+          container="runtime-entrypoint-smoke-${GITHUB_RUN_ID}"
+          cleanup() {
+            docker logs --tail 200 "${container}" || true
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run -d --name "${container}" \
+            -e START_GPU_WORKER=false \
+            -e COMFY_RUNTIME_MODE=smoke_cpu \
+            -e COMFY_NODE_PROFILE=image-flux \
+            -e COMFYUI_DIR=/tmp/missing-comfyui \
+            -p 127.0.0.1:18080:8080 "${image}"
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/healthz | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("controller")=="alive" and p.get("stage")=="runtime_failed" and p.get("ready") is False'; then break; fi
+            test "${attempt}" -lt 30
+            sleep 1
+          done
+          docker ps --format '{{.Names}}' | grep -Fx "${container}"
+          docker logs "${container}" | grep -E 'supervisor_process_failure|runtime_failed|No such file|FileNotFound|comfyui_unhealthy'
+          echo "RUNTIME_ENTRYPOINT_SMOKE_COMPLETE=true"
       - name: GPU no-device fail closed
         shell: bash
         run: |
           set -euo pipefail
           image="${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}"
-          set +e
-          docker run --rm -e START_GPU_WORKER=false -e COMFY_RUNTIME_MODE=gpu -e COMFY_GPU_PROFILE=rtx4090 -e COMFY_NODE_PROFILE=image-flux "${image}" >/tmp/runtime-hygiene-gpu.log 2>&1
-          code=$?
-          set -e
-          test "${code}" -ne 0
-          grep -F 'gpu_preflight_failed' /tmp/runtime-hygiene-gpu.log
-          ! grep -F 'starting ComfyUI runtime' /tmp/runtime-hygiene-gpu.log
-          docker run --rm --entrypoint /bin/sh "${image}" -c 'test ! -e /app/worker.py'
+          container="runtime-gpu-no-device-${GITHUB_RUN_ID}"
+          cleanup() {
+            docker logs --tail 200 "${container}" || true
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run -d --name "${container}" -e START_GPU_WORKER=false -e COMFY_RUNTIME_MODE=gpu -e COMFY_GPU_PROFILE=rtx4090 -e COMFY_NODE_PROFILE=image-flux -p 127.0.0.1:18081:8080 "${image}"
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18081/healthz | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("controller")=="alive" and p.get("stage")=="runtime_failed" and p.get("ready") is False'; then break; fi
+            test "${attempt}" -lt 30
+            sleep 1
+          done
+          docker ps --format '{{.Names}}' | grep -Fx "${container}"
+          docker logs "${container}" | grep -F 'gpu_preflight_failed'
+          ! docker logs "${container}" | grep -F 'starting ComfyUI runtime'
+          docker exec "${container}" sh -lc 'test ! -e /app/worker.py'
           echo "GPU_FAIL_CLOSED_COMPLETE=true"

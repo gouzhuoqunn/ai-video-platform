@@ -454,7 +454,12 @@ async function defaultFetchBinary(url: string, init?: RequestInit) {
 async function defaultFetchHealth(url: string) {
   try {
     const response = await fetch(url);
-    return { ok: response.ok, status: response.status, error: response.ok ? null : `http_${response.status}` };
+    const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!response.ok) return { ok: false, status: response.status, error: `http_${response.status}` };
+    if (body?.controller === "alive" && body.ready === true) return { ok: true, status: response.status, error: null };
+    const stage = typeof body?.stage === "string" ? body.stage : "runtime_not_ready";
+    const detail = typeof body?.error === "string" && body.error ? `:${body.error}` : "";
+    return { ok: false, status: response.status, error: `${stage}${detail}` };
   } catch (error) {
     return { ok: false, status: null, error: error instanceof Error ? error.message : String(error) };
   }

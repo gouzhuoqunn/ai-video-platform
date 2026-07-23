@@ -40,5 +40,6 @@ COPY node-profiles/image-flux.json /opt/image-runtime/node-profiles/image-flux.j
 COPY smoke_import_blocker/ /opt/image-runtime/smoke_import_blocker/
 RUN python3 -m compileall -q /opt/image-runtime
 
+EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD python3 /opt/image-runtime/healthcheck.py
 ENTRYPOINT ["/opt/image-runtime/entrypoint.sh"]
