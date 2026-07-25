@@ -22,6 +22,17 @@ export type RemoteImageModel = {
   size_bytes: number;
 };
 
+/** The only model shape the restricted Agent accepts over its public API. */
+export type AgentModelEntry = {
+  role: string;
+  filename: string;
+  url: string;
+  sha256: string;
+  size_bytes: number;
+};
+
+export type AgentModelManifest = { models: AgentModelEntry[] };
+
 export type ImageModelPreflight = {
   models: RemoteImageModel[];
   checked: Array<{ id: string; status: number; contentLength: number; source: "civitai" | "huggingface" }>;
@@ -154,6 +165,59 @@ export async function verifyFiveImageModelSources(input: { fetchImpl?: FetchLike
     checked.push({ id, status: probe.status, contentLength: probe.contentLength, source: artifact.source });
   }
   return { models, checked };
+}
+
+/**
+ * Projects the local resolver records onto the deliberately narrow remote
+ * contract. Do not replace this with object spread: local identity and retry
+ * metadata must never cross the Agent boundary.
+ */
+export function toAgentModelManifest(resolvedModels: ReadonlyArray<RemoteImageModel>): AgentModelManifest {
+  if (resolvedModels.length !== REQUIRED_IDS.length) throw new Error("exactly_five_models_required");
+  const expectedRoles = new Set(Object.values(ROLE_BY_ID));
+  const seenRoles = new Set<string>();
+  const models = resolvedModels.map((model) => {
+    if (!expectedRoles.has(model.role) || seenRoles.has(model.role)) throw new Error("invalid_or_duplicate_model_role");
+    if (!model.filename || /[\\/]|\.\./.test(model.filename)) throw new Error("invalid_model_filename");
+    if (!/^[a-f0-9]{64}$/i.test(model.sha256) || !Number.isSafeInteger(model.size_bytes) || model.size_bytes <= 0) throw new Error("invalid_model_hash_or_size");
+    requireHttps(model.url, "invalid_model_url");
+    seenRoles.add(model.role);
+    return {
+      role: model.role,
+      filename: model.filename,
+      url: model.url,
+      sha256: model.sha256,
+      size_bytes: model.size_bytes,
+    };
+  });
+  if (seenRoles.size !== expectedRoles.size) throw new Error("missing_approved_model_role");
+  return { models };
+}
+
+/** Runs the committed restricted Agent validator locally before renting. */
+export function validateAgentModelManifestContract(manifest: AgentModelManifest) {
+  const agentPath = path.join(process.cwd(), "scripts", "clore", "diagnostic-agent.py");
+  const script = [
+    "import importlib.util,json,sys",
+    "s=importlib.util.spec_from_file_location('agent',sys.argv[1])",
+    "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)",
+    "m.validate_manifest(json.load(sys.stdin))",
+  ].join(";");
+  const candidates: Array<[string, string[]]> = process.platform === "win32"
+    ? [["py", ["-3", "-c", script, agentPath]], ["python", ["-c", script, agentPath]]]
+    : [["python3", ["-c", script, agentPath]], ["python", ["-c", script, agentPath]]];
+  for (const [command, args] of candidates) {
+    const result = spawnSync(command, args, { cwd: process.cwd(), input: JSON.stringify(manifest), encoding: "utf8", windowsHide: true });
+    if (result.status === 0) return;
+    if (result.error?.code === "ENOENT") continue;
+    throw new Error("agent_model_manifest_contract_rejected");
+  }
+  throw new Error("agent_model_manifest_validator_unavailable");
+}
+
+/** Keep local-only identity separate when a single signed URL must be refreshed. */
+export function indexResolvedModelsById(resolvedModels: ReadonlyArray<RemoteImageModel>) {
+  return new Map(resolvedModels.map((model) => [model.id, model] as const));
 }
 
 export function sanitizeImageModelPreflight(value: ImageModelPreflight) {
