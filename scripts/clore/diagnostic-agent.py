@@ -38,7 +38,8 @@ VENV = WORKSPACE / "clore-diagnostic-venv"
 COMFY_DIR = WORKSPACE / "ComfyUI"
 COMFY_URL = "https://github.com/comfyanonymous/ComfyUI.git"
 COMFY_COMMIT = "da2608926eaf68fd532bba4e1ace3402c5d21399"
-PYTORCH_INDEX = "https://download.pytorch.org/whl/cu124"
+PYTORCH_CU128_INDEX = "https://download.pytorch.org/whl/cu128"
+TORCH_REQUIREMENTS = ("torch==2.8.0", "torchvision==0.23.0", "torchaudio==2.8.0")
 RAW_ROOT = "https://raw.githubusercontent.com/gouzhuoqunn/ai-video-platform"
 MAX_TEXT = 6000
 MAX_MODEL_BODY = 64 * 1024
@@ -107,6 +108,31 @@ def sha256(path: Path) -> str:
 def exec_fixed(command: list[str], timeout: int = 90, cwd: Path | None = None) -> dict[str, Any]:
     result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, cwd=str(cwd) if cwd else None)
     return {"command": " ".join(command), "exit_code": result.returncode, "output": clean(result.stdout)}
+
+
+def exec_logged(name: str, command: list[str], timeout: int, cwd: Path | None = None) -> dict[str, Any]:
+    """Run one fixed long-lived installer while retaining a bounded, sanitized summary."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log = LOG_DIR / f"{name}.log"
+    started_at = now(); started = time.monotonic(); timed_out = False; exit_code: int | None = None
+    with log.open("w", encoding="utf-8") as handle:
+        process = subprocess.Popen(command, cwd=str(cwd) if cwd else None, stdout=handle, stderr=subprocess.STDOUT, text=True)
+        try:
+            exit_code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.terminate()
+            try: exit_code = process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                process.kill(); exit_code = process.wait(timeout=10)
+    lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+    patterns = re.compile(r"ERROR|WARNING: Retrying|ResolutionImpossible|No matching distribution|Could not find|dependency conflict|Requires-Python|Killed|No space left|Traceback|subprocess-exited-with-error|externally-managed-environment", re.I)
+    return {"command": " ".join(command), "log_path": str(log), "started_at": started_at, "finished_at": now(), "duration_seconds": round(time.monotonic() - started, 3), "exit_code": exit_code, "timed_out": timed_out, "first_output_lines": [clean(line, 500) for line in lines[:30]], "final_output_lines": [clean(line, 500) for line in lines[-120:]], "error_matches": [clean(line, 500) for line in lines if patterns.search(line)]}
+
+
+class StageFailure(RuntimeError):
+    def __init__(self, message: str, data: dict[str, Any]):
+        super().__init__(message); self.data = data
 
 
 def writable(directory: str) -> dict[str, Any]:
@@ -290,6 +316,35 @@ def write_runtime_state(stage: str, ready: bool, error: str | None = None) -> No
     (ROOT / "controller-state.json").write_text(json.dumps(state), encoding="utf-8")
 
 
+def write_comfy_requirements() -> tuple[Path, Path]:
+    source = COMFY_DIR / "requirements.txt"; filtered = ROOT / "comfy-requirements.filtered.txt"; constraints = ROOT / "comfy-torch.constraints.txt"
+    ROOT.mkdir(parents=True, exist_ok=True)
+    kept: list[str] = []
+    torch_line = re.compile(r"^\s*(torch|torchvision|torchaudio)(?:\s|[<>=!~;\[])|^\s*(torch|torchvision|torchaudio)\s*$", re.I)
+    for line in source.read_text(encoding="utf-8").splitlines():
+        if not torch_line.match(line): kept.append(line)
+    filtered.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    constraints.write_text("\n".join(TORCH_REQUIREMENTS) + "\n", encoding="utf-8")
+    return filtered, constraints
+
+
+def torch_probe_command() -> list[str]:
+    code = "import json,torch,torchvision,torchaudio;assert torch.__version__.startswith('2.8');assert str(torch.version.cuda).startswith('12.8');assert torch.cuda.is_available();name=torch.cuda.get_device_name(0);assert 'RTX 4090' in name;x=torch.tensor([1.0],device='cuda');assert float((x+1).item())==2.0;p=torch.cuda.get_device_properties(0);print(json.dumps({'torch':torch.__version__,'cuda':torch.version.cuda,'gpu':name,'vram':p.total_memory,'torchvision':torchvision.__version__,'torchaudio':torchaudio.__version__}))"
+    return [venv_python(), "-c", code]
+
+
+def comfy_import_probe_command() -> list[str]:
+    return [venv_python(), "-c", "import torch,torchvision,torchaudio,aiohttp,transformers,safetensors,comfy_aimdo,comfy_kitchen;print('comfy_imports_ok')"]
+
+
+def install_failure(step: str, result: dict[str, Any]) -> StageFailure:
+    diagnostics = {"step": step, "exit_code": result["exit_code"], "timed_out": result["timed_out"], "duration_seconds": result["duration_seconds"], "error_matches": result["error_matches"], "final_output_lines": result["final_output_lines"], "full_log_path": result["log_path"], "disk_free": exec_fixed(["df", "-h", "/workspace"], 30), "venv_python": exec_fixed([venv_python(), "--version"], 30), "pip_version": exec_fixed([venv_python(), "-m", "pip", "--version"], 30), "torch_versions": exec_fixed([venv_python(), "-c", "import json,torch;print(json.dumps({'torch':torch.__version__,'cuda':torch.version.cuda}))"], 30)}
+    if isinstance(result["exit_code"], int) and result["exit_code"] < 0:
+        diagnostics["memory"] = exec_fixed(["free", "-h"], 30)
+        diagnostics["dmesg_tail"] = exec_fixed(["dmesg", "--color=never"], 30)
+    return StageFailure(f"{step}_failed", diagnostics)
+
+
 def stage_comfyui(_: dict[str, Any]) -> dict[str, Any]:
     workspace = writable(str(WORKSPACE))
     if not workspace["writable"]:
@@ -297,13 +352,13 @@ def stage_comfyui(_: dict[str, Any]) -> dict[str, Any]:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     progress: dict[str, Any] = {"workspace": workspace, "venv": str(VENV), "comfy_commit": COMFY_COMMIT}
     progress["ensure_venv"] = ensure_venv()
-    progress["install_torch"] = exec_fixed([venv_python(), "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools"], 600)
+    progress["install_torch"] = exec_logged("pip-bootstrap", [venv_python(), "-m", "pip", "install", "--no-input", "--progress-bar", "off", "--upgrade", "pip", "wheel", "setuptools"], 600)
     if progress["install_torch"]["exit_code"]:
-        raise RuntimeError(progress["install_torch"]["output"])
-    progress["install_cuda_torch"] = exec_fixed([venv_python(), "-m", "pip", "install", "torch==2.6.0", "torchvision==0.21.0", "--index-url", PYTORCH_INDEX], 1800)
+        raise install_failure("pip_bootstrap", progress["install_torch"])
+    progress["install_cuda_torch"] = exec_logged("pip-cuda-torch", [venv_python(), "-m", "pip", "install", "--no-input", "--progress-bar", "off", *TORCH_REQUIREMENTS, "--index-url", PYTORCH_CU128_INDEX], 1800)
     if progress["install_cuda_torch"]["exit_code"]:
-        raise RuntimeError(progress["install_cuda_torch"]["output"])
-    progress["torch_probe"] = exec_fixed([venv_python(), "-c", "import json,torch;assert torch.cuda.is_available();p=torch.cuda.get_device_properties(0);assert 'RTX 4090' in torch.cuda.get_device_name(0);print(json.dumps({'torch':torch.__version__,'cuda':torch.version.cuda,'gpu':torch.cuda.get_device_name(0),'vram':p.total_memory}))"], 90)
+        raise install_failure("install_cuda_torch", progress["install_cuda_torch"])
+    progress["torch_probe"] = exec_fixed(torch_probe_command(), 90)
     if progress["torch_probe"]["exit_code"]:
         raise RuntimeError("cuda_torch_probe_failed:" + progress["torch_probe"]["output"])
     if not COMFY_DIR.exists():
@@ -316,15 +371,25 @@ def stage_comfyui(_: dict[str, Any]) -> dict[str, Any]:
     progress["checkout_comfy"] = exec_fixed(["git", "checkout", "--detach", COMFY_COMMIT], 120, COMFY_DIR)
     if progress["checkout_comfy"]["exit_code"]:
         raise RuntimeError(progress["checkout_comfy"]["output"])
-    progress["install_comfy"] = exec_fixed([venv_python(), "-m", "pip", "install", "-r", "requirements.txt"], 1800, COMFY_DIR)
+    filtered_requirements, constraints = write_comfy_requirements()
+    progress["install_comfy"] = exec_logged("pip-comfy-requirements", [venv_python(), "-m", "pip", "install", "--no-input", "--progress-bar", "off", "--constraint", str(constraints), "-r", str(filtered_requirements)], 1800, COMFY_DIR)
     if progress["install_comfy"]["exit_code"]:
-        raise RuntimeError(progress["install_comfy"]["output"])
+        raise install_failure("install_comfy_requirements", progress["install_comfy"])
+    progress["pip_check"] = exec_logged("pip-check", [venv_python(), "-m", "pip", "check"], 180)
+    if progress["pip_check"]["exit_code"]:
+        raise install_failure("pip_check", progress["pip_check"])
+    progress["comfy_import_probe"] = exec_fixed(comfy_import_probe_command(), 90)
+    if progress["comfy_import_probe"]["exit_code"]:
+        raise RuntimeError("comfy_import_probe_failed:" + progress["comfy_import_probe"]["output"])
     log = LOG_DIR / "comfyui.log"
     previous = CHILDREN.get("comfyui")
     if previous and previous.poll() is None:
         previous.terminate()
     handle = log.open("w", encoding="utf-8")
-    process = subprocess.Popen([venv_python(), "main.py", "--listen", "127.0.0.1", "--port", "8188"], cwd=str(COMFY_DIR), stdout=handle, stderr=subprocess.STDOUT, text=True)
+    try:
+        process = subprocess.Popen([venv_python(), "main.py", "--listen", "127.0.0.1", "--port", "8188"], cwd=str(COMFY_DIR), stdout=handle, stderr=subprocess.STDOUT, text=True)
+    finally:
+        handle.close()
     CHILDREN["comfyui"] = process
     results = {route: probe("http://127.0.0.1:8188" + route, 60) for route in ("/system_stats", "/object_info", "/queue")}
     results.update({"progress": progress, "process_exit_code": process.poll(), "log_tail": tail(log)})
@@ -513,7 +578,7 @@ def run_stage(route: str, payload: dict[str, Any]) -> bool:
             time.sleep(test_stage_delay())
             complete(name, action(payload))
         except Exception as error:
-            failed(name, error)
+            failed(name, error, getattr(error, "data", None))
         finally:
             STAGE_GATE.release()
     threading.Thread(target=worker, daemon=True).start()
@@ -537,7 +602,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, value); return
         if route in {"/status", "/logs"}:
             with STATE_LOCK:
-                value = json.loads(json.dumps(STATE)) if route == "/status" else {name: record.get("log_tail", []) for name, record in STATE["stages"].items()}
+                value = json.loads(json.dumps(STATE)) if route == "/status" else {name: {"log_tail": record.get("log_tail", []), "error_matches": record.get("data", {}).get("error_matches", []), "final_output_lines": record.get("data", {}).get("final_output_lines", [])} for name, record in STATE["stages"].items()}
             self.send_json(200, value); return
         match = re.fullmatch(r"/artifacts/([^/]+)/(image|metadata)", route)
         if match:
