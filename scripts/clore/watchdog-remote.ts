@@ -11,6 +11,7 @@ import {
   putRemoteWatchdogState,
   readRemoteWatchdogArmState,
   readRemoteWatchdogHeartbeat,
+  writeWatchdogReadyReceipt,
   writeLocalWatchdogArmState,
 } from "./watchdog-io";
 import type { WatchdogArmState } from "./watchdog-core";
@@ -103,6 +104,7 @@ async function arm() {
     throw new Error("Remote watchdog armed, but local watchdog tick failed. Disarm before retrying.");
   }
   await waitForRemoteHeartbeat(state.serverId, state.armedAt);
+  writeWatchdogReadyReceipt({ serverId: state.serverId, sessionNonce: state.sessionNonce, checkedAt: new Date().toISOString() });
   const output = JSON.stringify(
     {
       armed: true,

@@ -538,12 +538,18 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--token-sha256", required=True)
-    parser.add_argument("--project-commit", required=True)
-    parser.add_argument("--controller-sha256", required=True)
-    parser.add_argument("--workflow-sha256", required=True)
+    parser.add_argument("--project-commit")
+    parser.add_argument("--controller-sha256")
+    parser.add_argument("--workflow-sha256")
+    parser.add_argument("--immutable", help="commit:controller_sha256:workflow_sha256")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
-    if not COMMIT_RE.fullmatch(args.project_commit) or not SHA_RE.fullmatch(args.controller_sha256) or not SHA_RE.fullmatch(args.workflow_sha256) or not SHA_RE.fullmatch(args.token_sha256):
+    if args.immutable:
+        parts = args.immutable.split(":")
+        if len(parts) != 3:
+            raise SystemExit("immutable_sha256_and_project_commit_required")
+        args.project_commit, args.controller_sha256, args.workflow_sha256 = parts
+    if not args.project_commit or not args.controller_sha256 or not args.workflow_sha256 or not COMMIT_RE.fullmatch(args.project_commit) or not SHA_RE.fullmatch(args.controller_sha256) or not SHA_RE.fullmatch(args.workflow_sha256) or not SHA_RE.fullmatch(args.token_sha256):
         raise SystemExit("immutable_sha256_and_project_commit_required")
     CONFIG.update({"project_commit": args.project_commit.lower(), "controller_sha256": args.controller_sha256.lower(), "workflow_sha256": args.workflow_sha256.lower()})
     ROOT.mkdir(parents=True, exist_ok=True); LOG_DIR.mkdir(parents=True, exist_ok=True)

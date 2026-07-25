@@ -15,6 +15,8 @@ import {
 const WRANGLER_CONFIG = "cloudflare/clore-watchdog/wrangler.toml";
 export const LOCAL_WATCHDOG_HEARTBEAT_PATH = path.join(process.cwd(), ".secrets", "clore-local-watchdog-heartbeat.json");
 export const LOCAL_WATCHDOG_TASK_NAME = "AiVideoPlatformCloreWatchdog";
+export const LOCAL_WATCHDOG_READY_PATH = path.join(process.cwd(), ".secrets", "clore-watchdog-ready.json");
+type WatchdogReadyReceipt = { serverId: string; sessionNonce: string; checkedAt: string };
 
 function secretsPath(relativePath: string) {
   return path.join(process.cwd(), relativePath);
@@ -51,20 +53,38 @@ export function writeLocalWatchdogArmState(state: WatchdogArmState) {
   writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 }
 
+export function writeWatchdogReadyReceipt(receipt: WatchdogReadyReceipt) {
+  mkdirSync(path.dirname(LOCAL_WATCHDOG_READY_PATH), { recursive: true });
+  writeFileSync(LOCAL_WATCHDOG_READY_PATH, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+}
+
+export function readWatchdogReadyReceipt(): WatchdogReadyReceipt | null {
+  if (!existsSync(LOCAL_WATCHDOG_READY_PATH)) return null;
+  try {
+    const receipt = JSON.parse(readFileSync(LOCAL_WATCHDOG_READY_PATH, "utf8")) as Partial<WatchdogReadyReceipt>;
+    if (!receipt.serverId || !receipt.sessionNonce || !receipt.checkedAt) return null;
+    return { serverId: receipt.serverId, sessionNonce: receipt.sessionNonce, checkedAt: receipt.checkedAt };
+  } catch { return null; }
+}
+
 function runWrangler(args: string[]) {
   const wrangler = buildWranglerCommand(args);
-  const result = spawnSync(wrangler.command, wrangler.args, {
-    cwd: process.cwd(),
-    encoding: "utf8",
-    stdio: "pipe",
-    timeout: 120000,
-  });
-  if (result.status !== 0) {
-    const spawnError = result.error ? ` (${result.error.message})` : "";
-    const message = `${result.stderr || result.stdout || "wrangler failed"}`.replace(/auth:\s*[A-Za-z0-9_-]+/gi, "auth:<redacted>");
-    throw new Error(`${message.trim()}${spawnError}`.trim());
+  let last: ReturnType<typeof spawnSync> | null = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const result = spawnSync(wrangler.command, wrangler.args, {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: "pipe",
+      timeout: 120000,
+    });
+    if (result.status === 0) return result.stdout;
+    last = result;
+    const message = `${result.stderr || result.stdout || result.error?.message || "wrangler failed"}`;
+    if (!/fetch failed|network|connect/i.test(message)) break;
   }
-  return result.stdout;
+  const spawnError = last?.error ? ` (${last.error.message})` : "";
+  const message = `${last?.stderr || last?.stdout || "wrangler failed"}`.replace(/auth:\s*[A-Za-z0-9_-]+/gi, "auth:<redacted>");
+  throw new Error(`${message.trim()}${spawnError}`.trim());
 }
 
 export function putRemoteWatchdogState(state: WatchdogArmState) {

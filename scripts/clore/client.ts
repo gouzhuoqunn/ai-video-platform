@@ -22,6 +22,9 @@ export type CloreRequestOptions = {
   forceRefresh?: boolean;
   onCreateUncertain?: () => Promise<boolean>;
   beforeCreateRetry?: () => Promise<void>;
+  /** Opt out of automatic retries for one-shot, operator-authorized calls. */
+  maxRateLimitRetries?: number;
+  maxNetworkRetries?: number;
 };
 
 type FetchLike = typeof fetch;
@@ -240,7 +243,7 @@ export class CloreRequestScheduler {
             clearTimeout(timer);
           }
         } catch (error) {
-          if (networkAttempts >= 2) throw error;
+          if (networkAttempts >= (options.maxNetworkRetries ?? 2)) throw error;
           networkAttempts += 1;
           if (endpoint === "/create_order" && await options.onCreateUncertain?.()) {
             throw new Error("create_order outcome uncertain: active order found during recovery.");
@@ -258,7 +261,7 @@ export class CloreRequestScheduler {
         const code = typeof payload.code === "number" ? payload.code : response.ok ? 0 : response.status;
         this.log({ endpoint, at: new Date().toISOString(), status: response.status, retry: rateLimitAttempts });
         if (response.status === 429 || code === 5) {
-          if (rateLimitAttempts >= 3) throw new Error("Clore API rate limit persisted after retries.");
+          if (rateLimitAttempts >= (options.maxRateLimitRetries ?? 3)) throw new Error("Clore API rate limit persisted after retries.");
           rateLimitAttempts += 1;
           if (endpoint === "/create_order") await options.beforeCreateRetry?.();
           await this.sleepFn(this.backoff(rateLimitAttempts - 1, retryAfter));

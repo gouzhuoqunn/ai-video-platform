@@ -1,0 +1,210 @@
+import { createHash } from "node:crypto";
+import type { EligibleImageTask } from "./run-image-e2e";
+import type { LocalArtifactReference } from "../../src/lib/image-generation/local-image-artifacts";
+
+export const IMAGE_E2E_PHASES = ["PRERENTAL", "ORDER", "AGENT", "RUNTIME", "MODELS", "CLAIM", "INFERENCE", "ARTIFACT", "FINALIZE", "UI_VERIFY", "CANCEL", "DONE"] as const;
+export type ImageE2ePhase = (typeof IMAGE_E2E_PHASES)[number];
+
+export type SanitizedImageE2eSession = {
+  schemaVersion: 1;
+  taskId: string;
+  phase: ImageE2ePhase;
+  orderId: string | null;
+  endpoint: string | null;
+  immutableCommit: string;
+  tokenFile: string;
+  tokenSha256: string;
+  claimTokenHash: string | null;
+  artifact: LocalArtifactReference | null;
+  remoteArtifact: { byteSize: number; sha256: string; width: number; height: number; generationDurationSeconds: number; controllerPromptId: string | null } | null;
+  stages: Record<string, "pending" | "running" | "succeeded" | "failed">;
+  timestamps: Partial<Record<ImageE2ePhase, string>>;
+  lastError: string | null;
+};
+
+export type RemoteArtifact = NonNullable<SanitizedImageE2eSession["remoteArtifact"]> & { png: Buffer };
+export type ModelEntry = { role: string; filename: string; url: string; sha256: string; size_bytes: number };
+export type InferenceReceiptDetail = {
+  acceptedHttpStatus?: number;
+  error?: string;
+  controllerPromptId?: string | null;
+  remoteArtifact?: Omit<NonNullable<SanitizedImageE2eSession["remoteArtifact"]>, "controllerPromptId">;
+};
+export type ReceiptEvent = "artifact_downloaded" | "task_finalized" | "ui_verified" | "order_cancelled";
+
+export type CoordinatorDeps = {
+  now: () => string;
+  persist: (session: SanitizedImageE2eSession) => void;
+  load: () => SanitizedImageE2eSession | null;
+  prerental: (taskId: string) => Promise<EligibleImageTask>;
+  readEligibleTask: (taskId: string) => Promise<EligibleImageTask>;
+  createOrder: () => Promise<{ orderId: string; endpoint: string }>;
+  reconnect: (orderId: string) => Promise<{ active: boolean; endpoint: string | null }>;
+  armWatchdog: (orderId: string) => Promise<void>;
+  disarmWatchdog: () => Promise<void>;
+  health: (endpoint: string) => Promise<{ alive: boolean; currentStage: string; lastError: string | null }>;
+  stage: (endpoint: string, stage: "environment" | "gpu" | "controller" | "comfyui" | "models" | "inference", payload?: object) => Promise<{ status: "succeeded" | "failed"; error?: string }>;
+  submitInference: (endpoint: string, payload: object) => Promise<{ acceptedHttpStatus: 202 }>;
+  pollInference: (endpoint: string) => Promise<{ status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> }>;
+  inferenceReceipt?: (event: "submitting" | "accepted" | "succeeded" | "failed", detail?: InferenceReceiptDetail) => Promise<void>;
+  receiptEvent?: (event: ReceiptEvent, detail?: InferenceReceiptDetail) => Promise<void>;
+  resolveModels: () => Promise<ModelEntry[]>;
+  claim: (task: EligibleImageTask) => Promise<{ token: string; tokenHash: string }>;
+  startHeartbeat: (taskId: string, token: string) => { stop: () => void; assertHealthy: () => void };
+  retrieveArtifact: (endpoint: string, taskId: string) => Promise<RemoteArtifact>;
+  publishAndFinalize: (task: EligibleImageTask, token: string, artifact: RemoteArtifact, orderId: string) => Promise<LocalArtifactReference>;
+  verifyUi: (taskId: string) => Promise<void>;
+  failClaim: (taskId: string, token: string, error: string) => Promise<void>;
+  cancelExactOrder: (orderId: string) => Promise<void>;
+  confirmNoActiveOrders: () => Promise<void>;
+};
+
+function clean(value: unknown) {
+  return String(value instanceof Error ? value.message : value)
+    .replace(/([?&](?:x-amz-|signature|token|credential)[^=&]*=)[^&\s]+/gi, "$1<redacted>")
+    .replace(/(bearer\s+)[^\s]+/gi, "$1<redacted>")
+    .replace(/(civitai_api_token|hf_token|clore_api_key|password|secret)\s*[:=]\s*[^\s]+/gi, "$1=<redacted>")
+    .slice(0, 1000);
+}
+
+function initial(input: { taskId: string; immutableCommit: string; tokenFile: string; tokenSha256: string }): SanitizedImageE2eSession {
+  return { schemaVersion: 1, taskId: input.taskId, phase: "PRERENTAL", orderId: null, endpoint: null, immutableCommit: input.immutableCommit, tokenFile: input.tokenFile, tokenSha256: input.tokenSha256, claimTokenHash: null, artifact: null, remoteArtifact: null, stages: {}, timestamps: { PRERENTAL: new Date().toISOString() }, lastError: null };
+}
+
+function mark(deps: CoordinatorDeps, session: SanitizedImageE2eSession, phase: ImageE2ePhase, patch: Partial<SanitizedImageE2eSession> = {}) {
+  const next = { ...session, ...patch, phase, timestamps: { ...session.timestamps, [phase]: deps.now() } };
+  deps.persist(next);
+  return next;
+}
+
+function inferencePayload(task: EligibleImageTask) {
+  return { task_id: task.id, mode: "text_generation", prompt: task.prompt, width: task.width, height: task.height, steps: task.steps, cfg: task.cfg, lora_strength: task.loraStrength, seed: task.seed, sampler: task.sampler };
+}
+
+function inferenceReceiptDetail(data: Record<string, unknown> | undefined): InferenceReceiptDetail {
+  if (!data) return {};
+  const byteSize = Number(data.byte_size);
+  const width = Number(data.width);
+  const height = Number(data.height);
+  const generationDurationSeconds = Number(data.generation_duration_seconds);
+  const sha256 = typeof data.sha256 === "string" && /^[a-f0-9]{64}$/i.test(data.sha256) ? data.sha256.toLowerCase() : null;
+  const remoteArtifact = Number.isSafeInteger(byteSize) && byteSize > 0 && Number.isSafeInteger(width) && width > 0 && Number.isSafeInteger(height) && height > 0 && Number.isFinite(generationDurationSeconds) && generationDurationSeconds >= 0 && sha256
+    ? { byteSize, sha256, width, height, generationDurationSeconds }
+    : undefined;
+  return {
+    controllerPromptId: typeof data.controller_prompt_id === "string" ? data.controller_prompt_id.slice(0, 200) : null,
+    remoteArtifact,
+  };
+}
+
+async function requiredStage(deps: CoordinatorDeps, session: SanitizedImageE2eSession, endpoint: string, name: "environment" | "gpu" | "controller" | "comfyui", payload?: object) {
+  session.stages[name] = "running"; deps.persist(session);
+  const result = await deps.stage(endpoint, name, payload);
+  session.stages[name] = result.status; deps.persist(session);
+  if (result.status !== "succeeded") throw new Error(`${name}_stage_failed:${clean(result.error ?? "unknown")}`);
+}
+
+/** Runs one exact task and never creates a replacement order. All provider-facing
+ * details live in the dependency adapter; this state machine owns ordering,
+ * resume decisions, local finalization, and exact-order cleanup. */
+export async function runImageE2e(input: { taskId: string; immutableCommit: string; tokenFile: string; tokenSha256: string; resume: boolean }, deps: CoordinatorDeps) {
+  let session = input.resume ? deps.load() : null;
+  if (session && session.taskId !== input.taskId) throw new Error("image_e2e_resume_task_mismatch");
+  session ??= initial(input);
+  let task: EligibleImageTask | null = null;
+  let claim: { token: string; tokenHash: string } | null = null;
+  let heartbeat: ReturnType<CoordinatorDeps["startHeartbeat"]> | null = null;
+  let preserveRemoteArtifact = false;
+  try {
+    task = await deps.prerental(input.taskId);
+    session = mark(deps, session, "PRERENTAL");
+    if (session.orderId) {
+      const live = await deps.reconnect(session.orderId);
+      if (!live.active) {
+        if (session.phase === "FINALIZE" && session.artifact) return mark(deps, session, "DONE");
+        session = mark(deps, session, "PRERENTAL", { orderId: null, endpoint: null, lastError: "stale_local_order_cleared" });
+      } else if (live.endpoint) {
+        session = mark(deps, session, session.phase, { endpoint: live.endpoint });
+      }
+    }
+    if (!session.orderId) {
+      const created = await deps.createOrder();
+      session = mark(deps, session, "ORDER", { orderId: created.orderId, endpoint: created.endpoint });
+      await deps.armWatchdog(created.orderId);
+    }
+    if (!session.endpoint || !session.orderId) throw new Error("image_e2e_order_endpoint_missing");
+    const health = await deps.health(session.endpoint);
+    if (!health.alive || health.currentStage !== "idle" || health.lastError) throw new Error(`agent_not_ready:${clean(health.lastError ?? health.currentStage)}`);
+    session = mark(deps, session, "AGENT");
+    for (const stage of ["environment", "gpu", "controller", "comfyui"] as const) await requiredStage(deps, session, session.endpoint, stage);
+    session = mark(deps, session, "RUNTIME");
+    let models = await deps.resolveModels();
+    let modelsResult = await deps.stage(session.endpoint, "models", { models });
+    if (modelsResult.status === "failed" && /expired|timeout|403|401/i.test(modelsResult.error ?? "")) {
+      // Agent-side verified files are idempotent; only the failed remote URL is refreshed.
+      models = await deps.resolveModels();
+      modelsResult = await deps.stage(session.endpoint, "models", { models });
+    }
+    session.stages.models = modelsResult.status; deps.persist(session);
+    if (modelsResult.status !== "succeeded") throw new Error(`models_stage_failed:${clean(modelsResult.error ?? "unknown")}`);
+    session = mark(deps, session, "MODELS");
+    task = await deps.readEligibleTask(input.taskId);
+    claim = await deps.claim(task);
+    session = mark(deps, session, "CLAIM", { claimTokenHash: claim.tokenHash });
+    heartbeat = deps.startHeartbeat(task.id, claim.token);
+    heartbeat.assertHealthy();
+    // The pre-submit receipt is deliberately persisted before the sole remote POST.
+    // If this fails, the POST is never allowed to occur.
+    await deps.inferenceReceipt?.("submitting");
+    const accepted = await deps.submitInference(session.endpoint, inferencePayload(task));
+    await deps.inferenceReceipt?.("accepted", { acceptedHttpStatus: accepted.acceptedHttpStatus });
+    const inference = await deps.pollInference(session.endpoint);
+    session.stages.inference = inference.status; deps.persist(session);
+    if (inference.status !== "succeeded") { await deps.inferenceReceipt?.("failed", { error: clean(inference.error ?? "unknown") }); throw new Error(`inference_stage_failed:${clean(inference.error ?? "unknown")}`); }
+    await deps.inferenceReceipt?.("succeeded", inferenceReceiptDetail(inference.data));
+    preserveRemoteArtifact = true;
+    session = mark(deps, session, "INFERENCE");
+    heartbeat.assertHealthy();
+    let remote: RemoteArtifact | null = null;
+    let retrievalError: unknown;
+    for (let attempt = 0; attempt < 3 && !remote; attempt += 1) {
+      try { remote = await deps.retrieveArtifact(session.endpoint, task.id); }
+      catch (error) { retrievalError = error; }
+    }
+    if (!remote) throw retrievalError instanceof Error ? retrievalError : new Error("remote_artifact_download_failed");
+    await deps.receiptEvent?.("artifact_downloaded", { controllerPromptId: remote.controllerPromptId, remoteArtifact: { byteSize: remote.byteSize, sha256: remote.sha256, width: remote.width, height: remote.height, generationDurationSeconds: remote.generationDurationSeconds } });
+    session = mark(deps, session, "ARTIFACT", { remoteArtifact: { byteSize: remote.byteSize, sha256: remote.sha256, width: remote.width, height: remote.height, generationDurationSeconds: remote.generationDurationSeconds, controllerPromptId: remote.controllerPromptId } });
+    let artifact: LocalArtifactReference | null = null;
+    let finalizationError: unknown;
+    for (let attempt = 0; attempt < 3 && !artifact; attempt += 1) {
+      try { artifact = await deps.publishAndFinalize(task, claim.token, remote, session.orderId); }
+      catch (error) { finalizationError = error; }
+    }
+    if (!artifact) throw finalizationError instanceof Error ? finalizationError : new Error("local_artifact_finalization_failed");
+    await deps.receiptEvent?.("task_finalized");
+    heartbeat.stop(); heartbeat = null;
+    session = mark(deps, session, "FINALIZE", { artifact });
+    await deps.verifyUi(task.id);
+    await deps.receiptEvent?.("ui_verified");
+    session = mark(deps, session, "UI_VERIFY");
+    return session;
+  } catch (error) {
+    const failure = clean(error);
+    if (claim && task && !preserveRemoteArtifact) await deps.failClaim(task.id, claim.token, failure).catch(() => undefined);
+    session = mark(deps, session, session.phase, { lastError: failure });
+    throw error;
+  } finally {
+    heartbeat?.stop();
+    if (session.orderId) {
+      session = mark(deps, session, "CANCEL");
+      await deps.cancelExactOrder(session.orderId);
+      await deps.confirmNoActiveOrders();
+      await deps.confirmNoActiveOrders();
+      await deps.receiptEvent?.("order_cancelled");
+    }
+    await deps.disarmWatchdog();
+    mark(deps, session, "DONE");
+  }
+}
+
+export function claimTokenHash(token: string) { return createHash("sha256").update(token).digest("hex"); }
