@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { EligibleImageTask } from "./run-image-e2e";
 import type { LocalArtifactReference } from "../../src/lib/image-generation/local-image-artifacts";
+import type { AgentTransportDiagnostic } from "./agent-get-transport";
 
 export const IMAGE_E2E_PHASES = ["PRERENTAL", "ORDER", "AGENT", "RUNTIME", "MODELS", "CLAIM", "INFERENCE", "ARTIFACT", "FINALIZE", "UI_VERIFY", "CANCEL", "DONE"] as const;
 export type ImageE2ePhase = (typeof IMAGE_E2E_PHASES)[number];
@@ -20,6 +21,7 @@ export type SanitizedImageE2eSession = {
   stages: Record<string, "pending" | "running" | "succeeded" | "failed">;
   timestamps: Partial<Record<ImageE2ePhase, string>>;
   lastError: string | null;
+  transportDiagnostics?: AgentTransportDiagnostic[];
 };
 
 export type RemoteArtifact = NonNullable<SanitizedImageE2eSession["remoteArtifact"]> & { png: Buffer };
@@ -68,7 +70,7 @@ function clean(value: unknown) {
 }
 
 function initial(input: { taskId: string; immutableCommit: string; tokenFile: string; tokenSha256: string }): SanitizedImageE2eSession {
-  return { schemaVersion: 1, taskId: input.taskId, phase: "PRERENTAL", orderId: null, endpoint: null, immutableCommit: input.immutableCommit, tokenFile: input.tokenFile, tokenSha256: input.tokenSha256, claimTokenHash: null, artifact: null, remoteArtifact: null, stages: {}, timestamps: { PRERENTAL: new Date().toISOString() }, lastError: null };
+  return { schemaVersion: 1, taskId: input.taskId, phase: "PRERENTAL", orderId: null, endpoint: null, immutableCommit: input.immutableCommit, tokenFile: input.tokenFile, tokenSha256: input.tokenSha256, claimTokenHash: null, artifact: null, remoteArtifact: null, stages: {}, timestamps: { PRERENTAL: new Date().toISOString() }, lastError: null, transportDiagnostics: [] };
 }
 
 function mark(deps: CoordinatorDeps, session: SanitizedImageE2eSession, phase: ImageE2ePhase, patch: Partial<SanitizedImageE2eSession> = {}) {
