@@ -140,6 +140,55 @@ def test_comfy_missing_torch_is_bounded(agent, temp):
         agent.exec_fixed, agent.writable, agent.venv_python = original_exec, original_writable, original_venv
 
 
+def test_ensure_venv(agent, temp):
+    original_venv, original_exec, original_writable, original_log = agent.VENV, agent.exec_fixed, agent.writable, agent.LOG_DIR
+    agent.VENV = Path(temp) / "venv"; agent.LOG_DIR = Path(temp) / "logs"; agent.writable = lambda _path: {"path": str(Path(temp) / "workspace"), "writable": True}
+    calls = []
+    def result(command, code=0, output="fixture"):
+        calls.append(command); return {"command": " ".join(command), "exit_code": code, "output": output}
+    def make_venv():
+        target = Path(agent.venv_python()); target.parent.mkdir(parents=True, exist_ok=True); target.write_text("fixture", encoding="utf-8")
+    try:
+        # A healthy existing venv is reused and never touches apt.
+        make_venv(); agent.exec_fixed = lambda command, timeout=90, cwd=None: result(command)
+        assert agent.ensure_venv()["reused"] is True
+        assert not any(command and command[0] in {"apt-get", "env"} for command in calls)
+        # A direct venv creation succeeds without apt.
+        calls.clear(); __import__("shutil").rmtree(agent.VENV)
+        def direct(command, timeout=90, cwd=None):
+            if command[:3] == ["python3", "-m", "venv"]: make_venv()
+            return result(command)
+        agent.exec_fixed = direct; agent.ensure_venv()
+        assert not any(command and command[0] in {"apt-get", "env"} for command in calls)
+        # The known ensurepip failure installs exactly the fixed package once, then retries.
+        calls.clear(); __import__("shutil").rmtree(agent.VENV)
+        attempts = {"venv": 0}
+        def recover(command, timeout=90, cwd=None):
+            if command[:3] == ["python3", "-m", "venv"]:
+                attempts["venv"] += 1
+                if attempts["venv"] == 1: return result(command, 1, "ensurepip is not available; install python3.12-venv")
+                make_venv()
+            return result(command)
+        agent.exec_fixed = recover; progress = agent.ensure_venv()
+        assert attempts["venv"] == 2 and len([command for command in calls if command == ["apt-get", "update"]]) == 1
+        assert len([command for command in calls if command == ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "--no-install-recommends", "python3.12-venv"]]) == 1
+        assert progress["pip_probe"]["exit_code"] == 0
+        # An incomplete venv is removed before creation.
+        calls.clear(); __import__("shutil").rmtree(agent.VENV, ignore_errors=True); (agent.VENV / "partial").mkdir(parents=True)
+        agent.exec_fixed = direct; progress = agent.ensure_venv(); assert progress["removed_incomplete_venv"] is True
+        # Apt failure is bounded at ensure_venv and stage_comfyui never begins Torch/ComfyUI work.
+        calls.clear(); __import__("shutil").rmtree(agent.VENV)
+        def apt_fails(command, timeout=90, cwd=None):
+            if command[:3] == ["python3", "-m", "venv"]: return result(command, 1, "ensurepip unavailable")
+            if command == ["apt-get", "update"]: return result(command, 1, "repository unavailable")
+            return result(command)
+        agent.exec_fixed = apt_fails
+        assert_raises(lambda: agent.stage_comfyui({}), "ensure_venv_failed")
+        assert not any("torch" in " ".join(command) or command[:1] == ["git"] for command in calls)
+    finally:
+        agent.VENV, agent.exec_fixed, agent.writable, agent.LOG_DIR = original_venv, original_exec, original_writable, original_log
+
+
 def request(port, method, route, token=None, body=None):
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     if body is not None: headers["Content-Type"] = "application/json"
@@ -181,8 +230,9 @@ def main():
         test_raw_fetch_and_controller_failure(agent, temp)
         test_inference(agent, temp)
         test_comfy_missing_torch_is_bounded(agent, temp)
+        test_ensure_venv(agent, temp)
     test_http_artifacts()
-    print(json.dumps({"ok": True, "raw_runtime": "verified", "models": "restricted_and_resumable", "inference": "fixed_controller_round_trip", "artifacts": "authenticated"}))
+    print(json.dumps({"ok": True, "venv": "fixed_reuse_and_bounded_package_repair", "raw_runtime": "verified", "models": "restricted_and_resumable", "inference": "fixed_controller_round_trip", "artifacts": "authenticated"}))
 
 
 if __name__ == "__main__": main()

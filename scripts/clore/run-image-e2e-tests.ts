@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { claimImageTask, readImageTask } from "../../src/lib/image-generation/local-image-task-store";
-import { freshRunRequiresManualRecovery, persistAndFinalizeExactLocalTask, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat } from "./run-image-e2e";
+import { freshRunRequiresManualRecovery, prepareFreshReceipt, persistAndFinalizeExactLocalTask, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, type FreshReceipt } from "./run-image-e2e";
 
 const taskId = "723e4567-e89b-42d3-a456-426614174000";
+function failedReceipt(state: FreshReceipt["inferenceState"]): FreshReceipt { return { schema: 1, runId: "fixture-run", taskId, orderId: "fixture-order", endpoint: "https://fixture.invalid", currentStep: "failed", inferenceState: state, inferenceSubmitted: state !== "not_started", inferenceSucceeded: false, inferenceSubmittingAt: null, inferenceAcceptedAt: null, acceptedHttpStatus: null, inferenceCompletedAt: null, remoteArtifactAvailable: false, controllerPromptId: null, remoteArtifact: null, artifactDownloaded: false, localArtifactPublished: false, taskFinalized: false, uiVerified: false, orderCancelled: true, timestamps: {}, firstError: "fixture" }; }
 async function main() {
   const root = mkdtempSync(path.join(os.tmpdir(), "image-e2e-"));
   try {
@@ -26,6 +27,12 @@ async function main() {
     assert.equal(freshRunRequiresManualRecovery({ taskId, inferenceState: "accepted" }, taskId, "waiting_for_gpu"), true);
     assert.equal(freshRunRequiresManualRecovery({ taskId, inferenceState: "succeeded" }, taskId, "waiting_for_gpu"), true);
     assert.equal(freshRunRequiresManualRecovery({ taskId, inferenceState: "failed" }, taskId, "waiting_for_gpu"), false);
+    const receiptPath = path.join(root, "receipt.json"); const archiveDir = path.join(root, "diagnostics"); writeFileSync(receiptPath, JSON.stringify(failedReceipt("not_started")), "utf8");
+    let activeChecks = 0; const rotated = await prepareFreshReceipt({ taskId, taskStatus: "waiting_for_gpu", receiptPath, archiveDir, activeOrderCount: async () => { activeChecks += 1; return 0; } });
+    assert.equal(rotated.inferenceState, "not_started"); assert.notEqual(rotated.runId, "fixture-run"); assert.equal(activeChecks, 1); assert.equal(readdirSync(archiveDir).length, 1); assert.ok(existsSync(receiptPath));
+    writeFileSync(receiptPath, JSON.stringify(failedReceipt("submitting")), "utf8"); activeChecks = 0;
+    await assert.rejects(() => prepareFreshReceipt({ taskId, taskStatus: "waiting_for_gpu", receiptPath, archiveDir, activeOrderCount: async () => { activeChecks += 1; return 0; } }), /previous_inference_state_requires_manual_recovery/);
+    assert.equal(activeChecks, 0);
     const claim = claimImageTask(taskId, "coordinator-fixture", 60_000, options);
     const heartbeat = startImageTaskLeaseHeartbeat({ taskId, claimToken: claim.claimToken, leaseMs: 60_000, options });
     const png = await sharp({ create: { width: 768, height: 768, channels: 3, background: "#2e6" } }).png().toBuffer();
@@ -33,7 +40,7 @@ async function main() {
     heartbeat.assertHealthy(); heartbeat.stop();
     assert.equal(result.completed.status, "completed");
     assert.equal(readImageTask(taskId, options)?.result?.pngSha256, result.artifact.pngSha256);
-    console.log(JSON.stringify({ ok: true, preflight_does_not_claim: true, prior_submitting_blocks_fresh_provider_mutation: true, model_failure_leaves_task_unchanged: true, local_lease_heartbeat: true, persistence_and_exact_finalization: true }));
+    console.log(JSON.stringify({ ok: true, preflight_does_not_claim: true, prior_submitting_blocks_fresh_provider_mutation: true, safe_failed_receipt_archived_and_rotated: true, model_failure_leaves_task_unchanged: true, local_lease_heartbeat: true, persistence_and_exact_finalization: true }));
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 void main();
