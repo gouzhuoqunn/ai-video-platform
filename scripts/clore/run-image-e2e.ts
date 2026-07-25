@@ -191,7 +191,7 @@ export async function waitForStage(input: WaitForStageOptions) {
         consecutiveFailures = 0; outageStartedAt = null; healthProbed = false; lastSuccessfulStatusAt = timestamp();
         const stageRecord = (status.body.stages as Record<string, Record<string, unknown>> | undefined)?.[input.stage];
         if (stageRecord?.status === "succeeded") return { status: "succeeded" as const, data: typeof stageRecord.data === "object" && stageRecord.data !== null ? stageRecord.data as Record<string, unknown> : undefined };
-        if (stageRecord?.status === "failed") return { status: "failed" as const, error: String(stageRecord.first_exact_failure ?? "agent_stage_failed") };
+        if (stageRecord?.status === "failed") return { status: "failed" as const, error: String(stageRecord.first_exact_failure ?? "agent_stage_failed"), data: typeof stageRecord.data === "object" && stageRecord.data !== null ? stageRecord.data as Record<string, unknown> : undefined };
         await sleepImpl(2_000); continue;
       }
       record(status.diagnostic);

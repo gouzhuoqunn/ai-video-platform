@@ -452,14 +452,27 @@ def stream_model(entry: dict[str, Any]) -> dict[str, Any]:
     offset = part.stat().st_size if part.exists() else 0
     if offset > entry["size_bytes"]:
         part.unlink(); offset = 0
-    request = urllib.request.Request(entry["url"])
-    if offset:
-        request.add_header("Range", f"bytes={offset}-")
+    def download_request(resume_offset: int) -> urllib.request.Request:
+        request = urllib.request.Request(entry["url"], headers={"User-Agent": "ai-video-platform-model-fetch/1", "Accept": "application/octet-stream"})
+        if resume_offset:
+            request.add_header("Range", f"bytes={resume_offset}-")
+        return request
+
+    def http_failure(error: urllib.error.HTTPError) -> StageFailure:
+        raw = b""
+        try: raw = error.read(1024)
+        except Exception: pass
+        excerpt = raw.decode("utf-8", "replace")
+        excerpt = re.sub(r"(?i)[?&](?:x-amz-[^=&\s]*|signature|token|credential)=[^&\s]+", "<redacted-query>", excerpt)
+        body = clean(re.sub(r"https?://[^\s\"']+", "<redacted-url>", excerpt), 1024)
+        headers = error.headers
+        data = {"code": "model_download_http_error", "role": entry["role"], "filename": entry["filename"], "http_status": error.code, "final_hostname": (urllib.parse.urlsplit(error.geturl() or entry["url"]).hostname or "").lower(), "content_type": headers.get("Content-Type") if headers else None, "content_length": headers.get("Content-Length") if headers else None, "retry_after": headers.get("Retry-After") if headers else None, "body_excerpt": body}
+        return StageFailure(f"model_download_http_error:{entry['role']}:{entry['filename']}:http_{error.code}", data)
     try:
-        response = urllib.request.urlopen(request, timeout=60)
+        response = urllib.request.urlopen(download_request(offset), timeout=60)
         if offset and response.status != 206:
             response.close(); part.unlink(missing_ok=True); offset = 0
-            response = urllib.request.urlopen(urllib.request.Request(entry["url"]), timeout=60)
+            response = urllib.request.urlopen(download_request(0), timeout=60)
         with response, part.open("ab" if offset else "wb") as handle:
             received = offset
             while True:
@@ -472,6 +485,8 @@ def stream_model(entry: dict[str, Any]) -> dict[str, Any]:
                 with STATE_LOCK:
                     STATE["models"][entry["role"]] = {"filename": entry["filename"], "status": "downloading", "downloaded_bytes": received, "size_bytes": entry["size_bytes"], "url": redacted_url(entry["url"])}
                     save_locked()
+    except urllib.error.HTTPError as error:
+        raise http_failure(error) from error
     except Exception as error:
         raise RuntimeError(f"model_download_failed:{entry['filename']}:{clean(error, 400)}") from error
     if part.stat().st_size != entry["size_bytes"]:

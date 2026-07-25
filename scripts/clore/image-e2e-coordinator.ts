@@ -46,7 +46,7 @@ export type CoordinatorDeps = {
   armWatchdog: (orderId: string) => Promise<void>;
   disarmWatchdog: () => Promise<void>;
   health: (endpoint: string) => Promise<{ alive: boolean; currentStage: string; lastError: string | null }>;
-  stage: (endpoint: string, stage: "environment" | "gpu" | "controller" | "comfyui" | "models" | "inference", payload?: object) => Promise<{ status: "succeeded" | "failed"; error?: string }>;
+  stage: (endpoint: string, stage: "environment" | "gpu" | "controller" | "comfyui" | "models" | "inference", payload?: object) => Promise<{ status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> }>;
   submitInference: (endpoint: string, payload: object) => Promise<{ acceptedHttpStatus: 202 }>;
   pollInference: (endpoint: string) => Promise<{ status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> }>;
   inferenceReceipt?: (event: "submitting" | "accepted" | "succeeded" | "failed", detail?: InferenceReceiptDetail) => Promise<void>;
@@ -141,12 +141,17 @@ export async function runImageE2e(input: { taskId: string; immutableCommit: stri
     session = mark(deps, session, "AGENT");
     for (const stage of ["environment", "gpu", "controller", "comfyui"] as const) await requiredStage(deps, session, session.endpoint, stage);
     session = mark(deps, session, "RUNTIME");
+    const isRefreshableAuthorizationFailure = (result: { status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> }) => result.status === "failed"
+      && result.data?.code === "model_download_http_error" && (result.data.http_status === 401 || result.data.http_status === 403);
     let models = await deps.resolveModels();
     let modelsResult = await deps.stage(session.endpoint, "models", { models });
-    if (modelsResult.status === "failed" && /expired|timeout|403|401/i.test(modelsResult.error ?? "")) {
-      // Agent-side verified files are idempotent; only the failed remote URL is refreshed.
+    if (isRefreshableAuthorizationFailure(modelsResult)) {
+      // This is still before claim/inference. Rebuilding all five exact entries lets
+      // the Agent retain verified files and resume the failed .part safely.
+      if (session.claimTokenHash !== null) throw new Error("model_refresh_after_claim_forbidden");
       models = await deps.resolveModels();
       modelsResult = await deps.stage(session.endpoint, "models", { models });
+      if (isRefreshableAuthorizationFailure(modelsResult)) throw new Error(`model_download_authorization_failed_after_refresh:${clean(JSON.stringify(modelsResult.data))}`);
     }
     session.stages.models = modelsResult.status; deps.persist(session);
     if (modelsResult.status !== "succeeded") throw new Error(`models_stage_failed:${clean(modelsResult.error ?? "unknown")}`);
