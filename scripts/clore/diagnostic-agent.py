@@ -242,6 +242,49 @@ def venv_python() -> str:
     return str(VENV / "bin" / "python")
 
 
+def venv_package_missing(result: dict[str, Any]) -> bool:
+    output = str(result.get("output", "")).lower()
+    return "ensurepip" in output or "python3.12-venv" in output or "python3-venv" in output
+
+
+def ensure_venv() -> dict[str, Any]:
+    """Create the fixed runtime venv, repairing only Ubuntu's missing venv package."""
+    progress: dict[str, Any] = {}
+    python = Path(venv_python())
+    if python.is_file():
+        progress["existing_pip_probe"] = exec_fixed([str(python), "-m", "pip", "--version"], 60)
+        if progress["existing_pip_probe"]["exit_code"] == 0:
+            progress["reused"] = True
+            return progress
+    if VENV.exists():
+        shutil.rmtree(VENV, ignore_errors=True)
+        progress["removed_incomplete_venv"] = True
+    progress["initial_venv"] = exec_fixed(["python3", "-m", "venv", str(VENV)], 180)
+    if progress["initial_venv"]["exit_code"] != 0:
+        if not venv_package_missing(progress["initial_venv"]):
+            raise RuntimeError("ensure_venv_failed:" + clean(json.dumps(progress)))
+        progress["apt_update"] = exec_fixed(["apt-get", "update"], 300)
+        if progress["apt_update"]["exit_code"] != 0:
+            raise RuntimeError("ensure_venv_failed:" + clean(json.dumps(progress)))
+        progress["apt_install"] = exec_fixed(["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "--no-install-recommends", "python3.12-venv"], 600)
+        if progress["apt_install"]["exit_code"] != 0:
+            raise RuntimeError("ensure_venv_failed:" + clean(json.dumps(progress)))
+        shutil.rmtree(VENV, ignore_errors=True)
+        progress["removed_before_retry"] = True
+        progress["retry_venv"] = exec_fixed(["python3", "-m", "venv", str(VENV)], 180)
+        if progress["retry_venv"]["exit_code"] != 0:
+            raise RuntimeError("ensure_venv_failed:" + clean(json.dumps(progress)))
+    python = Path(venv_python())
+    if not python.is_file():
+        progress["python_exists"] = False
+        raise RuntimeError("ensure_venv_failed:" + clean(json.dumps(progress)))
+    progress["python_probe"] = exec_fixed([str(python), "--version"], 60)
+    progress["pip_probe"] = exec_fixed([str(python), "-m", "pip", "--version"], 60)
+    if progress["python_probe"]["exit_code"] != 0 or progress["pip_probe"]["exit_code"] != 0:
+        raise RuntimeError("ensure_venv_failed:" + clean(json.dumps(progress)))
+    return progress
+
+
 def write_runtime_state(stage: str, ready: bool, error: str | None = None) -> None:
     state = {"stage": stage, "ready": ready, "error": error, "updated_at": now(), "comfyui_pid": CHILDREN.get("comfyui").pid if CHILDREN.get("comfyui") else None, "workspace": str(WORKSPACE)}
     (ROOT / "controller-state.json").write_text(json.dumps(state), encoding="utf-8")
@@ -253,10 +296,7 @@ def stage_comfyui(_: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("workspace_not_writable")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     progress: dict[str, Any] = {"workspace": workspace, "venv": str(VENV), "comfy_commit": COMFY_COMMIT}
-    if not Path(venv_python()).is_file():
-        progress["create_venv"] = exec_fixed(["python3", "-m", "venv", str(VENV)], 180)
-        if progress["create_venv"]["exit_code"]:
-            raise RuntimeError(progress["create_venv"]["output"])
+    progress["ensure_venv"] = ensure_venv()
     progress["install_torch"] = exec_fixed([venv_python(), "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools"], 600)
     if progress["install_torch"]["exit_code"]:
         raise RuntimeError(progress["install_torch"]["output"])
