@@ -4,13 +4,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { formatHourlyPrice, safeFixed } from "@/lib/image-generation/formatters";
 
 type PersistedImageResult = {
-  imagePath: string;
-  thumbnailPath: string;
-  sha256: string;
+  imagePath?: string;
+  thumbnailPath?: string;
+  sha256?: string;
   width: number;
   height: number;
-  metadataPath: string;
-  persistedAt: string;
+  metadataPath?: string;
+  persistedAt?: string;
+  relativeDir?: string;
+  pngSha256?: string;
+  pngBytes?: number;
+  completedAt?: string;
 };
 
 type Task = {
@@ -458,7 +462,8 @@ export function ImageCreationStudio() {
                 <div className="flex justify-between"><span className={task.gpuClass === "rtx4090" ? "text-sky-300" : "text-violet-300"}>{className(task.gpuClass)}</span><span>{task.status ?? "pending_confirmation"}</span></div>
                 <p className="mt-1 line-clamp-2">{task.prompt ?? ""}</p>
                 <p className="mt-1 text-stone-400">{task.width ?? "—"}×{task.height ?? "—"} · {task.steps ?? "—"} 步 · {task.sampler ?? "—"} · LoRA {safeFixed(task.loraStrength, 1)} · CFG {safeFixed(task.cfg, 1)}{task.referenceImage ? " · 参考图" : ""}</p>
-                {task.result ? <p className="mt-1 text-emerald-300">结果：{task.result.width}×{task.result.height} · SHA {task.result.sha256.slice(0, 12)}</p> : null}
+                {task.result ? <p className="mt-1 text-emerald-300">结果：{task.result.width}×{task.result.height} · SHA {(task.result.pngSha256 ?? task.result.sha256 ?? "unknown").slice(0, 12)}</p> : null}
+                {task.status === "completed" && task.result?.relativeDir ? <img className="mt-2 max-h-40 w-full rounded object-contain" alt="已完成图像缩略图" src={`/api/local-images/${encodeURIComponent(task.id)}/thumbnail`} /> : null}
                 <div className="mt-2 flex gap-2">
                   <button type="button" onClick={(event) => { event.stopPropagation(); void mutate("confirm", task.id); }}>确认</button>
                   <button type="button" onClick={(event) => { event.stopPropagation(); void mutate("retry", task.id); }}>重试</button>
