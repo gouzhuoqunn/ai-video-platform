@@ -126,7 +126,7 @@ def test_inference(agent, temp):
 
 
 def test_comfy_missing_torch_is_bounded(agent, temp):
-    original_exec, original_writable, original_venv = agent.exec_fixed, agent.writable, agent.venv_python
+    original_exec, original_logged, original_writable, original_venv = agent.exec_fixed, agent.exec_logged, agent.writable, agent.venv_python
     agent.writable = lambda _path: {"path": str(Path(temp) / "workspace"), "writable": True}
     agent.venv_python = lambda: sys.executable
     def fake_exec(command, timeout=90, cwd=None):
@@ -134,10 +134,59 @@ def test_comfy_missing_torch_is_bounded(agent, temp):
             return {"command": " ".join(command), "exit_code": 1, "output": "ModuleNotFoundError: No module named 'torch'"}
         return {"command": " ".join(command), "exit_code": 0, "output": "fixture"}
     agent.exec_fixed = fake_exec
+    agent.exec_logged = lambda name, command, timeout, cwd=None: {"command": " ".join(command), "log_path": str(Path(temp) / f"{name}.log"), "started_at": "fixture", "finished_at": "fixture", "duration_seconds": 0, "exit_code": 0, "timed_out": False, "first_output_lines": [], "final_output_lines": [], "error_matches": []}
     try:
         assert_raises(lambda: agent.stage_comfyui({}), "cuda_torch_probe_failed")
     finally:
-        agent.exec_fixed, agent.writable, agent.venv_python = original_exec, original_writable, original_venv
+        agent.exec_fixed, agent.exec_logged, agent.writable, agent.venv_python = original_exec, original_logged, original_writable, original_venv
+
+
+def logged_result(agent, temp, name, command, code=0, timed_out=False, output="fixture"):
+    path = Path(temp) / "logs" / f"{name}.log"; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(output, encoding="utf-8")
+    lines = output.splitlines()
+    return {"command": " ".join(command), "log_path": str(path), "started_at": "fixture", "finished_at": "fixture", "duration_seconds": 1.25, "exit_code": code, "timed_out": timed_out, "first_output_lines": lines[:30], "final_output_lines": lines[-120:], "error_matches": [line for line in lines if "ERROR" in line or "ResolutionImpossible" in line]}
+
+
+def test_comfy_torch_requirements_and_logging(agent, temp):
+    original = agent.VENV, agent.COMFY_DIR, agent.ROOT, agent.LOG_DIR, agent.exec_fixed, agent.exec_logged, agent.ensure_venv, agent.writable, agent.probe, agent.venv_python, agent.subprocess.Popen
+    agent.VENV = Path(temp) / "venv"; agent.COMFY_DIR = Path(temp) / "ComfyUI"; agent.ROOT = Path(temp) / "root"; agent.LOG_DIR = agent.ROOT / "logs"; agent.COMFY_DIR.mkdir(exist_ok=True)
+    agent.COMFY_DIR.joinpath("requirements.txt").write_text("torch==9.9\ntorchvision>=9\ntorchaudio ; sys_platform == 'linux'\naiohttp==3\n# torch comment\ncomfy-aimdo==0.4.10\n", encoding="utf-8")
+    try:
+        assert agent.TORCH_REQUIREMENTS == ("torch==2.8.0", "torchvision==0.23.0", "torchaudio==2.8.0")
+        assert agent.PYTORCH_CU128_INDEX.endswith("/cu128")
+        filtered, constraints = agent.write_comfy_requirements()
+        assert filtered.read_text(encoding="utf-8") == "aiohttp==3\n# torch comment\ncomfy-aimdo==0.4.10\n"
+        assert constraints.read_text(encoding="utf-8") == "torch==2.8.0\ntorchvision==0.23.0\ntorchaudio==2.8.0\n"
+        # Full retained logs preserve terminal errors after a long download transcript.
+        agent.LOG_DIR.mkdir(parents=True, exist_ok=True)
+        error = agent.exec_logged("long-error", [sys.executable, "-c", "import sys;print('x'*7001);print('ERROR: terminal failure');sys.exit(7)"], 10)
+        assert error["exit_code"] == 7 and error["timed_out"] is False and "ERROR: terminal failure" in error["error_matches"] and "ERROR: terminal failure" in error["final_output_lines"] and error["duration_seconds"] >= 0
+        timeout = agent.exec_logged("timeout", [sys.executable, "-c", "import time;print('partial-output',flush=True);time.sleep(10)"], 0.1)
+        assert timeout["timed_out"] is True and "partial-output" in timeout["final_output_lines"]
+        conflict = agent.exec_logged("conflict", [sys.executable, "-c", "import sys;print('ResolutionImpossible: conflict');sys.exit(1)"], 10)
+        assert "ResolutionImpossible: conflict" in conflict["error_matches"]
+        # A successful stage uses only the fixed cu128 stack, constraints, pip check, and import probe.
+        calls = []
+        agent.ensure_venv = lambda: {"reused": True}; agent.writable = lambda _path: {"path": str(Path(temp) / "workspace"), "writable": True}; agent.venv_python = lambda: sys.executable; agent.probe = lambda _url, attempts=30, timeout=3: {"status": 200, "body": "{}"}
+        def fixed(command, timeout=90, cwd=None):
+            calls.append(("fixed", command)); return {"command": " ".join(command), "exit_code": 0, "output": "fixture"}
+        def logged(name, command, timeout, cwd=None):
+            calls.append((name, command)); return logged_result(agent, temp, name, command)
+        agent.exec_fixed, agent.exec_logged = fixed, logged
+        class FakeProcess:
+            pid = 0
+            def poll(self): return None
+            def terminate(self): return None
+        agent.subprocess.Popen = lambda *_args, **_kwargs: FakeProcess()
+        result = agent.stage_comfyui({}); assert result["/system_stats"]["status"] == 200
+        cuda = next(command for name, command in calls if name == "pip-cuda-torch")
+        assert cuda == [sys.executable, "-m", "pip", "install", "--no-input", "--progress-bar", "off", "torch==2.8.0", "torchvision==0.23.0", "torchaudio==2.8.0", "--index-url", agent.PYTORCH_CU128_INDEX]
+        requirements = next(command for name, command in calls if name == "pip-comfy-requirements")
+        assert "--constraint" in requirements and "torch==2.8.0" not in requirements and "torchvision==0.23.0" not in requirements and "torchaudio==2.8.0" not in requirements
+        assert any(name == "pip-check" for name, _command in calls)
+        assert any("comfy_aimdo" in " ".join(command) and "comfy_kitchen" in " ".join(command) for name, command in calls if name == "fixed")
+    finally:
+        agent.VENV, agent.COMFY_DIR, agent.ROOT, agent.LOG_DIR, agent.exec_fixed, agent.exec_logged, agent.ensure_venv, agent.writable, agent.probe, agent.venv_python, agent.subprocess.Popen = original
 
 
 def test_ensure_venv(agent, temp):
@@ -231,8 +280,9 @@ def main():
         test_inference(agent, temp)
         test_comfy_missing_torch_is_bounded(agent, temp)
         test_ensure_venv(agent, temp)
+        test_comfy_torch_requirements_and_logging(agent, temp)
     test_http_artifacts()
-    print(json.dumps({"ok": True, "venv": "fixed_reuse_and_bounded_package_repair", "raw_runtime": "verified", "models": "restricted_and_resumable", "inference": "fixed_controller_round_trip", "artifacts": "authenticated"}))
+    print(json.dumps({"ok": True, "venv": "fixed_reuse_and_bounded_package_repair", "torch": "cu128_2_8_pinned", "requirements": "torch_filtered_and_constrained", "pip_logs": "full_local_with_bounded_status_summary", "raw_runtime": "verified", "models": "restricted_and_resumable", "inference": "fixed_controller_round_trip", "artifacts": "authenticated"}))
 
 
 if __name__ == "__main__": main()
