@@ -4,6 +4,7 @@
  */
 import { claimImageTask, finalizeImageTask, readImageTask, renewImageTaskLease, type LocalImageTask, type LocalTaskStoreOptions } from "../../src/lib/image-generation/local-image-task-store";
 import { publishLocalImageArtifact, type LocalArtifactReference } from "../../src/lib/image-generation/local-image-artifacts";
+import { sanitizeImageModelPreflight, verifyFiveImageModelSources } from "./image-model-preflight";
 
 export type EligibleImageTask = LocalImageTask & { prompt: string; mode: "text_generation"; referenceImage: null; width: number; height: number; steps: number; cfg: number; loraStrength: number; seed: number; sampler: "Euler" | "FlowMatch" };
 
@@ -13,6 +14,15 @@ export function resolveExactEligibleImageTask(taskId: string, options: LocalTask
     throw new Error("image_task_not_eligible_for_restricted_4090_run");
   }
   return task as EligibleImageTask;
+}
+
+/** Pre-rental only: it deliberately does not claim a task or call Clore. */
+export async function preflightExactLocalImageTask(taskId: string, options: LocalTaskStoreOptions = {}, verifyModels = verifyFiveImageModelSources) {
+  const task = resolveExactEligibleImageTask(taskId, options);
+  const modelPreflight = await verifyModels();
+  const reread = readImageTask(taskId, options);
+  if (!reread || reread.status !== "waiting_for_gpu") throw new Error("image_task_changed_during_prerental_preflight");
+  return { task, modelPreflight: sanitizeImageModelPreflight(modelPreflight), createsOrder: false, claimsTask: false };
 }
 
 export function startImageTaskLeaseHeartbeat(input: { taskId: string; claimToken: string; leaseMs: number; options?: LocalTaskStoreOptions }) {
@@ -49,15 +59,13 @@ export async function persistAndFinalizeExactLocalTask(input: {
 
 function argument(name: string) { const index = process.argv.indexOf(name); return index >= 0 ? process.argv[index + 1] : undefined; }
 
-function main() {
+async function main() {
   const taskId = argument("--task-id");
   if (!taskId) throw new Error("--task-id is required; the coordinator never selects another task");
-  const task = resolveExactEligibleImageTask(taskId);
-  // This is a zero-provider-mutation plan mode. A later authenticated runner
-  // calls claimImageTask only after health, runtime, and model preflight pass.
-  console.log(JSON.stringify({ ready_for_remote_preflight: true, creates_order: false, task: { id: task.id, status: task.status, width: task.width, height: task.height }, next: "verify_public_agent_and_model_manifest" }, null, 2));
+  const preflight = await preflightExactLocalImageTask(taskId);
+  console.log(JSON.stringify({ ready_for_remote_preflight: true, creates_order: false, claims_task: false, task: { id: preflight.task.id, status: preflight.task.status, width: preflight.task.width, height: preflight.task.height }, model_preflight: preflight.modelPreflight, next: "immutable_agent_and_provider_cost_preflight" }, null, 2));
 }
 
 if (process.argv[1]?.endsWith("run-image-e2e.ts")) {
-  try { main(); } catch (error) { console.error(error instanceof Error ? error.message : "image_e2e_failed"); process.exitCode = 1; }
+  void main().catch((error) => { console.error(error instanceof Error ? error.message : "image_e2e_failed"); process.exitCode = 1; });
 }
