@@ -9,9 +9,10 @@ const source = readFileSync(file, "utf8");
 const digest = createHash("sha256").update(source, "utf8").digest("hex");
 
 assert.match(source, /add_argument\("--port", type=int, default=8080\)/);
-assert.match(source, /add_argument\("--project-commit", required=True\)/);
-assert.match(source, /add_argument\("--controller-sha256", required=True\)/);
-assert.match(source, /add_argument\("--workflow-sha256", required=True\)/);
+assert.match(source, /add_argument\("--project-commit"\)/);
+assert.match(source, /add_argument\("--controller-sha256"\)/);
+assert.match(source, /add_argument\("--workflow-sha256"\)/);
+assert.match(source, /add_argument\("--immutable"/);
 assert.match(source, /ThreadingHTTPServer\(\("0\.0\.0\.0", args\.port\)/);
 for (const route of ["/healthz", "/status", "/logs", "/stage/environment", "/stage/gpu", "/stage/controller", "/stage/comfyui", "/stage/models", "/stage/inference", "/artifacts/"]) assert.match(source, new RegExp(route.replaceAll("/", "\\/")));
 assert.match(source, /Authorization/);

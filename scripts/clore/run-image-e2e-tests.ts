@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { claimImageTask, readImageTask } from "../../src/lib/image-generation/local-image-task-store";
-import { persistAndFinalizeExactLocalTask, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat } from "./run-image-e2e";
+import { freshRunRequiresManualRecovery, persistAndFinalizeExactLocalTask, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat } from "./run-image-e2e";
 
 const taskId = "723e4567-e89b-42d3-a456-426614174000";
 async function main() {
@@ -22,6 +22,10 @@ async function main() {
     const preflight = await preflightExactLocalImageTask(taskId, options, async () => ({ models: [], checked: [] }));
     assert.equal(preflight.claimsTask, false);
     assert.equal(readImageTask(taskId, options)?.status, "waiting_for_gpu");
+    assert.equal(freshRunRequiresManualRecovery({ taskId, inferenceState: "submitting" }, taskId, "waiting_for_gpu"), true);
+    assert.equal(freshRunRequiresManualRecovery({ taskId, inferenceState: "accepted" }, taskId, "waiting_for_gpu"), true);
+    assert.equal(freshRunRequiresManualRecovery({ taskId, inferenceState: "succeeded" }, taskId, "waiting_for_gpu"), true);
+    assert.equal(freshRunRequiresManualRecovery({ taskId, inferenceState: "failed" }, taskId, "waiting_for_gpu"), false);
     const claim = claimImageTask(taskId, "coordinator-fixture", 60_000, options);
     const heartbeat = startImageTaskLeaseHeartbeat({ taskId, claimToken: claim.claimToken, leaseMs: 60_000, options });
     const png = await sharp({ create: { width: 768, height: 768, channels: 3, background: "#2e6" } }).png().toBuffer();
@@ -29,7 +33,7 @@ async function main() {
     heartbeat.assertHealthy(); heartbeat.stop();
     assert.equal(result.completed.status, "completed");
     assert.equal(readImageTask(taskId, options)?.result?.pngSha256, result.artifact.pngSha256);
-    console.log(JSON.stringify({ ok: true, preflight_does_not_claim: true, model_failure_leaves_task_unchanged: true, local_lease_heartbeat: true, persistence_and_exact_finalization: true }));
+    console.log(JSON.stringify({ ok: true, preflight_does_not_claim: true, prior_submitting_blocks_fresh_provider_mutation: true, model_failure_leaves_task_unchanged: true, local_lease_heartbeat: true, persistence_and_exact_finalization: true }));
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 void main();

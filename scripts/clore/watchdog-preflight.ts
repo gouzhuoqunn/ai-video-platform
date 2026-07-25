@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { LOCAL_WATCHDOG_HEARTBEAT_PATH, isLocalWatchdogTaskInstalled, readLocalWatchdogArmState, readRemoteWatchdogArmState, readRemoteWatchdogHeartbeat } from "./watchdog-io";
+import { LOCAL_WATCHDOG_HEARTBEAT_PATH, isLocalWatchdogTaskInstalled, readLocalWatchdogArmState, readRemoteWatchdogArmState, readRemoteWatchdogHeartbeat, readWatchdogReadyReceipt } from "./watchdog-io";
 
 function assertRecent(timestamp: string | undefined, label: string) {
   if (!timestamp) throw new Error(`${label} heartbeat is missing.`);
@@ -28,6 +28,19 @@ export function assertWatchdogsReadyForCreate(serverId: string) {
   if (!localState?.armed || localState.serverId !== serverId) {
     throw new Error("Local watchdog is not armed for the selected server.");
   }
+  const localHeartbeat = readLocalHeartbeat();
+  assertRecent(localHeartbeat.checked_at, "Local watchdog");
+  if (localHeartbeat.api_available === false || localHeartbeat.reason === "api_unavailable") {
+    throw new Error("Local watchdog is not healthy.");
+  }
+  // `arm` has already proven remote state + heartbeat and records the exact
+  // nonce. Reuse that very short-lived proof so a transient R2 read cannot
+  // invalidate the same order immediately before create_order.
+  const receipt = readWatchdogReadyReceipt();
+  if (receipt && receipt.serverId === serverId && receipt.sessionNonce === localState.sessionNonce) {
+    assertRecent(receipt.checkedAt, "Watchdog readiness receipt");
+    return;
+  }
   const remoteState = readRemoteWatchdogArmState();
   if (!remoteState.armed || remoteState.serverId !== serverId) {
     throw new Error("Remote watchdog is not armed for the selected server.");
@@ -37,12 +50,6 @@ export function assertWatchdogsReadyForCreate(serverId: string) {
   }
   if (localState.currency !== "USD-Blockchain" || remoteState.currency !== "USD-Blockchain") {
     throw new Error("Watchdog currency must be USD-Blockchain.");
-  }
-
-  const localHeartbeat = readLocalHeartbeat();
-  assertRecent(localHeartbeat.checked_at, "Local watchdog");
-  if (localHeartbeat.api_available === false || localHeartbeat.reason === "api_unavailable") {
-    throw new Error("Local watchdog is not healthy.");
   }
 
   const remoteHeartbeat = readRemoteWatchdogHeartbeat();
