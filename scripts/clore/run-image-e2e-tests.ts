@@ -8,6 +8,13 @@ import { freshRunRequiresManualRecovery, prepareFreshReceipt, persistAndFinalize
 
 const taskId = "723e4567-e89b-42d3-a456-426614174000";
 function failedReceipt(state: FreshReceipt["inferenceState"]): FreshReceipt { return { schema: 1, runId: "fixture-run", taskId, orderId: "fixture-order", endpoint: "https://fixture.invalid", currentStep: "failed", inferenceState: state, inferenceSubmitted: state !== "not_started", inferenceSucceeded: false, inferenceSubmittingAt: null, inferenceAcceptedAt: null, acceptedHttpStatus: null, inferenceCompletedAt: null, remoteArtifactAvailable: false, controllerPromptId: null, remoteArtifact: null, artifactDownloaded: false, localArtifactPublished: false, taskFinalized: false, uiVerified: false, orderCancelled: true, timestamps: {}, firstError: "fixture" }; }
+function exactModelFixture() { return { models: [
+  { role: "transformer", id: "fluxed-up-10.2" as const, filename: "fluxedUpFluxNSFW_102BF16.safetensors", url: "https://fixture.invalid/transformer", sha256: "0".repeat(64), size_bytes: 1 },
+  { role: "lora", id: "aidma-lora" as const, filename: "aidmaNSFWunlock-FLUX-V0.2.safetensors", url: "https://fixture.invalid/lora", sha256: "1".repeat(64), size_bytes: 2 },
+  { role: "vae", id: "flux-vae" as const, filename: "ae.safetensors", url: "https://fixture.invalid/vae", sha256: "2".repeat(64), size_bytes: 3 },
+  { role: "clip_l", id: "flux-clip-l" as const, filename: "clip_l.safetensors", url: "https://fixture.invalid/clip", sha256: "3".repeat(64), size_bytes: 4 },
+  { role: "t5", id: "flux-t5xxl-fp8" as const, filename: "t5xxl_fp8_e4m3fn_scaled.safetensors", url: "https://fixture.invalid/t5", sha256: "4".repeat(64), size_bytes: 5 },
+], checked: [] as Array<{ id: string; status: number; contentLength: number; source: "civitai" | "huggingface" }> }; }
 async function main() {
   const root = mkdtempSync(path.join(os.tmpdir(), "image-e2e-"));
   try {
@@ -20,7 +27,7 @@ async function main() {
     assert.equal(readImageTask(taskId, options)?.status, "waiting_for_gpu");
     await assert.rejects(() => preflightExactLocalImageTask(taskId, options, async () => { throw new Error("model_source_unavailable"); }), /model_source_unavailable/);
     assert.equal(readImageTask(taskId, options)?.status, "waiting_for_gpu");
-    const preflight = await preflightExactLocalImageTask(taskId, options, async () => ({ models: [], checked: [] }));
+    const preflight = await preflightExactLocalImageTask(taskId, options, async () => exactModelFixture());
     assert.equal(preflight.claimsTask, false);
     assert.equal(readImageTask(taskId, options)?.status, "waiting_for_gpu");
     assert.equal(freshRunRequiresManualRecovery({ taskId, inferenceState: "submitting" }, taskId, "waiting_for_gpu"), true);
