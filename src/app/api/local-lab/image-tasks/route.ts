@@ -5,6 +5,7 @@ import path from "node:path";
 import { NextResponse, type NextRequest } from "next/server";
 import { FLUX_IMAGE_STACK, classifyImageGpu, type ImageGpuClass, type ImageTaskSettings } from "@/lib/image-generation/flux-stack";
 import { finiteNumber } from "@/lib/image-generation/formatters";
+import { listImageTasks, mutateImageTasks, type LocalImageTask } from "@/lib/image-generation/local-image-task-store";
 import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/route-guard";
 import { COMFY_RUNTIME_IMAGE, loadCloreConfig } from "../../../../../scripts/clore/config";
 import { cloreRequest } from "../../../../../scripts/clore/client";
@@ -130,11 +131,15 @@ function writeJson(filePath: string, value: unknown) {
 }
 
 function readTasks() {
-  return readJson<ImageTask[]>(DATA_PATH, []).filter((task, index, all) => task?.id && all.findIndex((candidate) => candidate.id === task.id) === index);
+  return listImageTasks() as ImageTask[];
 }
 
-function saveTasks(tasks: ImageTask[]) {
-  writeJson(DATA_PATH, tasks.filter((task, index, all) => task?.id && all.findIndex((candidate) => candidate.id === task.id) === index));
+function updateTasks(transform: (tasks: ImageTask[]) => ImageTask[]) {
+  return mutateImageTasks((tasks) => {
+    const next = transform(tasks as ImageTask[]);
+    const unique = next.filter((task, index, all) => task?.id && all.findIndex((candidate) => candidate.id === task.id) === index);
+    return { tasks: unique as LocalImageTask[], value: unique };
+  });
 }
 
 function readPrice() {
@@ -344,7 +349,7 @@ function returnFrozenTasksToWaiting(runner: ImageRunnerSession) {
   const ids = new Set(runner.frozenTaskIds);
   if (!ids.size) return;
   const now = new Date().toISOString();
-  saveTasks(readTasks().map((task) => (ids.has(task.id) && task.status === "generating" ? { ...task, status: "waiting_for_gpu", updatedAt: now } : task)));
+  updateTasks((tasks) => tasks.map((task) => (ids.has(task.id) && task.status === "generating" ? { ...task, status: "waiting_for_gpu", updatedAt: now } : task)));
 }
 
 function clearLocalActiveImageState() {
@@ -633,8 +638,7 @@ export async function POST(request: NextRequest) {
 
     if (action === "create") {
       const task = taskFrom(body);
-      tasks = [task, ...tasks.filter((candidate) => candidate.id !== task.id)];
-      saveTasks(tasks);
+      tasks = updateTasks((current) => [task, ...current.filter((candidate) => candidate.id !== task.id)]);
       return NextResponse.json({ task, ...(await responsePayload()) });
     }
 
@@ -727,7 +731,7 @@ export async function POST(request: NextRequest) {
     else if (action === "confirm") tasks = tasks.map((task) => (task.id === id ? { ...task, status: "waiting_for_gpu", updatedAt } : task));
     else if (action === "retry") tasks = tasks.map((task) => (task.id === id ? { ...task, status: "pending_confirmation", attempts: task.attempts + 1, updatedAt } : task));
     else return NextResponse.json({ error: "invalid_action" }, { status: 400 });
-    saveTasks(tasks);
+    tasks = updateTasks(() => tasks);
     return NextResponse.json(await responsePayload());
   } catch (error) {
     const message = error instanceof Error ? error.message : "image_task_failed";
