@@ -10,7 +10,7 @@ import { publishLocalImageArtifact, type LocalArtifactReference } from "../../sr
 import { sanitizeImageModelPreflight, toAgentModelManifest, validateAgentModelManifestContract, verifyFiveImageModelSources } from "./image-model-preflight";
 import { runImageE2e, claimTokenHash, type ModelEntry, type SanitizedImageE2eSession } from "./image-e2e-coordinator";
 import { loadCloreConfig } from "./config";
-import { cloreRequest, CloreApiError } from "./client";
+import { cloreRequest, CloreApiError, CloreRateLimitError } from "./client";
 import { readLiveMarketplace, readLiveOrdersSummary, readWalletSummary } from "./live";
 import { computeCloreProjectedCost, normalizeCloreServer } from "./marketplace";
 import { createSessionNonce, isLocalWatchdogTaskInstalled, writeLocalWatchdogArmState } from "./watchdog-io";
@@ -43,8 +43,55 @@ function receiptRead(receiptPath=RECEIPT_PATH){try{return JSON.parse(readFileSyn
 function receiptWrite(value:FreshReceipt,receiptPath=RECEIPT_PATH){mkdirSync(path.dirname(receiptPath),{recursive:true});const tmp=`${receiptPath}.${process.pid}.tmp`;const descriptor=openSync(tmp,"w",0o600);try{writeSync(descriptor,`${JSON.stringify(value,null,2)}\n`);fsyncSync(descriptor)}finally{closeSync(descriptor)}renameSync(tmp,receiptPath)}
 export function freshRunRequiresManualRecovery(receipt: Pick<FreshReceipt, "taskId" | "inferenceState"> | null, taskId: string, taskStatus: string | undefined) { return receipt?.taskId === taskId && ["submitting", "accepted", "succeeded"].includes(receipt.inferenceState) && taskStatus !== "completed"; }
 function freshReceipt(taskId:string):FreshReceipt{return {schema:1,runId:randomBytes(12).toString("hex"),taskId,orderId:null,endpoint:null,currentStep:"prerental",inferenceState:"not_started",inferenceSubmitted:false,inferenceSucceeded:false,inferenceSubmittingAt:null,inferenceAcceptedAt:null,acceptedHttpStatus:null,inferenceCompletedAt:null,remoteArtifactAvailable:false,controllerPromptId:null,remoteArtifact:null,artifactDownloaded:false,localArtifactPublished:false,taskFinalized:false,uiVerified:false,orderCancelled:false,timestamps:{prerental:new Date().toISOString()},firstError:null}}
-export function isSafeFailedReceiptForFreshRun(receipt:FreshReceipt|null,taskId:string,taskStatus:string|undefined){return receipt?.taskId===taskId&&receipt.inferenceState==="not_started"&&receipt.inferenceSubmitted===false&&receipt.taskFinalized===false&&receipt.orderCancelled===true&&taskStatus==="waiting_for_gpu"}
+export function isSafeFailedReceiptForFreshRun(receipt:FreshReceipt|null,taskId:string,taskStatus:string|undefined){
+  if (receipt?.taskId !== taskId || receipt.inferenceState !== "not_started" || receipt.inferenceSubmitted || receipt.inferenceSucceeded || receipt.taskFinalized || receipt.localArtifactPublished || receipt.artifactDownloaded || taskStatus !== "waiting_for_gpu") return false;
+  const preOrderFailure = receipt.orderId === null && receipt.endpoint === null;
+  const cancelledPostOrderFailure = Boolean(receipt.orderId && receipt.orderCancelled);
+  return preOrderFailure || cancelledPostOrderFailure;
+}
 export async function prepareFreshReceipt(input:{taskId:string;taskStatus:string|undefined;activeOrderCount:()=>Promise<number>;receiptPath?:string;archiveDir?:string}){const receiptPath=input.receiptPath??RECEIPT_PATH;const archiveDir=input.archiveDir??RECEIPT_ARCHIVE_DIR;const previous=receiptRead(receiptPath);if(freshRunRequiresManualRecovery(previous,input.taskId,input.taskStatus))throw new Error("previous_inference_state_requires_manual_recovery");if(previous?.taskId===input.taskId){if(!isSafeFailedReceiptForFreshRun(previous,input.taskId,input.taskStatus))throw new Error("previous_receipt_not_safe_to_rotate");if(await input.activeOrderCount()!==0)throw new Error("previous_receipt_active_order_exists");mkdirSync(archiveDir,{recursive:true});const archivePath=path.join(archiveDir,`${previous.taskId}-${previous.runId}.json`);renameSync(receiptPath,archivePath)}const receipt=freshReceipt(input.taskId);receiptWrite(receipt,receiptPath);return receipt}
+
+export type ActiveOrderSnapshot = { orders: Awaited<ReturnType<typeof readLiveOrdersSummary>>; checkedAt: number };
+export type CreateRateLimitDiagnostic = { httpStatus: 429; retryAfterMs: number | null; code: number; message: string | null; attempt: number };
+
+function matchingCreatedOrder(orders: ActiveOrderSnapshot["orders"], serverId: string) { return orders.find((order) => order.active && order.serverId === serverId && order.orderId) ?? null; }
+function rateLimitFailure(error: unknown) { return error instanceof CloreRateLimitError ? error.failure : null; }
+
+/** Exactly one caller-owned 429 retry. The payload closure is intentionally reused unchanged. */
+export async function createOrderWithRateLimit(input: {
+  serverId: string;
+  createOnce: () => Promise<unknown>;
+  reconcile: () => Promise<ActiveOrderSnapshot>;
+  sleepImpl?: (milliseconds: number) => Promise<void>;
+  jitter?: () => number;
+  onDiagnostic?: (diagnostic: CreateRateLimitDiagnostic) => void;
+}): Promise<{ created: unknown | null; adoptedOrderId: string | null; attempts: number }> {
+  const sleepImpl = input.sleepImpl ?? sleep;
+  const jitter = input.jitter ?? Math.random;
+  const reconcileAndAdopt = async () => {
+    const snapshot = await input.reconcile();
+    const adopted = matchingCreatedOrder(snapshot.orders, input.serverId);
+    if (adopted?.orderId) return adopted.orderId;
+    if (snapshot.orders.some((order) => order.active)) throw new Error("active_order_exists_after_create_rate_limit");
+    return null;
+  };
+  try { return { created: await input.createOnce(), adoptedOrderId: null, attempts: 1 }; }
+  catch (error) {
+    const first = rateLimitFailure(error); if (!first) throw error;
+    input.onDiagnostic?.(first);
+    const adopted = await reconcileAndAdopt(); if (adopted) return { created: null, adoptedOrderId: adopted, attempts: 1 };
+    const cooldown = (first.retryAfterMs ?? 90_000) + Math.floor(Math.max(0, Math.min(1, jitter())) * 10_000);
+    await sleepImpl(cooldown);
+  }
+  const beforeRetry = await reconcileAndAdopt(); if (beforeRetry) return { created: null, adoptedOrderId: beforeRetry, attempts: 1 };
+  try { return { created: await input.createOnce(), adoptedOrderId: null, attempts: 2 }; }
+  catch (error) {
+    const second = rateLimitFailure(error); if (!second) throw error;
+    input.onDiagnostic?.(second);
+    const adopted = await reconcileAndAdopt(); if (adopted) return { created: null, adoptedOrderId: adopted, attempts: 2 };
+    throw new Error(JSON.stringify({ code: "create_order_rate_limit_persisted", http_status: 429, retry_after_ms: second.retryAfterMs, clore_code: second.code, attempt: 2 }));
+  }
+}
 function url(endpoint: string, part: string) { return `${endpoint.replace(/\/$/, "")}${part}`; }
 async function agentPostJson(endpoint: string, token: string, route: string, payload?: object) {
   const response = await fetch(url(endpoint, route), { method: "POST", headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" }, body: payload === undefined ? undefined : JSON.stringify(payload) });
@@ -199,33 +246,45 @@ export async function getArtifactMetadataWithRetry(input: { endpoint: string; to
   throw new Error("agent_artifact_metadata_transport_unavailable");
 }
 
-async function runLive(taskId: string, resume: boolean, commit: string, agentSha256: string, controllerSha256: string, workflowSha256: string) {
+async function runLive(taskId: string, resume: boolean, commit: string, agentSha256: string, controllerSha256: string, workflowSha256: string, initialOrderSnapshot: ActiveOrderSnapshot) {
   const token = resume ? tokenRead() : tokenCreate(); if (!token) throw new Error("image_e2e_agent_token_missing_for_resume");
   const tokenSha256 = createHash("sha256").update(token).digest("hex");
   const config = { ...loadCloreConfig(), targetGpu: "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: 24, maxGpuPricePerHour: MAX_HOURLY, orderType: "on-demand" as const };
-  let selected: ReturnType<typeof normalizeCloreServer> | null = null; let startingBalance = 0; let activeOrderId: string | null = null;
+  let selected: ReturnType<typeof normalizeCloreServer> | null = null; let startingBalance = 0; let activeOrderId: string | null = null; let orderSnapshot = initialOrderSnapshot;
   let transportDiagnostics: AgentTransportDiagnostic[] = [];
+  let createDiagnostics: CreateRateLimitDiagnostic[] = [];
   const appendTransportDiagnostic = (diagnostic: AgentTransportDiagnostic) => { transportDiagnostics = [...transportDiagnostics, diagnostic].slice(-60); const current = sessionRead(); if (current) sessionWrite({ ...current, transportDiagnostics }); };
+  const appendCreateDiagnostic = (diagnostic: CreateRateLimitDiagnostic) => { createDiagnostics = [...createDiagnostics, diagnostic].slice(-4); const current = sessionRead(); if (current) sessionWrite({ ...current, createDiagnostics }); };
+  const refreshOrderSnapshot = async () => { orderSnapshot = { orders: await readLiveOrdersSummary(config, { forceRefresh: true }), checkedAt: Date.now() }; return orderSnapshot; };
   const deps = {
-    now: () => new Date().toISOString(), persist: (session: SanitizedImageE2eSession) => sessionWrite({ ...session, transportDiagnostics }), load: sessionRead,
+    now: () => new Date().toISOString(), persist: (session: SanitizedImageE2eSession) => sessionWrite({ ...session, transportDiagnostics, createDiagnostics }), load: sessionRead,
     readEligibleTask: async (id: string) => resolveExactEligibleImageTask(id),
     prerental: async (id: string) => {
-      const orders = await readLiveOrdersSummary(config, { forceRefresh: true }); if (orders.some((item) => item.active)) throw new Error("active_clore_order_exists");
+      if (orderSnapshot.orders.some((item) => item.active)) throw new Error("active_clore_order_exists");
       await sleep(1_200); const market = await readLiveMarketplace(config, { forceRefresh: true });
       const candidates = market.map((raw) => normalizeCloreServer(raw, config)).filter((item) => item.gpuNormalizedName === "NVIDIA GeForce RTX 4090" && item.orderType === "on-demand" && item.hostOnline !== false && item.priceUsdPerHour !== null && item.priceUsdPerHour <= MAX_HOURLY && item.priceOriginalAmount !== null && item.priceOriginalUnit === "day");
       selected = candidates.find((item) => item.serverId === "98682") ?? candidates.sort((a, b) => (a.priceUsdPerHour ?? Infinity) - (b.priceUsdPerHour ?? Infinity))[0] ?? null;
       if (!selected) throw new Error("no_compliant_rtx4090_candidate"); const cost = computeCloreProjectedCost(selected.priceUsdPerHour, MAX_HOURS); if (!cost.projectedTotalUsd || cost.projectedTotalUsd > MAX_TOTAL) throw new Error("image_e2e_cost_guard_failed");
       const wallet = await readWalletSummary(config, { forceRefresh: true }); if (wallet.availableUsdBalance === null || wallet.availableUsdBalance < cost.projectedTotalUsd) throw new Error("insufficient_clore_balance"); startingBalance = wallet.availableUsdBalance;
       if (!isLocalWatchdogTaskInstalled()) throw new Error("local_watchdog_not_installed");
-      await preflightExactLocalImageTask(id); return resolveExactEligibleImageTask(id);
+      await preflightExactLocalImageTask(id);
+      if (Date.now() - orderSnapshot.checkedAt > 10_000) await refreshOrderSnapshot();
+      if (orderSnapshot.orders.some((item) => item.active)) throw new Error("active_clore_order_exists");
+      return resolveExactEligibleImageTask(id);
     },
     createOrder: async () => {
       if (!selected?.priceOriginalAmount) throw new Error("image_e2e_candidate_missing");
       const command = buildPublicAgentBootstrap({ commit, agentSha256, controllerSha256, workflowSha256, tokenSha256 }); if (Buffer.byteLength(command, "utf8") >= 700) throw new Error("image_e2e_bootstrap_too_long");
       const payload = { currency: config.rentalCurrency, image: "cloreai/jupyter:ubuntu24.04-v2", renting_server: Number(selected.serverId), type: "on-demand", ports: { "8080": "http" }, required_price: selected.priceOriginalAmount, command };
-      let created: unknown; for (let attempt = 0; attempt < 2; attempt += 1) { try { created = await cloreRequest(config, "/create_order", { method: "POST", body: JSON.stringify(payload) }, { maxNetworkRetries: 0, maxRateLimitRetries: 0 }); break; } catch (error) { if (!(error instanceof CloreApiError) || error.failure.code !== 1 || attempt) throw error; const active = await readLiveOrdersSummary(config, { forceRefresh: true }); if (active.some((item) => item.active)) break; await sleep(60_000); } }
-      const direct = created && typeof created === "object" ? String((created as Record<string, unknown>).id ?? (created as Record<string, unknown>).order_id ?? "") : "";
-      const active = await readLiveOrdersSummary(config, { forceRefresh: true }); const order = direct ? active.find((item) => item.orderId === direct) : active.filter((item) => item.active && item.serverId === selected!.serverId)[0];
+      if (Date.now() - orderSnapshot.checkedAt > 10_000) await refreshOrderSnapshot();
+      if (orderSnapshot.orders.some((item) => item.active)) throw new Error("active_clore_order_exists");
+      let created: unknown = null; let adoptedOrderId: string | null = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) { try {
+        const outcome = await createOrderWithRateLimit({ serverId: selected.serverId, createOnce: () => cloreRequest(config, "/create_order", { method: "POST", body: JSON.stringify(payload) }, { maxNetworkRetries: 0, maxRateLimitRetries: 0 }), reconcile: refreshOrderSnapshot, onDiagnostic: appendCreateDiagnostic });
+        created = outcome.created; adoptedOrderId = outcome.adoptedOrderId; break;
+      } catch (error) { if (!(error instanceof CloreApiError) || error.failure.code !== 1 || attempt) throw error; await refreshOrderSnapshot(); if (orderSnapshot.orders.some((item) => item.active)) break; await sleep(60_000); } }
+      const direct = adoptedOrderId ?? (created && typeof created === "object" ? String((created as Record<string, unknown>).id ?? (created as Record<string, unknown>).order_id ?? "") : "");
+      const active = (await refreshOrderSnapshot()).orders; const order = direct ? active.find((item) => item.orderId === direct) : active.filter((item) => item.active && item.serverId === selected!.serverId)[0];
       if (!order?.orderId) throw new Error("create_order_unreconciled");
       const deadline = new Date(Date.now() + MAX_HOURS * 60 * 60 * 1000); writeLocalWatchdogArmState({ schemaVersion: 1, armed: true, sessionNonce: createSessionNonce(), serverId: selected.serverId, orderType: "on-demand", currency: config.rentalCurrency, startingBalanceUsd: startingBalance, armedAt: new Date().toISOString(), drainingAt: new Date(deadline.getTime() - 10 * 60 * 1000).toISOString(), hardDeadlineAt: deadline.toISOString(), hardBudgetUsd: MAX_TOTAL, budgetSafetyUsd: .05, emergencyStop: false });
       let endpoint = order.controllerUrl; const endpointDeadline = Date.now() + 10 * 60 * 1000;
@@ -258,8 +317,8 @@ async function main() {
   if (process.argv.includes("--execute-fresh")) {
     const commit = argument("--immutable-commit"); const agent = argument("--agent-sha256"); const controller = argument("--controller-sha256"); const workflow = argument("--workflow-sha256");
     if (!commit || !agent || !controller || !workflow) throw new Error("immutable_commit_and_agent_hashes_required");
-    const task=readImageTask(taskId);const receipt=await prepareFreshReceipt({taskId,taskStatus:task?.status,activeOrderCount:async()=>{const config={...loadCloreConfig(),targetGpu:"NVIDIA GeForce RTX 4090" as const,minGpuVramGb:24,maxGpuPricePerHour:MAX_HOURLY,orderType:"on-demand" as const};return (await readLiveOrdersSummary(config,{forceRefresh:true})).filter((item)=>item.active).length}});ACTIVE_RECEIPT=receipt;
-    try{console.log(JSON.stringify(await runLive(taskId,false,commit,agent,controller,workflow),null,2));receiptWrite({...ACTIVE_RECEIPT!,currentStep:"done",timestamps:{...ACTIVE_RECEIPT!.timestamps,done:new Date().toISOString()}})}catch(error){receiptWrite({...ACTIVE_RECEIPT!,currentStep:"failed",firstError:error instanceof Error?error.message.slice(0,800):"fresh_run_failed",timestamps:{...ACTIVE_RECEIPT!.timestamps,failed:new Date().toISOString()}});throw error}finally{ACTIVE_RECEIPT=null} return;
+    const task=readImageTask(taskId);const config={...loadCloreConfig(),targetGpu:"NVIDIA GeForce RTX 4090" as const,minGpuVramGb:24,maxGpuPricePerHour:MAX_HOURLY,orderType:"on-demand" as const};const initialOrderSnapshot:ActiveOrderSnapshot={orders:await readLiveOrdersSummary(config,{forceRefresh:true}),checkedAt:Date.now()};const receipt=await prepareFreshReceipt({taskId,taskStatus:task?.status,activeOrderCount:async()=>initialOrderSnapshot.orders.filter((item)=>item.active).length});ACTIVE_RECEIPT=receipt;
+    try{console.log(JSON.stringify(await runLive(taskId,false,commit,agent,controller,workflow,initialOrderSnapshot),null,2));receiptWrite({...ACTIVE_RECEIPT!,currentStep:"done",timestamps:{...ACTIVE_RECEIPT!.timestamps,done:new Date().toISOString()}})}catch(error){receiptWrite({...ACTIVE_RECEIPT!,currentStep:"failed",firstError:error instanceof Error?error.message.slice(0,800):"fresh_run_failed",timestamps:{...ACTIVE_RECEIPT!.timestamps,failed:new Date().toISOString()}});throw error}finally{ACTIVE_RECEIPT=null} return;
   }
   const preflight = await preflightExactLocalImageTask(taskId);
   console.log(JSON.stringify({ ready_for_remote_preflight: true, creates_order: false, claims_task: false, task: { id: preflight.task.id, status: preflight.task.status, width: preflight.task.width, height: preflight.task.height }, model_preflight: preflight.modelPreflight, next: "immutable_agent_and_provider_cost_preflight" }, null, 2));
