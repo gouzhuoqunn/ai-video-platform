@@ -4,10 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { claimImageTask, readImageTask } from "../../src/lib/image-generation/local-image-task-store";
-import { freshRunRequiresManualRecovery, prepareFreshReceipt, persistAndFinalizeExactLocalTask, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, type FreshReceipt } from "./run-image-e2e";
+import { createOrderWithRateLimit, freshRunRequiresManualRecovery, prepareFreshReceipt, persistAndFinalizeExactLocalTask, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, type FreshReceipt } from "./run-image-e2e";
+import { CloreRateLimitError } from "./client";
 
 const taskId = "723e4567-e89b-42d3-a456-426614174000";
 function failedReceipt(state: FreshReceipt["inferenceState"]): FreshReceipt { return { schema: 1, runId: "fixture-run", taskId, orderId: "fixture-order", endpoint: "https://fixture.invalid", currentStep: "failed", inferenceState: state, inferenceSubmitted: state !== "not_started", inferenceSucceeded: false, inferenceSubmittingAt: null, inferenceAcceptedAt: null, acceptedHttpStatus: null, inferenceCompletedAt: null, remoteArtifactAvailable: false, controllerPromptId: null, remoteArtifact: null, artifactDownloaded: false, localArtifactPublished: false, taskFinalized: false, uiVerified: false, orderCancelled: true, timestamps: {}, firstError: "fixture" }; }
+function rateLimit(retryAfterMs: number | null, attempt: number, message = "rate limited") { return new CloreRateLimitError({ httpStatus: 429, code: 5, message, retryAfterMs, attempt }); }
 function exactModelFixture() { return { models: [
   { role: "transformer", id: "fluxed-up-10.2" as const, filename: "fluxedUpFluxNSFW_102BF16.safetensors", url: "https://fixture.invalid/transformer", sha256: "0".repeat(64), size_bytes: 1 },
   { role: "lora", id: "aidma-lora" as const, filename: "aidmaNSFWunlock-FLUX-V0.2.safetensors", url: "https://fixture.invalid/lora", sha256: "1".repeat(64), size_bytes: 2 },
@@ -40,6 +42,30 @@ async function main() {
     writeFileSync(receiptPath, JSON.stringify(failedReceipt("submitting")), "utf8"); activeChecks = 0;
     await assert.rejects(() => prepareFreshReceipt({ taskId, taskStatus: "waiting_for_gpu", receiptPath, archiveDir, activeOrderCount: async () => { activeChecks += 1; return 0; } }), /previous_inference_state_requires_manual_recovery/);
     assert.equal(activeChecks, 0);
+
+    const preOrderReceipt = { ...failedReceipt("not_started"), orderId: null, endpoint: null, orderCancelled: false, runId: "pre-order" };
+    writeFileSync(receiptPath, JSON.stringify(preOrderReceipt), "utf8"); activeChecks = 0;
+    const preOrderRotated = await prepareFreshReceipt({ taskId, taskStatus: "waiting_for_gpu", receiptPath, archiveDir, activeOrderCount: async () => { activeChecks += 1; return 0; } });
+    assert.equal(preOrderRotated.inferenceState, "not_started"); assert.equal(activeChecks, 1);
+    writeFileSync(receiptPath, JSON.stringify(preOrderReceipt), "utf8");
+    await assert.rejects(() => prepareFreshReceipt({ taskId, taskStatus: "waiting_for_gpu", receiptPath, archiveDir, activeOrderCount: async () => 1 }), /previous_receipt_active_order_exists/);
+
+    const emptySnapshot = { orders: [], checkedAt: 0 };
+    let firstCreateReconciliations = 0;
+    await createOrderWithRateLimit({ serverId: "98682", createOnce: async () => ({ id: "created-first" }), reconcile: async () => { firstCreateReconciliations += 1; return emptySnapshot; } });
+    assert.equal(firstCreateReconciliations, 0, "the fresh zero-order snapshot is reused for the first create");
+    const retryAfterDelays: number[] = []; let createCalls = 0; const payloadReferences: object[] = []; const payload = { unchanged: true };
+    const retryAfter = await createOrderWithRateLimit({ serverId: "98682", createOnce: async () => { createCalls += 1; payloadReferences.push(payload); if (createCalls === 1) throw rateLimit(12_000, 1); return { id: "created" }; }, reconcile: async () => emptySnapshot, sleepImpl: async (delay) => { retryAfterDelays.push(delay); }, jitter: () => 0 });
+    assert.equal(retryAfter.attempts, 2); assert.equal(createCalls, 2); assert.deepEqual(retryAfterDelays, [12_000]); assert.equal(payloadReferences[0], payloadReferences[1]);
+    const fallbackDelays: number[] = []; createCalls = 0;
+    await createOrderWithRateLimit({ serverId: "98682", createOnce: async () => { createCalls += 1; if (createCalls === 1) throw rateLimit(null, 1); return { id: "created" }; }, reconcile: async () => emptySnapshot, sleepImpl: async (delay) => { fallbackDelays.push(delay); }, jitter: () => 0 });
+    assert.deepEqual(fallbackDelays, [90_000]);
+    createCalls = 0;
+    const adopted = await createOrderWithRateLimit({ serverId: "98682", createOnce: async () => { createCalls += 1; throw rateLimit(null, 1); }, reconcile: async () => ({ orders: [{ orderId: "adopted", serverId: "98682", active: true }] as any, checkedAt: 0 }), sleepImpl: async () => undefined, jitter: () => 0 });
+    assert.equal(adopted.adoptedOrderId, "adopted"); assert.equal(createCalls, 1);
+    createCalls = 0; const diagnostics: unknown[] = [];
+    await assert.rejects(() => createOrderWithRateLimit({ serverId: "98682", createOnce: async () => { createCalls += 1; throw rateLimit(null, createCalls, "token=fixture-secret"); }, reconcile: async () => emptySnapshot, sleepImpl: async () => undefined, jitter: () => 0, onDiagnostic: (value) => diagnostics.push(value) }), /create_order_rate_limit_persisted/);
+    assert.equal(createCalls, 2); assert.ok(!JSON.stringify(diagnostics).includes("fixture-secret"));
     const claim = claimImageTask(taskId, "coordinator-fixture", 60_000, options);
     const heartbeat = startImageTaskLeaseHeartbeat({ taskId, claimToken: claim.claimToken, leaseMs: 60_000, options });
     const png = await sharp({ create: { width: 768, height: 768, channels: 3, background: "#2e6" } }).png().toBuffer();
@@ -47,7 +73,7 @@ async function main() {
     heartbeat.assertHealthy(); heartbeat.stop();
     assert.equal(result.completed.status, "completed");
     assert.equal(readImageTask(taskId, options)?.result?.pngSha256, result.artifact.pngSha256);
-    console.log(JSON.stringify({ ok: true, preflight_does_not_claim: true, prior_submitting_blocks_fresh_provider_mutation: true, safe_failed_receipt_archived_and_rotated: true, model_failure_leaves_task_unchanged: true, local_lease_heartbeat: true, persistence_and_exact_finalization: true }));
+    console.log(JSON.stringify({ ok: true, preflight_does_not_claim: true, prior_submitting_blocks_fresh_provider_mutation: true, safe_failed_receipt_archived_and_rotated: true, safe_preorder_receipt_archived_and_rotated: true, active_order_blocks_preorder_rotation: true, single_snapshot_before_first_create: true, exact_429_retry_after_and_fallback: true, reconciled_order_adopted_without_second_create: true, second_429_stops_without_alternate: true, model_failure_leaves_task_unchanged: true, local_lease_heartbeat: true, persistence_and_exact_finalization: true }));
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 void main();

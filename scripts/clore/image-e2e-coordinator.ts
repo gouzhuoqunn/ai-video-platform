@@ -22,6 +22,7 @@ export type SanitizedImageE2eSession = {
   timestamps: Partial<Record<ImageE2ePhase, string>>;
   lastError: string | null;
   transportDiagnostics?: AgentTransportDiagnostic[];
+  createDiagnostics?: Array<{ httpStatus: 429; retryAfterMs: number | null; code: number; message: string | null; attempt: number }>;
 };
 
 export type RemoteArtifact = NonNullable<SanitizedImageE2eSession["remoteArtifact"]> & { png: Buffer };
@@ -70,7 +71,7 @@ function clean(value: unknown) {
 }
 
 function initial(input: { taskId: string; immutableCommit: string; tokenFile: string; tokenSha256: string }): SanitizedImageE2eSession {
-  return { schemaVersion: 1, taskId: input.taskId, phase: "PRERENTAL", orderId: null, endpoint: null, immutableCommit: input.immutableCommit, tokenFile: input.tokenFile, tokenSha256: input.tokenSha256, claimTokenHash: null, artifact: null, remoteArtifact: null, stages: {}, timestamps: { PRERENTAL: new Date().toISOString() }, lastError: null, transportDiagnostics: [] };
+  return { schemaVersion: 1, taskId: input.taskId, phase: "PRERENTAL", orderId: null, endpoint: null, immutableCommit: input.immutableCommit, tokenFile: input.tokenFile, tokenSha256: input.tokenSha256, claimTokenHash: null, artifact: null, remoteArtifact: null, stages: {}, timestamps: { PRERENTAL: new Date().toISOString() }, lastError: null, transportDiagnostics: [], createDiagnostics: [] };
 }
 
 function mark(deps: CoordinatorDeps, session: SanitizedImageE2eSession, phase: ImageE2ePhase, patch: Partial<SanitizedImageE2eSession> = {}) {

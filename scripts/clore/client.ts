@@ -81,10 +81,12 @@ function sanitizeProviderValue(value: unknown, depth = 0): unknown {
   if (depth > 5) return "<truncated>";
   if (value === null || typeof value === "number" || typeof value === "boolean") return value;
   if (typeof value === "string") {
-    const redacted = value
+      const redacted = value
       .replace(/ssh-(?:ed25519|rsa)\s+[A-Za-z0-9+/=]+(?:\s+\S+)?/g, "<redacted-ssh-key>")
       .replace(/\b(?:hf_|sk-)[A-Za-z0-9_-]{16,}\b/g, "<redacted-secret>")
-      .replace(/\bBearer\s+\S+/gi, "Bearer <redacted>");
+      .replace(/\bBearer\s+\S+/gi, "Bearer <redacted>")
+      .replace(/([?&](?:token|signature|credential)[^=&]*=)[^&\s]+/gi, "$1<redacted>")
+      .replace(/\b(token|secret|password)\s*[:=]\s*[^\s,;]+/gi, "$1=<redacted>");
     return redacted.slice(0, 4000);
   }
   if (Array.isArray(value)) return value.slice(0, 50).map((item) => sanitizeProviderValue(item, depth + 1));
@@ -118,6 +120,24 @@ export class CloreApiError extends Error {
     super(`Clore API failed: ${serialized}`);
     this.name = "CloreApiError";
     this.failure = failure;
+  }
+}
+
+export type SanitizedCloreRateLimitFailure = {
+  httpStatus: 429;
+  code: number;
+  message: string | null;
+  retryAfterMs: number | null;
+  attempt: number;
+};
+
+/** Preserves only the rate-limit facts needed by a caller-owned safe retry. */
+export class CloreRateLimitError extends Error {
+  readonly failure: SanitizedCloreRateLimitFailure;
+  constructor(failure: SanitizedCloreRateLimitFailure) {
+    super("clore_rate_limit");
+    this.name = "CloreRateLimitError";
+    this.failure = { ...failure, message: failure.message === null ? null : String(sanitizeProviderValue(failure.message)) };
   }
 }
 
@@ -261,7 +281,10 @@ export class CloreRequestScheduler {
         const code = typeof payload.code === "number" ? payload.code : response.ok ? 0 : response.status;
         this.log({ endpoint, at: new Date().toISOString(), status: response.status, retry: rateLimitAttempts });
         if (response.status === 429 || code === 5) {
-          if (rateLimitAttempts >= (options.maxRateLimitRetries ?? 3)) throw new Error("Clore API rate limit persisted after retries.");
+          if (rateLimitAttempts >= (options.maxRateLimitRetries ?? 3)) {
+            const message = typeof payload.message === "string" ? String(sanitizeProviderValue(payload.message)) : null;
+            throw new CloreRateLimitError({ httpStatus: 429, code, message, retryAfterMs: retryAfter, attempt: rateLimitAttempts + 1 });
+          }
           rateLimitAttempts += 1;
           if (endpoint === "/create_order") await options.beforeCreateRetry?.();
           await this.sleepFn(this.backoff(rateLimitAttempts - 1, retryAfter));
