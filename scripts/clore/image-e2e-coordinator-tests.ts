@@ -3,14 +3,14 @@ import { runImageE2e, type CoordinatorDeps, type SanitizedImageE2eSession } from
 
 const task = { id: "eefc2b5b-5f25-4d82-aeeb-3b8ff501a1a0", status: "waiting_for_gpu", mode: "text_generation", referenceImage: null, prompt: "fixture", width: 768, height: 768, steps: 30, cfg: 4, loraStrength: .8, seed: 1, sampler: "FlowMatch" } as any;
 
-function fake(input: { modelFailure?: boolean; artifactFailure?: boolean; submittingReceiptFailure?: boolean; acceptedReceiptFailure?: boolean; inferenceFailure?: boolean; resume?: SanitizedImageE2eSession | null } = {}) {
+function fake(input: { modelAuthFailure?: "once" | "twice"; artifactFailure?: boolean; submittingReceiptFailure?: boolean; acceptedReceiptFailure?: boolean; inferenceFailure?: boolean; resume?: SanitizedImageE2eSession | null } = {}) {
   const events: string[] = []; let saved: SanitizedImageE2eSession | null = input.resume ?? null; let claimed = false; let inferenceCalls = 0;
   const deps: CoordinatorDeps = {
     now: () => "2026-07-25T00:00:00.000Z", persist: (value) => { saved = structuredClone(value); events.push(`persist:${value.phase}`); }, load: () => saved,
     prerental: async () => { events.push("prerental"); return task; }, readEligibleTask: async () => { events.push("read_task"); return task; },
     createOrder: async () => { events.push("create"); return { orderId: "1979999", endpoint: "https://agent.example" }; }, reconnect: async () => ({ active: true, endpoint: "https://agent.example" }),
     armWatchdog: async () => { events.push("arm"); }, disarmWatchdog: async () => { events.push("disarm"); }, health: async () => ({ alive: true, currentStage: "idle", lastError: null }),
-    stage: async (_endpoint, stage) => { events.push(`stage:${stage}`); if (stage === "models" && input.modelFailure && events.filter((value) => value === "stage:models").length === 1) return { status: "failed", error: "signed_url_expired" }; if (stage === "inference") inferenceCalls += 1; return { status: "succeeded" }; },
+    stage: async (_endpoint, stage) => { events.push(`stage:${stage}`); const modelPosts = events.filter((value) => value === "stage:models").length; if (stage === "models" && input.modelAuthFailure && (input.modelAuthFailure === "twice" || modelPosts === 1)) return { status: "failed" as const, error: "model_download_http_error:transformer:x:http_403", data: { code: "model_download_http_error", role: "transformer", http_status: 403, body_excerpt: "AccessDenied" } }; if (stage === "inference") inferenceCalls += 1; return { status: "succeeded" as const }; },
     submitInference: async () => { events.push("inference_post"); inferenceCalls += 1; return { acceptedHttpStatus: 202 as const }; },
     pollInference: async () => { events.push("first_status_get"); return input.inferenceFailure ? { status: "failed" as const, error: "controller_exact_failure" } : { status: "succeeded" as const, data: { controller_prompt_id: "prompt-from-status", byte_size: 3, sha256: "c".repeat(64), width: 768, height: 768, generation_duration_seconds: 1 } }; },
     inferenceReceipt: async (event, detail) => { events.push(`receipt_${event}`); if (event === "submitting" && input.submittingReceiptFailure) throw new Error("receipt_submitting_write_failed"); if (event === "accepted" && input.acceptedReceiptFailure) throw new Error("receipt_accepted_write_failed"); if (event === "accepted") assert.equal(detail?.acceptedHttpStatus, 202); if (event === "succeeded") { assert.equal(detail?.controllerPromptId, "prompt-from-status"); assert.equal(detail?.remoteArtifact?.sha256, "c".repeat(64)); } },
@@ -36,9 +36,14 @@ async function main() {
   assert.ok(success.events.includes("receipt_artifact_downloaded") && success.events.includes("receipt_task_finalized") && success.events.includes("receipt_ui_verified") && success.events.includes("receipt_order_cancelled"));
   assert.ok(success.events.includes("cancel:1979999") && success.events.filter((value) => value === "zero").length === 2);
   assert.ok(!JSON.stringify(success.saved).includes("plain-claim-token") && !JSON.stringify(success.saved).includes("signed.example"));
-  const refreshed = fake({ modelFailure: true }); await runImageE2e({ taskId: task.id, immutableCommit: "a".repeat(40), tokenFile: ".secrets/token", tokenSha256: "d".repeat(64), resume: false }, refreshed.deps);
+  const refreshed = fake({ modelAuthFailure: "once" }); await runImageE2e({ taskId: task.id, immutableCommit: "a".repeat(40), tokenFile: ".secrets/token", tokenSha256: "d".repeat(64), resume: false }, refreshed.deps);
   assert.equal(refreshed.events.filter((value) => value === "resolve_models").length, 2);
   assert.equal(refreshed.events.filter((value) => value === "stage:models").length, 2);
+  assert.equal(refreshed.inferenceCalls, 1);
+  const authorizationExhausted = fake({ modelAuthFailure: "twice" });
+  await assert.rejects(() => runImageE2e({ taskId: task.id, immutableCommit: "a".repeat(40), tokenFile: ".secrets/token", tokenSha256: "d".repeat(64), resume: false }, authorizationExhausted.deps), /model_download_authorization_failed_after_refresh/);
+  assert.equal(authorizationExhausted.events.filter((value) => value === "stage:models").length, 2);
+  assert.equal(authorizationExhausted.inferenceCalls, 0); assert.equal(authorizationExhausted.claimed, false); assert.ok(authorizationExhausted.events.includes("cancel:1979999"));
   const transfer = fake({ artifactFailure: true }); await runImageE2e({ taskId: task.id, immutableCommit: "a".repeat(40), tokenFile: ".secrets/token", tokenSha256: "d".repeat(64), resume: false }, transfer.deps);
   assert.equal(transfer.inferenceCalls, 1); assert.equal(transfer.events.filter((value) => value === "retrieve").length, 2); assert.ok(transfer.events.includes("cancel:1979999"));
   const submittingWriteFailure = fake({ submittingReceiptFailure: true });

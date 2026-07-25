@@ -2,6 +2,7 @@
 """Focused, offline contract tests for the restricted diagnostic agent."""
 import hashlib
 import http.client
+import io
 import importlib.util
 import json
 import socket
@@ -65,14 +66,38 @@ def test_manifest_and_download(agent, temp):
     fixture = b"fixture-model"
     entry = accepted[0]
     original = agent.urllib.request.urlopen
-    agent.urllib.request.urlopen = lambda *_args, **_kwargs: FakeResponse(fixture)
+    requests = []
+    def downloaded(request, *_args, **_kwargs):
+        requests.append(request); return FakeResponse(fixture)
+    agent.urllib.request.urlopen = downloaded
     try:
         first = agent.stream_model(entry); assert first["status"] == "verified"
-        second = agent.stream_model(entry); assert second["status"] == "verified_existing"
+        second = agent.stream_model(entry); assert second["status"] == "verified_existing" and len(requests) == 1
+        assert requests[0].get_header("User-agent") == "ai-video-platform-model-fetch/1"
+        assert requests[0].get_header("Accept") == "application/octet-stream"
         wrong = dict(entry); wrong["sha256"] = "0" * 64
         assert_raises(lambda: agent.stream_model(wrong), "model_sha256_mismatch")
     finally:
         agent.urllib.request.urlopen = original
+
+
+def test_model_http_error_is_structured_and_sanitized(agent, temp):
+    agent.COMFY_DIR = Path(temp) / "ComfyUI-http-error"
+    entry = agent.validate_manifest({"models": model_entries(agent, "https://signed.example/model?X-Amz-Signature=secret")})[0]
+    original = agent.urllib.request.urlopen
+    def denied(*_args, **_kwargs):
+        raise urllib.error.HTTPError("https://signed.example/model?X-Amz-Signature=secret", 403, "Forbidden", {"Content-Type": "application/xml", "Content-Length": "99", "Retry-After": "3"}, io.BytesIO(b"<Error><Code>AccessDenied</Code><Message>SignatureDoesNotMatch https://signed.example/model?X-Amz-Signature=secret</Message></Error>"))
+    agent.urllib.request.urlopen = denied
+    try:
+        try: agent.stream_model(entry)
+        except agent.StageFailure as error:
+            data = error.data
+            assert data["code"] == "model_download_http_error" and data["http_status"] == 403
+            assert data["final_hostname"] == "signed.example" and data["content_type"] == "application/xml" and data["retry_after"] == "3"
+            assert "AccessDenied" in data["body_excerpt"] and "SignatureDoesNotMatch" in data["body_excerpt"]
+            assert "secret" not in json.dumps(data) and "X-Amz-Signature" not in json.dumps(data)
+        else: raise AssertionError("expected structured HTTP error")
+    finally: agent.urllib.request.urlopen = original
 
 
 def test_raw_fetch_and_controller_failure(agent, temp):
@@ -276,6 +301,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="diagnostic-agent-restricted-") as temp:
         agent = load_agent(); agent.ROOT = Path(temp); agent.STATE_FILE = agent.ROOT / "state.json"; agent.RUNTIME_DIR = agent.ROOT / "runtime"; agent.ARTIFACT_DIR = agent.ROOT / "artifacts"
         test_manifest_and_download(agent, temp)
+        test_model_http_error_is_structured_and_sanitized(agent, temp)
         test_raw_fetch_and_controller_failure(agent, temp)
         test_inference(agent, temp)
         test_comfy_missing_torch_is_bounded(agent, temp)
