@@ -41,12 +41,14 @@ def request(port, method, route, body=None):
 
 def main():
     controller = load_controller(); received = []; validation_failure = {"error": {"type": "prompt_validation", "message": "missing node"}, "node_errors": {"7": {"errors": [{"message": "invalid sampler"}]}}, "prompt_validation": {"reason": "fixture"}, "prompt": "must-not-escape", "token": "fixture-token"}
-    mode = {"validation": False}
+    mode = {"validation": False, "missing_node": False}
     class FakeComfy(BaseHTTPRequestHandler):
         def log_message(self, *_args): return
         def do_GET(self):
             if self.path == "/object_info":
-                json_response(self, 200, {key: {} for key in {"CLIPTextEncode", "DualCLIPLoader", "EmptyFlux2LatentImage", "FluxGuidance", "KSampler", "LoraLoader", "SaveImage", "UNETLoader", "VAEDecode", "VAELoader"}}); return
+                nodes = {"CLIPTextEncode", "DualCLIPLoader", "EmptySD3LatentImage", "FluxGuidance", "KSampler", "LoraLoader", "SaveImage", "UNETLoader", "VAEDecode", "VAELoader"}
+                if mode["missing_node"]: nodes.remove("EmptySD3LatentImage")
+                json_response(self, 200, {key: {} for key in nodes}); return
             if self.path.startswith("/history/"):
                 json_response(self, 200, {}); return
             json_response(self, 404, {"error": "not_found"})
@@ -54,7 +56,7 @@ def main():
             assert self.path == "/prompt"
             if self.headers.get("Content-Length") is None:
                 try: json_response(self, 400, {"error": "missing_content_length"})
-                except ConnectionResetError: pass
+                except (ConnectionResetError, ConnectionAbortedError): pass
                 return
             length = int(self.headers["Content-Length"]); raw = self.rfile.read(length)
             received.append({"raw": raw, "content_type": self.headers.get("Content-Type"), "payload": json.loads(raw.decode("utf-8"))})
@@ -68,6 +70,8 @@ def main():
         server = ThreadingHTTPServer(("127.0.0.1", controller_port), controller.make_handler(state)); thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         payload = {"task_id": "123e4567-e89b-42d3-a456-426614174000", "mode": "text_generation", "prompt": "Unicode survives: 雪", "width": 768, "height": 768, "steps": 25, "cfg": 4.0, "lora_strength": 0.8, "seed": 1, "sampler": "Euler"}
         try:
+            mode["missing_node"] = True; status, missing = request(controller_port, "POST", "/image/generate", json.dumps(payload, ensure_ascii=False).encode("utf-8")); assert status == 400 and missing["error"] == "runtime_missing_nodes:EmptySD3LatentImage" and not received
+            mode["missing_node"] = False
             status, body = request(controller_port, "POST", "/image/generate", json.dumps(payload, ensure_ascii=False).encode("utf-8")); assert status == 202 and body["prompt_id"] == "fake-prompt-id"
             assert len(received) == 1 and isinstance(received[0]["raw"], bytes) and received[0]["content_type"] == "application/json"
             assert set(received[0]["payload"]) == {"prompt", "client_id"}; assert received[0]["payload"]["prompt"]["4"]["inputs"]["text"] == payload["prompt"]
@@ -81,7 +85,7 @@ def main():
             server.shutdown(); comfy.shutdown(); thread.join(timeout=5)
     source = CONTROLLER_PATH.read_text(encoding="utf-8")
     assert "request_upstream(f\"{state.comfy_base_url}/prompt\", \"POST\", {\"prompt\": workflow" not in source
-    print(json.dumps({"ok": True, "json_body_bytes": True, "utf8": True, "prompt_id_stored": True, "structured_validation_error": True, "old_dict_boundary_regression": True, "single_inference_boundary": True, "secrets_redacted": True}))
+    print(json.dumps({"ok": True, "json_body_bytes": True, "utf8": True, "sd3_latent_gate_before_prompt": True, "prompt_id_stored": True, "structured_validation_error": True, "old_dict_boundary_regression": True, "single_inference_boundary": True, "secrets_redacted": True}))
 
 
 if __name__ == "__main__": main()

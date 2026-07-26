@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 REQUIRED_NODE_CLASSES = {
-    "CLIPTextEncode", "DualCLIPLoader", "EmptyFlux2LatentImage", "FluxGuidance",
+    "CLIPTextEncode", "DualCLIPLoader", "EmptySD3LatentImage", "FluxGuidance",
     "KSampler", "LoraLoader", "SaveImage", "UNETLoader", "VAEDecode", "VAELoader",
 }
 
@@ -52,7 +52,7 @@ def build_text_workflow(job_id: str, options: dict[str, Any]) -> dict[str, Any]:
         "3": {"class_type": "LoraLoader", "inputs": {"model": ["1", 0], "clip": ["2", 0], "lora_name": AIDMA, "strength_model": options["lora_strength"], "strength_clip": options["lora_strength"]}},
         "4": {"class_type": "CLIPTextEncode", "inputs": {"text": options["prompt"], "clip": ["3", 1]}},
         "5": {"class_type": "FluxGuidance", "inputs": {"conditioning": ["4", 0], "guidance": options["cfg"]}},
-        "6": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": options["width"], "height": options["height"], "batch_size": 1}},
+        "6": {"class_type": "EmptySD3LatentImage", "inputs": {"width": options["width"], "height": options["height"], "batch_size": 1}},
         "7": {"class_type": "KSampler", "inputs": {"model": ["3", 0], "seed": options["seed"], "steps": options["steps"], "cfg": 1.0, "sampler_name": sampler_name, "scheduler": "simple", "positive": ["5", 0], "negative": ["5", 0], "latent_image": ["6", 0], "denoise": 1.0}},
         "8": {"class_type": "VAELoader", "inputs": {"vae_name": VAE}},
         "9": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["8", 0]}},

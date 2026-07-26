@@ -196,7 +196,8 @@ def complete(name: str, data: dict[str, Any]) -> None:
 def failed(name: str, error: object, data: dict[str, Any] | None = None) -> None:
     with STATE_LOCK:
         record = STATE["stages"].setdefault(name, {})
-        record.update({"status": "failed", "completed_at": now(), "first_exact_failure": clean(error), "data": data or record.get("data", {})})
+        existing = record.get("data") if isinstance(record.get("data"), dict) else {}
+        record.update({"status": "failed", "completed_at": now(), "first_exact_failure": clean(error), "data": {**existing, **(data or {})}})
         STATE["last_error"] = clean(error)
         STATE["current_stage"] = "idle"
         save_locked()
@@ -531,7 +532,12 @@ def stage_inference(payload: dict[str, Any]) -> dict[str, Any]:
     status, job = request_json("http://127.0.0.1:18080/image/generate", "POST", payload)
     if status != 202 or not isinstance(job, dict) or not isinstance(job.get("job_id"), str):
         raise RuntimeError("controller_generate_failed:" + clean(job, 800))
-    started = time.monotonic(); job_id = job["job_id"]
+    started = time.monotonic(); job_id = job["job_id"]; prompt_id = job.get("prompt_id") if isinstance(job.get("prompt_id"), str) else None
+    with STATE_LOCK:
+        record = STATE["stages"].setdefault("inference", {"status": "running", "started_at": now(), "completed_at": None, "exit_code": None, "log_tail": []})
+        existing = record.get("data") if isinstance(record.get("data"), dict) else {}
+        record["data"] = {**existing, "controller_job_id": job_id, "controller_prompt_id": prompt_id, "controllerAcceptedAt": now(), "requested_width": payload["width"], "requested_height": payload["height"]}
+        save_locked()
     while time.monotonic() - started < 20 * 60:
         status, state = request_json(f"http://127.0.0.1:18080/jobs/{urllib.parse.quote(job_id)}")
         if status != 200 or not isinstance(state, dict):
@@ -553,7 +559,7 @@ def stage_inference(payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("controller_result_failed:" + clean(error, 500)) from error
     width, height = png_dimensions(image)
     if width != payload["width"] or height != payload["height"]:
-        raise RuntimeError(f"result_dimensions_mismatch:{width}x{height}")
+        raise StageFailure(f"result_dimensions_mismatch:{width}x{height}", {"code": "result_dimensions_mismatch", "requested_width": payload["width"], "requested_height": payload["height"], "actual_width": width, "actual_height": height, "controller_job_id": job_id, "controller_prompt_id": prompt_id, "png_byte_size": len(image), "png_sha256": hashlib.sha256(image).hexdigest()})
     artifact = ARTIFACT_DIR / task_id
     artifact.mkdir(parents=True, exist_ok=True)
     image_path = artifact / "image.png"; image_path.write_bytes(image)
