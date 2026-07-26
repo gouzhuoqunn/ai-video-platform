@@ -25,7 +25,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ tas
     if (!task || task.status !== "completed" || !artifact) return NextResponse.json({ error: "artifact_not_found" }, { status: 404 });
     await verifyPublishedLocalImageArtifact({ taskId, artifact });
     const bytes = readFileSync(localArtifactFile({ taskId, artifact, kind }));
-    return new NextResponse(bytes, { headers: { "content-type": kind === "output" ? "image/png" : "image/webp", "cache-control": "private, max-age=60, no-transform", "x-content-type-options": "nosniff" } });
+    return new NextResponse(bytes, { headers: { "content-type": kind === "output" ? "image/png" : "image/webp", "content-length": String(bytes.length), "cache-control": "private, max-age=60, no-transform", "x-content-type-options": "nosniff" } });
   } catch {
     return NextResponse.json({ error: "artifact_not_found" }, { status: 404 });
   }

@@ -270,6 +270,7 @@
     "cross-env": "^10.1.0",
     "eslint": "^9.39.4",
     "eslint-config-next": "^16.2.10",
+    "playwright": "^1.62.0",
     "postcss": "^8.5.16",
     "tailwindcss": "^4.3.2",
     "tsx": "^4.21.0",
