@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { HISTORICAL_RENTED_CANDIDATE_MESSAGE, HISTORICAL_RUNNER_GENERIC_MESSAGE, projectRunnerStatus } from "../src/lib/image-generation/runner-status-projection";
 
 const historicalCode6 = { state: "failed", pid: 27900, host: { orderId: null }, blocker: "Clore API failed", error: { stage: "preflight", at: "2026-07-26T18:26:08.488Z", message: "Clore API failed: {\"httpStatus\":200,\"code\":6,\"error\":\"server-already-rented\",\"classification\":\"unknown_code6\"}" } };
@@ -18,6 +19,10 @@ function main() {
   assert.equal(active.error?.isBlocking, true);
   assert.equal(active.error?.historical, false);
   assert.doesNotMatch(JSON.stringify(active), /unknown_code6|httpStatus|server-already-rented/);
+  const route = readFileSync("src/app/api/local-lab/image-tasks/route.ts", "utf8");
+  assert.match(route, /host: display\.error\?\.historical \? null : runner\.host/);
+  const studio = readFileSync("src/components/ImageCreationStudio.tsx", "utf8");
+  assert.match(studio, /candidateRole/);
   console.log(JSON.stringify({ ok: true, historicalCode6Mapped: true, currentErrorBlocking: true, providerMutationCount: 0 }));
 }
 

@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { listImageTasks } from "../../src/lib/image-generation/local-image-task-store";
 import { hydrateFrozenImageSessionPlan, planImageSession } from "./image-session";
-import { cleanupLiveSession, createLiveSessionOrder, installModelsOnce, invokeStage, submitTaskInference, waitForAgentIdle, writeSessionReceipt, writeTaskReceipt, type CandidateAttemptEvent, type ImmutableRuntime } from "./image-live-runtime";
+import { cleanupLiveSession, createLiveSessionOrder, installModelsOnce, invokeStage, submitTaskInference, waitForAgentIdle, writeSessionReceipt, writeTaskReceipt, type CandidateAttemptEvent, type ImmutableRuntime, type MarketWaitEvent } from "./image-live-runtime";
 import { resolveExactEligibleImageTask } from "./run-image-e2e";
 import { RTX4090_GOLDEN_DEPLOYMENT_PROFILE } from "../image-executor/rtx4090-golden-deployment-profile";
 
@@ -23,7 +23,7 @@ function initial(sessionId: string, plan: ReturnType<typeof planImageSession>): 
 function persist(receipt: SessionReceipt) { writeSessionReceipt(receipt); }
 function taskReceipt(receipt: SessionReceipt, taskId: string, patch: Record<string, unknown>) { writeTaskReceipt(receipt.sessionId, taskId, { taskId, inferenceState: receipt.tasks[taskId].inferenceState, stageRunId: receipt.tasks[taskId].stageRunId, timestamps: { updatedAt: stamp() }, ...patch }); }
 
-export async function runLiveImageSession(input: { taskIds: string[]; immutable: ImmutableRuntime; execute: boolean; sessionId?: string; onOrderCreated?: (order: { orderId: string; serverId: string; endpoint: string }, profile: SessionReceipt["deploymentProfile"]) => Promise<void> | void; onCandidateAttempt?: (event: CandidateAttemptEvent) => Promise<void> | void }) {
+export async function runLiveImageSession(input: { taskIds: string[]; immutable: ImmutableRuntime; execute: boolean; sessionId?: string; onOrderCreated?: (order: { orderId: string; serverId: string; endpoint: string }, profile: SessionReceipt["deploymentProfile"]) => Promise<void> | void; onCandidateAttempt?: (event: CandidateAttemptEvent) => Promise<void> | void; onMarketWait?: (event: MarketWaitEvent) => Promise<void> | void }) {
   if (!input.execute) {
     const plan = planImageSession(listImageTasks(), { activeOrderCount: 0 });
     return { dryRun: true, providerMutationCount: 0, selectedTaskIds: plan.selectedTaskIds, executionEligible: plan.executionEligible };
@@ -36,7 +36,7 @@ export async function runLiveImageSession(input: { taskIds: string[]; immutable:
   let order: Awaited<ReturnType<typeof createLiveSessionOrder>> | null = null; let primary: unknown = null;
   try {
     receipt.sessionState = "starting"; receipt.timestamps.starting = stamp(); persist(receipt);
-    order = await createLiveSessionOrder({ sessionId: receipt.sessionId, taskIds: exact, immutable: input.immutable, execute: true, onCandidateAttempt: async (event) => { receipt.candidateAttempts = [...receipt.candidateAttempts, event].slice(-10); receipt.timestamps[`candidate:${event.attempt}:${event.event}`] = stamp(); persist(receipt); await input.onCandidateAttempt?.(event); } });
+    order = await createLiveSessionOrder({ sessionId: receipt.sessionId, taskIds: exact, immutable: input.immutable, execute: true, onCandidateAttempt: async (event) => { receipt.candidateAttempts = [...receipt.candidateAttempts, event].slice(-10); receipt.timestamps[`candidate:${event.attempt}:${event.event}`] = stamp(); persist(receipt); await input.onCandidateAttempt?.(event); }, onMarketWait: input.onMarketWait });
     receipt.orderId = order.orderId; receipt.endpointHostname = order.hostname; receipt.timestamps.orderCreated = stamp(); persist(receipt);
     await input.onOrderCreated?.({ orderId: order.orderId, serverId: order.serverId, endpoint: order.endpoint }, receipt.deploymentProfile);
     await waitForAgentIdle(order);

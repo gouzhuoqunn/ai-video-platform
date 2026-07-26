@@ -1080,10 +1080,14 @@ export async function runImage4090Batch(deps = defaultDeps()) {
       readSourceAcquisitionManifest(sourceManifestPath);
       const receipt = await deps.runLiveSession({ sessionId: readRunner().createAttempt?.id, taskIds: frozenPlan.selectedTaskIds, immutable: profile.immutable, execute: true, onCandidateAttempt: (event) => {
         const current = readRunner(); const prior = Array.isArray(current.host?.candidateAttempts) ? current.host.candidateAttempts : [];
-        const message = event.event === "candidate_already_rented" ? "候选显卡已被其他用户租用，正在尝试下一台。" : `正在尝试第 ${event.attempt} 台候选显卡`;
-        updateRunner({ state: "running", stage: message, host: { ...(current.host ?? {}), serverId: event.serverId, priceHourly: event.hourlyUsd, attemptedServerIds: [...new Set([...prior.map((item) => String((item as Record<string, unknown>).serverId ?? "")).filter(Boolean), event.serverId])], candidateAttempts: [...prior, event].slice(-10), marketplaceRefreshedAt: event.marketplaceRefreshedAt, message } });
+        const message = event.event === "candidate_already_rented" ? "候选显卡已被其他用户租用，正在重新扫描市场。" : event.event === "candidate_failed" ? "候选显卡启动失败，已停止本次启动。" : `正在尝试第 ${event.attempt} 台候选显卡`;
+        updateRunner({ state: "running", stage: message, host: { ...(current.host ?? {}), serverId: event.serverId, orderId: current.host?.orderId ?? null, priceHourly: event.hourlyUsd, candidateRole: "candidate", attemptedServerIds: [...new Set([...prior.map((item) => String((item as Record<string, unknown>).serverId ?? "")).filter(Boolean), event.serverId])], candidateAttempts: [...prior, event].slice(-10), marketplaceRefreshedAt: event.marketplaceRefreshedAt, message } });
+      }, onMarketWait: (market) => {
+        const current = readRunner();
+        const message = market.phase === "waiting_for_market" ? "当前没有可用候选，等待市场刷新。" : "正在刷新 Clore 市场并排序候选显卡。";
+        updateRunner({ state: "running", stage: message, host: { ...(current.host ?? {}), candidateRole: "candidate", market: { phase: market.phase, scannedAt: market.scannedAt, nextScanAt: market.nextScanAt, totalServerCount: market.totalServerCount, compliantCandidateCount: market.compliantCandidateCount, rejectedServerIds: market.rejectedServerIds, selectedServerId: market.selectedServerId, selectedHourlyUsd: market.selectedHourlyUsd }, message } });
       }, onOrderCreated: (order, deploymentProfile) => {
-        updateRunner({ stage: "订单已创建，正在等待已验证运行环境", host: { ...(readRunner().host ?? {}), orderId: order.orderId, serverId: order.serverId, controllerUrl: order.endpoint, deploymentProfileId: deploymentProfile.id, bootstrapTemplateSha256: deploymentProfile.bootstrapTemplateSha256, runtimeDigest: deploymentProfile.image, healthPath: profile.healthPath, controllerBind: profile.controllerBind } });
+        updateRunner({ stage: "订单已创建，正在等待已验证运行环境", host: { ...(readRunner().host ?? {}), candidateRole: "rented_host", orderId: order.orderId, serverId: order.serverId, controllerUrl: order.endpoint, deploymentProfileId: deploymentProfile.id, bootstrapTemplateSha256: deploymentProfile.bootstrapTemplateSha256, runtimeDigest: deploymentProfile.image, healthPath: profile.healthPath, controllerBind: profile.controllerBind } });
       } });
       updateRunner({
         state: receipt.sessionState === "completed" ? "completed" : "failed",

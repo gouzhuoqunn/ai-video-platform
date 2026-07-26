@@ -87,6 +87,10 @@ export type ImageRunnerSession = {
     lastCreateOrderError?: string | null;
     lastCreateOrderTechnicalCause?: string | null;
     createOrderAttempts?: Record<string, unknown>[] | null;
+    candidateRole?: "candidate" | "rented_host" | null;
+    market?: { phase: string; scannedAt: string | null; nextScanAt: string | null; totalServerCount: number | null; compliantCandidateCount: number | null; rejectedServerIds: string[]; selectedServerId: string | null; selectedHourlyUsd: number | null } | null;
+    marketplaceRefreshedAt?: string | null;
+    candidateAttempts?: Array<{ serverId?: string; hourlyUsd?: number | null; event?: string; marketplaceRefreshedAt?: string | null }> | null;
   } | null;
   error: {
     stage: string;
@@ -259,6 +263,39 @@ function normalizeHost(value: unknown): ImageRunnerSession["host"] {
     lastCreateOrderError: stringOrNull(host.lastCreateOrderError),
     lastCreateOrderTechnicalCause: stringOrNull(host.lastCreateOrderTechnicalCause),
     createOrderAttempts: recordArrayOrNull(host.createOrderAttempts),
+    candidateRole: host.candidateRole === "candidate" || host.candidateRole === "rented_host" ? host.candidateRole : null,
+    marketplaceRefreshedAt: stringOrNull(host.marketplaceRefreshedAt),
+    candidateAttempts: recordArrayOrNull(host.candidateAttempts)?.map((attempt) => ({ serverId: stringOrNull(attempt.serverId) ?? undefined, hourlyUsd: finiteNumber(attempt.hourlyUsd), event: stringOrNull(attempt.event) ?? undefined, marketplaceRefreshedAt: stringOrNull(attempt.marketplaceRefreshedAt) })) ?? null,
+    market: host.market && typeof host.market === "object" && !Array.isArray(host.market) ? {
+      phase: stringOrNull((host.market as Record<string, unknown>).phase) ?? "unknown",
+      scannedAt: stringOrNull((host.market as Record<string, unknown>).scannedAt),
+      nextScanAt: stringOrNull((host.market as Record<string, unknown>).nextScanAt),
+      totalServerCount: finiteNumber((host.market as Record<string, unknown>).totalServerCount),
+      compliantCandidateCount: finiteNumber((host.market as Record<string, unknown>).compliantCandidateCount),
+      rejectedServerIds: stringArrayOrNull((host.market as Record<string, unknown>).rejectedServerIds) ?? [],
+      selectedServerId: stringOrNull((host.market as Record<string, unknown>).selectedServerId),
+      selectedHourlyUsd: finiteNumber((host.market as Record<string, unknown>).selectedHourlyUsd),
+    } : null,
+  };
+}
+
+function projectRunnerProgress(runner: ImageRunnerSession) {
+  const host = runner.host;
+  const market = host?.market ?? null;
+  const candidate = host?.orderId ? null : host?.serverId ? { serverId: host.serverId, hourlyUsd: host.priceHourly, selectedAt: host.marketplaceRefreshedAt ?? null } : null;
+  const order = host?.orderId ? { orderId: host.orderId, serverId: host.serverId, hourlyUsd: host.priceHourly, state: host.deploymentState ?? host.orderStatus ?? "created" } : null;
+  return {
+    phase: market?.phase ?? (order ? "order_created" : runner.state === "running" ? "preflight" : "idle"),
+    displayMessage: host?.message ?? runner.stage,
+    market: market ? { ...market, nextScanInSeconds: market.nextScanAt ? Math.max(0, Math.ceil((Date.parse(market.nextScanAt) - Date.now()) / 1000)) : null } : null,
+    candidate,
+    order,
+    deployment: order ? { state: host?.deploymentState ?? host?.orderStatus ?? "unknown" } : null,
+    generation: runner.currentTaskIndex === null ? null : { taskIndex: runner.currentTaskIndex, taskCount: runner.frozenTaskIds.length },
+    canCancelWaiting: runner.state === "running" && market?.phase === "waiting_for_market" && !host?.orderId,
+    canStopAndCancelOrder: Boolean(host?.orderId),
+    isBlocking: Boolean(runner.blocker),
+    timeline: (host?.candidateAttempts ?? []).slice(-8).map((attempt) => ({ at: String(attempt.marketplaceRefreshedAt ?? runner.updatedAt), phase: String(attempt.event ?? "candidate"), serverId: String(attempt.serverId ?? ""), hourlyUsd: finiteNumber(attempt.hourlyUsd) })),
   };
 }
 
@@ -508,7 +545,11 @@ async function responsePayload(extra: Record<string, unknown> = {}) {
     },
     runner: {
       ...runner,
+      // A terminal receipt without PID/order/lock is historical evidence, not
+      // a current rented host or a reusable marketplace selection.
+      host: display.error?.historical ? null : runner.host,
       error: display.error,
+      progress: projectRunnerProgress(display.error?.historical ? { ...runner, host: null } : runner),
       blocker: terminalRunnerState(runner.state) ? (readiness.rtx4090.ready ? display.blocker : readiness.rtx4090.blocker) : display.blocker,
     },
     executionReady: readiness.rtx4090.ready,

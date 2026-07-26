@@ -8,6 +8,7 @@ import { loadCloreConfig } from "./config";
 import { cloreRequest, CloreApiError, sleep } from "./client";
 import { readLiveMarketplace, readLiveOrdersSummary, readWalletSummary } from "./live";
 import { normalizeCloreServer } from "./marketplace";
+import { rankFreshMarketplaceCandidates, type MarketScanEvidence } from "./live-market-selection";
 import { createSessionNonce, isLocalWatchdogTaskInstalled, writeLocalWatchdogArmState } from "./watchdog-io";
 import { agentGetJsonWithRetry, agentHealthResponse } from "./agent-get-transport";
 import { agentPostJson, buildPublicAgentBootstrap, createOrderWithRateLimit, getArtifactMetadataWithRetry, persistAndFinalizeExactLocalTask, pollInferenceStage, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, waitForStage, type AcceptedStage, type EligibleImageTask } from "./run-image-e2e";
@@ -21,11 +22,16 @@ import { resilientCreateOrder, type ResilientCreateAttempt, type ResilientCreate
 export type ImmutableRuntime = { commit: string; agentSha256: string; controllerSha256: string; workflowSha256: string };
 export type LiveSessionOrder = { orderId: string; endpoint: string; hostname: string; serverId: string; hourlyUsd: number; startingBalanceUsd: number; plan: ImageSessionPlan; token: string; tokenSha256: string; hardDeadlineAt: string };
 export type StageTerminal = { stageRunId: string; status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> };
-export type CandidateAttemptEvent = { attempt: number; serverId: string; hourlyUsd: number | null; event: "selected" | "candidate_already_rented" | "order_created"; classification: string | null; marketplaceRefreshedAt: string };
+export type CandidateAttemptEvent = { attempt: number; serverId: string; hourlyUsd: number | null; event: "selected" | "candidate_already_rented" | "candidate_failed" | "order_created"; classification: string | null; marketplaceRefreshedAt: string };
+export type MarketWaitEvent = MarketScanEvidence & { phase: "scanning_market" | "waiting_for_market"; cycle: number; nextScanAt: string | null };
 
 const MAX_HOURS = 4;
 const MAX_TOTAL = 1.50;
 export const MAX_CANDIDATE_CREATE_ATTEMPTS = 5;
+export const MARKET_NO_CANDIDATE_MESSAGE = "当前没有符合价格和配置要求的 RTX 4090，正在等待市场刷新。";
+export const MARKET_WAIT_PAUSED_MESSAGE = "市场持续没有可用候选，搜索已暂停；可以继续等待市场。";
+export const MARKET_REFRESH_INTERVAL_MS = 20_000;
+export const MARKET_WAIT_TIMEOUT_MS = 30 * 60_000;
 export const NO_COMPLIANT_RTX4090_CANDIDATE_MESSAGE = "当前符合价格和配置要求的 RTX 4090 已被租用，请稍后重试。";
 const SESSION_SECRET_ROOT = path.join(process.cwd(), ".secrets", "diagnostics", "image-sessions");
 const fixedConfig = (gpuClass: ImageGpuClass = "rtx4090") => ({ ...loadCloreConfig(), targetGpu: gpuClass === "rtx5090" ? "NVIDIA GeForce RTX 5090" as const : "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: gpuClass === "rtx5090" ? 32 : 24, maxGpuPricePerHour: IMAGE_SESSION_LIMITS.maxHourlyUsd, orderType: "on-demand" as const });
@@ -40,6 +46,10 @@ function exactTaskIds(taskIds: readonly string[]) { if (!taskIds.length || new S
 
 export function isCandidateAlreadyRented(error: unknown) {
   return error instanceof CloreApiError && error.failure.classification === "candidate_already_rented";
+}
+
+export class MarketplaceWaitTimeoutError extends Error {
+  constructor() { super(MARKET_WAIT_PAUSED_MESSAGE); this.name = "MarketplaceWaitTimeoutError"; }
 }
 
 export async function createOrderWithCandidateFallback<Candidate extends ResilientCreateCandidate, Value>(input: {
@@ -58,19 +68,19 @@ export async function createOrderWithCandidateFallback<Candidate extends Resilie
       reconcile: input.reconcile,
       onAttempt: input.onAttempt,
       shouldRetryOnNextCandidate: isCandidateAlreadyRented,
-      noFreshCandidateError: () => new Error(NO_COMPLIANT_RTX4090_CANDIDATE_MESSAGE),
+      noFreshCandidateError: () => new Error(MARKET_NO_CANDIDATE_MESSAGE),
     });
   } catch (error) {
     const attempts = (error as { resilientAttempts?: unknown[] } | null)?.resilientAttempts;
     if (isCandidateAlreadyRented(error) && Array.isArray(attempts) && attempts.length >= MAX_CANDIDATE_CREATE_ATTEMPTS) {
-      throw new Error(NO_COMPLIANT_RTX4090_CANDIDATE_MESSAGE);
+      throw new Error(MARKET_NO_CANDIDATE_MESSAGE);
     }
     throw error;
   }
 }
 
 /** Read-only prerequisites plus a bounded same-attempt fallback for an already-rented candidate. */
-export async function createLiveSessionOrder(input: { sessionId: string; taskIds: string[]; immutable: ImmutableRuntime; execute: boolean; onCandidateAttempt?: (event: CandidateAttemptEvent) => Promise<void> | void }): Promise<LiveSessionOrder> {
+export async function createLiveSessionOrder(input: { sessionId: string; taskIds: string[]; immutable: ImmutableRuntime; execute: boolean; onCandidateAttempt?: (event: CandidateAttemptEvent) => Promise<void> | void; onMarketWait?: (event: MarketWaitEvent) => Promise<void> | void }): Promise<LiveSessionOrder> {
   if (!input.execute) throw new Error("image_session_execute_flag_required");
   const tasks = exactTaskIds(input.taskIds);
   const gpuClass = tasks[0].gpuClass as ImageGpuClass;
@@ -85,12 +95,19 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
   if (command !== buildRtx4090GoldenBootstrap(token.sha256)) throw new Error("rtx4090_golden_profile_bootstrap_mismatch");
   type CandidateContext = { candidate: ReturnType<typeof normalizeCloreServer>; wallet: Awaited<ReturnType<typeof readWalletSummary>>; plan: ImageSessionPlan; marketplaceRefreshedAt: string };
   const contexts = new Map<string, CandidateContext>();
-  const result = await createOrderWithCandidateFallback({
+  let result: Awaited<ReturnType<typeof createOrderWithCandidateFallback>>;
+  const waitingStartedAt = Date.now();
+  for (let cycle = 0; ; cycle += 1) {
+    contexts.clear();
+    try {
+    result = await createOrderWithCandidateFallback({
     activeOrderCount: async () => (await readLiveOrdersSummary(config, { forceRefresh: true })).filter((order) => order.active).length,
     selectFreshCandidate: async (attempted) => {
       const marketplaceRefreshedAt = new Date().toISOString();
       const market = await readLiveMarketplace(config, { forceRefresh: true });
-      const candidate = market.map((raw) => normalizeCloreServer(raw, config)).filter((item) => item.gpuNormalizedName === config.targetGpu && item.orderType === "on-demand" && item.hostOnline !== false && item.priceUsdPerHour !== null && item.priceUsdPerHour <= IMAGE_SESSION_LIMITS.maxHourlyUsd && item.priceOriginalAmount !== null && item.priceOriginalUnit === "day" && !attempted.has(item.serverId)).sort((left, right) => (left.priceUsdPerHour ?? Infinity) - (right.priceUsdPerHour ?? Infinity) || left.serverId.localeCompare(right.serverId))[0] ?? null;
+      const ranked = rankFreshMarketplaceCandidates({ marketplace: market, config, attemptedServerIds: attempted, now: () => marketplaceRefreshedAt });
+      const candidate = ranked.candidates[0] ?? null;
+      await input.onMarketWait?.({ ...ranked.evidence, phase: "scanning_market", cycle, nextScanAt: null });
       if (!candidate?.priceUsdPerHour || !candidate.priceOriginalAmount) return null;
       const wallet = await readWalletSummary(config, { forceRefresh: true });
       const plan = { ...planImageSession(tasks, { gpuClass, activeOrderCount: 0, selectedHourlyUsd: candidate.priceUsdPerHour, walletBalanceUsd: wallet.availableUsdBalance }), selectedGpuModel: candidate.gpuNormalizedName };
@@ -126,9 +143,19 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
     onAttempt: async (attempt) => {
       const context = contexts.get(attempt.candidateId);
       if (!context) return;
-      await input.onCandidateAttempt?.({ attempt: attempt.requestNumber, serverId: attempt.candidateId, hourlyUsd: context.candidate.priceUsdPerHour, event: attempt.result === "failed_request" ? "candidate_already_rented" : "order_created", classification: attempt.failure && "classification" in attempt.failure ? attempt.failure.classification : null, marketplaceRefreshedAt: context.marketplaceRefreshedAt });
+      const classification = attempt.failure && "classification" in attempt.failure ? attempt.failure.classification : null;
+      await input.onCandidateAttempt?.({ attempt: attempt.requestNumber, serverId: attempt.candidateId, hourlyUsd: context.candidate.priceUsdPerHour, event: attempt.result === "failed_request" ? (classification === "candidate_already_rented" ? "candidate_already_rented" : "candidate_failed") : "order_created", classification, marketplaceRefreshedAt: context.marketplaceRefreshedAt });
     },
-  });
+    });
+    break;
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== MARKET_NO_CANDIDATE_MESSAGE) throw error;
+      if (Date.now() - waitingStartedAt >= MARKET_WAIT_TIMEOUT_MS) throw new MarketplaceWaitTimeoutError();
+      const nextScanAt = new Date(Date.now() + MARKET_REFRESH_INTERVAL_MS).toISOString();
+      await input.onMarketWait?.({ scannedAt: new Date().toISOString(), totalServerCount: 0, compliantCandidateCount: 0, rejectedServerIds: [], attemptedServerIds: [], selectedServerId: null, selectedHourlyUsd: null, phase: "waiting_for_market", cycle: cycle + 1, nextScanAt });
+      await sleep(MARKET_REFRESH_INTERVAL_MS);
+    }
+  }
   const selected = result.order.value.candidate; const wallet = result.order.value.wallet; const plan = result.order.value.plan; const order = result.order.value.order;
   const hardDeadlineAt = new Date(Date.now() + MAX_HOURS * 3_600_000).toISOString();
   writeLocalWatchdogArmState({ schemaVersion: 1, armed: true, sessionNonce: createSessionNonce(), serverId: selected.serverId, orderType: "on-demand", currency: config.rentalCurrency, startingBalanceUsd: wallet.availableUsdBalance, armedAt: new Date().toISOString(), drainingAt: new Date(Date.parse(hardDeadlineAt) - 10 * 60_000).toISOString(), hardDeadlineAt, hardBudgetUsd: MAX_TOTAL, budgetSafetyUsd: .05, emergencyStop: false });
