@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import type { ImageGpuClass } from "../../src/lib/image-generation/flux-stack";
+import { imageRuntimeForGpuClass } from "../clore/config";
 import { readSourceAcquisitionManifest, readValidatedRestoreManifest, type SourceAcquisitionManifest, type ValidatedRestoreManifest } from "./manifests";
 
 export const IMAGE_RUNNER_PRECHECK_STAGE = "preflight";
@@ -14,6 +16,9 @@ export type ImageExecutorReadiness =
   | { ready: true; mode: "restore_manifest"; blocker: null; restoreManifest: ValidatedRestoreManifest }
   | { ready: true; mode: "first_run_bootstrap"; blocker: null; sourceManifest: SourceAcquisitionManifest }
   | { ready: false; mode: "not_ready"; blocker: string; code: string };
+
+export const RTX5090_RUNTIME_UNPUBLISHED_BLOCKER =
+  "RTX 5090 运行时尚未发布，当前可先使用 RTX 4090 生成不超过 1280 × 1280 的图片。";
 
 export type ImageExecutorPaths = {
   restoreManifestPath: string;
@@ -81,6 +86,13 @@ export function assertImageExecutorReady(paths: ImageExecutorPaths) {
   const readiness = imageExecutorReadiness(paths);
   if (!readiness.ready) throw new Error(readiness.code === "restore_manifest_missing_and_bootstrap_incomplete" ? RESTORE_OR_BOOTSTRAP_BLOCKER : readiness.blocker);
   return readiness;
+}
+
+export function imageExecutorReadinessForGpuClass(gpuClass: ImageGpuClass, paths: ImageExecutorPaths): ImageExecutorReadiness {
+  if (gpuClass === "rtx5090" && !imageRuntimeForGpuClass(gpuClass)) {
+    return { ready: false, mode: "not_ready", blocker: RTX5090_RUNTIME_UNPUBLISHED_BLOCKER, code: "rtx5090_runtime_unpublished" };
+  }
+  return imageExecutorReadiness(paths);
 }
 
 export function processExists(pid: number | null | undefined) {

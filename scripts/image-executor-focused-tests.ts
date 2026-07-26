@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
@@ -374,7 +374,8 @@ async function main() {
   const studio = readFileSync("src/components/ImageCreationStudio.tsx", "utf8");
   assert.match(route, /frozenTaskIds: \[\.\.\.new Set\(batch\.map/);
   assert.match(route, /writeJson\(PREFERENCES_PATH, \{ maxHourlyPrice \}\)/);
-  assert.match(route, /executionReady: blocker === null/);
+  assert.match(route, /executionReady: readiness\.rtx4090\.ready/);
+  assert.match(route, /const blocker = readinessBlocker\(selectedGpuClass\)/);
   assert.match(route, /stdio: \["ignore", "pipe", "pipe"\]/);
   assert.match(route, /child\.on\("exit"/);
   assert.match(route, /child\.on\("error"/);

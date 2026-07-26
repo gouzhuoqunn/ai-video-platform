@@ -12,7 +12,7 @@ The active product is an image-only, local-first FLUX creation workspace. The on
 - Tasks at or below 1280 x 1280 use RTX 4090 (`低`); all larger dimensions use RTX 5090 (`高`).
 - Text-generation dimensions are limited to 768-1536 in 256-pixel increments. Both dimensions at or below 1280 require RTX 4090; either dimension above 1280 through 1536 requires RTX 5090; larger or non-grid dimensions are rejected with a clear local error.
 - RTX 5090-class tasks enter the same local pending-confirmation queue as RTX 4090 tasks. A confirmed batch is frozen to exactly one GPU class; the shared executor chooses the cheapest compliant online on-demand host of that exact class, verifies the post-start GPU report, and preserves the existing one-order, reserve-balance, cost, watchdog, and cleanup guards.
-- The currently pinned runtime digest contains the historical 1280-pixel workflow validation. The source-side 1536 workflow change must be released as a new immutable digest and pinned before a paid RTX 5090 session is enabled; the executor must fail closed rather than renting an image that cannot accept the requested dimensions.
+- The currently pinned runtime digest contains the historical 1280-pixel workflow validation. RTX 4090 text batches (768-1280, 256-pixel grid, no reference image) may use that exact proven digest when the local readiness gate and no-active-order checks pass, even when the broader deployment hold remains enabled. The hold continues to reject every other deployment path. RTX 5090 requires its own newly published and pinned immutable digest containing the 1536-capable workflow; until then it fails closed with a class-specific unpublished-runtime blocker rather than renting the 4090 image.
 
 ## RTX 4090 executor checkpoint
 

@@ -8,6 +8,17 @@ export const PROJECT_TAG = "ai-video-platform-wan22";
 export const DEFAULT_DOCKER_IMAGE = "nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04";
 export const COMFY_RUNTIME_IMAGE =
   "ghcr.io/gouzhuoqunn/ai-creative-comfy-runtime@sha256:c5867e642b503e22533827d59a6128bc84cd97cefdafdf2cac934d4f4ad69830";
+// This is deliberately null until the same runtime build is published with the
+// 1536-capable workflow and its immutable digest is verified.
+export const COMFY_RUNTIME_5090_IMAGE: string | null = null;
+
+export function imageRuntimeForGpuClass(gpuClass: "rtx4090" | "rtx5090") {
+  return gpuClass === "rtx4090" ? COMFY_RUNTIME_IMAGE : COMFY_RUNTIME_5090_IMAGE;
+}
+
+export function isApprovedImageRuntime(image: string) {
+  return image === COMFY_RUNTIME_IMAGE || image === COMFY_RUNTIME_5090_IMAGE;
+}
 
 function parseEnvFile(filePath: string) {
   if (!existsSync(filePath)) {

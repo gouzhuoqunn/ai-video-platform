@@ -15,7 +15,7 @@ import { cloreRequest } from "../../../../../scripts/clore/client";
 import { loadCloreExecutionConfig } from "../../../../../scripts/clore/execution-config";
 import { readLiveOrdersSummary, type CloreOrderSummary } from "../../../../../scripts/clore/live";
 import { ACTIVE_ORDER_PATH, LEGACY_ORDER_CREATE_LOCK_PATH, ORDER_CREATE_LOCK_PATH, clearActiveOrder, clearOrderCreateLocks, readActiveOrder } from "../../../../../scripts/clore/order-state";
-import { finalSanitizedLogLines, imageExecutorReadiness, processExists, STALE_RUNNER_NO_ORDER_MESSAGE } from "../../../../../scripts/image-executor/readiness";
+import { finalSanitizedLogLines, imageExecutorReadinessForGpuClass, processExists, STALE_RUNNER_NO_ORDER_MESSAGE } from "../../../../../scripts/image-executor/readiness";
 
 export const dynamic = "force-dynamic";
 
@@ -145,8 +145,12 @@ function readPrice() {
   return value !== null && value > 0 ? value : DEFAULT_MAX_HOURLY_PRICE;
 }
 
-function readinessBlocker() {
-  const readiness = imageExecutorReadiness({ restoreManifestPath: RESTORE_MANIFEST_PATH, sourceManifestPath: SOURCE_MANIFEST_PATH });
+function readinessForGpuClass(gpuClass: ImageGpuClass) {
+  return imageExecutorReadinessForGpuClass(gpuClass, { restoreManifestPath: RESTORE_MANIFEST_PATH, sourceManifestPath: SOURCE_MANIFEST_PATH });
+}
+
+function readinessBlocker(gpuClass: ImageGpuClass = "rtx4090") {
+  const readiness = readinessForGpuClass(gpuClass);
   return readiness.ready ? null : readiness.blocker;
 }
 
@@ -454,12 +458,19 @@ async function reconcileStaleRunner(runner: ImageRunnerSession) {
 }
 
 async function responsePayload(extra: Record<string, unknown> = {}) {
-  const blocker = readinessBlocker();
+  const readiness = {
+    rtx4090: readinessForGpuClass("rtx4090"),
+    rtx5090: readinessForGpuClass("rtx5090"),
+  };
   const runner = await reconcileStaleRunner(readRunner());
   return {
     tasks: readTasks(),
-    runner: terminalRunnerState(runner.state) ? { ...runner, blocker } : runner,
-    executionReady: blocker === null,
+    runner: terminalRunnerState(runner.state) ? { ...runner, blocker: readiness.rtx4090.ready ? null : readiness.rtx4090.blocker } : runner,
+    executionReady: readiness.rtx4090.ready,
+    executionReadiness: {
+      rtx4090: { ready: readiness.rtx4090.ready, blocker: readiness.rtx4090.ready ? null : readiness.rtx4090.blocker },
+      rtx5090: { ready: readiness.rtx5090.ready, blocker: readiness.rtx5090.ready ? null : readiness.rtx5090.blocker },
+    },
     maxHourlyPrice: readPrice(),
     localProgram: readLocalProgramStatus(),
     ...extra,
@@ -611,12 +622,12 @@ function regenerateGroupedTasks(input: Record<string, unknown>) {
 
 function assertStartableBatch(batch: ImageTask[], maxHourlyPrice: number) {
   const classes = [...new Set(batch.map((task) => task.gpuClass))];
-  const blocker = readinessBlocker();
-  if (blocker) throw new Error(blocker);
   if (!batch.length) throw new Error("no_confirmed_image_tasks_selected");
   if (classes.length !== 1) throw new Error("mixed_gpu_classes_are_not_allowed");
   if (!Number.isFinite(maxHourlyPrice) || maxHourlyPrice <= 0) throw new Error("invalid_max_hourly_price");
   const selectedGpuClass = classes[0];
+  const blocker = readinessBlocker(selectedGpuClass);
+  if (blocker) throw new Error(blocker);
   if (batch.some((task) => task.mode !== "text_generation" || task.referenceImage || classifyImageGpu(task.width, task.height) !== selectedGpuClass || !task.prompt.trim())) {
     throw new Error(KONTEXT_BLOCKER);
   }

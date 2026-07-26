@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { cloreRequest, sleep } from "./client";
-import { COMFY_RUNTIME_IMAGE, DEFAULT_DOCKER_IMAGE, PROJECT_TAG } from "./config";
+import { COMFY_RUNTIME_IMAGE, DEFAULT_DOCKER_IMAGE, PROJECT_TAG, isApprovedImageRuntime } from "./config";
 import type { loadCloreConfig } from "./config";
 import { verifyDockerImage } from "./docker-image";
 import { readLiveOrdersSummary, readWalletSummary } from "./live";
@@ -151,6 +151,14 @@ export function buildKeyWithPasswordFallbackCreateOrderBody(input: { serverId: s
   return { currency: input.currency, image: CLORE_LIGHT_BOOTSTRAP_IMAGE, renting_server: Number(input.serverId), type: "on-demand", ports: { "22": "tcp" }, ssh_password: input.sshPassword, ssh_key: input.sshPublicKey, required_price: input.requiredPriceForApi, autossh_entrypoint: true };
 }
 
+function isProvenRtx4090ImageTextOrder(input: { requestBody: CreateOrderRequest; sessionMetadata?: { gpuProfile: GpuProfile; bootstrapImage: string } }) {
+  const body = input.requestBody;
+  return input.sessionMetadata?.gpuProfile === "rtx4090" && input.sessionMetadata.bootstrapImage === COMFY_RUNTIME_IMAGE &&
+    body.image === COMFY_RUNTIME_IMAGE && body.command === undefined && body.ssh_key === undefined && body.ssh_password === undefined &&
+    Object.keys(body.ports).length === 1 && body.ports["8080"] === "http" && body.env?.COMFY_RUNTIME_MODE === "gpu" &&
+    body.env?.COMFY_GPU_PROFILE === "rtx4090" && body.env?.COMFY_NODE_PROFILE === "image-flux" && body.env?.START_GPU_WORKER === "false";
+}
+
 export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
   const serialized = JSON.stringify(body);
   if (/CLORE_API_KEY|SUPABASE_SECRET_KEY|SUPABASE_SERVICE_ROLE_KEY|GPU_WORKER_PASSWORD|LOCAL_LAB_PASSWORD/i.test(serialized)) {
@@ -162,13 +170,13 @@ export function assertCreateOrderBodySafe(body: CreateOrderRequest) {
   if (body.currency !== "USD-Blockchain") {
     throw new Error("Clore order currency must be USD-Blockchain.");
   }
-  const fixedRuntime = body.image === COMFY_RUNTIME_IMAGE && /@sha256:[a-f0-9]{64}$/.test(body.image);
+  const fixedRuntime = isApprovedImageRuntime(body.image) && /@sha256:[a-f0-9]{64}$/.test(body.image);
   const lightBootstrap = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.env?.RUNTIME_BOOTSTRAP_PROFILE === CLORE_LIGHT_BOOTSTRAP_PROFILE;
   const manualParity = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.ssh_password !== undefined && body.env === undefined && body.command === undefined && body.required_price === undefined && body.autossh_entrypoint === true;
   const passwordFallback = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.ssh_password !== undefined && body.env === undefined && body.command === undefined && body.required_price !== undefined && body.autossh_entrypoint === true;
   const keyOnly = body.image === CLORE_LIGHT_BOOTSTRAP_IMAGE && body.ssh_password === undefined && body.env === undefined && body.command === undefined && body.required_price !== undefined && body.autossh_entrypoint === true;
   const cudaBase = body.image === CLORE_CUDA_BASE_IMAGE && body.ssh_password === undefined && body.env === undefined && body.command === undefined && body.required_price !== undefined && body.autossh_entrypoint === true;
-  const httpRuntime = body.image === COMFY_RUNTIME_IMAGE && body.ssh_key === undefined && body.ssh_password === undefined && body.command === undefined && body.ports["8080"] === "http";
+  const httpRuntime = isApprovedImageRuntime(body.image) && body.ssh_key === undefined && body.ssh_password === undefined && body.command === undefined && body.ports["8080"] === "http";
   if (!fixedRuntime && !httpRuntime && !lightBootstrap && !manualParity && !passwordFallback && !keyOnly && !cudaBase) throw new Error("Clore order image must be the pinned Runtime, approved light bootstrap, or CUDA base profile.");
   if (httpRuntime) {
     const activeRuntimeText = JSON.stringify({
@@ -315,7 +323,7 @@ export async function createCloreOrder(input: {
   afterCreateRequestAttempt?: () => Promise<void> | void;
   resolvedBatchRelease?: boolean;
 }) {
-  assertCloreDeploymentAllowed({ resolvedBatchRelease: input.resolvedBatchRelease });
+  assertCloreDeploymentAllowed({ resolvedBatchRelease: input.resolvedBatchRelease, provenRtx4090ImageTextRelease: isProvenRtx4090ImageTextOrder(input) });
   if (!input.execution.enabled) {
     throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false.");
   }
