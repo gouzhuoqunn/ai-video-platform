@@ -22,14 +22,68 @@ export type ImageTaskGroup<T extends GroupableImageTask = GroupableImageTask> = 
   requestedCount: number;
   completedCount: number;
   pendingCount: number;
+  pendingConfirmationCount: number;
+  waitingForGpuCount: number;
   generatingCount: number;
   failedCount: number;
+  currentChildIndex: number | null;
+  status: "pending_confirmation" | "waiting_for_gpu" | "generating" | "failed" | "completed";
   latestCompletedAt: string | null;
   isActive: boolean;
 };
 
+export type MutableGroupableImageTask = GroupableImageTask & {
+  status?: string;
+  updatedAt?: string;
+  attempts?: number;
+  localClaim?: unknown;
+  error?: unknown;
+};
+
 export function groupIdentity(task: GroupableImageTask) { return task.groupId || task.id; }
 export function promptTitle(prompt: string | undefined) { return Array.from(prompt ?? "").slice(0, 12).join(""); }
+
+export function groupStatusLabel(status: ImageTaskGroup["status"]) {
+  return ({ pending_confirmation: "待确认", waiting_for_gpu: "等待显卡", generating: "生成中", failed: "失败", completed: "已完成" })[status];
+}
+
+export function confirmImageTaskGroup<T extends MutableGroupableImageTask>(tasks: T[], groupId: string, updatedAt: string) {
+  let confirmed = 0;
+  const next = tasks.map((task) => {
+    if (groupIdentity(task) !== groupId || task.status !== "pending_confirmation") return task;
+    confirmed += 1;
+    return { ...task, status: "waiting_for_gpu", updatedAt } as T;
+  });
+  if (!confirmed) throw new Error("该任务组没有可确认的任务。");
+  return { tasks: next, confirmed };
+}
+
+export function cancelImageTaskGroup<T extends MutableGroupableImageTask>(tasks: T[], groupId: string) {
+  const members = tasks.filter((task) => groupIdentity(task) === groupId);
+  if (!members.length) throw new Error("未找到任务组。");
+  const cancellable = new Set(members.filter((task) => !task.localClaim && ["pending_confirmation", "waiting_for_gpu", "failed"].includes(task.status ?? "")).map((task) => task.id));
+  const protectedCount = members.filter((task) => task.status === "generating" || task.localClaim).length;
+  if (!cancellable.size && protectedCount) throw new Error("该任务组已有图像进入生成，不能在这里取消；请使用批次级停止操作。");
+  if (!cancellable.size) throw new Error("该任务组没有可取消的未认领任务。");
+  return {
+    tasks: tasks.filter((task) => !cancellable.has(task.id)),
+    cancelled: cancellable.size,
+    blocker: protectedCount ? "已有图像正在生成，已保留该图像；其余未认领任务已取消。" : null,
+  };
+}
+
+export function retryFailedImageTaskGroup<T extends MutableGroupableImageTask>(tasks: T[], groupId: string, updatedAt: string) {
+  let retried = 0;
+  const next = tasks.map((task) => {
+    if (groupIdentity(task) !== groupId || task.status !== "failed" || task.localClaim) return task;
+    retried += 1;
+    const replacement = { ...task, status: "pending_confirmation", attempts: Number(task.attempts ?? 0) + 1, updatedAt } as T;
+    delete replacement.error;
+    return replacement;
+  });
+  if (!retried) throw new Error("该任务组没有可重试的失败任务。");
+  return { tasks: next, retried };
+}
 
 export function groupImageTasks<T extends GroupableImageTask>(tasks: T[]): ImageTaskGroup<T>[] {
   const map = new Map<string, T[]>();
@@ -40,11 +94,15 @@ export function groupImageTasks<T extends GroupableImageTask>(tasks: T[]): Image
   return [...map.entries()].map(([id, members]) => {
     const ordered = [...members].sort((a, b) => (a.groupIndex ?? 1) - (b.groupIndex ?? 1) || a.id.localeCompare(b.id));
     const completed = ordered.filter((task) => task.status === "completed");
-    const pending = ordered.filter((task) => task.status === "pending_confirmation" || task.status === "waiting_for_gpu");
+    const pendingConfirmation = ordered.filter((task) => task.status === "pending_confirmation");
+    const waitingForGpu = ordered.filter((task) => task.status === "waiting_for_gpu");
+    const pending = [...pendingConfirmation, ...waitingForGpu];
     const generating = ordered.filter((task) => task.status === "generating");
     const failed = ordered.filter((task) => task.status === "failed");
     const requested = Math.max(ordered.length, ...ordered.map((task) => Number.isSafeInteger(task.groupRequestedCount) && task.groupRequestedCount! > 0 ? task.groupRequestedCount! : 0));
     const completedDates = completed.map((task) => task.result?.completedAt ?? task.result?.persistedAt ?? task.updatedAt ?? task.createdAt ?? "").filter(Boolean).sort();
+    const generatingTask = generating[0];
+    const status = generating.length ? "generating" : pendingConfirmation.length ? "pending_confirmation" : waitingForGpu.length ? "waiting_for_gpu" : failed.length ? "failed" : "completed";
     return {
       id,
       title: ordered.find((task) => task.groupTitle)?.groupTitle || promptTitle(ordered[0]?.prompt),
@@ -52,8 +110,12 @@ export function groupImageTasks<T extends GroupableImageTask>(tasks: T[]): Image
       requestedCount: requested,
       completedCount: completed.length,
       pendingCount: pending.length,
+      pendingConfirmationCount: pendingConfirmation.length,
+      waitingForGpuCount: waitingForGpu.length,
       generatingCount: generating.length,
       failedCount: failed.length,
+      currentChildIndex: generatingTask?.groupIndex ?? null,
+      status,
       latestCompletedAt: completedDates.at(-1) ?? null,
       isActive: pending.length + generating.length + failed.length > 0,
     };

@@ -1,10 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { NextResponse, type NextRequest } from "next/server";
 import { FLUX_IMAGE_STACK, classifyImageGpu, type ImageGpuClass, type ImageTaskSettings } from "@/lib/image-generation/flux-stack";
 import { finiteNumber } from "@/lib/image-generation/formatters";
+import { cancelImageTaskGroup, confirmImageTaskGroup, retryFailedImageTaskGroup } from "@/lib/image-generation/image-task-groups";
+import { imageLibraryRoot } from "@/lib/image-generation/local-image-artifacts";
 import { listImageTasks, mutateImageTasks, type LocalImageTask } from "@/lib/image-generation/local-image-task-store";
 import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/route-guard";
 import { COMFY_RUNTIME_IMAGE, loadCloreConfig } from "../../../../../scripts/clore/config";
@@ -102,7 +105,6 @@ export type ImageRunnerSession = {
 };
 
 const DATA_DIR = path.join(process.cwd(), ".secrets", "image-studio");
-const DATA_PATH = path.join(DATA_DIR, "tasks.json");
 const RUNNER_PATH = path.join(DATA_DIR, "runner-session.json");
 const RUNNER_LOG_PATH = path.join(DATA_DIR, "image-runner.log");
 const PREFERENCES_PATH = path.join(DATA_DIR, "preferences.json");
@@ -460,7 +462,25 @@ async function responsePayload(extra: Record<string, unknown> = {}) {
     runner: terminalRunnerState(runner.state) ? { ...runner, blocker } : runner,
     executionReady: blocker === null,
     maxHourlyPrice: readPrice(),
+    localProgram: readLocalProgramStatus(),
     ...extra,
+  };
+}
+
+function readLocalProgramStatus() {
+  let taskStoreAvailable = true;
+  try { readTasks(); } catch { taskStoreAvailable = false; }
+  const memory = process.memoryUsage();
+  return {
+    service: "running" as const,
+    port: 3000,
+    cpuLogicalCores: os.cpus().length,
+    totalRamBytes: os.totalmem(),
+    availableRamBytes: os.freemem(),
+    processMemoryBytes: memory.rss,
+    taskStoreAvailable,
+    imageLibraryAvailable: existsSync(imageLibraryRoot()),
+    refreshedAt: new Date().toISOString(),
   };
 }
 
@@ -496,6 +516,7 @@ function taskFrom(input: Record<string, unknown>): ImageTask {
   }
   const referenceImage = typeof input.referenceImage === "string" && input.referenceImage.startsWith("data:image/") && input.referenceImage.length <= 6_000_000 ? input.referenceImage : null;
   const gpuClass = classifyImageGpu(width, height);
+  if (gpuClass === "rtx5090") throw new Error(RTX5090_BLOCKER);
   const now = new Date().toISOString();
   return {
     id: randomUUID(),
@@ -565,8 +586,8 @@ function regenerateGroupedTasks(input: Record<string, unknown>) {
     const source = tasks.filter((task) => groupIdentity(task) === requestedGroupId);
     if (!source.length) throw new Error("image_group_not_found");
     const origin = source[0];
-    const highestIndex = Math.max(source.length, ...source.map((task) => Number.isSafeInteger(task.groupIndex) ? task.groupIndex! : 0));
-    const total = highestIndex + requestedCount;
+    const existingTotal = Math.max(source.length, ...source.map((task) => Math.max(Number.isSafeInteger(task.groupIndex) ? task.groupIndex! : 0, Number.isSafeInteger(task.groupRequestedCount) ? task.groupRequestedCount! : 0)));
+    const total = existingTotal + requestedCount;
     const explicit = source.filter((task) => task.groupId === requestedGroupId).map((task) => ({ ...task, groupRequestedCount: total }));
     const retained = tasks.map((task) => explicit.find((updated) => updated.id === task.id) ?? task);
     const childInput: Record<string, unknown> = {
@@ -579,7 +600,7 @@ function regenerateGroupedTasks(input: Record<string, unknown>) {
       loraStrength: origin.loraStrength,
       sampler: origin.sampler,
     };
-    const children = createGroupChildren(childInput, requestedCount, requestedGroupId, highestIndex);
+    const children = createGroupChildren(childInput, requestedCount, requestedGroupId, existingTotal);
     const next = [...children.map((task) => ({ ...task, groupRequestedCount: total })), ...retained];
     return { tasks: next, value: { groupId: requestedGroupId, createdTaskIds: children.map((task) => task.id), tasks: next } };
   });
@@ -725,6 +746,26 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    if (["confirm_group", "cancel_group", "retry_failed_group"].includes(action)) {
+      const groupId = String(body.groupId ?? "");
+      if (!groupId) throw new Error("invalid_group_id");
+      const updatedAt = new Date().toISOString();
+      const outcome = mutateImageTasks<Record<string, unknown>>((current) => {
+        const imageTasks = current as ImageTask[];
+        if (action === "confirm_group") {
+          const result = confirmImageTaskGroup(imageTasks, groupId, updatedAt);
+          return { tasks: result.tasks as LocalImageTask[], value: { action, ...result } };
+        }
+        if (action === "cancel_group") {
+          const result = cancelImageTaskGroup(imageTasks, groupId);
+          return { tasks: result.tasks as LocalImageTask[], value: { action, ...result } };
+        }
+        const result = retryFailedImageTaskGroup(imageTasks, groupId, updatedAt);
+        return { tasks: result.tasks as LocalImageTask[], value: { action, ...result } };
+      });
+      return NextResponse.json(await responsePayload({ groupId, groupAction: outcome }));
+    }
+
     if (action === "set_price") {
       const maxHourlyPrice = Number(body.maxHourlyPrice);
       if (!Number.isFinite(maxHourlyPrice) || maxHourlyPrice <= 0 || maxHourlyPrice > 100) throw new Error("invalid_max_hourly_price");
@@ -818,6 +859,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(await responsePayload());
   } catch (error) {
     const message = error instanceof Error ? error.message : "image_task_failed";
+    if (["create", "create_group", "confirm_group", "cancel_group", "retry_failed_group", "regenerate_group"].includes(action)) {
+      return NextResponse.json({ error: message, ...(await responsePayload()) }, { status: 400 });
+    }
     const runner = readRunner();
     saveRunner({
       ...runner,
