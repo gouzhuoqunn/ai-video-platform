@@ -97,7 +97,9 @@ export async function verifyPublishedLocalImageArtifact(input: { taskId: string;
   const metadata = JSON.parse(readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
   const bytes = readFileSync(outputPath);
   const image = await sharp(bytes).metadata();
-  if (metadata.task_id !== taskId || metadata.png_sha256 !== digest(bytes) || metadata.png_byte_size !== bytes.length || image.format !== "png" || image.width !== input.artifact.width || image.height !== input.artifact.height || metadata.width !== image.width || metadata.height !== image.height || metadata.png_sha256 !== input.artifact.pngSha256 || metadata.png_byte_size !== input.artifact.pngBytes || !SHA256.test(String(metadata.png_sha256))) {
+  const thumbnailBytes = readFileSync(thumbnailPath);
+  const thumbnail = await sharp(thumbnailBytes).metadata();
+  if (metadata.task_id !== taskId || metadata.png_sha256 !== digest(bytes) || metadata.png_byte_size !== bytes.length || image.format !== "png" || image.width !== input.artifact.width || image.height !== input.artifact.height || metadata.width !== image.width || metadata.height !== image.height || metadata.png_sha256 !== input.artifact.pngSha256 || metadata.png_byte_size !== input.artifact.pngBytes || !SHA256.test(String(metadata.png_sha256)) || thumbnailBytes.length <= 0 || thumbnail.format !== "webp" || !thumbnail.width || !thumbnail.height || thumbnail.width > 512 || thumbnail.height > 512) {
     throw new Error("local_artifact_verification_failed");
   }
   return { relativeDir: input.artifact.relativeDir, pngSha256: String(metadata.png_sha256), pngBytes: bytes.length, width: image.width, height: image.height, completedAt: String(metadata.completed_at) };

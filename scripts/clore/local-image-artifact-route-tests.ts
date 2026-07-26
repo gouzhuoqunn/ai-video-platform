@@ -14,7 +14,7 @@ process.env.NEXT_PUBLIC_APP_MODE = "local_lab";
 async function main() {
   try {
     const { claimImageTask, finalizeImageTask } = await import("../../src/lib/image-generation/local-image-task-store");
-    const { publishLocalImageArtifact } = await import("../../src/lib/image-generation/local-image-artifacts");
+    const { publishLocalImageArtifact, verifyPublishedLocalImageArtifact } = await import("../../src/lib/image-generation/local-image-artifacts");
     const { GET } = await import("../../src/app/api/local-images/[taskId]/[kind]/route");
     const taskPath = path.join(root, "tasks.json");
     process.env.AI_IMAGE_TASK_STORE_PATH = taskPath;
@@ -26,12 +26,16 @@ async function main() {
     await finalizeImageTask(taskId, claim.claimToken, artifact, { taskPath, artifactRoot: process.env.AI_IMAGE_LIBRARY_ROOT });
     const request = new NextRequest(`http://127.0.0.1/api/local-images/${taskId}/output`, { headers: { host: "127.0.0.1" } });
     const output = await GET(request, { params: Promise.resolve({ taskId, kind: "output" }) });
-    assert.equal(output.status, 200); assert.equal(output.headers.get("content-type"), "image/png"); assert.equal((await output.arrayBuffer()).byteLength, png.length);
+    const outputBytes = Buffer.from(await output.arrayBuffer());
+    assert.equal(output.status, 200); assert.equal(output.headers.get("content-type"), "image/png"); assert.equal(output.headers.get("content-length"), String(outputBytes.length)); assert.equal(outputBytes.length, png.length);
     const thumbnail = await GET(request, { params: Promise.resolve({ taskId, kind: "thumbnail" }) });
-    assert.equal(thumbnail.status, 200); assert.equal(thumbnail.headers.get("content-type"), "image/webp");
+    const thumbnailBytes = Buffer.from(await thumbnail.arrayBuffer());
+    const thumbnailMetadata = await sharp(thumbnailBytes).metadata();
+    assert.equal(thumbnail.status, 200); assert.equal(thumbnail.headers.get("content-type"), "image/webp"); assert.equal(thumbnail.headers.get("content-length"), String(thumbnailBytes.length)); assert.equal(thumbnailMetadata.format, "webp"); assert.ok((thumbnailMetadata.width ?? 0) > 0 && (thumbnailMetadata.width ?? 513) <= 512); assert.ok((thumbnailMetadata.height ?? 0) > 0 && (thumbnailMetadata.height ?? 513) <= 512);
+    await verifyPublishedLocalImageArtifact({ taskId, artifact, root: process.env.AI_IMAGE_LIBRARY_ROOT });
     const traversal = await GET(request, { params: Promise.resolve({ taskId: "../../etc/passwd", kind: "output" }) });
     assert.equal(traversal.status, 404);
-    console.log(JSON.stringify({ ok: true, local_only_route: true, verified_png_served: true, traversal_blocked: true }));
+    console.log(JSON.stringify({ ok: true, local_only_route: true, exact_content_length: true, verified_png_and_webp_served: true, traversal_blocked: true }));
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
