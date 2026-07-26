@@ -148,17 +148,19 @@ export async function runImageE2e(input: { taskId: string; immutableCommit: stri
     session = mark(deps, session, "AGENT");
     for (const stage of ["environment", "gpu", "controller", "comfyui"] as const) await requiredStage(deps, session, session.endpoint, stage);
     session = mark(deps, session, "RUNTIME");
-    const isRefreshableAuthorizationFailure = (result: { status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> }) => result.status === "failed"
-      && result.data?.code === "model_download_http_error" && (result.data.http_status === 401 || result.data.http_status === 403);
+    const isRefreshableModelFailure = (result: { status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> }) => result.status === "failed" && (result.data?.code === "model_download_incomplete_after_retries" || (result.data?.code === "model_download_http_error" && (result.data.http_status === 401 || result.data.http_status === 403)));
     let models = await deps.resolveModels();
     let modelsResult = await deps.stage(session.endpoint, "models", { models });
-    if (isRefreshableAuthorizationFailure(modelsResult)) {
+    if (isRefreshableModelFailure(modelsResult)) {
       // This is still before claim/inference. Rebuilding all five exact entries lets
       // the Agent retain verified files and resume the failed .part safely.
       if (session.claimTokenHash !== null) throw new Error("model_refresh_after_claim_forbidden");
       models = await deps.resolveModels();
       modelsResult = await deps.stage(session.endpoint, "models", { models });
-      if (isRefreshableAuthorizationFailure(modelsResult)) throw new Error(`model_download_authorization_failed_after_refresh:${clean(JSON.stringify(modelsResult.data))}`);
+      if (isRefreshableModelFailure(modelsResult)) {
+        const code = modelsResult.data?.code;
+        throw new Error(`${code === "model_download_http_error" ? "model_download_authorization_failed_after_refresh" : "model_download_incomplete_after_refresh"}:${clean(JSON.stringify(modelsResult.data))}`);
+      }
     }
     session.stages.models = modelsResult.status; deps.persist(session);
     if (modelsResult.status !== "succeeded") throw new Error(`models_stage_failed:${clean(modelsResult.error ?? "unknown")}`);
