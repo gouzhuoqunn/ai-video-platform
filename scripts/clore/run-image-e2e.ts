@@ -7,6 +7,7 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import path from "node:path";
 import { claimImageTask, failImageTask, finalizeImageTask, mutateImageTasks, readImageTask, renewImageTaskLease, type LocalImageTask, type LocalTaskStoreOptions } from "../../src/lib/image-generation/local-image-task-store";
 import { classifyImageGpu } from "../../src/lib/image-generation/flux-stack";
+import { buildRtx4090GoldenBootstrap, RTX4090_GOLDEN_DEPLOYMENT_PROFILE } from "../image-executor/rtx4090-golden-deployment-profile";
 import { publishLocalImageArtifact, type LocalArtifactReference } from "../../src/lib/image-generation/local-image-artifacts";
 import { sanitizeImageModelPreflight, toAgentModelManifest, validateAgentModelManifestContract, verifyFiveImageModelSources } from "./image-model-preflight";
 import { runImageE2e, claimTokenHash, type ModelEntry, type SanitizedImageE2eSession } from "./image-e2e-coordinator";
@@ -30,8 +31,16 @@ let ACTIVE_RECEIPT: FreshReceipt | null = null;
 
 export function buildPublicAgentBootstrap(input: { commit: string; agentSha256: string; controllerSha256: string; workflowSha256: string; tokenSha256: string }) {
   if (![input.commit, input.agentSha256, input.controllerSha256, input.workflowSha256, input.tokenSha256].every((value) => /^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(value))) throw new Error("immutable_agent_bootstrap_values_required");
-  const url = `https://raw.githubusercontent.com/gouzhuoqunn/ai-video-platform/${input.commit}/scripts/clore/diagnostic-agent.py`;
-  return `python3 -c "import urllib.request as u,hashlib as h,os;p='/tmp/a.py';d=u.urlopen('${url}',timeout=30).read();assert h.sha256(d).hexdigest()=='${input.agentSha256}';open(p,'wb').write(d);os.execvp('python3',['python3',p,'--token-sha256','${input.tokenSha256}','--immutable','${input.commit}:${input.controllerSha256}:${input.workflowSha256}'])"`;
+  const profile = assertGoldenBootstrapIdentity(input);
+  return buildRtx4090GoldenBootstrap(profile.tokenSha256);
+}
+
+function assertGoldenBootstrapIdentity(input: { commit: string; agentSha256: string; controllerSha256: string; workflowSha256: string; tokenSha256: string }) {
+  const immutable = RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable;
+  if (input.commit !== immutable.commit || input.agentSha256 !== immutable.agentSha256 || input.controllerSha256 !== immutable.controllerSha256 || input.workflowSha256 !== immutable.workflowSha256) {
+    throw new Error("rtx4090_golden_bootstrap_identity_mismatch");
+  }
+  return { tokenSha256: input.tokenSha256 };
 }
 
 function sessionRead() { try { return JSON.parse(readFileSync(SESSION_PATH, "utf8")) as SanitizedImageE2eSession; } catch { return null; } }
@@ -331,7 +340,7 @@ async function runLive(taskId: string, resume: boolean, commit: string, agentSha
     claim: async (task: EligibleImageTask) => { const value = claimImageTask(task.id, `clore-image-e2e-${process.pid}`, 10 * 60 * 1000); claimTokenWrite(value.claimToken); return { token: value.claimToken, tokenHash: claimTokenHash(value.claimToken) }; },
     startHeartbeat: (id: string, claimToken: string) => startImageTaskLeaseHeartbeat({ taskId: id, claimToken, leaseMs: 10 * 60 * 1000 }),
     retrieveArtifact: async (endpoint: string, id: string) => { const metadata = await getArtifactMetadataWithRetry({ endpoint, token, taskId: id, onDiagnostic: appendTransportDiagnostic }); const response = await fetch(url(endpoint, `/artifacts/${id}/image`), { headers: { Authorization: `Bearer ${token}` } }); const png = Buffer.from(await response.arrayBuffer()); if (!response.ok || createHash("sha256").update(png).digest("hex") !== metadata.sha256) throw new Error("remote_png_verification_failed"); return { png, byteSize: Number(metadata.byte_size), sha256: String(metadata.sha256), width: Number(metadata.width), height: Number(metadata.height), generationDurationSeconds: Number(metadata.generation_duration_seconds), controllerPromptId: typeof metadata.controller_prompt_id === "string" ? metadata.controller_prompt_id : null }; },
-    publishAndFinalize: async (task: EligibleImageTask, token: string, artifact: any, orderId: string) => persistAndFinalizeExactLocalTask({ task, claimToken: token, png: artifact.png, remote: { generationDurationSeconds: artifact.generationDurationSeconds, orderId, gpuModel: "RTX 4090", controllerPromptId: artifact.controllerPromptId }, onArtifactPublished: async () => { if(!ACTIVE_RECEIPT)throw new Error("fresh_receipt_missing");const now=new Date().toISOString();const next:FreshReceipt={...ACTIVE_RECEIPT,currentStep:"local_artifact_published",localArtifactPublished:true,timestamps:{...ACTIVE_RECEIPT.timestamps,local_artifact_published:now}};receiptWrite(next);ACTIVE_RECEIPT=next; } }).then((value) => { rmSync(CLAIM_TOKEN_PATH, { force: true }); return value.artifact; }),
+    publishAndFinalize: async (task: EligibleImageTask, token: string, artifact: { png: Buffer; generationDurationSeconds: number; controllerPromptId: string | null }, orderId: string) => persistAndFinalizeExactLocalTask({ task, claimToken: token, png: artifact.png, remote: { generationDurationSeconds: artifact.generationDurationSeconds, orderId, gpuModel: "RTX 4090", controllerPromptId: artifact.controllerPromptId }, onArtifactPublished: async () => { if(!ACTIVE_RECEIPT)throw new Error("fresh_receipt_missing");const now=new Date().toISOString();const next:FreshReceipt={...ACTIVE_RECEIPT,currentStep:"local_artifact_published",localArtifactPublished:true,timestamps:{...ACTIVE_RECEIPT.timestamps,local_artifact_published:now}};receiptWrite(next);ACTIVE_RECEIPT=next; } }).then((value) => { rmSync(CLAIM_TOKEN_PATH, { force: true }); return value.artifact; }),
     verifyUi: async (id: string) => { const ui = await ensureLocalUi({}); try { await verifyImageUi({ taskId: id, screenshotPath: path.join("D:\\AI-Video-Library", "diagnostics", `image-e2e-${id}.png`) }); } finally { if (ui.started) ui.stop(); } }, failClaim: async (id: string, token: string, error: string) => { failImageTask(id, token, error); rmSync(CLAIM_TOKEN_PATH, { force: true }); },
     cancelExactOrder: async (id: string) => { await cloreRequest(config, "/cancel_order", { method: "POST", body: JSON.stringify({ id, issue: "image_e2e_complete_or_failed" }) }); },
     confirmNoActiveOrders: async () => { if ((await readLiveOrdersSummary(config, { forceRefresh: true })).some((item) => item.active)) throw new Error("active_order_remains_after_cancel"); },

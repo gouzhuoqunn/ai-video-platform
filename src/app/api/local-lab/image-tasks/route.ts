@@ -16,6 +16,7 @@ import { loadCloreExecutionConfig } from "../../../../../scripts/clore/execution
 import { readLiveOrdersSummary, type CloreOrderSummary } from "../../../../../scripts/clore/live";
 import { ACTIVE_ORDER_PATH, LEGACY_ORDER_CREATE_LOCK_PATH, ORDER_CREATE_LOCK_PATH, clearActiveOrder, clearOrderCreateLocks, readActiveOrder } from "../../../../../scripts/clore/order-state";
 import { finalSanitizedLogLines, imageExecutorReadinessForGpuClass, processExists, STALE_RUNNER_NO_ORDER_MESSAGE } from "../../../../../scripts/image-executor/readiness";
+import { assertRtx4090GoldenDeploymentProfile } from "../../../../../scripts/image-executor/rtx4090-golden-deployment-profile";
 
 export const dynamic = "force-dynamic";
 
@@ -148,7 +149,14 @@ function readPrice() {
 }
 
 function readinessForGpuClass(gpuClass: ImageGpuClass) {
-  return imageExecutorReadinessForGpuClass(gpuClass, { restoreManifestPath: RESTORE_MANIFEST_PATH, sourceManifestPath: SOURCE_MANIFEST_PATH });
+  const readiness = imageExecutorReadinessForGpuClass(gpuClass, { restoreManifestPath: RESTORE_MANIFEST_PATH, sourceManifestPath: SOURCE_MANIFEST_PATH });
+  if (!readiness.ready || gpuClass !== "rtx4090") return readiness;
+  try {
+    assertRtx4090GoldenDeploymentProfile();
+    return readiness;
+  } catch {
+    return { ready: false as const, mode: "not_ready" as const, blocker: "RTX 4090 已验证部署配置不匹配，已阻止创建订单。", code: "rtx4090_golden_deployment_profile_drift" };
+  }
 }
 
 function readinessBlocker(gpuClass: ImageGpuClass = "rtx4090") {

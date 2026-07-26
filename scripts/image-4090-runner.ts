@@ -16,6 +16,8 @@ import { recordDeploymentFailure, recordTemporaryDeploymentDeny } from "./clore/
 import { persistImageResult } from "./image-executor/result-persistence";
 import { readSourceAcquisitionManifest, readValidatedRestoreManifest, validateValidatedRestoreManifest, type SourceAcquisitionManifest, type ValidatedRestoreManifest } from "./image-executor/manifests";
 import { assertImageExecutorReady, IMAGE_RUNNER_PRECHECK_STAGE, RESTORE_OR_BOOTSTRAP_BLOCKER } from "./image-executor/readiness";
+import { assertRtx4090GoldenDeploymentProfile } from "./image-executor/rtx4090-golden-deployment-profile";
+import { runLiveImageSession } from "./clore/image-session-live";
 
 export type ImageTask = {
   id: string;
@@ -1034,6 +1036,39 @@ export async function runImage4090Batch(deps = defaultDeps()) {
       throw new Error("frozen_batch_invalid_for_text_generation_gpu_class");
     }
     const targetGpu = targetGpuForImageClass(requestedGpuClass);
+
+    // The normal Studio path deliberately delegates to the same Agent session
+    // contract that produced golden order 1982156.  The legacy custom-image
+    // HTTP controller flow below remains diagnostic-only and is never reached.
+    if (requestedGpuClass === "rtx4090") {
+      const profile = assertRtx4090GoldenDeploymentProfile();
+      execution = deps.loadExecution();
+      if (!execution.enabled) throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false; order not created");
+      updateRunner({
+        stage: "正在使用已验证的 RTX 4090 部署配置",
+        host: {
+          gpu: "RTX 4090",
+          runtimeProfileId: profile.id,
+          runtimeDigest: profile.image,
+          bootstrapTemplateSha256: profile.bootstrapTemplateSha256,
+          controllerBind: profile.controllerBind,
+          healthPath: profile.healthPath,
+          message: "将使用已验证的 Jupyter + 不可变 Agent 启动合同",
+        },
+      });
+      const receipt = await runLiveImageSession({ taskIds: frozen.map((task) => task.id), immutable: profile.immutable, execute: true, onOrderCreated: (order, deploymentProfile) => {
+        updateRunner({ stage: "订单已创建，正在等待已验证运行环境", host: { ...(readRunner().host ?? {}), orderId: order.orderId, serverId: order.serverId, controllerUrl: order.endpoint, deploymentProfileId: deploymentProfile.id, bootstrapTemplateSha256: deploymentProfile.bootstrapTemplateSha256, runtimeDigest: deploymentProfile.image, healthPath: profile.healthPath, controllerBind: profile.controllerBind } });
+      } });
+      updateRunner({
+        state: receipt.sessionState === "completed" ? "completed" : "failed",
+        stage: receipt.sessionState === "completed" ? "本批次已完成" : "运行环境未启动成功，尚未进入模型加载或图片生成。",
+        host: receipt.orderId ? { ...(readRunner().host ?? {}), orderId: receipt.orderId, deploymentProfileId: receipt.deploymentProfile.id } : null,
+        currentTaskIndex: null,
+        currentModel: null,
+        promptSummary: null,
+      });
+      return;
+    }
 
     updateRunner({ stage: "正在检查模型缓存" });
     const restore = resolveRestorePayload(restorePath, sourceManifestPath);

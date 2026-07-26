@@ -15,6 +15,7 @@ import { toAgentModelManifest, verifyFiveImageModelSources } from "./image-model
 import { ensureLocalUi, verifyImageUi } from "./image-e2e-ui";
 import { IMAGE_SESSION_LIMITS, planImageSession, type ImageSessionPlan } from "./image-session";
 import type { ImageGpuClass } from "../../src/lib/image-generation/flux-stack";
+import { assertRtx4090GoldenDeploymentProfile, buildRtx4090GoldenBootstrap } from "../image-executor/rtx4090-golden-deployment-profile";
 
 export type ImmutableRuntime = { commit: string; agentSha256: string; controllerSha256: string; workflowSha256: string };
 export type LiveSessionOrder = { orderId: string; endpoint: string; hostname: string; serverId: string; hourlyUsd: number; startingBalanceUsd: number; plan: ImageSessionPlan; token: string; tokenSha256: string; hardDeadlineAt: string };
@@ -51,9 +52,11 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
   if (!plan.executionEligible || wallet.availableUsdBalance === null || wallet.availableUsdBalance - plan.projectedProviderCostCeilingUsd < IMAGE_SESSION_LIMITS.minimumWalletReserveUsd) throw new Error("image_session_cost_or_wallet_guard_failed");
   if (!isLocalWatchdogTaskInstalled()) throw new Error("local_watchdog_not_installed");
   const token = newSessionToken(input.sessionId); const command = buildPublicAgentBootstrap({ ...input.immutable, tokenSha256: token.sha256 });
-  if (Buffer.byteLength(command, "utf8") >= 700) throw new Error("image_session_bootstrap_too_long");
+  const profile = assertRtx4090GoldenDeploymentProfile();
+  if (input.immutable.commit !== profile.immutable.commit || input.immutable.agentSha256 !== profile.immutable.agentSha256 || input.immutable.controllerSha256 !== profile.immutable.controllerSha256 || input.immutable.workflowSha256 !== profile.immutable.workflowSha256) throw new Error("rtx4090_golden_profile_identity_mismatch");
+  if (command !== buildRtx4090GoldenBootstrap(token.sha256)) throw new Error("rtx4090_golden_profile_bootstrap_mismatch");
   const fresh = await readLiveOrdersSummary(config, { forceRefresh: true }); if (fresh.some((order) => order.active)) throw new Error("active_clore_order_exists");
-  const payload = { currency: config.rentalCurrency, image: "cloreai/jupyter:ubuntu24.04-v2", renting_server: Number(selected.serverId), type: "on-demand", ports: { "8080": "http" }, required_price: selected.priceOriginalAmount, command };
+  const payload = { currency: config.rentalCurrency, image: profile.image, renting_server: Number(selected.serverId), type: "on-demand", ports: profile.ports, required_price: selected.priceOriginalAmount, command };
   let created: unknown = null;
   try { created = (await createOrderWithRateLimit({ serverId: selected.serverId, createOnce: () => cloreRequest(config, "/create_order", { method: "POST", body: JSON.stringify(payload) }, { maxNetworkRetries: 0, maxRateLimitRetries: 0 }), reconcile: async () => ({ orders: await readLiveOrdersSummary(config, { forceRefresh: true }) }) })).created; }
   catch (error) { if (error instanceof CloreApiError && error.failure.code === 1) { const retryOrders = await readLiveOrdersSummary(config, { forceRefresh: true }); if (retryOrders.some((order) => order.active)) throw error; await sleep(60_000); created = (await createOrderWithRateLimit({ serverId: selected.serverId, createOnce: () => cloreRequest(config, "/create_order", { method: "POST", body: JSON.stringify(payload) }, { maxNetworkRetries: 0, maxRateLimitRetries: 0 }), reconcile: async () => ({ orders: await readLiveOrdersSummary(config, { forceRefresh: true }) }) })).created; } else throw error; }
@@ -72,7 +75,23 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
   return { orderId: order.orderId, endpoint, hostname: new URL(endpoint).hostname, serverId: selected.serverId, hourlyUsd: selected.priceUsdPerHour, startingBalanceUsd: wallet.availableUsdBalance, plan, token: token.token, tokenSha256: token.sha256, hardDeadlineAt };
 }
 
-export async function waitForAgentIdle(order: LiveSessionOrder) { for (let attempt = 1; attempt <= 60; attempt += 1) { const result = await agentGetJsonWithRetry({ endpoint: order.endpoint, token: order.token, route: "/healthz", validator: agentHealthResponse, attempt }); if (result.ok && result.body.current_stage === "idle" && result.body.last_error === null) return; await sleep(5_000); } throw new Error("agent_health_not_ready"); }
+export class RuntimeDeploymentFailure extends Error {
+  constructor(input: { order: LiveSessionOrder; elapsedMs: number; lastHttpStatus: number | null; lastStartupDiagnostic: string | null }) {
+    super(JSON.stringify({ code: "runtime_deployment_failed_before_model_or_inference", message: "运行环境未启动成功，尚未进入模型加载或图片生成。", deploymentProfileId: "rtx4090-golden-agent-v1", image: "cloreai/jupyter:ubuntu24.04-v2", serverId: input.order.serverId, orderId: input.order.orderId, elapsedDeploymentMs: input.elapsedMs, proxyUrl: input.order.endpoint, lastHttpStatus: input.lastHttpStatus, controllerEverListened: false, lastStartupDiagnostic: input.lastStartupDiagnostic }));
+    this.name = "RuntimeDeploymentFailure";
+  }
+}
+
+export async function waitForAgentIdle(order: LiveSessionOrder) {
+  const started = Date.now(); let lastHttpStatus: number | null = null; let lastStartupDiagnostic: string | null = null;
+  for (let attempt = 1; attempt <= 60; attempt += 1) {
+    const result = await agentGetJsonWithRetry({ endpoint: order.endpoint, token: order.token, route: "/healthz", validator: agentHealthResponse, attempt });
+    if (result.ok && result.body.current_stage === "idle" && result.body.last_error === null) return;
+    if (!result.ok) { lastHttpStatus = result.diagnostic.httpStatus; lastStartupDiagnostic = result.diagnostic.message; }
+    await sleep(5_000);
+  }
+  throw new RuntimeDeploymentFailure({ order, elapsedMs: Date.now() - started, lastHttpStatus, lastStartupDiagnostic });
+}
 export async function invokeStage(order: LiveSessionOrder, stage: "environment" | "gpu" | "controller" | "comfyui" | "models", payload?: object): Promise<StageTerminal> { const accepted = await agentPostJson(order.endpoint, order.token, `/stage/${stage}`, payload); const terminal = await waitForStage({ endpoint: order.endpoint, token: order.token, stage, expectedStageRunId: accepted.stageRunId, timeoutMs: stage === "models" ? 3 * 60 * 60_000 : 45 * 60_000, reconcileExactOrder: async () => Boolean((await readLiveOrdersSummary(fixedConfig(order.plan.selectedGpuClass === "RTX 5090" ? "rtx5090" : "rtx4090"), { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.active) }); return { stageRunId: accepted.stageRunId, ...terminal }; }
 export async function installModelsOnce(order: LiveSessionOrder) { const models = toAgentModelManifest((await verifyFiveImageModelSources()).models); return await invokeStage(order, "models", models); }
 export async function submitTaskInference(order: LiveSessionOrder, task: EligibleImageTask, receipt?: { submitting: () => void; accepted: (value: AcceptedStage) => void }): Promise<{ accepted: AcceptedStage; terminal: StageTerminal; artifact: LocalArtifactReference; controllerJobId: string | null; controllerPromptId: string | null; uiVerified: boolean; uiVerificationError: string | null }> {
