@@ -8,6 +8,7 @@ it is not a shell, file browser, workflow runner, or general proxy.
 from __future__ import annotations
 
 import argparse
+import http.client
 import hashlib
 import hmac
 import ipaddress
@@ -450,11 +451,17 @@ def stream_model(entry: dict[str, Any]) -> dict[str, Any]:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_file() and destination.stat().st_size == entry["size_bytes"] and sha256(destination) == entry["sha256"]:
         return {"filename": entry["filename"], "status": "verified_existing", "downloaded_bytes": entry["size_bytes"], "size_bytes": entry["size_bytes"], "sha256": entry["sha256"]}
-    offset = part.stat().st_size if part.exists() else 0
-    if offset > entry["size_bytes"]:
-        part.unlink(); offset = 0
+    expected = entry["size_bytes"]; attempts = 0; restarted = False; last: dict[str, Any] = {"http_status": None, "content_length": None, "content_range": None, "hostname": urllib.parse.urlsplit(entry["url"]).hostname or "", "error": None}
+    last_progress = -64 * 1024 * 1024; last_write = 0.0
+    def state(status: str, offset: int, force: bool = False) -> None:
+        nonlocal last_progress, last_write
+        moment = time.monotonic()
+        if not force and offset - last_progress < 64 * 1024 * 1024 and moment - last_write < 5: return
+        with STATE_LOCK:
+            STATE["models"][entry["role"]] = {"filename": entry["filename"], "status": status, "downloaded_bytes": offset, "size_bytes": expected, "attempt": attempts, "url": redacted_url(entry["url"])}; save_locked()
+        last_progress, last_write = offset, moment
     def download_request(resume_offset: int) -> urllib.request.Request:
-        request = urllib.request.Request(entry["url"], headers={"User-Agent": "ai-video-platform-model-fetch/1", "Accept": "application/octet-stream"})
+        request = urllib.request.Request(entry["url"], headers={"User-Agent": "ai-video-platform-model-fetch/1", "Accept": "application/octet-stream", "Accept-Encoding": "identity"})
         if resume_offset:
             request.add_header("Range", f"bytes={resume_offset}-")
         return request
@@ -469,33 +476,46 @@ def stream_model(entry: dict[str, Any]) -> dict[str, Any]:
         headers = error.headers
         data = {"code": "model_download_http_error", "role": entry["role"], "filename": entry["filename"], "http_status": error.code, "final_hostname": (urllib.parse.urlsplit(error.geturl() or entry["url"]).hostname or "").lower(), "content_type": headers.get("Content-Type") if headers else None, "content_length": headers.get("Content-Length") if headers else None, "retry_after": headers.get("Retry-After") if headers else None, "body_excerpt": body}
         return StageFailure(f"model_download_http_error:{entry['role']}:{entry['filename']}:http_{error.code}", data)
-    try:
-        response = urllib.request.urlopen(download_request(offset), timeout=60)
-        if offset and response.status != 206:
-            response.close(); part.unlink(missing_ok=True); offset = 0
-            response = urllib.request.urlopen(download_request(0), timeout=60)
-        with response, part.open("ab" if offset else "wb") as handle:
-            received = offset
-            while True:
-                block = response.read(1024 * 1024)
-                if not block:
-                    break
-                handle.write(block); received += len(block)
-                if received > entry["size_bytes"]:
-                    raise RuntimeError("model_download_exceeds_expected_size")
-                with STATE_LOCK:
-                    STATE["models"][entry["role"]] = {"filename": entry["filename"], "status": "downloading", "downloaded_bytes": received, "size_bytes": entry["size_bytes"], "url": redacted_url(entry["url"])}
-                    save_locked()
-    except urllib.error.HTTPError as error:
-        raise http_failure(error) from error
-    except Exception as error:
-        raise RuntimeError(f"model_download_failed:{entry['filename']}:{clean(error, 400)}") from error
-    if part.stat().st_size != entry["size_bytes"]:
-        raise RuntimeError(f"model_size_mismatch:{entry['filename']}")
-    if sha256(part) != entry["sha256"]:
-        raise RuntimeError(f"model_sha256_mismatch:{entry['filename']}")
-    os.replace(part, destination)
-    return {"filename": entry["filename"], "status": "verified", "downloaded_bytes": entry["size_bytes"], "size_bytes": entry["size_bytes"], "sha256": entry["sha256"]}
+    transient = (http.client.IncompleteRead, urllib.error.URLError, socket.timeout, TimeoutError, ConnectionResetError, BrokenPipeError, http.client.RemoteDisconnected, EOFError, OSError)
+    for attempts in range(1, 5):
+        offset = part.stat().st_size if part.exists() else 0
+        if offset == expected:
+            state("verifying", offset, True)
+            actual = sha256(part)
+            if actual != entry["sha256"]: raise StageFailure(f"model_sha256_mismatch:{entry['filename']}", {"code": "model_sha256_mismatch", "role": entry["role"], "filename": entry["filename"], "expected_sha256": entry["sha256"], "actual_sha256": actual, "byte_size": offset})
+            os.replace(part, destination); state("verified", offset, True)
+            return {"filename": entry["filename"], "status": "verified", "downloaded_bytes": expected, "size_bytes": expected, "sha256": entry["sha256"]}
+        if offset > expected:
+            if restarted: raise StageFailure("model_download_exceeds_expected_size", {"code": "model_download_exceeds_expected_size", "role": entry["role"], "filename": entry["filename"], "expected_bytes": expected, "actual_bytes": offset, "transport_attempt": attempts})
+            part.unlink(missing_ok=True); restarted = True; offset = 0
+        state("resuming" if offset else "downloading", offset, True)
+        try:
+            response = urllib.request.urlopen(download_request(offset), timeout=60); headers = getattr(response, "headers", {})
+            get = lambda name: headers.get(name) if hasattr(headers, "get") else None
+            status, content_range, content_length = response.status, get("Content-Range"), get("Content-Length")
+            last.update({"http_status": status, "content_range": content_range, "content_length": content_length, "hostname": (urllib.parse.urlsplit(response.geturl() if hasattr(response, "geturl") else entry["url"]).hostname or "").lower(), "error": None})
+            match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", content_range or "")
+            valid = (offset == 0 and ((status == 200 and (content_length is None or int(content_length) == expected)) or (status == 206 and match and int(match.group(1)) == 0 and int(match.group(3)) == expected and int(match.group(2)) < expected))) or (offset > 0 and status == 206 and match and int(match.group(1)) == offset and int(match.group(3)) == expected and int(match.group(2)) < expected and (content_length is None or int(content_length) == int(match.group(2)) - offset + 1))
+            if offset > 0 and status == 200:
+                response.close(); part.unlink(missing_ok=True)
+                if restarted: raise StageFailure("model_download_invalid_range", {"code": "model_download_invalid_range", "role": entry["role"], "filename": entry["filename"], "requested_offset": offset, "http_status": status, "content_range": content_range, "content_length": content_length, "expected_total": expected})
+                restarted = True; continue
+            if not valid:
+                response.close(); raise StageFailure("model_download_invalid_range", {"code": "model_download_invalid_range", "role": entry["role"], "filename": entry["filename"], "requested_offset": offset, "http_status": status, "content_range": content_range, "content_length": content_length, "expected_total": expected})
+            with response, part.open("ab" if offset else "wb") as handle:
+                while block := response.read(1024 * 1024):
+                    handle.write(block); offset += len(block)
+                    if offset > expected: raise StageFailure("model_download_exceeds_expected_size", {"code": "model_download_exceeds_expected_size", "role": entry["role"], "filename": entry["filename"], "expected_bytes": expected, "actual_bytes": offset, "transport_attempt": attempts})
+                    state("downloading", offset)
+            if offset < expected: raise EOFError("premature_eof")
+        except urllib.error.HTTPError as error: raise http_failure(error) from error
+        except StageFailure: raise
+        except transient as error:
+            last["error"] = error; state("resuming", part.stat().st_size if part.exists() else 0, True)
+            if attempts < 4: time.sleep((3, 7, 15)[attempts - 1]); continue
+    actual = part.stat().st_size if part.exists() else 0
+    data = {"code": "model_download_incomplete_after_retries", "role": entry["role"], "filename": entry["filename"], "expected_bytes": expected, "actual_bytes": actual, "remaining_bytes": max(0, expected - actual), "transport_attempts": attempts, "last_http_status": last["http_status"], "last_content_length": last["content_length"], "last_content_range": last["content_range"], "final_hostname": last["hostname"], "last_error_name": type(last["error"]).__name__ if last["error"] else None, "last_error_code": getattr(last["error"], "errno", None), "last_error_message": clean(last["error"], 300) if last["error"] else None}
+    raise StageFailure(f"model_download_incomplete_after_retries:{entry['filename']}", data)
 
 
 def stage_models(payload: dict[str, Any]) -> dict[str, Any]:
