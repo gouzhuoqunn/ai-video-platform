@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,7 @@ import { readLiveMarketplace, readLiveOrdersSummary } from "./clore/live";
 import { evaluateMarketplace } from "./clore/marketplace";
 import { buildHttpRuntimeCreateOrderBody, createCloreOrder } from "./clore/order-execution";
 import { cancelCloreOrder } from "./clore/cancel-execution";
-import { buildCloreUrl, cloreRequest, createCloreHeaders, sleep } from "./clore/client";
+import { buildCloreUrl, CloreApiError, CloreCreateRetryReconciledError, CloreRateLimitError, cloreRequest, sleep } from "./clore/client";
 import { writeActiveOrder } from "./clore/order-state";
 import { orderRecords, parseCloreOrder } from "./clore/order-readiness-parser";
 import { recordDeploymentFailure, recordTemporaryDeploymentDeny } from "./clore/deployment-host-blacklist";
@@ -71,6 +71,12 @@ export type ImageRunnerSession = {
   blocker: string | null;
   pid?: number | null;
   logPath?: string | null;
+  createAttempt?: {
+    id: string;
+    startedAt: string;
+    phase: "creating_order" | "create_order_rate_limited" | "reconciling_create_order" | "waiting_create_retry" | "order_created_waiting_deployment" | "create_order_failed" | "ambiguous_active_orders";
+    requestAttempts: number;
+  } | null;
 };
 
 type CloreConfig = ReturnType<typeof loadCloreConfig>;
@@ -91,7 +97,6 @@ export function chooseCheapestImageCandidate<T extends { gpuNormalizedName: stri
 }
 
 const CREATE_ORDER_HARD_TIMEOUT_MS = 60_000;
-const CREATE_ORDER_RETRY_DELAY_MS = 3_000;
 const HTTP_READINESS_TIMEOUT_MS = 12 * 60 * 1000;
 const DEPLOYING_PROXY_502_TIMEOUT_MS = 6 * 60 * 1000;
 const HTTP_READINESS_POLL_MS = 10_000;
@@ -320,10 +325,12 @@ function readableCreateOrderMessage(classification: SanitizedFetchFailure["class
 
 function createOrderFailureDetail(error: unknown, context: CreateOrderFailureContext): SanitizedFetchFailure {
   const { record, cause } = pickCause(error);
-  const status = typeof context.httpStatus === "number" ? context.httpStatus : null;
+  const rateLimit = error instanceof CloreRateLimitError ? error.failure : null;
+  const providerFailure = error instanceof CloreApiError ? error.failure : null;
+  const status = typeof context.httpStatus === "number" ? context.httpStatus : rateLimit?.httpStatus ?? providerFailure?.httpStatus ?? null;
   const rawMessage = error instanceof Error ? error.message : String(error);
   const causeMessage = typeof cause.message === "string" ? cause.message : rawMessage;
-  const code = typeof cause.code === "string" ? cause.code : typeof record.code === "string" ? record.code : null;
+  const code = typeof cause.code === "string" ? cause.code : typeof record.code === "string" ? record.code : rateLimit ? `clore_code_${rateLimit.code}` : providerFailure ? `clore_code_${providerFailure.code}` : null;
   const classification = classifyFetchFailure({ status, code, message: `${rawMessage} ${causeMessage}` });
   const url = sanitizedUrlParts(context.url);
   return {
@@ -350,10 +357,6 @@ function createOrderFailureDetailFromError(error: unknown): SanitizedFetchFailur
   if (error instanceof CreateOrderHardTimeoutError || error instanceof CreateOrderRequestError || error instanceof CreateOrderNoOrderFailure) return error.detail;
   const maybe = error && typeof error === "object" ? (error as { detail?: unknown }) : {};
   return maybe.detail && typeof maybe.detail === "object" ? (maybe.detail as SanitizedFetchFailure) : null;
-}
-
-function isTransientCreateOrderFailure(detail: SanitizedFetchFailure) {
-  return ["dns", "tls", "timeout", "reset", "connection_refused", "network_error"].includes(detail.classification);
 }
 
 function technicalCauseText(detail: SanitizedFetchFailure, extra: Record<string, unknown> = {}) {
@@ -585,46 +588,6 @@ function logEndpointDiagnostics(input: {
   }));
 }
 
-function cloreCreatePayloadError(payload: Record<string, unknown>, status: number, context: CreateOrderFailureContext) {
-  const safePayload = {
-    status,
-    code: payload.code ?? null,
-    error: payload.error ?? null,
-    message: payload.message ?? null,
-    details: payload.details ?? payload.errors ?? null,
-  };
-  const safe = JSON.stringify(safePayload).replace(/ssh-(?:ed25519|rsa)\s+[A-Za-z0-9+/=]+(?:\s+\S+)?/g, "<redacted-ssh-key>");
-  const detail = createOrderFailureDetail(new Error(`create_order_api_error:${safe}`), { ...context, httpStatus: status, responseBody: safePayload });
-  return new CreateOrderRequestError(detail);
-}
-
-async function postCreateOrderOnce(config: CloreConfig, body: ReturnType<typeof buildHttpRuntimeCreateOrderBody>) {
-  const context = createOrderContext(config);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), CREATE_ORDER_HARD_TIMEOUT_MS);
-  try {
-    const response = await fetch(context.url, {
-      method: "POST",
-      body: JSON.stringify(body),
-      headers: createCloreHeaders(config.apiKey!),
-      signal: controller.signal,
-    });
-    const raw = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-    const code = typeof raw.code === "number" ? raw.code : response.ok ? 0 : response.status;
-    console.info(JSON.stringify({ endpoint: "/create_order", at: new Date().toISOString(), status: response.status, retry: 0, hardTimeoutMs: CREATE_ORDER_HARD_TIMEOUT_MS }));
-    if (code !== 0) throw cloreCreatePayloadError(raw, response.status, context);
-    return "data" in raw ? raw.data : raw;
-  } catch (error) {
-    if (error instanceof CreateOrderRequestError) throw error;
-    const detail = createOrderFailureDetail(error, context);
-    console.info(JSON.stringify({ event: "image_create_order_failure", at: new Date().toISOString(), ...detail }));
-    if (controller.signal.aborted) throw new CreateOrderHardTimeoutError(detail);
-    throw new CreateOrderRequestError(detail);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 function persistRecoveredActiveOrder(orderId: string, candidate: RuntimeCandidate, requestBody: ReturnType<typeof buildHttpRuntimeCreateOrderBody>, gpuClass: ImageGpuClass) {
   writeActiveOrder({
     order_id: orderId,
@@ -639,6 +602,7 @@ function persistRecoveredActiveOrder(orderId: string, candidate: RuntimeCandidat
     gpu_type: candidate.gpu,
     gpu_profile: gpuClass,
     bootstrap_image: COMFY_RUNTIME_IMAGE,
+    create_attempt_id: readRunner().createAttempt?.id,
   });
 }
 
@@ -649,7 +613,7 @@ function existingCreateOrderAttempts(host: Record<string, unknown> | null) {
 function persistCreateOrderAttempt(input: {
   attempt: number;
   detail: SanitizedFetchFailure;
-  reconciliation: "checking" | "no_order" | "reused_order" | "retrying" | "failed";
+  reconciliation: "checking" | "no_order" | "reused_order" | "retrying" | "failed" | "ambiguous";
   matchedOrderId?: string | null;
 }) {
   const current = readRunner();
@@ -674,9 +638,23 @@ function persistCreateOrderAttempt(input: {
       message: input.detail.readableMessage,
     },
   ].slice(-4);
+  const phase = input.reconciliation === "reused_order"
+    ? "order_created_waiting_deployment"
+    : input.reconciliation === "retrying"
+      ? "waiting_create_retry"
+      : input.reconciliation === "checking"
+        ? input.detail.classification === "rate_limited" ? "create_order_rate_limited" : "reconciling_create_order"
+        : "reconciling_create_order";
+  const stage = phase === "create_order_rate_limited"
+    ? "Clore限流，正在核对是否已创建订单"
+    : phase === "waiting_create_retry"
+      ? "尚未创建订单，等待重试"
+      : phase === "order_created_waiting_deployment"
+        ? "已找到创建成功的订单，正在部署"
+        : "正在核对是否已创建订单";
   updateRunner({
     state: "running",
-    stage: "creating_order",
+    stage,
     host: {
       ...(current.host ?? {}),
       orderId: null,
@@ -692,16 +670,12 @@ function persistCreateOrderAttempt(input: {
       lastCreateOrderTechnicalCause: technicalCauseText(input.detail, { attempt: input.attempt, reconciliation: input.reconciliation, matchedOrderId: input.matchedOrderId ?? null }),
       createOrderAttempts: attempts,
     },
-    error: {
-      stage: "creating_order",
-      message: input.detail.readableMessage,
-      at: new Date().toISOString(),
-      operation: input.detail.operation,
-      method: input.detail.method,
-      targetHost: input.detail.targetHost,
-      targetPath: input.detail.targetPath,
-      classification: input.detail.classification,
-      technicalCause: technicalCauseText(input.detail, { attempt: input.attempt, reconciliation: input.reconciliation, matchedOrderId: input.matchedOrderId ?? null }),
+    error: null,
+    createAttempt: {
+      id: current.createAttempt?.id ?? randomUUID(),
+      startedAt: current.createAttempt?.startedAt ?? new Date().toISOString(),
+      phase,
+      requestAttempts: Math.max(current.createAttempt?.requestAttempts ?? 0, input.attempt),
     },
   });
 }
@@ -719,6 +693,7 @@ function persistCreateOrderNoOrderFailure(detail: SanitizedFetchFailure) {
     promptSummary: null,
     pid: null,
     blocker: null,
+    createAttempt: current.createAttempt ? { ...current.createAttempt, phase: "create_order_failed" } : null,
     error: {
       stage: "create_order_failed",
       message: detail.readableMessage,
@@ -738,7 +713,45 @@ function persistCreateOrderNoOrderFailure(detail: SanitizedFetchFailure) {
   });
 }
 
-async function createOrderWithNetworkRetry(input: {
+class CreateOrderAmbiguousFailure extends Error {
+  constructor() {
+    super("create_order_ambiguous_active_orders");
+    this.name = "CreateOrderAmbiguousFailure";
+  }
+}
+
+function persistAmbiguousCreateOrderFailure(durable: NonNullable<ImageRunnerSession["createAttempt"]>) {
+  updateRunner({
+    state: "failed",
+    stage: "ambiguous_active_orders",
+    error: {
+      stage: "ambiguous_active_orders",
+      message: "创建订单状态不明确，未继续创建或取消订单。",
+      at: new Date().toISOString(),
+    },
+    blocker: "ambiguous_active_orders",
+    createAttempt: { ...durable, phase: "ambiguous_active_orders" },
+  });
+}
+
+function ensureCreateAttempt() {
+  const current = readRunner();
+  if (current.createAttempt?.id) return current.createAttempt;
+  const attempt = { id: randomUUID(), startedAt: new Date().toISOString(), phase: "creating_order" as const, requestAttempts: 0 };
+  updateRunner({ createAttempt: attempt, state: "running", stage: "creating_order", error: null });
+  return attempt;
+}
+
+async function reconcileCreateAttempt(input: { deps: RunnerDeps; config: CloreConfig; selectedServerId: string | null }) {
+  const active = (await input.deps.readOrders(input.config)).filter((order) => order.active && order.orderId);
+  if (active.length === 0) return { kind: "none" as const, orderId: null };
+  if (active.length !== 1) return { kind: "ambiguous" as const, orderId: null };
+  const only = active[0];
+  if (input.selectedServerId && only.serverId !== input.selectedServerId) return { kind: "ambiguous" as const, orderId: null };
+  return { kind: "matched" as const, orderId: only.orderId! };
+}
+
+export async function createOrderWithNetworkRetry(input: {
   deps: RunnerDeps;
   config: CloreConfig;
   execution: CloreExecution;
@@ -747,45 +760,62 @@ async function createOrderWithNetworkRetry(input: {
   selectedServerId: string | null;
   gpuClass: ImageGpuClass;
 }) {
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    try {
-      const order = await input.deps.createOrder({
-        config: input.config,
-        execution: input.execution,
-        candidate: input.candidate,
-        requestBody: input.requestBody,
-        request: (body) => postCreateOrderOnce(input.config, body),
-        readOrders: (nextConfig) => input.deps.readOrders(nextConfig),
-        sessionMetadata: { gpuType: input.candidate.gpu, gpuProfile: input.gpuClass, bootstrapImage: COMFY_RUNTIME_IMAGE },
-      });
-      return order.order_id;
-    } catch (error) {
-      const detail = createOrderFailureDetailFromError(error);
-      if (!detail) throw error;
-      persistCreateOrderAttempt({ attempt, detail, reconciliation: "checking" });
-      const reconciledOrderId = await reconcileCreatedOrder(input.deps, input.config, input.selectedServerId).catch((reconcileError) => {
-        const reconcileDetail = createOrderFailureDetail(reconcileError, { ...defaultCreateOrderContext(), operation: "clore.my_orders_reconcile", method: "GET", url: buildCloreUrl(input.config, "/my_orders"), timeoutMs: null });
-        persistCreateOrderAttempt({ attempt, detail: reconcileDetail, reconciliation: "failed" });
-        return null;
-      });
-      if (reconciledOrderId) {
-        persistRecoveredActiveOrder(reconciledOrderId, input.candidate, input.requestBody, input.gpuClass);
-        persistCreateOrderAttempt({ attempt, detail, reconciliation: "reused_order", matchedOrderId: reconciledOrderId });
-        return reconciledOrderId;
-      }
-      persistCreateOrderAttempt({ attempt, detail, reconciliation: "no_order" });
-      if (attempt === 1 && isTransientCreateOrderFailure(detail)) {
-        persistCreateOrderAttempt({ attempt, detail, reconciliation: "retrying" });
-        await input.deps.sleep(CREATE_ORDER_RETRY_DELAY_MS);
-        continue;
-      }
-      persistCreateOrderNoOrderFailure(detail);
-      throw new CreateOrderNoOrderFailure(detail);
+  const durable = ensureCreateAttempt();
+  let recoveredOrderId: string | null = null;
+  const reconcileBeforeRetry = async (reason: "rate_limited" | "network_error", attempt: number, httpStatus: number | null, code: number | null) => {
+    const detail = createOrderFailureDetail(new Error(reason), { ...createOrderContext(input.config), httpStatus, responseBody: code === null ? null : { code } });
+    persistCreateOrderAttempt({ attempt, detail, reconciliation: "checking" });
+    const reconciliation = await reconcileCreateAttempt(input);
+    if (reconciliation.kind === "matched") {
+      recoveredOrderId = reconciliation.orderId;
+      persistRecoveredActiveOrder(recoveredOrderId, input.candidate, input.requestBody, input.gpuClass);
+      persistCreateOrderAttempt({ attempt, detail, reconciliation: "reused_order", matchedOrderId: recoveredOrderId });
+      return true;
     }
+    if (reconciliation.kind === "ambiguous") {
+      persistCreateOrderAttempt({ attempt, detail, reconciliation: "ambiguous" });
+      throw new CreateOrderAmbiguousFailure();
+    }
+    persistCreateOrderAttempt({ attempt, detail, reconciliation: "retrying" });
+    return false;
+  };
+  try {
+    const order = await input.deps.createOrder({
+      config: input.config,
+      execution: input.execution,
+      candidate: input.candidate,
+      requestId: durable.id,
+      requestBody: input.requestBody,
+      request: async (body) => await input.deps.cloreRequest<unknown>(input.config, "/create_order", { method: "POST", body: JSON.stringify(body) }, {
+        onCreateRetry: async (retry) => await reconcileBeforeRetry(retry.reason, retry.attempt, retry.httpStatus, retry.code),
+      }),
+      readOrders: (nextConfig) => input.deps.readOrders(nextConfig),
+      sessionMetadata: { gpuType: input.candidate.gpu, gpuProfile: input.gpuClass, bootstrapImage: COMFY_RUNTIME_IMAGE, createAttemptId: durable.id },
+    });
+    updateRunner({ createAttempt: { ...durable, phase: "order_created_waiting_deployment" }, stage: "order_created_waiting_deployment", error: null });
+    return order.order_id;
+  } catch (error) {
+    if (error instanceof CloreCreateRetryReconciledError && recoveredOrderId) return recoveredOrderId;
+    if (error instanceof CreateOrderAmbiguousFailure) {
+      persistAmbiguousCreateOrderFailure(durable);
+      throw error;
+    }
+    const detail = createOrderFailureDetailFromError(error) ?? createOrderFailureDetail(error, createOrderContext(input.config));
+    persistCreateOrderAttempt({ attempt: Math.max(1, durable.requestAttempts + 1), detail, reconciliation: "checking" });
+    const reconciliation = await reconcileCreateAttempt(input);
+    if (reconciliation.kind === "matched") {
+      persistRecoveredActiveOrder(reconciliation.orderId, input.candidate, input.requestBody, input.gpuClass);
+      persistCreateOrderAttempt({ attempt: Math.max(1, durable.requestAttempts + 1), detail, reconciliation: "reused_order", matchedOrderId: reconciliation.orderId });
+      return reconciliation.orderId;
+    }
+    if (reconciliation.kind === "ambiguous") {
+      persistCreateOrderAttempt({ attempt: Math.max(1, durable.requestAttempts + 1), detail, reconciliation: "ambiguous" });
+      persistAmbiguousCreateOrderFailure(durable);
+      throw new CreateOrderAmbiguousFailure();
+    }
+    persistCreateOrderNoOrderFailure(detail);
+    throw new CreateOrderNoOrderFailure(detail);
   }
-  const detail = createOrderFailureDetail(new Error("create_order_retry_exhausted"), createOrderContext(input.config));
-  persistCreateOrderNoOrderFailure(detail);
-  throw new CreateOrderNoOrderFailure(detail);
 }
 
 async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId: string) {
@@ -1157,7 +1187,7 @@ export async function runImage4090Batch(deps = defaultDeps()) {
     updateRunner({ state: "completed", stage: "本批次已完成", currentTaskIndex: null, error: null, blocker: null });
   } catch (error) {
     rootError = error;
-    if (error instanceof CreateOrderNoOrderFailure) throw error;
+    if (error instanceof CreateOrderNoOrderFailure || error instanceof CreateOrderAmbiguousFailure) throw error;
     if (attemptedCreate && !orderId && config) orderId = await reconcileCreatedOrder(deps, config, selectedServerId).catch(() => null);
     failRunner(attemptedCreate ? `${requestedGpuClass === "rtx5090" ? "RTX 5090" : "RTX 4090"} 图像 Runner` : IMAGE_RUNNER_PRECHECK_STAGE, error);
     throw error;

@@ -318,7 +318,7 @@ export async function createCloreOrder(input: {
   requestId?: string;
   request?: (body: CreateOrderRequest) => Promise<unknown>;
   readOrders?: typeof readLiveOrdersSummary;
-  sessionMetadata?: { gpuType: string; gpuProfile: GpuProfile; bootstrapImage: string };
+  sessionMetadata?: { gpuType: string; gpuProfile: GpuProfile; bootstrapImage: string; createAttemptId?: string };
   beforeCreateRequest?: () => Promise<void> | void;
   afterCreateRequestAttempt?: () => Promise<void> | void;
   resolvedBatchRelease?: boolean;
@@ -396,6 +396,7 @@ export async function createCloreOrder(input: {
       gpu_type: input.sessionMetadata?.gpuType ?? input.candidate.gpu,
       gpu_profile: input.sessionMetadata?.gpuProfile ?? "rtx4090",
       bootstrap_image: input.sessionMetadata?.bootstrapImage ?? input.requestBody.image,
+      create_attempt_id: input.sessionMetadata?.createAttemptId,
     });
     return {
       order_created: true,

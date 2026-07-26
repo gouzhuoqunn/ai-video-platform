@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { NextResponse, type NextRequest } from "next/server";
@@ -101,12 +101,14 @@ export type ImageRunnerSession = {
   blocker: string | null;
   pid?: number | null;
   logPath?: string | null;
+  createAttempt?: { id: string; startedAt: string; phase: string; requestAttempts: number } | null;
   lastCancellation?: { at: string; orderId: string | null; message: string };
 };
 
 const DATA_DIR = path.join(process.cwd(), ".secrets", "image-studio");
 const RUNNER_PATH = path.join(DATA_DIR, "runner-session.json");
 const RUNNER_LOG_PATH = path.join(DATA_DIR, "image-runner.log");
+const RUNNER_START_LOCK_PATH = path.join(DATA_DIR, "runner-start.lock");
 const PREFERENCES_PATH = path.join(DATA_DIR, "preferences.json");
 const RESTORE_MANIFEST_PATH = path.join(DATA_DIR, "fluxed-up-10.2-rtx4090-text.restore.json");
 const SOURCE_MANIFEST_PATH = path.join(process.cwd(), "comfy-runtime", "image-source-artifacts.json");
@@ -272,6 +274,24 @@ function normalizeRunner(input: Partial<ImageRunnerSession>): ImageRunnerSession
     blocker: input.blocker ?? null,
     pid: Number.isInteger(input.pid) ? input.pid : null,
     logPath: stringOrNull(input.logPath),
+    createAttempt: input.createAttempt && typeof input.createAttempt === "object" && typeof input.createAttempt.id === "string" && typeof input.createAttempt.startedAt === "string" && typeof input.createAttempt.phase === "string"
+      ? { id: input.createAttempt.id, startedAt: input.createAttempt.startedAt, phase: input.createAttempt.phase, requestAttempts: Number.isInteger(input.createAttempt.requestAttempts) ? input.createAttempt.requestAttempts : 0 }
+      : null,
+  };
+}
+
+function acquireRunnerStartLock(attemptId: string) {
+  mkdirSync(DATA_DIR, { recursive: true });
+  let descriptor: number;
+  try {
+    descriptor = openSync(RUNNER_START_LOCK_PATH, "wx");
+  } catch {
+    throw new Error(DUPLICATE_START_MESSAGE);
+  }
+  writeFileSync(descriptor, JSON.stringify({ attemptId, acquiredAt: new Date().toISOString() }), "utf8");
+  return () => {
+    closeSync(descriptor);
+    rmSync(RUNNER_START_LOCK_PATH, { force: true });
   };
 }
 
@@ -790,6 +810,9 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === "start_batch") {
+      const attemptId = randomUUID();
+      const releaseStartLock = acquireRunnerStartLock(attemptId);
+      try {
       const ids = [...new Set(Array.isArray(body.taskIds) ? body.taskIds.map(String).filter(Boolean) : [])];
       const maxHourlyPrice = Number(body.maxHourlyPrice);
       const previous = await reconcileStaleRunner(readRunner());
@@ -815,6 +838,7 @@ export async function POST(request: NextRequest) {
         blocker: null,
         pid: null,
         logPath: RUNNER_LOG_PATH,
+        createAttempt: { id: attemptId, startedAt, phase: "creating_order", requestAttempts: 0 },
         updatedAt: startedAt,
       });
       const child = spawn(process.execPath, [path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs"), path.join(process.cwd(), "scripts", "image-4090-runner.ts")], {
@@ -860,6 +884,9 @@ export async function POST(request: NextRequest) {
         }
       });
       return NextResponse.json(await responsePayload());
+      } finally {
+        releaseStartLock();
+      }
     }
 
     const id = String(body.id ?? "");

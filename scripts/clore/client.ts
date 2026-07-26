@@ -25,6 +25,13 @@ export type CloreRequestOptions = {
   /** Opt out of automatic retries for one-shot, operator-authorized calls. */
   maxRateLimitRetries?: number;
   maxNetworkRetries?: number;
+  /**
+   * Create-order retries are ambiguous: the provider can accept a request even
+   * when the caller only observes a transport or rate-limit failure.  The
+   * owner may reconcile while the scheduler still owns the same create slot.
+   * Return true only after it persisted the matching order locally.
+   */
+  onCreateRetry?: (input: { reason: "rate_limited" | "network_error"; attempt: number; httpStatus: number | null; code: number | null }) => Promise<boolean>;
 };
 
 type FetchLike = typeof fetch;
@@ -138,6 +145,13 @@ export class CloreRateLimitError extends Error {
     super("clore_rate_limit");
     this.name = "CloreRateLimitError";
     this.failure = { ...failure, message: failure.message === null ? null : String(sanitizeProviderValue(failure.message)) };
+  }
+}
+
+export class CloreCreateRetryReconciledError extends Error {
+  constructor() {
+    super("create_order_reconciled_before_retry");
+    this.name = "CloreCreateRetryReconciledError";
   }
 }
 
@@ -268,6 +282,9 @@ export class CloreRequestScheduler {
           if (endpoint === "/create_order" && await options.onCreateUncertain?.()) {
             throw new Error("create_order outcome uncertain: active order found during recovery.");
           }
+          if (endpoint === "/create_order" && await options.onCreateRetry?.({ reason: "network_error", attempt: networkAttempts, httpStatus: null, code: null })) {
+            throw new CloreCreateRetryReconciledError();
+          }
           if (endpoint === "/create_order") await options.beforeCreateRetry?.();
           const delay = this.backoff(networkAttempts - 1, null);
           this.log({ endpoint, at: new Date().toISOString(), status: "network_error", retry: networkAttempts });
@@ -286,6 +303,9 @@ export class CloreRequestScheduler {
             throw new CloreRateLimitError({ httpStatus: 429, code, message, retryAfterMs: retryAfter, attempt: rateLimitAttempts + 1 });
           }
           rateLimitAttempts += 1;
+          if (endpoint === "/create_order" && await options.onCreateRetry?.({ reason: "rate_limited", attempt: rateLimitAttempts, httpStatus: response.status, code })) {
+            throw new CloreCreateRetryReconciledError();
+          }
           if (endpoint === "/create_order") await options.beforeCreateRetry?.();
           await this.sleepFn(this.backoff(rateLimitAttempts - 1, retryAfter));
           continue;
