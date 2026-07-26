@@ -61,7 +61,12 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
   const hardDeadlineAt = new Date(Date.now() + MAX_HOURS * 3_600_000).toISOString();
   writeLocalWatchdogArmState({ schemaVersion: 1, armed: true, sessionNonce: createSessionNonce(), serverId: selected.serverId, orderType: "on-demand", currency: config.rentalCurrency, startingBalanceUsd: wallet.availableUsdBalance, armedAt: new Date().toISOString(), drainingAt: new Date(Date.parse(hardDeadlineAt) - 10 * 60_000).toISOString(), hardDeadlineAt, hardBudgetUsd: MAX_TOTAL, budgetSafetyUsd: .05, emergencyStop: false });
   let endpoint = order.controllerUrl; const deadline = Date.now() + 10 * 60_000; while (!endpoint && Date.now() < deadline) { await sleep(10_000); endpoint = (await readLiveOrdersSummary(config, { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.controllerUrl ?? null; }
-  if (!endpoint) throw new Error("order_endpoint_not_published_within_timeout");
+  if (!endpoint) {
+    // Creation has already mutated the provider, so endpoint publication failure
+    // must not escape without the same exact-order cleanup path.
+    await cleanupLiveSession({ orderId: order.orderId, serverId: selected.serverId, startingBalanceUsd: wallet.availableUsdBalance });
+    throw new Error("order_endpoint_not_published_within_timeout");
+  }
   return { orderId: order.orderId, endpoint, hostname: new URL(endpoint).hostname, serverId: selected.serverId, hourlyUsd: selected.priceUsdPerHour, startingBalanceUsd: wallet.availableUsdBalance, plan, token: token.token, tokenSha256: token.sha256, hardDeadlineAt };
 }
 
