@@ -1,7 +1,7 @@
 /** One-order, sequential two-task image session.  The CLI gates provider mutation. */
 import { randomUUID } from "node:crypto";
 import { listImageTasks } from "../../src/lib/image-generation/local-image-task-store";
-import { planImageSession } from "./image-session";
+import { hydrateFrozenImageSessionPlan, planImageSession } from "./image-session";
 import { cleanupLiveSession, createLiveSessionOrder, installModelsOnce, invokeStage, submitTaskInference, waitForAgentIdle, writeSessionReceipt, writeTaskReceipt, type ImmutableRuntime } from "./image-live-runtime";
 import { resolveExactEligibleImageTask } from "./run-image-e2e";
 import { RTX4090_GOLDEN_DEPLOYMENT_PROFILE } from "../image-executor/rtx4090-golden-deployment-profile";
@@ -29,8 +29,9 @@ export async function runLiveImageSession(input: { taskIds: string[]; immutable:
     return { dryRun: true, providerMutationCount: 0, selectedTaskIds: plan.selectedTaskIds, executionEligible: plan.executionEligible };
   }
   const exact = input.taskIds; if (!exact.length || exact.length > 8 || new Set(exact).size !== exact.length) throw new Error("image_session_requires_one_to_eight_exact_task_ids");
-  const selected = planImageSession(exact.map((id) => resolveExactEligibleImageTask(id)), { activeOrderCount: 0 });
-  if (selected.selectedTaskIds.join(",") !== exact.join(",")) throw new Error("image_session_task_order_mismatch");
+  // The UI already persisted this canonical order.  Validate membership only;
+  // never sort or independently rebuild it after the batch has been frozen.
+  const selected = hydrateFrozenImageSessionPlan(exact.map((id) => resolveExactEligibleImageTask(id)), exact, { activeOrderCount: 0 });
   const receipt: LiveSessionReceipt = initial(input.sessionId ?? randomUUID(), selected); persist(receipt);
   let order: Awaited<ReturnType<typeof createLiveSessionOrder>> | null = null; let primary: unknown = null;
   try {

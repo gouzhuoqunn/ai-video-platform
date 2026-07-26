@@ -18,6 +18,7 @@ import { readSourceAcquisitionManifest, readValidatedRestoreManifest, validateVa
 import { assertImageExecutorReady, IMAGE_RUNNER_PRECHECK_STAGE, RESTORE_OR_BOOTSTRAP_BLOCKER } from "./image-executor/readiness";
 import { assertRtx4090GoldenDeploymentProfile } from "./image-executor/rtx4090-golden-deployment-profile";
 import { runLiveImageSession } from "./clore/image-session-live";
+import { FrozenImageSessionMembershipChangedError, hydrateFrozenImageSessionPlan } from "./clore/image-session";
 
 export type ImageTask = {
   id: string;
@@ -216,6 +217,13 @@ function updateRunner(patch: Partial<ImageRunnerSession>) {
 }
 
 function readableError(error: unknown) {
+  if (error instanceof FrozenImageSessionMembershipChangedError) {
+    return `任务 ${error.taskId} 在启动前发生变化，已取消本次启动，请刷新后重试。`;
+  }
+  const membership = /^image_session_planned_task_changed:([^\s]+)$/.exec(String(error instanceof Error ? error.message : error));
+  if (membership) {
+    return `任务 ${membership[1]} 在启动前发生变化，已取消本次启动，请刷新后重试。`;
+  }
   const detail = createOrderFailureDetailFromError(error);
   if (detail) return detail.readableMessage;
   const message = error instanceof Error ? error.message : String(error);
@@ -368,10 +376,11 @@ function technicalCauseText(detail: SanitizedFetchFailure, extra: Record<string,
 function failRunner(stage: string, error: unknown, cancellationError?: unknown, blocker?: string) {
   const machine = error instanceof Error ? error.message : String(error);
   const detail = createOrderFailureDetailFromError(error);
+  const membershipChanged = error instanceof FrozenImageSessionMembershipChangedError || machine.startsWith("image_session_planned_task_changed:");
   updateRunner({
     state: "failed",
     stage,
-    blocker: blocker ?? machine,
+    blocker: blocker ?? (membershipChanged ? readableError(error) : machine),
     error: {
       stage,
       message: readableError(error),
@@ -1030,11 +1039,14 @@ export async function runImage4090Batch(deps = defaultDeps()) {
     });
 
     const tasks = readJson<ImageTask[]>(taskPath, []);
-    const frozen = tasks.filter((task) => session.frozenTaskIds.includes(task.id));
     requestedGpuClass = session.gpuClass;
-    if (!requestedGpuClass || !frozen.length || frozen.some((task) => !isValidFrozenTask(task, requestedGpuClass))) {
+    if (!requestedGpuClass) {
       throw new Error("frozen_batch_invalid_for_text_generation_gpu_class");
     }
+    const frozenPlan = hydrateFrozenImageSessionPlan(tasks, session.frozenTaskIds, { gpuClass: requestedGpuClass, activeOrderCount: 0, selectedHourlyUsd: session.maxHourlyPrice });
+    const frozenById = new Map(tasks.map((task) => [task.id, task]));
+    const frozen = frozenPlan.selectedTaskIds.map((taskId) => frozenById.get(taskId)!);
+    if (!frozen.length || frozen.some((task) => !isValidFrozenTask(task, requestedGpuClass))) throw new Error("frozen_batch_invalid_for_text_generation_gpu_class");
     const targetGpu = targetGpuForImageClass(requestedGpuClass);
 
     // The normal Studio path deliberately delegates to the same Agent session
@@ -1056,7 +1068,7 @@ export async function runImage4090Batch(deps = defaultDeps()) {
           message: "将使用已验证的 Jupyter + 不可变 Agent 启动合同",
         },
       });
-      const receipt = await runLiveImageSession({ taskIds: frozen.map((task) => task.id), immutable: profile.immutable, execute: true, onOrderCreated: (order, deploymentProfile) => {
+      const receipt = await runLiveImageSession({ taskIds: frozenPlan.selectedTaskIds, immutable: profile.immutable, execute: true, onOrderCreated: (order, deploymentProfile) => {
         updateRunner({ stage: "订单已创建，正在等待已验证运行环境", host: { ...(readRunner().host ?? {}), orderId: order.orderId, serverId: order.serverId, controllerUrl: order.endpoint, deploymentProfileId: deploymentProfile.id, bootstrapTemplateSha256: deploymentProfile.bootstrapTemplateSha256, runtimeDigest: deploymentProfile.image, healthPath: profile.healthPath, controllerBind: profile.controllerBind } });
       } });
       updateRunner({
@@ -1225,6 +1237,12 @@ export async function runImage4090Batch(deps = defaultDeps()) {
     if (error instanceof CreateOrderNoOrderFailure || error instanceof CreateOrderAmbiguousFailure) throw error;
     if (attemptedCreate && !orderId && config) orderId = await reconcileCreatedOrder(deps, config, selectedServerId).catch(() => null);
     failRunner(attemptedCreate ? `${requestedGpuClass === "rtx5090" ? "RTX 5090" : "RTX 4090"} 图像 Runner` : IMAGE_RUNNER_PRECHECK_STAGE, error);
+    if (!attemptedCreate && (error instanceof FrozenImageSessionMembershipChangedError || String(error instanceof Error ? error.message : error).startsWith("image_session_planned_task_changed:"))) {
+      // The new batch was never submitted.  Discard only its local freeze so a
+      // refreshed manual start makes a fresh canonical plan; task records and
+      // historical inference receipts deliberately remain untouched.
+      updateRunner({ frozenTaskIds: [], gpuClass: null, currentTaskIndex: null, currentModel: null, promptSummary: null });
+    }
     throw error;
   } finally {
     if (orderId && config && execution) {
@@ -1246,11 +1264,14 @@ export async function dryRun() {
     const session = readRunner();
     updateRunner({ state: "running", stage: IMAGE_RUNNER_PRECHECK_STAGE, error: null, blocker: null });
     const tasks = readJson<ImageTask[]>(taskPath, []);
-    const frozen = tasks.filter((task) => session.frozenTaskIds.includes(task.id));
     const requestedGpuClass = session.gpuClass;
-    if (!requestedGpuClass || !frozen.length || frozen.some((task) => !isValidFrozenTask(task, requestedGpuClass))) {
+    if (!requestedGpuClass) {
       throw new Error("frozen_batch_invalid_for_text_generation_gpu_class");
     }
+    const frozenPlan = hydrateFrozenImageSessionPlan(tasks, session.frozenTaskIds, { gpuClass: requestedGpuClass, activeOrderCount: 0, selectedHourlyUsd: session.maxHourlyPrice });
+    const frozenById = new Map(tasks.map((task) => [task.id, task]));
+    const frozen = frozenPlan.selectedTaskIds.map((taskId) => frozenById.get(taskId)!);
+    if (!frozen.length || frozen.some((task) => !isValidFrozenTask(task, requestedGpuClass))) throw new Error("frozen_batch_invalid_for_text_generation_gpu_class");
     updateRunner({ stage: "正在检查模型缓存" });
     const readiness = assertImageExecutorReady({ restoreManifestPath: restorePath, sourceManifestPath });
     if (readiness.mode === "restore_manifest") readValidatedRestoreManifest(restorePath);

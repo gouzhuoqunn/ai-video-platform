@@ -17,6 +17,7 @@ import { readLiveOrdersSummary, type CloreOrderSummary } from "../../../../../sc
 import { ACTIVE_ORDER_PATH, LEGACY_ORDER_CREATE_LOCK_PATH, ORDER_CREATE_LOCK_PATH, clearActiveOrder, clearOrderCreateLocks, readActiveOrder } from "../../../../../scripts/clore/order-state";
 import { finalSanitizedLogLines, imageExecutorReadinessForGpuClass, processExists, STALE_RUNNER_NO_ORDER_MESSAGE } from "../../../../../scripts/image-executor/readiness";
 import { assertRtx4090GoldenDeploymentProfile } from "../../../../../scripts/image-executor/rtx4090-golden-deployment-profile";
+import { planImageSession } from "../../../../../scripts/clore/image-session";
 
 export const dynamic = "force-dynamic";
 
@@ -827,14 +828,29 @@ export async function POST(request: NextRequest) {
       if (previous.state === "running" || previous.state === "cancelling" || processExists(previous.pid)) throw new Error(DUPLICATE_START_MESSAGE);
       await assertNoActiveProviderOrderBeforeStart(previous);
       const batch = tasks.filter((task) => ids.includes(task.id) && task.status === "waiting_for_gpu");
+      if (batch.length !== ids.length) {
+        const changedTaskId = ids.find((id) => !batch.some((task) => task.id === id)) ?? "未知任务";
+        throw new Error(`任务 ${changedTaskId} 在启动前发生变化，已取消本次启动，请刷新后重试。`);
+      }
       assertStartableBatch(batch, maxHourlyPrice);
+      const planned = planImageSession(batch, {
+        requestedTaskIds: ids,
+        gpuClass: batch[0]?.gpuClass,
+        maxBatchSize: ids.length,
+        activeOrderCount: 0,
+        selectedHourlyUsd: maxHourlyPrice,
+      });
+      if (planned.selectedTaskIds.length !== ids.length || new Set(planned.selectedTaskIds).size !== ids.length) {
+        const changedTaskId = ids.find((id) => !planned.selectedTaskIds.includes(id)) ?? "未知任务";
+        throw new Error(`任务 ${changedTaskId} 在启动前发生变化，已取消本次启动，请刷新后重试。`);
+      }
       const startedAt = new Date().toISOString();
       writeJson(PREFERENCES_PATH, { maxHourlyPrice });
       saveRunner({
         ...previous,
         state: "running",
         stage: "正在寻找显卡",
-        frozenTaskIds: [...new Set(batch.map((task) => task.id))],
+        frozenTaskIds: planned.selectedTaskIds,
         gpuClass: batch[0]?.gpuClass ?? null,
         maxHourlyPrice,
         currentTaskIndex: null,

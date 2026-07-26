@@ -11,6 +11,10 @@ export type ImageSessionReceipt = { schemaVersion: 1; sessionId: string; orderId
 
 export class DeterministicTaskFailure extends Error { readonly scope = "task" as const; }
 export class AmbiguousInferenceFailure extends Error { readonly scope = "ambiguous" as const; }
+export class FrozenImageSessionMembershipChangedError extends Error {
+  readonly code = "image_session_planned_task_changed" as const;
+  constructor(readonly taskId: string) { super(`${"image_session_planned_task_changed"}:${taskId}`); }
+}
 
 function positiveInteger(value: unknown) { return Number.isInteger(value) && Number(value) > 0; }
 function taskPriority(task: LocalImageTask) { const value = String(task.priority ?? "").toLowerCase(); return value === "urgent" || value === "immediate" ? 0 : 1; }
@@ -21,19 +25,49 @@ export function isSessionEligibleTask(task: LocalImageTask): task is EligibleIma
     positiveInteger(task.steps) && Number(task.steps) >= 25 && Number(task.steps) <= 40 && Number.isFinite(task.cfg) && Number(task.cfg) >= 3.5 && Number(task.cfg) <= 5 && Number.isFinite(task.loraStrength) && Number(task.loraStrength) >= .6 && Number(task.loraStrength) <= 1.1 && Number.isInteger(task.seed) && Number(task.seed) >= 0 && Number(task.seed) <= 2_147_483_647 && (task.sampler === "Euler" || task.sampler === "FlowMatch") && !Number.isNaN(Date.parse(String(task.createdAt)));
 }
 
-export function planImageSession(tasks: readonly LocalImageTask[], input: { maxBatchSize?: number; activeOrderCount?: number; selectedHourlyUsd?: number; walletBalanceUsd?: number | null; gpuClass?: ImageGpuClass } = {}): ImageSessionPlan {
-  const maxBatchSize = Math.max(1, Math.min(IMAGE_SESSION_LIMITS.maxBatchSize, Math.floor(input.maxBatchSize ?? IMAGE_SESSION_LIMITS.maxBatchSize)));
-  const allEligible = tasks.filter(isSessionEligibleTask).sort((a, b) => taskPriority(a) - taskPriority(b) || Date.parse(String(a.createdAt)) - Date.parse(String(b.createdAt)) || a.id.localeCompare(b.id));
-  const selectedClass = input.gpuClass ?? allEligible[0]?.gpuClass ?? null;
-  const eligible = selectedClass ? allEligible.filter((task) => task.gpuClass === selectedClass) : [];
-  const selected = eligible.slice(0, maxBatchSize); const hours = selected.length ? Math.min(IMAGE_SESSION_LIMITS.maxHours, .75 + selected.length * .35) : 0;
+export type ImageSessionPlannerInput = { maxBatchSize?: number; activeOrderCount?: number; selectedHourlyUsd?: number; walletBalanceUsd?: number | null; gpuClass?: ImageGpuClass; requestedTaskIds?: readonly string[] };
+
+function planFromSelected(selected: readonly EligibleImageTask[], eligibleCount: number, selectedClass: ImageGpuClass | null, input: Omit<ImageSessionPlannerInput, "requestedTaskIds">): ImageSessionPlan {
+  const hours = selected.length ? Math.min(IMAGE_SESSION_LIMITS.maxHours, .75 + selected.length * .35) : 0;
   const activeOrderCount = Math.max(0, Math.floor(input.activeOrderCount ?? 0));
   const selectedHourlyUsd = Number(input.selectedHourlyUsd ?? IMAGE_SESSION_LIMITS.maxHourlyUsd);
   const projectedRentalCostUsd = Number((hours * selectedHourlyUsd).toFixed(2));
   const projectedProviderCostCeilingUsd = Number((projectedRentalCostUsd + IMAGE_SESSION_LIMITS.creationFeeUsd).toFixed(2));
   const walletBalanceUsd = input.walletBalanceUsd ?? null;
   const executionEligible = selected.length > 0 && activeOrderCount === 0 && selectedHourlyUsd <= IMAGE_SESSION_LIMITS.maxHourlyUsd && projectedProviderCostCeilingUsd <= IMAGE_SESSION_LIMITS.maxCostUsd && (walletBalanceUsd === null || walletBalanceUsd - projectedProviderCostCeilingUsd >= IMAGE_SESSION_LIMITS.minimumWalletReserveUsd);
-  return { selectedTaskIds: selected.map((task) => task.id), selectedDimensions: selected.map((task) => ({ taskId: task.id, width: task.width, height: task.height })), count: selected.length, eligibleCount: eligible.length, estimatedMaximumSessionHours: Number(hours.toFixed(2)), selectedGpuClass: selectedClass === "rtx5090" ? "RTX 5090" : "RTX 4090", selectedGpuModel: null, modelSetIdentity: "fluxed-up-10.2-five-file", oneModelStageServesAll: selected.length > 0, selectedHourlyUsd, projectedRentalCostUsd, projectedCreationFeeUsd: IMAGE_SESSION_LIMITS.creationFeeUsd, projectedProviderCostCeilingUsd, minimumWalletReserveUsd: IMAGE_SESSION_LIMITS.minimumWalletReserveUsd, walletBalanceUsd, activeOrderCount, executionEligible };
+  return { selectedTaskIds: selected.map((task) => task.id), selectedDimensions: selected.map((task) => ({ taskId: task.id, width: task.width, height: task.height })), count: selected.length, eligibleCount, estimatedMaximumSessionHours: Number(hours.toFixed(2)), selectedGpuClass: selectedClass === "rtx5090" ? "RTX 5090" : "RTX 4090", selectedGpuModel: null, modelSetIdentity: "fluxed-up-10.2-five-file", oneModelStageServesAll: selected.length > 0, selectedHourlyUsd, projectedRentalCostUsd, projectedCreationFeeUsd: IMAGE_SESSION_LIMITS.creationFeeUsd, projectedProviderCostCeilingUsd, minimumWalletReserveUsd: IMAGE_SESSION_LIMITS.minimumWalletReserveUsd, walletBalanceUsd, activeOrderCount, executionEligible };
+}
+
+/** The start action calls this once.  Its result is the canonical batch order. */
+export function planImageSession(tasks: readonly LocalImageTask[], input: ImageSessionPlannerInput = {}): ImageSessionPlan {
+  const maxBatchSize = Math.max(1, Math.min(IMAGE_SESSION_LIMITS.maxBatchSize, Math.floor(input.maxBatchSize ?? IMAGE_SESSION_LIMITS.maxBatchSize)));
+  const requested = input.requestedTaskIds ? [...new Set(input.requestedTaskIds.map(String).filter(Boolean))] : null;
+  const requestedSet = requested ? new Set(requested) : null;
+  const allEligible = tasks.filter((task) => !requestedSet || requestedSet.has(task.id)).filter(isSessionEligibleTask).sort((a, b) => taskPriority(a) - taskPriority(b) || Date.parse(String(a.createdAt)) - Date.parse(String(b.createdAt)) || a.id.localeCompare(b.id));
+  const firstClass = allEligible[0]?.gpuClass;
+  const selectedClass: ImageGpuClass | null = input.gpuClass ?? (firstClass === "rtx4090" || firstClass === "rtx5090" ? firstClass : null);
+  const eligible = selectedClass ? allEligible.filter((task) => task.gpuClass === selectedClass) : [];
+  return planFromSelected(eligible.slice(0, maxBatchSize), eligible.length, selectedClass, input);
+}
+
+/**
+ * Rehydrates a persisted canonical batch without sorting or selecting again.
+ * It is intentionally the only later-stage task-store read permitted for a
+ * frozen batch, and fails closed when membership or eligibility changed.
+ */
+export function hydrateFrozenImageSessionPlan(tasks: readonly LocalImageTask[], plannedTaskIds: readonly string[], input: Omit<ImageSessionPlannerInput, "requestedTaskIds" | "maxBatchSize"> = {}): ImageSessionPlan {
+  const ids = plannedTaskIds.map(String).filter(Boolean);
+  if (!ids.length || ids.length > IMAGE_SESSION_LIMITS.maxBatchSize || new Set(ids).size !== ids.length) throw new Error("image_session_invalid_frozen_task_ids");
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const selected = ids.map((taskId) => {
+    const task = byId.get(taskId);
+    if (!task || !isSessionEligibleTask(task)) throw new FrozenImageSessionMembershipChangedError(taskId);
+    return task;
+  });
+  const firstClass = selected[0]?.gpuClass;
+  const selectedClass: ImageGpuClass | null = input.gpuClass ?? (firstClass === "rtx4090" || firstClass === "rtx5090" ? firstClass : null);
+  if (!selectedClass || selected.some((task) => task.gpuClass !== selectedClass)) throw new FrozenImageSessionMembershipChangedError(selected.find((task) => task.gpuClass !== selectedClass)?.id ?? ids[0]);
+  return planFromSelected(selected, selected.length, selectedClass, input);
 }
 
 export function formatImageSessionPlanChinese(plan: ImageSessionPlan) {
