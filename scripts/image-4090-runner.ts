@@ -1068,7 +1068,11 @@ export async function runImage4090Batch(deps = defaultDeps()) {
           message: "将使用已验证的 Jupyter + 不可变 Agent 启动合同",
         },
       });
-      const receipt = await runLiveImageSession({ taskIds: frozenPlan.selectedTaskIds, immutable: profile.immutable, execute: true, onOrderCreated: (order, deploymentProfile) => {
+      const receipt = await runLiveImageSession({ sessionId: readRunner().createAttempt?.id, taskIds: frozenPlan.selectedTaskIds, immutable: profile.immutable, execute: true, onCandidateAttempt: (event) => {
+        const current = readRunner(); const prior = Array.isArray(current.host?.candidateAttempts) ? current.host.candidateAttempts : [];
+        const message = event.event === "candidate_already_rented" ? "候选显卡已被其他用户租用，正在尝试下一台。" : `正在尝试第 ${event.attempt} 台候选显卡`;
+        updateRunner({ state: "running", stage: message, host: { ...(current.host ?? {}), serverId: event.serverId, priceHourly: event.hourlyUsd, attemptedServerIds: [...new Set([...prior.map((item) => String((item as Record<string, unknown>).serverId ?? "")).filter(Boolean), event.serverId])], candidateAttempts: [...prior, event].slice(-10), marketplaceRefreshedAt: event.marketplaceRefreshedAt, message } });
+      }, onOrderCreated: (order, deploymentProfile) => {
         updateRunner({ stage: "订单已创建，正在等待已验证运行环境", host: { ...(readRunner().host ?? {}), orderId: order.orderId, serverId: order.serverId, controllerUrl: order.endpoint, deploymentProfileId: deploymentProfile.id, bootstrapTemplateSha256: deploymentProfile.bootstrapTemplateSha256, runtimeDigest: deploymentProfile.image, healthPath: profile.healthPath, controllerBind: profile.controllerBind } });
       } });
       updateRunner({

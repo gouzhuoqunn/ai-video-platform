@@ -66,12 +66,12 @@ export function mapCloreCode(code: number) {
 }
 
 export type CloreFailureClassification =
+  | "candidate_already_rented"
   | "candidate_unavailable"
   | "required_price_changed"
   | "invalid_field"
   | "provider_application_error"
-  | "provider_internal_error"
-  | "unknown_code6";
+  | "provider_internal_error";
 
 export type SanitizedCloreFailure = {
   httpStatus: number;
@@ -110,12 +110,13 @@ function sanitizeProviderValue(value: unknown, depth = 0): unknown {
 
 export function classifyCloreFailure(input: { httpStatus: number; code: number; error?: unknown; message?: unknown; details?: unknown }): CloreFailureClassification {
   const text = JSON.stringify([input.error, input.message, input.details]).toLowerCase();
+  if (input.code === 6 && /server[\s_-]*(?:is[\s_-]*)?already[\s_-]*rented|server-already-rented/.test(text)) return "candidate_already_rented";
   if (/unavailable|not available|already rented|not rentable|offline|busy|server.*(?:gone|missing)/.test(text)) return "candidate_unavailable";
   if (/required[_ -]?price|price.*(?:changed|mismatch|stale)|offer.*price/.test(text)) return "required_price_changed";
   if (/invalid|malformed|required field|validation|unknown field|bad request|credential|api.?key|token|currency.*not.*allowed|not.*allowed.*currency/.test(text)) return "invalid_field";
   if (/internal|exception|database|timeout|temporar|upstream|service unavailable/.test(text) || input.httpStatus >= 500 && input.code !== 6) return "provider_internal_error";
   if (/application|failed to (?:create|rent)|cannot (?:create|rent)|order failed/.test(text)) return "provider_application_error";
-  if (input.code === 6) return "unknown_code6";
+  if (input.code === 6) return "candidate_unavailable";
   return input.httpStatus >= 500 ? "provider_internal_error" : "provider_application_error";
 }
 
@@ -160,10 +161,10 @@ export function isRetryableCloreCreateError(error: unknown) {
   if (error.failure.classification === "invalid_field") return false;
   return error.failure.httpStatus >= 500 || [
     "candidate_unavailable",
+    "candidate_already_rented",
     "required_price_changed",
     "provider_application_error",
     "provider_internal_error",
-    "unknown_code6",
   ].includes(error.failure.classification);
 }
 

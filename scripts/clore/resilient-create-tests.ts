@@ -60,13 +60,13 @@ async function scenario(input: {
 }
 
 async function main() {
-const code6NoOrder = await scenario({ failures: [providerError("unknown_code6")] });
+const code6NoOrder = await scenario({ failures: [providerError("candidate_already_rented")] });
 assert.equal(code6NoOrder.createCalls, 2);
 assert.deepEqual(code6NoOrder.selected, ["101", "102"]);
 assert.equal(code6NoOrder.result.createRequestCount, 2);
 assert.equal(code6NoOrder.result.successfulOrderCount, 1);
 
-const code6Reconciled = await scenario({ failures: [providerError("unknown_code6")], reconcileAt: 1 });
+const code6Reconciled = await scenario({ failures: [providerError("candidate_already_rented")], reconcileAt: 1 });
 assert.equal(code6Reconciled.createCalls, 1);
 assert.equal(code6Reconciled.result.order.reconciled, true);
 assert.equal(code6Reconciled.result.successfulOrderCount, 1);
@@ -90,7 +90,7 @@ assert.equal(invalidCalls, 1);
 
 let exhausted: unknown = null;
 try {
-  await scenario({ failures: [providerError("provider_internal_error"), providerError("provider_application_error"), providerError("unknown_code6")] });
+  await scenario({ failures: [providerError("provider_internal_error"), providerError("provider_application_error"), providerError("candidate_already_rented")] });
 } catch (error) {
   exhausted = error;
 }
@@ -155,7 +155,7 @@ console.log(JSON.stringify({
   candidate_unavailable_retried: true,
   required_price_changed_retried: true,
   invalid_field_stopped: true,
-  three_request_cap_enforced: true,
+  requested_three_attempt_cap_enforced: true,
   successful_order_cap: 1,
   active_order_cap: 1,
   minimum_create_spacing_ms: 6000,

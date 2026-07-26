@@ -6,7 +6,7 @@ import path from "node:path";
 import { NextResponse, type NextRequest } from "next/server";
 import { FLUX_IMAGE_STACK, IMAGE_RESOLUTION_5090_MAX, IMAGE_RESOLUTION_MIN, IMAGE_RESOLUTION_STEP, classifyImageGpu, type ImageGpuClass, type ImageTaskSettings } from "@/lib/image-generation/flux-stack";
 import { finiteNumber } from "@/lib/image-generation/formatters";
-import { cancelImageTaskGroup, confirmImageTaskGroup, retryFailedImageTaskGroup } from "@/lib/image-generation/image-task-groups";
+import { confirmImageTaskGroup, deletePendingImageTaskGroup, retryFailedImageTaskGroup, unconfirmImageTaskGroup } from "@/lib/image-generation/image-task-groups";
 import { imageLibraryRoot } from "@/lib/image-generation/local-image-artifacts";
 import { listImageTasks, mutateImageTasks, type LocalImageTask } from "@/lib/image-generation/local-image-task-store";
 import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/route-guard";
@@ -617,6 +617,20 @@ function createGroupChildren(input: Record<string, unknown>, requestedCount: num
 
 function groupIdentity(task: ImageTask) { return task.groupId || task.id; }
 
+function assertUnconfirmIsSafe(groupId: string) {
+  const runner = readRunner();
+  if (runner.state === "running" || runner.state === "cancelling" || processExists(runner.pid) || runner.host?.orderId) {
+    throw new Error("任务已开始生成，请使用停止并退租。");
+  }
+  return runner;
+}
+
+function removeUnsubmittedFrozenGroupTasks(runner: ImageRunnerSession, groupId: string) {
+  const ids = new Set(readTasks().filter((task) => groupIdentity(task) === groupId).map((task) => task.id));
+  if (!ids.size || !runner.frozenTaskIds.some((id) => ids.has(id))) return;
+  saveRunner({ ...runner, frozenTaskIds: runner.frozenTaskIds.filter((id) => !ids.has(id)), currentTaskIndex: null, currentModel: null, promptSummary: null, updatedAt: new Date().toISOString() });
+}
+
 function createGroupedTasks(input: Record<string, unknown>) {
   const requestedCount = positiveSafeInteger(input.requestedCount);
   const groupId = randomUUID();
@@ -794,10 +808,11 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    if (["confirm_group", "cancel_group", "retry_failed_group"].includes(action)) {
+    if (["confirm_group", "cancel_group", "retry_failed_group", "unconfirm_group"].includes(action)) {
       const groupId = String(body.groupId ?? "");
       if (!groupId) throw new Error("invalid_group_id");
       const updatedAt = new Date().toISOString();
+      const runner = action === "unconfirm_group" ? assertUnconfirmIsSafe(groupId) : null;
       const outcome = mutateImageTasks<Record<string, unknown>>((current) => {
         const imageTasks = current as ImageTask[];
         if (action === "confirm_group") {
@@ -805,12 +820,17 @@ export async function POST(request: NextRequest) {
           return { tasks: result.tasks as LocalImageTask[], value: { action, ...result } };
         }
         if (action === "cancel_group") {
-          const result = cancelImageTaskGroup(imageTasks, groupId);
+          const result = deletePendingImageTaskGroup(imageTasks, groupId);
+          return { tasks: result.tasks as LocalImageTask[], value: { action, ...result } };
+        }
+        if (action === "unconfirm_group") {
+          const result = unconfirmImageTaskGroup(imageTasks, groupId, updatedAt);
           return { tasks: result.tasks as LocalImageTask[], value: { action, ...result } };
         }
         const result = retryFailedImageTaskGroup(imageTasks, groupId, updatedAt);
         return { tasks: result.tasks as LocalImageTask[], value: { action, ...result } };
       });
+      if (action === "unconfirm_group" && runner) removeUnsubmittedFrozenGroupTasks(runner, groupId);
       return NextResponse.json(await responsePayload({ groupId, groupAction: outcome }));
     }
 
@@ -929,7 +949,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(await responsePayload());
   } catch (error) {
     const message = error instanceof Error ? error.message : "image_task_failed";
-    if (["create", "create_group", "confirm_group", "cancel_group", "retry_failed_group", "regenerate_group"].includes(action)) {
+    if (["create", "create_group", "confirm_group", "cancel_group", "retry_failed_group", "unconfirm_group", "regenerate_group"].includes(action)) {
       return NextResponse.json({ error: message, ...(await responsePayload()) }, { status: 400 });
     }
     const runner = readRunner();

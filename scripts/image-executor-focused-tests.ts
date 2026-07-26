@@ -141,6 +141,7 @@ function fixtureTask(): ImageTask {
     sampler: "Euler",
     seed: 123,
     status: "waiting_for_gpu",
+    createdAt: "2026-07-26T00:00:00.000Z",
     updatedAt: new Date().toISOString(),
   };
 }

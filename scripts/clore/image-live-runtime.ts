@@ -16,13 +16,17 @@ import { ensureLocalUi, verifyImageUi } from "./image-e2e-ui";
 import { IMAGE_SESSION_LIMITS, planImageSession, type ImageSessionPlan } from "./image-session";
 import type { ImageGpuClass } from "../../src/lib/image-generation/flux-stack";
 import { assertRtx4090GoldenDeploymentProfile, buildRtx4090GoldenBootstrap } from "../image-executor/rtx4090-golden-deployment-profile";
+import { resilientCreateOrder, type ResilientCreateAttempt, type ResilientCreateCandidate } from "./resilient-create";
 
 export type ImmutableRuntime = { commit: string; agentSha256: string; controllerSha256: string; workflowSha256: string };
 export type LiveSessionOrder = { orderId: string; endpoint: string; hostname: string; serverId: string; hourlyUsd: number; startingBalanceUsd: number; plan: ImageSessionPlan; token: string; tokenSha256: string; hardDeadlineAt: string };
 export type StageTerminal = { stageRunId: string; status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> };
+export type CandidateAttemptEvent = { attempt: number; serverId: string; hourlyUsd: number | null; event: "selected" | "candidate_already_rented" | "order_created"; classification: string | null; marketplaceRefreshedAt: string };
 
 const MAX_HOURS = 4;
 const MAX_TOTAL = 1.50;
+export const MAX_CANDIDATE_CREATE_ATTEMPTS = 5;
+export const NO_COMPLIANT_RTX4090_CANDIDATE_MESSAGE = "当前符合价格和配置要求的 RTX 4090 已被租用，请稍后重试。";
 const SESSION_SECRET_ROOT = path.join(process.cwd(), ".secrets", "diagnostics", "image-sessions");
 const fixedConfig = (gpuClass: ImageGpuClass = "rtx4090") => ({ ...loadCloreConfig(), targetGpu: gpuClass === "rtx5090" ? "NVIDIA GeForce RTX 5090" as const : "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: gpuClass === "rtx5090" ? 32 : 24, maxGpuPricePerHour: IMAGE_SESSION_LIMITS.maxHourlyUsd, orderType: "on-demand" as const });
 const compact = (value: unknown) => String(value instanceof Error ? value.message : value).replace(/(bearer\s+)[^\s]+/gi, "$1<redacted>").replace(/([?&](?:signature|token|credential)[^=&]*=)[^&\s]+/gi, "$1<redacted>").slice(0, 700);
@@ -34,8 +38,39 @@ export function writeTaskReceipt(sessionId: string, taskId: string, value: Recor
 export function newSessionToken(sessionId: string) { const token = randomBytes(32).toString("base64url"); const file = sessionPaths(sessionId).token; mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, `${token}\n`, { mode: 0o600 }); return { token, sha256: createHash("sha256").update(token).digest("hex"), file }; }
 function exactTaskIds(taskIds: readonly string[]) { if (!taskIds.length || new Set(taskIds).size !== taskIds.length) throw new Error("image_session_exact_task_ids_required"); const tasks = taskIds.map((id) => resolveExactEligibleImageTask(id)); const classes = new Set(tasks.map((task) => task.gpuClass)); if (classes.size !== 1) throw new Error("mixed_gpu_classes_are_not_allowed"); return tasks; }
 
-/** Read-only prerequisites plus one explicit order creation.  No replacement order is attempted. */
-export async function createLiveSessionOrder(input: { sessionId: string; taskIds: string[]; immutable: ImmutableRuntime; execute: boolean }): Promise<LiveSessionOrder> {
+export function isCandidateAlreadyRented(error: unknown) {
+  return error instanceof CloreApiError && error.failure.classification === "candidate_already_rented";
+}
+
+export async function createOrderWithCandidateFallback<Candidate extends ResilientCreateCandidate, Value>(input: {
+  activeOrderCount: () => Promise<number>;
+  selectFreshCandidate: (attempted: ReadonlySet<string>) => Promise<Candidate | null>;
+  create: (candidate: Candidate) => Promise<{ orderId: string | null; value: Value }>;
+  reconcile: (candidate: Candidate, requestStartedAt: Date) => Promise<{ orderId: string; value: Value } | null>;
+  onAttempt?: (attempt: ResilientCreateAttempt) => Promise<void> | void;
+}) {
+  try {
+    return await resilientCreateOrder({
+      maximumCreateRequests: MAX_CANDIDATE_CREATE_ATTEMPTS,
+      activeOrderCount: input.activeOrderCount,
+      selectFreshCandidate: input.selectFreshCandidate,
+      create: input.create,
+      reconcile: input.reconcile,
+      onAttempt: input.onAttempt,
+      shouldRetryOnNextCandidate: isCandidateAlreadyRented,
+      noFreshCandidateError: () => new Error(NO_COMPLIANT_RTX4090_CANDIDATE_MESSAGE),
+    });
+  } catch (error) {
+    const attempts = (error as { resilientAttempts?: unknown[] } | null)?.resilientAttempts;
+    if (isCandidateAlreadyRented(error) && Array.isArray(attempts) && attempts.length >= MAX_CANDIDATE_CREATE_ATTEMPTS) {
+      throw new Error(NO_COMPLIANT_RTX4090_CANDIDATE_MESSAGE);
+    }
+    throw error;
+  }
+}
+
+/** Read-only prerequisites plus a bounded same-attempt fallback for an already-rented candidate. */
+export async function createLiveSessionOrder(input: { sessionId: string; taskIds: string[]; immutable: ImmutableRuntime; execute: boolean; onCandidateAttempt?: (event: CandidateAttemptEvent) => Promise<void> | void }): Promise<LiveSessionOrder> {
   if (!input.execute) throw new Error("image_session_execute_flag_required");
   const tasks = exactTaskIds(input.taskIds);
   const gpuClass = tasks[0].gpuClass as ImageGpuClass;
@@ -43,26 +78,58 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
   const before = await readLiveOrdersSummary(config, { forceRefresh: true });
   if (before.some((order) => order.active)) throw new Error("active_clore_order_exists");
   for (const task of tasks) await preflightExactLocalImageTask(task.id);
-  const market = await readLiveMarketplace(config, { forceRefresh: true });
-  const candidates = market.map((raw) => normalizeCloreServer(raw, config)).filter((item) => item.gpuNormalizedName === config.targetGpu && item.orderType === "on-demand" && item.hostOnline !== false && item.priceUsdPerHour !== null && item.priceUsdPerHour <= IMAGE_SESSION_LIMITS.maxHourlyUsd && item.priceOriginalAmount !== null && item.priceOriginalUnit === "day").sort((left, right) => (left.priceUsdPerHour ?? Infinity) - (right.priceUsdPerHour ?? Infinity) || left.serverId.localeCompare(right.serverId));
-  const selected = candidates[0] ?? null;
-  if (!selected?.priceUsdPerHour || !selected.priceOriginalAmount) throw new Error(`no_compliant_${gpuClass}_candidate_available`);
-  const wallet = await readWalletSummary(config, { forceRefresh: true });
-  const plan = { ...planImageSession(tasks, { gpuClass, activeOrderCount: 0, selectedHourlyUsd: selected.priceUsdPerHour, walletBalanceUsd: wallet.availableUsdBalance }), selectedGpuModel: selected.gpuNormalizedName };
-  if (!plan.executionEligible || wallet.availableUsdBalance === null || wallet.availableUsdBalance - plan.projectedProviderCostCeilingUsd < IMAGE_SESSION_LIMITS.minimumWalletReserveUsd) throw new Error("image_session_cost_or_wallet_guard_failed");
   if (!isLocalWatchdogTaskInstalled()) throw new Error("local_watchdog_not_installed");
   const token = newSessionToken(input.sessionId); const command = buildPublicAgentBootstrap({ ...input.immutable, tokenSha256: token.sha256 });
   const profile = assertRtx4090GoldenDeploymentProfile();
   if (input.immutable.commit !== profile.immutable.commit || input.immutable.agentSha256 !== profile.immutable.agentSha256 || input.immutable.controllerSha256 !== profile.immutable.controllerSha256 || input.immutable.workflowSha256 !== profile.immutable.workflowSha256) throw new Error("rtx4090_golden_profile_identity_mismatch");
   if (command !== buildRtx4090GoldenBootstrap(token.sha256)) throw new Error("rtx4090_golden_profile_bootstrap_mismatch");
-  const fresh = await readLiveOrdersSummary(config, { forceRefresh: true }); if (fresh.some((order) => order.active)) throw new Error("active_clore_order_exists");
-  const payload = { currency: config.rentalCurrency, image: profile.image, renting_server: Number(selected.serverId), type: "on-demand", ports: profile.ports, required_price: selected.priceOriginalAmount, command };
-  let created: unknown = null;
-  try { created = (await createOrderWithRateLimit({ serverId: selected.serverId, createOnce: () => cloreRequest(config, "/create_order", { method: "POST", body: JSON.stringify(payload) }, { maxNetworkRetries: 0, maxRateLimitRetries: 0 }), reconcile: async () => ({ orders: await readLiveOrdersSummary(config, { forceRefresh: true }) }) })).created; }
-  catch (error) { if (error instanceof CloreApiError && error.failure.code === 1) { const retryOrders = await readLiveOrdersSummary(config, { forceRefresh: true }); if (retryOrders.some((order) => order.active)) throw error; await sleep(60_000); created = (await createOrderWithRateLimit({ serverId: selected.serverId, createOnce: () => cloreRequest(config, "/create_order", { method: "POST", body: JSON.stringify(payload) }, { maxNetworkRetries: 0, maxRateLimitRetries: 0 }), reconcile: async () => ({ orders: await readLiveOrdersSummary(config, { forceRefresh: true }) }) })).created; } else throw error; }
-  const direct = created && typeof created === "object" ? String((created as Record<string, unknown>).id ?? (created as Record<string, unknown>).order_id ?? "") : "";
-  const active = await readLiveOrdersSummary(config, { forceRefresh: true }); const order = direct ? active.find((item) => item.orderId === direct) : active.filter((item) => item.active && item.serverId === selected.serverId)[0];
-  if (!order?.orderId) throw new Error("create_order_unreconciled");
+  type CandidateContext = { candidate: ReturnType<typeof normalizeCloreServer>; wallet: Awaited<ReturnType<typeof readWalletSummary>>; plan: ImageSessionPlan; marketplaceRefreshedAt: string };
+  const contexts = new Map<string, CandidateContext>();
+  const result = await createOrderWithCandidateFallback({
+    activeOrderCount: async () => (await readLiveOrdersSummary(config, { forceRefresh: true })).filter((order) => order.active).length,
+    selectFreshCandidate: async (attempted) => {
+      const marketplaceRefreshedAt = new Date().toISOString();
+      const market = await readLiveMarketplace(config, { forceRefresh: true });
+      const candidate = market.map((raw) => normalizeCloreServer(raw, config)).filter((item) => item.gpuNormalizedName === config.targetGpu && item.orderType === "on-demand" && item.hostOnline !== false && item.priceUsdPerHour !== null && item.priceUsdPerHour <= IMAGE_SESSION_LIMITS.maxHourlyUsd && item.priceOriginalAmount !== null && item.priceOriginalUnit === "day" && !attempted.has(item.serverId)).sort((left, right) => (left.priceUsdPerHour ?? Infinity) - (right.priceUsdPerHour ?? Infinity) || left.serverId.localeCompare(right.serverId))[0] ?? null;
+      if (!candidate?.priceUsdPerHour || !candidate.priceOriginalAmount) return null;
+      const wallet = await readWalletSummary(config, { forceRefresh: true });
+      const plan = { ...planImageSession(tasks, { gpuClass, activeOrderCount: 0, selectedHourlyUsd: candidate.priceUsdPerHour, walletBalanceUsd: wallet.availableUsdBalance }), selectedGpuModel: candidate.gpuNormalizedName };
+      if (!plan.executionEligible || wallet.availableUsdBalance === null || wallet.availableUsdBalance - plan.projectedProviderCostCeilingUsd < IMAGE_SESSION_LIMITS.minimumWalletReserveUsd) throw new Error("image_session_cost_or_wallet_guard_failed");
+      const value = { candidate, wallet, plan, marketplaceRefreshedAt }; contexts.set(candidate.serverId, value);
+      await input.onCandidateAttempt?.({ attempt: attempted.size + 1, serverId: candidate.serverId, hourlyUsd: candidate.priceUsdPerHour, event: "selected", classification: null, marketplaceRefreshedAt });
+      return { id: candidate.serverId, value };
+    },
+    create: async (entry) => {
+      const context = contexts.get(entry.id); if (!context) throw new Error("candidate_context_missing");
+      const payload = { currency: config.rentalCurrency, image: profile.image, renting_server: Number(context.candidate.serverId), type: "on-demand" as const, ports: profile.ports, required_price: context.candidate.priceOriginalAmount!, command };
+      const createOnce = async () => await createOrderWithRateLimit({ serverId: context.candidate.serverId, createOnce: () => cloreRequest(config, "/create_order", { method: "POST", body: JSON.stringify(payload) }, { maxNetworkRetries: 0, maxRateLimitRetries: 0 }), reconcile: async () => ({ orders: await readLiveOrdersSummary(config, { forceRefresh: true }) }) });
+      let outcome: Awaited<ReturnType<typeof createOnce>>;
+      try { outcome = await createOnce(); }
+      catch (error) {
+        if (!(error instanceof CloreApiError) || error.failure.code !== 1) throw error;
+        const retryOrders = await readLiveOrdersSummary(config, { forceRefresh: true }); if (retryOrders.some((order) => order.active)) throw error;
+        await sleep(60_000); outcome = await createOnce();
+      }
+      const direct = outcome.adoptedOrderId ?? (outcome.created && typeof outcome.created === "object" ? String((outcome.created as Record<string, unknown>).id ?? (outcome.created as Record<string, unknown>).order_id ?? "") : "");
+      const active = await readLiveOrdersSummary(config, { forceRefresh: true }); const order = direct ? active.find((item) => item.orderId === direct) : active.filter((item) => item.active && item.serverId === context.candidate.serverId)[0];
+      if (!order?.orderId) throw new Error("create_order_unreconciled");
+      return { orderId: order.orderId, value: { ...context, order } };
+    },
+    reconcile: async (entry) => {
+      const context = contexts.get(entry.id); if (!context) return null;
+      const active = (await readLiveOrdersSummary(config, { forceRefresh: true })).filter((order) => order.active && order.orderId);
+      const matching = active.find((order) => order.serverId === context.candidate.serverId);
+      if (matching?.orderId) return { orderId: matching.orderId, value: { ...context, order: matching } };
+      if (active.length) throw new Error("active_order_exists_after_candidate_conflict");
+      return null;
+    },
+    onAttempt: async (attempt) => {
+      const context = contexts.get(attempt.candidateId);
+      if (!context) return;
+      await input.onCandidateAttempt?.({ attempt: attempt.requestNumber, serverId: attempt.candidateId, hourlyUsd: context.candidate.priceUsdPerHour, event: attempt.result === "failed_request" ? "candidate_already_rented" : "order_created", classification: attempt.failure && "classification" in attempt.failure ? attempt.failure.classification : null, marketplaceRefreshedAt: context.marketplaceRefreshedAt });
+    },
+  });
+  const selected = result.order.value.candidate; const wallet = result.order.value.wallet; const plan = result.order.value.plan; const order = result.order.value.order;
   const hardDeadlineAt = new Date(Date.now() + MAX_HOURS * 3_600_000).toISOString();
   writeLocalWatchdogArmState({ schemaVersion: 1, armed: true, sessionNonce: createSessionNonce(), serverId: selected.serverId, orderType: "on-demand", currency: config.rentalCurrency, startingBalanceUsd: wallet.availableUsdBalance, armedAt: new Date().toISOString(), drainingAt: new Date(Date.parse(hardDeadlineAt) - 10 * 60_000).toISOString(), hardDeadlineAt, hardBudgetUsd: MAX_TOTAL, budgetSafetyUsd: .05, emergencyStop: false });
   let endpoint = order.controllerUrl; const deadline = Date.now() + 10 * 60_000; while (!endpoint && Date.now() < deadline) { await sleep(10_000); endpoint = (await readLiveOrdersSummary(config, { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.controllerUrl ?? null; }

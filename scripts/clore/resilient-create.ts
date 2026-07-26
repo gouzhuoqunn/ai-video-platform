@@ -30,6 +30,9 @@ export type ResilientCreateOptions<Candidate extends ResilientCreateCandidate, V
   create(candidate: Candidate): Promise<{ orderId: string | null; value: Value }>;
   reconcile(candidate: Candidate, requestStartedAt: Date): Promise<{ orderId: string; value: Value } | null>;
   activeOrderCount(): Promise<number>;
+  /** Only deterministic candidate conflicts may advance to a different host. */
+  shouldRetryOnNextCandidate?(error: unknown): boolean;
+  noFreshCandidateError?(): Error;
   onAttempt?(attempt: ResilientCreateAttempt): Promise<void> | void;
 };
 
@@ -44,7 +47,7 @@ function safeFailure(error: unknown): ResilientCreateAttempt["failure"] {
 export async function resilientCreateOrder<Candidate extends ResilientCreateCandidate, Value>(
   options: ResilientCreateOptions<Candidate, Value>,
 ): Promise<ResilientCreateResult> {
-  if (!Number.isInteger(options.maximumCreateRequests) || options.maximumCreateRequests < 1 || options.maximumCreateRequests > 3) {
+  if (!Number.isInteger(options.maximumCreateRequests) || options.maximumCreateRequests < 1 || options.maximumCreateRequests > 5) {
     throw new Error("resilient_create_request_limit_invalid");
   }
   const now = options.now ?? Date.now;
@@ -58,7 +61,7 @@ export async function resilientCreateOrder<Candidate extends ResilientCreateCand
   for (let requestNumber = 1; requestNumber <= options.maximumCreateRequests; requestNumber += 1) {
     if (await options.activeOrderCount() > 0) throw new Error("resilient_create_active_order_exists");
     const candidate = await options.selectFreshCandidate(attempted);
-    if (!candidate) throw new Error("resilient_create_no_fresh_candidate");
+    if (!candidate) throw options.noFreshCandidateError?.() ?? new Error("resilient_create_no_fresh_candidate");
     if (attempted.has(candidate.id)) throw new Error("resilient_create_candidate_reused");
     attempted.add(candidate.id);
     const spacingWait = Math.max(0, lastRequestAt + spacing - now());
@@ -106,7 +109,8 @@ export async function resilientCreateOrder<Candidate extends ResilientCreateCand
         completedAt: new Date(now()).toISOString(), result: "failed_request", failure: safeFailure(error),
       };
       attempts.push(attempt); await options.onAttempt?.(attempt);
-      if (!isRetryableCloreCreateError(error) || requestNumber >= options.maximumCreateRequests) throw Object.assign(error instanceof Error ? error : new Error(String(error)), { resilientAttempts: attempts });
+      const shouldRetry = options.shouldRetryOnNextCandidate?.(error) ?? isRetryableCloreCreateError(error);
+      if (!shouldRetry || requestNumber >= options.maximumCreateRequests) throw Object.assign(error instanceof Error ? error : new Error(String(error)), { resilientAttempts: attempts });
       await sleep(backoffs[requestNumber - 1] ?? backoffs.at(-1)!);
     }
   }

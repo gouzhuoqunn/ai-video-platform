@@ -72,6 +72,40 @@ export function cancelImageTaskGroup<T extends MutableGroupableImageTask>(tasks:
   };
 }
 
+/** Destructive deletion is intentionally limited to never-confirmed children. */
+export function deletePendingImageTaskGroup<T extends MutableGroupableImageTask>(tasks: T[], groupId: string) {
+  const members = tasks.filter((task) => groupIdentity(task) === groupId);
+  if (!members.length) throw new Error("未找到任务组。");
+  const deletable = new Set(members.filter((task) => task.status === "pending_confirmation").map((task) => task.id));
+  if (!deletable.size) throw new Error("等待显卡的任务不能删除；请使用取消任务。");
+  return { tasks: tasks.filter((task) => !deletable.has(task.id)), deleted: deletable.size };
+}
+
+/** Reverts only unclaimed waiting children; it never deletes task history or artifacts. */
+export function unconfirmImageTaskGroup<T extends MutableGroupableImageTask>(tasks: T[], groupId: string, updatedAt: string) {
+  const members = tasks.filter((task) => groupIdentity(task) === groupId);
+  if (!members.length) throw new Error("未找到任务组。");
+  const activeClaim = (task: T) => {
+    if (!task.localClaim || typeof task.localClaim !== "object") return Boolean(task.localClaim);
+    const expiresAt = (task.localClaim as { leaseExpiresAt?: unknown }).leaseExpiresAt;
+    return typeof expiresAt !== "string" || !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) > Date.now();
+  };
+  if (members.some((task) => task.status === "generating" || activeClaim(task))) {
+    throw new Error("任务已开始生成，请使用停止并退租。");
+  }
+  let reverted = 0;
+  const next = tasks.map((task) => {
+    if (groupIdentity(task) !== groupId || task.status !== "waiting_for_gpu") return task;
+    reverted += 1;
+    const restored = { ...task, status: "pending_confirmation", updatedAt } as T;
+    delete restored.localClaim;
+    delete restored.error;
+    return restored;
+  });
+  if (!reverted) throw new Error("尚未确认生成，无需取消。");
+  return { tasks: next, reverted };
+}
+
 export function retryFailedImageTaskGroup<T extends MutableGroupableImageTask>(tasks: T[], groupId: string, updatedAt: string) {
   let retried = 0;
   const next = tasks.map((task) => {
