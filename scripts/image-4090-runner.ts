@@ -17,7 +17,7 @@ import { persistImageResult } from "./image-executor/result-persistence";
 import { readSourceAcquisitionManifest, readValidatedRestoreManifest, validateValidatedRestoreManifest, type SourceAcquisitionManifest, type ValidatedRestoreManifest } from "./image-executor/manifests";
 import { assertImageExecutorReady, IMAGE_RUNNER_PRECHECK_STAGE, RESTORE_OR_BOOTSTRAP_BLOCKER } from "./image-executor/readiness";
 import { assertRtx4090GoldenDeploymentProfile } from "./image-executor/rtx4090-golden-deployment-profile";
-import { runLiveImageSession } from "./clore/image-session-live";
+import { runLiveImageSession, type SessionReceipt } from "./clore/image-session-live";
 import { FrozenImageSessionMembershipChangedError, hydrateFrozenImageSessionPlan } from "./clore/image-session";
 
 export type ImageTask = {
@@ -34,6 +34,7 @@ export type ImageTask = {
   sampler: "Euler" | "FlowMatch";
   seed: number;
   status: string;
+  createdAt: string;
   updatedAt: string;
   result?: {
     imagePath: string;
@@ -163,6 +164,7 @@ export type RunnerDeps = {
   fetchHealth?: (url: string) => Promise<{ ok: boolean; status: number | null; error: string | null }>;
   cloreRequest: typeof cloreRequest;
   sleep: (ms: number) => Promise<void>;
+  runLiveSession: (input: Parameters<typeof runLiveImageSession>[0]) => Promise<SessionReceipt>;
 };
 
 function runnerPaths() {
@@ -943,6 +945,11 @@ function defaultDeps(): RunnerDeps {
     fetchHealth: defaultFetchHealth,
     cloreRequest,
     sleep,
+    runLiveSession: async (input) => {
+      const receipt = await runLiveImageSession(input);
+      if ("dryRun" in receipt) throw new Error("image_runner_live_session_unexpected_dry_run");
+      return receipt;
+    },
   };
 }
 
@@ -1068,7 +1075,10 @@ export async function runImage4090Batch(deps = defaultDeps()) {
           message: "将使用已验证的 Jupyter + 不可变 Agent 启动合同",
         },
       });
-      const receipt = await runLiveImageSession({ sessionId: readRunner().createAttempt?.id, taskIds: frozenPlan.selectedTaskIds, immutable: profile.immutable, execute: true, onCandidateAttempt: (event) => {
+      // Validate the exact source manifest before handing the immutable path to
+      // the live session. Missing manifests remain a fail-closed preflight.
+      readSourceAcquisitionManifest(sourceManifestPath);
+      const receipt = await deps.runLiveSession({ sessionId: readRunner().createAttempt?.id, taskIds: frozenPlan.selectedTaskIds, immutable: profile.immutable, execute: true, onCandidateAttempt: (event) => {
         const current = readRunner(); const prior = Array.isArray(current.host?.candidateAttempts) ? current.host.candidateAttempts : [];
         const message = event.event === "candidate_already_rented" ? "候选显卡已被其他用户租用，正在尝试下一台。" : `正在尝试第 ${event.attempt} 台候选显卡`;
         updateRunner({ state: "running", stage: message, host: { ...(current.host ?? {}), serverId: event.serverId, priceHourly: event.hourlyUsd, attemptedServerIds: [...new Set([...prior.map((item) => String((item as Record<string, unknown>).serverId ?? "")).filter(Boolean), event.serverId])], candidateAttempts: [...prior, event].slice(-10), marketplaceRefreshedAt: event.marketplaceRefreshedAt, message } });

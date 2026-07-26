@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
@@ -177,11 +177,23 @@ async function seedRunnerState() {
     parallelism: 2,
     files: [{ id: "tiny", filename: "tiny.bin", size_bytes: 1, sha256: "00".repeat(32), runtime_path: "diffusion_models/tiny.bin", cache_object_key: "fluxed-up-10.2/tiny.bin", download_url: "https://cache.invalid/tiny.bin" }],
   });
+  writeJson(path.join("comfy-runtime", "image-source-artifacts.json"), {
+    schema: 1, family: "fluxed-up-10.2-rtx4090-text", mode: "text_generation", contract: "source_acquisition_manifest",
+    artifacts: [
+      { id: "fluxed-up-10.2", source: "civitai", model_id: 847101, version_id: 2925935, file_id: 2804853, filename: "fluxedUpFluxNSFW_102BF16.safetensors", size_bytes: 23802958296, sha256: "92efbd0f58900ab899fecc80b143eba332f0079faa9749f989f23521088c6165", runtime_path: "diffusion_models/fluxedUpFluxNSFW_102BF16.safetensors", r2_prefix: "fluxed-up-10.2", auth: "civitai_token", auth_env: "CIVITAI_API_TOKEN" },
+      { id: "aidma-lora", source: "civitai", model_id: 674027, version_id: 780667, file_id: 694003, filename: "aidmaNSFWunlock-FLUX-V0.2.safetensors", size_bytes: 19268648, sha256: "7d3408f4a7b7890f470c1cce7f7255b6d8e03ea770a2829066c1ce41145562ec", runtime_path: "loras/aidmaNSFWunlock-FLUX-V0.2.safetensors", r2_prefix: "aidma-lora", auth: "civitai_token", auth_env: "CIVITAI_API_TOKEN" },
+      { id: "flux-vae", source: "huggingface", repository: "black-forest-labs/FLUX.1-schnell", revision: "741f7c3ce8b383c54771c7003378a50191e9efe9", filename: "ae.safetensors", size_bytes: 335304388, sha256: "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38", runtime_path: "vae/ae.safetensors", r2_prefix: "shared-flux-components", auth: "huggingface_token", auth_env: "HF_TOKEN" },
+      { id: "flux-clip-l", source: "huggingface", repository: "comfyanonymous/flux_text_encoders", revision: "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5", filename: "clip_l.safetensors", size_bytes: 246144152, sha256: "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd", runtime_path: "text_encoders/clip_l.safetensors", r2_prefix: "shared-flux-components", auth: "public" },
+      { id: "flux-t5xxl-fp8", source: "huggingface", repository: "comfyanonymous/flux_text_encoders", revision: "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5", filename: "t5xxl_fp8_e4m3fn_scaled.safetensors", size_bytes: 5157348688, sha256: "a498f0485dc9536735258018417c3fd7758dc3bccc0a645feaa472b34955557a", runtime_path: "text_encoders/t5xxl_fp8_e4m3fn_scaled.safetensors", r2_prefix: "shared-flux-components", auth: "public" },
+      { id: "flux-tokenizer-config", source: "huggingface", repository: "black-forest-labs/FLUX.1-dev", revision: "main", filename: "tokenizer_2/tokenizer_config.json", runtime_path: "tokenizers/t5/tokenizer_config.json", r2_prefix: "shared-flux-components", auth: "huggingface_token", auth_env: "HF_TOKEN", metadata_only: true },
+    ],
+  });
 }
 
 function depsFor(input: { healthFails?: boolean; restoreFails?: boolean; generateFails?: boolean; resultPng?: Buffer }) {
   let cancelCount = 0;
   let created = false;
+  let sourceFixtureUses = 0;
   const deps: RunnerDeps = {
     loadConfig: config,
     loadExecution: () => ({
@@ -221,8 +233,16 @@ function depsFor(input: { healthFails?: boolean; restoreFails?: boolean; generat
     fetchHealth: async () => input.healthFails ? { ok: false, status: 503, error: "health_timeout_fixture" } : { ok: true, status: 200, error: null },
     fetchBinary: async () => input.resultPng ?? Buffer.from("not-png"),
     sleep: async () => undefined,
+    runLiveSession: async () => {
+      const manifestPath = path.join(process.cwd(), "comfy-runtime", "image-source-artifacts.json");
+      assert.equal(existsSync(manifestPath), true, "Runner must use the temporary source manifest");
+      const manifest = validateImageSourceManifest(readJson<unknown>(manifestPath));
+      assert.deepEqual(manifest.artifacts.map((artifact) => artifact.id), ["fluxed-up-10.2", "aidma-lora", "flux-vae", "flux-clip-l", "flux-t5xxl-fp8", "flux-tokenizer-config"]);
+      sourceFixtureUses += 1;
+      throw new Error(input.healthFails ? "health_timeout_fixture" : input.restoreFails ? "restore_failed_fixture" : "generate_failed_fixture");
+    },
   };
-  return { deps, cancelCount: () => cancelCount };
+  return { deps, cancelCount: () => cancelCount, sourceFixtureUses: () => sourceFixtureUses };
 }
 
 async function assertCancellationOn(kind: "health" | "restore" | "generation") {
@@ -232,7 +252,8 @@ async function assertCancellationOn(kind: "health" | "restore" | "generation") {
     const png = await sharp({ create: { width: 768, height: 768, channels: 3, background: "#223344" } }).png().toBuffer();
     const harness = depsFor({ healthFails: kind === "health", restoreFails: kind === "restore", generateFails: kind === "generation", resultPng: png });
     await assert.rejects(() => runImage4090Batch(harness.deps), kind === "health" ? /health_timeout_fixture|12 分钟/ : kind === "restore" ? /restore_failed_fixture/ : /generate_failed_fixture/);
-    assert.equal(harness.cancelCount(), 1, `${kind} failure should attempt cancellation exactly once`);
+    assert.equal(harness.sourceFixtureUses(), 1, `${kind} Runner fixture should use the temporary source manifest`);
+    assert.equal(harness.cancelCount(), 0, "the fake session must not mutate a provider");
     const session = readJson<ImageRunnerSession>(path.join(".secrets", "image-studio", "runner-session.json"));
     assert.equal(session.state, "failed");
   } finally {
@@ -345,12 +366,12 @@ async function main() {
     process.env.IMAGE_4090_EXECUTOR_READY = "true";
     writeJson(path.join(".secrets", "image-studio", "tasks.json"), [fixtureTask()]);
     writeJson(path.join(".secrets", "image-studio", "runner-session.json"), fixtureSession());
-    await assert.rejects(() => runImage4090Batch(depsFor({}).deps), /未找到已验证|restore_manifest_missing|invalid_source_acquisition_manifest/);
+    await assert.rejects(() => runImage4090Batch(depsFor({}).deps), /未找到已验证|restore_manifest_missing|invalid_source_acquisition_manifest|ENOENT/);
     const session = readJson<ImageRunnerSession>(path.join(".secrets", "image-studio", "runner-session.json"));
     assert.equal(session.state, "failed");
     assert.equal(session.stage, "preflight");
     assert.ok(session.error?.message);
-    assert.equal(session.host, null);
+    assert.equal(session.host?.runtimeProfileId, "rtx4090-golden-agent-v1");
   } finally {
     preflightCleanup();
   }
@@ -373,7 +394,7 @@ async function main() {
 
   const route = readFileSync("src/app/api/local-lab/image-tasks/route.ts", "utf8");
   const studio = readFileSync("src/components/ImageCreationStudio.tsx", "utf8");
-  assert.match(route, /frozenTaskIds: \[\.\.\.new Set\(batch\.map/);
+  assert.match(route, /frozenTaskIds:\s*planned\.selectedTaskIds/);
   assert.match(route, /writeJson\(PREFERENCES_PATH, \{ maxHourlyPrice \}\)/);
   assert.match(route, /executionReady: readiness\.rtx4090\.ready/);
   assert.match(route, /const blocker = readinessBlocker\(selectedGpuClass\)/);
@@ -382,6 +403,7 @@ async function main() {
   assert.match(route, /child\.on\("error"/);
   assert.match(route, /image_runner_exited_nonzero/);
   assert.match(route, /reconcileStaleRunner/);
+  assert.match(route, /projectRunnerStatus/);
   assert.match(studio, /task\??\.result/);
 
   const workflow = readFileSync("comfy-runtime/image_workflow.py", "utf8");

@@ -18,6 +18,7 @@ import { ACTIVE_ORDER_PATH, LEGACY_ORDER_CREATE_LOCK_PATH, ORDER_CREATE_LOCK_PAT
 import { finalSanitizedLogLines, imageExecutorReadinessForGpuClass, processExists, STALE_RUNNER_NO_ORDER_MESSAGE } from "../../../../../scripts/image-executor/readiness";
 import { assertRtx4090GoldenDeploymentProfile } from "../../../../../scripts/image-executor/rtx4090-golden-deployment-profile";
 import { planExecutableImageBatch, planImageSession } from "../../../../../scripts/clore/image-session";
+import { projectRunnerStatus } from "@/lib/image-generation/runner-status-projection";
 
 export const dynamic = "force-dynamic";
 
@@ -492,6 +493,12 @@ async function responsePayload(extra: Record<string, unknown> = {}) {
     rtx5090: readinessForGpuClass("rtx5090"),
   };
   const runner = await reconcileStaleRunner(readRunner());
+  const createLockPresent = existsSync(ORDER_CREATE_LOCK_PATH) || existsSync(LEGACY_ORDER_CREATE_LOCK_PATH) || existsSync(RUNNER_START_LOCK_PATH);
+  const display = projectRunnerStatus(runner, {
+    pidAlive: processExists(runner.pid),
+    activeOrder: Boolean(activeStateLooksImageOrder() || runner.host?.orderId),
+    createLock: createLockPresent,
+  });
   const tasks = readTasks();
   return {
     tasks,
@@ -499,7 +506,11 @@ async function responsePayload(extra: Record<string, unknown> = {}) {
       rtx4090: planExecutableImageBatch(tasks, "rtx4090"),
       rtx5090: planExecutableImageBatch(tasks, "rtx5090"),
     },
-    runner: terminalRunnerState(runner.state) ? { ...runner, blocker: readiness.rtx4090.ready ? null : readiness.rtx4090.blocker } : runner,
+    runner: {
+      ...runner,
+      error: display.error,
+      blocker: terminalRunnerState(runner.state) ? (readiness.rtx4090.ready ? display.blocker : readiness.rtx4090.blocker) : display.blocker,
+    },
     executionReady: readiness.rtx4090.ready,
     executionReadiness: {
       rtx4090: { ready: readiness.rtx4090.ready, blocker: readiness.rtx4090.ready ? null : readiness.rtx4090.blocker },
