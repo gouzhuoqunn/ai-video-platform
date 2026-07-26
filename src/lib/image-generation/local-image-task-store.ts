@@ -161,7 +161,9 @@ export async function recoverCompletedImageTaskFromVerifiedArtifact(taskId: stri
   return mutateImageTasks((tasks) => {
     const task = tasks.find((candidate) => candidate.id === id);
     if (!task || !task.result || !task.finalizedClaimTokenHash || task.result.pngSha256 !== verified.pngSha256 || task.result.relativeDir !== verified.relativeDir) throw new Error("local_task_recovery_state_changed");
-    if (task.status !== "completed") { task.status = "completed"; task.updatedAt = now(options); delete task.localClaim; delete task.error; }
+    // This is reconciliation, not a new completion: preserve the original
+    // completion/result timestamps while removing only contradictory state.
+    if (task.status !== "completed") { task.status = "completed"; delete task.localClaim; delete task.error; }
     return { tasks, value: structuredClone(task) };
   }, options);
 }

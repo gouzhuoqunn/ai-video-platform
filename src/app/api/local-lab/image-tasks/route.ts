@@ -17,7 +17,7 @@ import { readLiveOrdersSummary, type CloreOrderSummary } from "../../../../../sc
 import { ACTIVE_ORDER_PATH, LEGACY_ORDER_CREATE_LOCK_PATH, ORDER_CREATE_LOCK_PATH, clearActiveOrder, clearOrderCreateLocks, readActiveOrder } from "../../../../../scripts/clore/order-state";
 import { finalSanitizedLogLines, imageExecutorReadinessForGpuClass, processExists, STALE_RUNNER_NO_ORDER_MESSAGE } from "../../../../../scripts/image-executor/readiness";
 import { assertRtx4090GoldenDeploymentProfile } from "../../../../../scripts/image-executor/rtx4090-golden-deployment-profile";
-import { planImageSession } from "../../../../../scripts/clore/image-session";
+import { planExecutableImageBatch, planImageSession } from "../../../../../scripts/clore/image-session";
 
 export const dynamic = "force-dynamic";
 
@@ -492,8 +492,13 @@ async function responsePayload(extra: Record<string, unknown> = {}) {
     rtx5090: readinessForGpuClass("rtx5090"),
   };
   const runner = await reconcileStaleRunner(readRunner());
+  const tasks = readTasks();
   return {
-    tasks: readTasks(),
+    tasks,
+    executableBatches: {
+      rtx4090: planExecutableImageBatch(tasks, "rtx4090"),
+      rtx5090: planExecutableImageBatch(tasks, "rtx5090"),
+    },
     runner: terminalRunnerState(runner.state) ? { ...runner, blocker: readiness.rtx4090.ready ? null : readiness.rtx4090.blocker } : runner,
     executionReady: readiness.rtx4090.ready,
     executionReadiness: {

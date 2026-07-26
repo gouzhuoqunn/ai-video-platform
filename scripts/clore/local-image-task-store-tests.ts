@@ -11,7 +11,7 @@ import { persistAndFinalizeExactLocalTask, resolveExactEligibleImageTask } from 
 const id = "123e4567-e89b-42d3-a456-426614174000";
 const failedId = "223e4567-e89b-42d3-a456-426614174000";
 const completionId = "323e4567-e89b-42d3-a456-426614174000";
-function task(taskId: string) { return { id: taskId, status: "waiting_for_gpu", mode: "text_generation", referenceImage: null, prompt: "fixture", width: 768, height: 768, steps: 25, cfg: 4, loraStrength: .8, seed: 1, sampler: "Euler", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 0 }; }
+function task(taskId: string) { return { id: taskId, status: "waiting_for_gpu", mode: "text_generation", referenceImage: null, prompt: "fixture", width: 768, height: 768, gpuClass: "rtx4090", steps: 25, cfg: 4, loraStrength: .8, seed: 1, sampler: "Euler", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 0 }; }
 function child(file: string, worker: string) {
   return new Promise<{ code: number | null; output: string }>((resolve) => {
     const childProcess = spawn(process.execPath, [path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs"), path.join(process.cwd(), "scripts", "clore", "local-image-task-claim-child.ts"), file, id, worker], { windowsHide: true });

@@ -26,6 +26,7 @@ export function isSessionEligibleTask(task: LocalImageTask): task is EligibleIma
 }
 
 export type ImageSessionPlannerInput = { maxBatchSize?: number; activeOrderCount?: number; selectedHourlyUsd?: number; walletBalanceUsd?: number | null; gpuClass?: ImageGpuClass; requestedTaskIds?: readonly string[] };
+export type ExecutableImageBatch = { plannedTaskIds: string[]; executableCount: number; excludedInconsistentTaskIds: string[] };
 
 function planFromSelected(selected: readonly EligibleImageTask[], eligibleCount: number, selectedClass: ImageGpuClass | null, input: Omit<ImageSessionPlannerInput, "requestedTaskIds">): ImageSessionPlan {
   const hours = selected.length ? Math.min(IMAGE_SESSION_LIMITS.maxHours, .75 + selected.length * .35) : 0;
@@ -48,6 +49,17 @@ export function planImageSession(tasks: readonly LocalImageTask[], input: ImageS
   const selectedClass: ImageGpuClass | null = input.gpuClass ?? (firstClass === "rtx4090" || firstClass === "rtx5090" ? firstClass : null);
   const eligible = selectedClass ? allEligible.filter((task) => task.gpuClass === selectedClass) : [];
   return planFromSelected(eligible.slice(0, maxBatchSize), eligible.length, selectedClass, input);
+}
+
+/** Shared source for Studio counts, the start-button payload, and batch freezing. */
+export function planExecutableImageBatch(tasks: readonly LocalImageTask[], gpuClass: ImageGpuClass): ExecutableImageBatch {
+  const classTasks = tasks.filter((task) => task.gpuClass === gpuClass);
+  const plan = planImageSession(classTasks, { requestedTaskIds: classTasks.map((task) => task.id), gpuClass, maxBatchSize: IMAGE_SESSION_LIMITS.maxBatchSize, activeOrderCount: 0 });
+  return {
+    plannedTaskIds: plan.selectedTaskIds,
+    executableCount: plan.count,
+    excludedInconsistentTaskIds: classTasks.filter((task) => task.status === "waiting_for_gpu" && !isSessionEligibleTask(task)).map((task) => task.id),
+  };
 }
 
 /**
