@@ -6,6 +6,10 @@ export const FLUX_IMAGE_STACK = {
 } as const;
 
 export type ImageGpuClass = "rtx4090" | "rtx5090";
+export const IMAGE_RESOLUTION_MIN = 768;
+export const IMAGE_RESOLUTION_4090_MAX = 1280;
+export const IMAGE_RESOLUTION_5090_MAX = 1536;
+export const IMAGE_RESOLUTION_STEP = 256;
 
 export type ImageTaskSettings = {
   prompt: string;
@@ -17,8 +21,11 @@ export type ImageTaskSettings = {
   height: number;
 };
 
-export function classifyImageGpu(width: number, height: number): ImageGpuClass {
-  return width <= 1280 && height <= 1280 ? "rtx4090" : "rtx5090";
+export function classifyImageGpu(width: number, height: number): ImageGpuClass | null {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < IMAGE_RESOLUTION_MIN || height < IMAGE_RESOLUTION_MIN || width % IMAGE_RESOLUTION_STEP || height % IMAGE_RESOLUTION_STEP) return null;
+  if (width <= IMAGE_RESOLUTION_4090_MAX && height <= IMAGE_RESOLUTION_4090_MAX) return "rtx4090";
+  if (width <= IMAGE_RESOLUTION_5090_MAX && height <= IMAGE_RESOLUTION_5090_MAX) return "rtx5090";
+  return null;
 }
 
 export function createFluxExecutionConfig(task: ImageTaskSettings & { referenceImage: string | null; gpuClass: ImageGpuClass }) {

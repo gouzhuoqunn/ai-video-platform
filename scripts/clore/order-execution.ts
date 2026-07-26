@@ -138,11 +138,11 @@ export function buildCudaBaseCreateOrderBody(input: { serverId: string; currency
   };
 }
 
-export function buildHttpRuntimeCreateOrderBody(input: { serverId: string; currency: string; requiredPrice: number }): CreateOrderRequest {
+export function buildHttpRuntimeCreateOrderBody(input: { serverId: string; currency: string; requiredPrice: number; gpuProfile?: "rtx4090" | "rtx5090" }): CreateOrderRequest {
   return {
     currency: input.currency, image: COMFY_RUNTIME_IMAGE, renting_server: Number(input.serverId), type: "on-demand",
     ports: { "8080": "http" },
-    env: { PROJECT_TAG, COMFY_RUNTIME_MODE: "gpu", COMFY_GPU_PROFILE: "rtx4090", COMFY_NODE_PROFILE: "image-flux", START_GPU_WORKER: "false" },
+    env: { PROJECT_TAG, COMFY_RUNTIME_MODE: "gpu", COMFY_GPU_PROFILE: input.gpuProfile ?? "rtx4090", COMFY_NODE_PROFILE: "image-flux", START_GPU_WORKER: "false" },
     required_price: input.requiredPrice,
   };
 }

@@ -380,7 +380,7 @@ async function main() {
   assert.match(route, /child\.on\("error"/);
   assert.match(route, /image_runner_exited_nonzero/);
   assert.match(route, /reconcileStaleRunner/);
-  assert.match(studio, /task\.result/);
+  assert.match(studio, /task\??\.result/);
 
   const workflow = readFileSync("comfy-runtime/image_workflow.py", "utf8");
   for (const node of ["UNETLoader", "DualCLIPLoader", "LoraLoader", "FluxGuidance", "KSampler", "VAELoader", "SaveImage"]) {

@@ -27,8 +27,8 @@ def validate_request(payload: object) -> dict[str, Any]:
     width, height = int(payload.get("width", 0)), int(payload.get("height", 0))
     steps, cfg, strength = int(payload.get("steps", 0)), float(payload.get("cfg", 0)), float(payload.get("lora_strength", 0))
     seed = int(payload.get("seed", -1)); sampler = str(payload.get("sampler", ""))
-    if width < 768 or height < 768 or width > 1280 or height > 1280 or width % 256 or height % 256:
-        raise ValueError("rtx4090_resolution_required")
+    if width < 768 or height < 768 or width > 1536 or height > 1536 or width % 256 or height % 256:
+        raise ValueError("unsupported_text_generation_resolution")
     if steps < 25 or steps > 40 or cfg < 3.5 or cfg > 5.0 or strength < 0.6 or strength > 1.1:
         raise ValueError("invalid_text_generation_settings")
     if seed < 0 or seed > 2_147_483_647 or sampler not in {"Euler", "FlowMatch"}:

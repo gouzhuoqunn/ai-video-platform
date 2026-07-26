@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import os from "node:os";
 import path from "node:path";
 import { NextResponse, type NextRequest } from "next/server";
-import { FLUX_IMAGE_STACK, classifyImageGpu, type ImageGpuClass, type ImageTaskSettings } from "@/lib/image-generation/flux-stack";
+import { FLUX_IMAGE_STACK, IMAGE_RESOLUTION_5090_MAX, IMAGE_RESOLUTION_MIN, IMAGE_RESOLUTION_STEP, classifyImageGpu, type ImageGpuClass, type ImageTaskSettings } from "@/lib/image-generation/flux-stack";
 import { finiteNumber } from "@/lib/image-generation/formatters";
 import { cancelImageTaskGroup, confirmImageTaskGroup, retryFailedImageTaskGroup } from "@/lib/image-generation/image-task-groups";
 import { imageLibraryRoot } from "@/lib/image-generation/local-image-artifacts";
@@ -112,7 +112,6 @@ const RESTORE_MANIFEST_PATH = path.join(DATA_DIR, "fluxed-up-10.2-rtx4090-text.r
 const SOURCE_MANIFEST_PATH = path.join(process.cwd(), "comfy-runtime", "image-source-artifacts.json");
 const DEFAULT_MAX_HOURLY_PRICE = 0.6;
 const KONTEXT_BLOCKER = "FLUX Kontext 执行器尚未完成";
-const RTX5090_BLOCKER = "RTX 5090 高分辨率执行器尚未完成";
 const DUPLICATE_START_MESSAGE = "已有图像批次正在启动或执行，请先等待或退租。";
 const CREATE_ORDER_STALE_MS = 3 * 60 * 1000;
 
@@ -486,7 +485,7 @@ function readLocalProgramStatus() {
 
 function imageDimension(value: unknown) {
   const dimension = Number(value);
-  return Number.isInteger(dimension) && dimension >= 768 && dimension <= 2048 && dimension % 256 === 0 ? dimension : null;
+  return Number.isInteger(dimension) ? dimension : null;
 }
 
 function taskFrom(input: Record<string, unknown>): ImageTask {
@@ -498,11 +497,15 @@ function taskFrom(input: Record<string, unknown>): ImageTask {
   const cfg = Number(input.cfg);
   const sampler = String(input.sampler);
   const seed = Number.isInteger(Number(input.seed)) ? Number(input.seed) : Math.floor(Math.random() * 2_147_483_647);
+  if (!width || !height || width < IMAGE_RESOLUTION_MIN || height < IMAGE_RESOLUTION_MIN || width % IMAGE_RESOLUTION_STEP || height % IMAGE_RESOLUTION_STEP) {
+    throw new Error("图像宽度和高度必须是 768 至 1536 之间的 256 像素整数倍");
+  }
+  if (width > IMAGE_RESOLUTION_5090_MAX || height > IMAGE_RESOLUTION_5090_MAX) {
+    throw new Error("当前文本生图最高支持 1536 × 1536；请缩小分辨率后重试");
+  }
   if (
     !prompt ||
     prompt.length > 4000 ||
-    !width ||
-    !height ||
     !Number.isInteger(steps) ||
     steps < 25 ||
     steps > 40 ||
@@ -516,6 +519,7 @@ function taskFrom(input: Record<string, unknown>): ImageTask {
   }
   const referenceImage = typeof input.referenceImage === "string" && input.referenceImage.startsWith("data:image/") && input.referenceImage.length <= 6_000_000 ? input.referenceImage : null;
   const gpuClass = classifyImageGpu(width, height);
+  if (!gpuClass) throw new Error("不支持的图像分辨率");
   const now = new Date().toISOString();
   return {
     id: randomUUID(),
@@ -612,8 +616,8 @@ function assertStartableBatch(batch: ImageTask[], maxHourlyPrice: number) {
   if (!batch.length) throw new Error("no_confirmed_image_tasks_selected");
   if (classes.length !== 1) throw new Error("mixed_gpu_classes_are_not_allowed");
   if (!Number.isFinite(maxHourlyPrice) || maxHourlyPrice <= 0) throw new Error("invalid_max_hourly_price");
-  if (classes[0] === "rtx5090") throw new Error(RTX5090_BLOCKER);
-  if (batch.some((task) => task.mode !== "text_generation" || task.referenceImage || task.width > 1280 || task.height > 1280 || !task.prompt.trim())) {
+  const selectedGpuClass = classes[0];
+  if (batch.some((task) => task.mode !== "text_generation" || task.referenceImage || classifyImageGpu(task.width, task.height) !== selectedGpuClass || !task.prompt.trim())) {
     throw new Error(KONTEXT_BLOCKER);
   }
 }
@@ -623,7 +627,7 @@ function activeStateLooksImageOrder() {
   if (!active) return null;
   const imageRuntime = active.bootstrap_image === COMFY_RUNTIME_IMAGE;
   const imagePort = Array.isArray(active.open_ports) && active.open_ports.map(String).includes("controller/http:8080");
-  const imageGpu = active.gpu_profile === "rtx4090" || /4090/.test(active.gpu_type ?? "");
+  const imageGpu = active.gpu_profile === "rtx4090" || active.gpu_profile === "rtx5090" || /4090|5090/.test(active.gpu_type ?? "");
   return imageRuntime || imagePort || imageGpu ? active : null;
 }
 
@@ -636,7 +640,7 @@ function matchingImageOrder(runner: ImageRunnerSession, orders: CloreOrderSummar
     const byServer = active.find((order) => order.serverId === activeState.server_id);
     if (byServer) return byServer;
   }
-  if (runner.gpuClass !== "rtx4090" || !runner.frozenTaskIds.length) return null;
+  if (!runner.gpuClass || !runner.frozenTaskIds.length) return null;
   if (runner.host?.orderId) return active.find((order) => order.orderId === runner.host?.orderId) ?? null;
   if (runner.host?.serverId) {
     const matches = active.filter((order) => order.serverId === runner.host?.serverId);
@@ -789,7 +793,7 @@ export async function POST(request: NextRequest) {
         state: "running",
         stage: "正在寻找显卡",
         frozenTaskIds: [...new Set(batch.map((task) => task.id))],
-        gpuClass: "rtx4090",
+        gpuClass: batch[0]?.gpuClass ?? null,
         maxHourlyPrice,
         currentTaskIndex: null,
         currentModel: null,

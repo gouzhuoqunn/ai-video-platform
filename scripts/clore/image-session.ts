@@ -1,10 +1,11 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import path from "node:path";
 import type { LocalImageTask } from "../../src/lib/image-generation/local-image-task-store";
+import { classifyImageGpu, type ImageGpuClass } from "../../src/lib/image-generation/flux-stack";
 import type { EligibleImageTask } from "./run-image-e2e";
 
 export const IMAGE_SESSION_LIMITS = { maxBatchSize: 8, maxHours: 4, maxHourlyUsd: .30, maxCostUsd: 1.50, creationFeeUsd: .10, minimumWalletReserveUsd: 1.00, idleMinutes: 15, normalGenerationMinutes: 12, cleanupMinutes: 5 } as const;
-export type ImageSessionPlan = { selectedTaskIds: string[]; count: number; eligibleCount: number; estimatedMaximumSessionHours: number; selectedGpuClass: "RTX 4090"; modelSetIdentity: "fluxed-up-10.2-five-file"; oneModelStageServesAll: boolean; selectedHourlyUsd: number; projectedRentalCostUsd: number; projectedCreationFeeUsd: number; projectedProviderCostCeilingUsd: number; minimumWalletReserveUsd: number; walletBalanceUsd: number | null; activeOrderCount: number; executionEligible: boolean };
+export type ImageSessionPlan = { selectedTaskIds: string[]; selectedDimensions: Array<{ taskId: string; width: number; height: number }>; count: number; eligibleCount: number; estimatedMaximumSessionHours: number; selectedGpuClass: "RTX 4090" | "RTX 5090"; selectedGpuModel: string | null; modelSetIdentity: "fluxed-up-10.2-five-file"; oneModelStageServesAll: boolean; selectedHourlyUsd: number; projectedRentalCostUsd: number; projectedCreationFeeUsd: number; projectedProviderCostCeilingUsd: number; minimumWalletReserveUsd: number; walletBalanceUsd: number | null; activeOrderCount: number; executionEligible: boolean };
 export type ImageTaskTerminal = "completed" | "failed" | "not_started" | "ambiguous";
 export type ImageSessionReceipt = { schemaVersion: 1; sessionId: string; orderId: string | null; selectedTaskIds: string[]; currentTaskId: string | null; modelStage: "not_started" | "succeeded" | "failed"; tasks: Record<string, { terminal: ImageTaskTerminal; inferenceState: "not_started" | "submitting" | "accepted" | "succeeded" | "failed" }>; completedTaskCount: number; failedTaskCount: number; timestamps: Record<string, string>; idleDeadlineAt: string; hardDeadlineAt: string; cancellationState: "not_started" | "cancelled"; firstInfrastructureError: string | null };
 
@@ -14,14 +15,17 @@ export class AmbiguousInferenceFailure extends Error { readonly scope = "ambiguo
 function positiveInteger(value: unknown) { return Number.isInteger(value) && Number(value) > 0; }
 function taskPriority(task: LocalImageTask) { const value = String(task.priority ?? "").toLowerCase(); return value === "urgent" || value === "immediate" ? 0 : 1; }
 export function isSessionEligibleTask(task: LocalImageTask): task is EligibleImageTask {
+  const gpuClass = classifyImageGpu(Number(task.width), Number(task.height));
   return task.status === "waiting_for_gpu" && task.mode === "text_generation" && task.referenceImage === null && !task.result && !task.localClaim && typeof task.prompt === "string" && task.prompt.trim().length > 0 &&
-    positiveInteger(task.width) && positiveInteger(task.height) && Number(task.width) >= 768 && Number(task.height) >= 768 && Number(task.width) <= 1280 && Number(task.height) <= 1280 && Number(task.width) % 256 === 0 && Number(task.height) % 256 === 0 &&
+    positiveInteger(task.width) && positiveInteger(task.height) && gpuClass !== null && task.gpuClass === gpuClass &&
     positiveInteger(task.steps) && Number(task.steps) >= 25 && Number(task.steps) <= 40 && Number.isFinite(task.cfg) && Number(task.cfg) >= 3.5 && Number(task.cfg) <= 5 && Number.isFinite(task.loraStrength) && Number(task.loraStrength) >= .6 && Number(task.loraStrength) <= 1.1 && Number.isInteger(task.seed) && Number(task.seed) >= 0 && Number(task.seed) <= 2_147_483_647 && (task.sampler === "Euler" || task.sampler === "FlowMatch") && !Number.isNaN(Date.parse(String(task.createdAt)));
 }
 
-export function planImageSession(tasks: readonly LocalImageTask[], input: { maxBatchSize?: number; activeOrderCount?: number; selectedHourlyUsd?: number; walletBalanceUsd?: number | null } = {}): ImageSessionPlan {
+export function planImageSession(tasks: readonly LocalImageTask[], input: { maxBatchSize?: number; activeOrderCount?: number; selectedHourlyUsd?: number; walletBalanceUsd?: number | null; gpuClass?: ImageGpuClass } = {}): ImageSessionPlan {
   const maxBatchSize = Math.max(1, Math.min(IMAGE_SESSION_LIMITS.maxBatchSize, Math.floor(input.maxBatchSize ?? IMAGE_SESSION_LIMITS.maxBatchSize)));
-  const eligible = tasks.filter(isSessionEligibleTask).sort((a, b) => taskPriority(a) - taskPriority(b) || Date.parse(String(a.createdAt)) - Date.parse(String(b.createdAt)) || a.id.localeCompare(b.id));
+  const allEligible = tasks.filter(isSessionEligibleTask).sort((a, b) => taskPriority(a) - taskPriority(b) || Date.parse(String(a.createdAt)) - Date.parse(String(b.createdAt)) || a.id.localeCompare(b.id));
+  const selectedClass = input.gpuClass ?? allEligible[0]?.gpuClass ?? null;
+  const eligible = selectedClass ? allEligible.filter((task) => task.gpuClass === selectedClass) : [];
   const selected = eligible.slice(0, maxBatchSize); const hours = selected.length ? Math.min(IMAGE_SESSION_LIMITS.maxHours, .75 + selected.length * .35) : 0;
   const activeOrderCount = Math.max(0, Math.floor(input.activeOrderCount ?? 0));
   const selectedHourlyUsd = Number(input.selectedHourlyUsd ?? IMAGE_SESSION_LIMITS.maxHourlyUsd);
@@ -29,7 +33,7 @@ export function planImageSession(tasks: readonly LocalImageTask[], input: { maxB
   const projectedProviderCostCeilingUsd = Number((projectedRentalCostUsd + IMAGE_SESSION_LIMITS.creationFeeUsd).toFixed(2));
   const walletBalanceUsd = input.walletBalanceUsd ?? null;
   const executionEligible = selected.length > 0 && activeOrderCount === 0 && selectedHourlyUsd <= IMAGE_SESSION_LIMITS.maxHourlyUsd && projectedProviderCostCeilingUsd <= IMAGE_SESSION_LIMITS.maxCostUsd && (walletBalanceUsd === null || walletBalanceUsd - projectedProviderCostCeilingUsd >= IMAGE_SESSION_LIMITS.minimumWalletReserveUsd);
-  return { selectedTaskIds: selected.map((task) => task.id), count: selected.length, eligibleCount: eligible.length, estimatedMaximumSessionHours: Number(hours.toFixed(2)), selectedGpuClass: "RTX 4090", modelSetIdentity: "fluxed-up-10.2-five-file", oneModelStageServesAll: selected.length > 0, selectedHourlyUsd, projectedRentalCostUsd, projectedCreationFeeUsd: IMAGE_SESSION_LIMITS.creationFeeUsd, projectedProviderCostCeilingUsd, minimumWalletReserveUsd: IMAGE_SESSION_LIMITS.minimumWalletReserveUsd, walletBalanceUsd, activeOrderCount, executionEligible };
+  return { selectedTaskIds: selected.map((task) => task.id), selectedDimensions: selected.map((task) => ({ taskId: task.id, width: task.width, height: task.height })), count: selected.length, eligibleCount: eligible.length, estimatedMaximumSessionHours: Number(hours.toFixed(2)), selectedGpuClass: selectedClass === "rtx5090" ? "RTX 5090" : "RTX 4090", selectedGpuModel: null, modelSetIdentity: "fluxed-up-10.2-five-file", oneModelStageServesAll: selected.length > 0, selectedHourlyUsd, projectedRentalCostUsd, projectedCreationFeeUsd: IMAGE_SESSION_LIMITS.creationFeeUsd, projectedProviderCostCeilingUsd, minimumWalletReserveUsd: IMAGE_SESSION_LIMITS.minimumWalletReserveUsd, walletBalanceUsd, activeOrderCount, executionEligible };
 }
 
 export function formatImageSessionPlanChinese(plan: ImageSessionPlan) {
@@ -76,7 +80,7 @@ function clean(error: unknown) { return String(error instanceof Error ? error.me
 
 /** Dependency-injected future live semantics. This module never imports a provider client. */
 export async function runImageSession(input: { sessionId: string; plan: ImageSessionPlan; normalGenerationMs?: number; cleanupMs?: number }, deps: ImageSessionDeps) {
-  let receipt = deps.load() ?? initial(input.plan, input.sessionId, deps.now()); if (isAmbiguous(receipt)) throw new AmbiguousInferenceFailure("image_session_resume_ambiguous_inference");
+  const receipt = deps.load() ?? initial(input.plan, input.sessionId, deps.now()); if (isAmbiguous(receipt)) throw new AmbiguousInferenceFailure("image_session_resume_ambiguous_inference");
   let orderId: string | null = receipt.orderId; let infrastructureError: unknown;
   const persist = () => deps.persist(structuredClone(receipt));
   const touchIdle = () => { receipt.idleDeadlineAt = new Date(deps.nowMs() + IMAGE_SESSION_LIMITS.idleMinutes * 60_000).toISOString(); };

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadCloreConfig, COMFY_RUNTIME_IMAGE, PROJECT_TAG } from "./clore/config";
+import { classifyImageGpu, type ImageGpuClass } from "../src/lib/image-generation/flux-stack";
 import { loadCloreExecutionConfig } from "./clore/execution-config";
 import { readLiveMarketplace, readLiveOrdersSummary } from "./clore/live";
 import { evaluateMarketplace } from "./clore/marketplace";
@@ -77,6 +78,17 @@ type CloreExecution = ReturnType<typeof loadCloreExecutionConfig>;
 type OrderSummary = Awaited<ReturnType<typeof readLiveOrdersSummary>>[number];
 type MarketplacePayload = Awaited<ReturnType<typeof readLiveMarketplace>>;
 type RuntimeCandidate = ReturnType<typeof evaluateMarketplace>["matches"][number];
+
+export function targetGpuForImageClass(gpuClass: ImageGpuClass) {
+  return gpuClass === "rtx5090" ? "NVIDIA GeForce RTX 5090" as const : "NVIDIA GeForce RTX 4090" as const;
+}
+
+export function chooseCheapestImageCandidate<T extends { gpuNormalizedName: string; orderType: string; hostOnline: boolean | null; priceUsdPerHour: number | null }>(candidates: readonly T[], gpuClass: ImageGpuClass, maxHourlyPrice: number): T | null {
+  const targetGpu = targetGpuForImageClass(gpuClass);
+  return [...candidates]
+    .filter((candidate) => candidate.gpuNormalizedName === targetGpu && candidate.orderType === "on-demand" && candidate.hostOnline !== false && candidate.priceUsdPerHour !== null && candidate.priceUsdPerHour <= maxHourlyPrice)
+    .sort((left, right) => (left.priceUsdPerHour ?? Infinity) - (right.priceUsdPerHour ?? Infinity))[0] ?? null;
+}
 
 const CREATE_ORDER_HARD_TIMEOUT_MS = 60_000;
 const CREATE_ORDER_RETRY_DELAY_MS = 3_000;
@@ -371,13 +383,12 @@ function failRunner(stage: string, error: unknown, cancellationError?: unknown, 
   });
 }
 
-function isValidFrozenTask(task: ImageTask) {
+function isValidFrozenTask(task: ImageTask, gpuClass: ImageGpuClass) {
   return (
     task.mode === "text_generation" &&
     !task.referenceImage &&
-    task.gpuClass === "rtx4090" &&
-    task.width <= 1280 &&
-    task.height <= 1280 &&
+    task.gpuClass === gpuClass &&
+    classifyImageGpu(task.width, task.height) === gpuClass &&
     task.steps >= 25 &&
     task.steps <= 40 &&
     task.cfg >= 3.5 &&
@@ -614,7 +625,7 @@ async function postCreateOrderOnce(config: CloreConfig, body: ReturnType<typeof 
   }
 }
 
-function persistRecoveredActiveOrder(orderId: string, candidate: RuntimeCandidate, requestBody: ReturnType<typeof buildHttpRuntimeCreateOrderBody>) {
+function persistRecoveredActiveOrder(orderId: string, candidate: RuntimeCandidate, requestBody: ReturnType<typeof buildHttpRuntimeCreateOrderBody>, gpuClass: ImageGpuClass) {
   writeActiveOrder({
     order_id: orderId,
     server_id: candidate.serverId,
@@ -626,7 +637,7 @@ function persistRecoveredActiveOrder(orderId: string, candidate: RuntimeCandidat
     order_type: "on-demand",
     open_ports: ["controller/http:8080"],
     gpu_type: candidate.gpu,
-    gpu_profile: "rtx4090",
+    gpu_profile: gpuClass,
     bootstrap_image: COMFY_RUNTIME_IMAGE,
   });
 }
@@ -734,6 +745,7 @@ async function createOrderWithNetworkRetry(input: {
   candidate: RuntimeCandidate;
   requestBody: ReturnType<typeof buildHttpRuntimeCreateOrderBody>;
   selectedServerId: string | null;
+  gpuClass: ImageGpuClass;
 }) {
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
@@ -744,7 +756,7 @@ async function createOrderWithNetworkRetry(input: {
         requestBody: input.requestBody,
         request: (body) => postCreateOrderOnce(input.config, body),
         readOrders: (nextConfig) => input.deps.readOrders(nextConfig),
-        sessionMetadata: { gpuType: input.candidate.gpu, gpuProfile: "rtx4090", bootstrapImage: COMFY_RUNTIME_IMAGE },
+        sessionMetadata: { gpuType: input.candidate.gpu, gpuProfile: input.gpuClass, bootstrapImage: COMFY_RUNTIME_IMAGE },
       });
       return order.order_id;
     } catch (error) {
@@ -757,7 +769,7 @@ async function createOrderWithNetworkRetry(input: {
         return null;
       });
       if (reconciledOrderId) {
-        persistRecoveredActiveOrder(reconciledOrderId, input.candidate, input.requestBody);
+        persistRecoveredActiveOrder(reconciledOrderId, input.candidate, input.requestBody, input.gpuClass);
         persistCreateOrderAttempt({ attempt, detail, reconciliation: "reused_order", matchedOrderId: reconciledOrderId });
         return reconciledOrderId;
       }
@@ -969,6 +981,7 @@ export async function runImage4090Batch(deps = defaultDeps()) {
   let rootError: unknown = null;
   let config: CloreConfig | null = null;
   let execution: CloreExecution | null = null;
+  let requestedGpuClass: ImageGpuClass | null = null;
 
   try {
     const session = readRunner();
@@ -986,9 +999,11 @@ export async function runImage4090Batch(deps = defaultDeps()) {
 
     const tasks = readJson<ImageTask[]>(taskPath, []);
     const frozen = tasks.filter((task) => session.frozenTaskIds.includes(task.id));
-    if (!frozen.length || frozen.some((task) => !isValidFrozenTask(task)) || session.gpuClass !== "rtx4090") {
-      throw new Error("frozen_batch_invalid_for_rtx4090_text_generation");
+    requestedGpuClass = session.gpuClass;
+    if (!requestedGpuClass || !frozen.length || frozen.some((task) => !isValidFrozenTask(task, requestedGpuClass))) {
+      throw new Error("frozen_batch_invalid_for_text_generation_gpu_class");
     }
+    const targetGpu = targetGpuForImageClass(requestedGpuClass);
 
     updateRunner({ stage: "正在检查模型缓存" });
     const restore = resolveRestorePayload(restorePath, sourceManifestPath);
@@ -996,8 +1011,8 @@ export async function runImage4090Batch(deps = defaultDeps()) {
     config = {
       ...deps.loadConfig(),
       dockerImage: COMFY_RUNTIME_IMAGE,
-      targetGpu: "NVIDIA GeForce RTX 4090" as const,
-      minGpuVramGb: 23,
+      targetGpu,
+      minGpuVramGb: requestedGpuClass === "rtx5090" ? 32 : 23,
       minRamGb: 31,
       minDiskGb: 200,
       maxGpuPricePerHour: session.maxHourlyPrice,
@@ -1007,17 +1022,14 @@ export async function runImage4090Batch(deps = defaultDeps()) {
 
     updateRunner({ stage: "正在寻找显卡", currentTaskIndex: null, currentModel: null, promptSummary: null });
     const marketplace = await deps.readMarketplace(config);
-    const candidates = evaluateMarketplace(marketplace, config).matches.filter(
-      (candidate) => candidate.priceUsdPerHour !== null && candidate.priceUsdPerHour <= session.maxHourlyPrice,
-    );
-    const candidate = candidates[0];
-    if (!candidate) throw new Error("未找到符合价格、显存、内存与磁盘条件的 RTX 4090 主机");
+    const candidate = chooseCheapestImageCandidate(evaluateMarketplace(marketplace, config).matches, requestedGpuClass, session.maxHourlyPrice);
+    if (!candidate) throw new Error(`未找到符合价格、显存、内存与磁盘条件的 ${targetGpu} 主机`);
     selectedServerId = candidate.serverId;
 
     updateRunner({
       stage: "creating_order",
       host: {
-        gpu: "RTX 4090",
+        gpu: targetGpu.replace("NVIDIA GeForce ", ""),
         priceHourly: candidate.priceUsdPerHour ?? 0,
         serverId: candidate.serverId,
         orderId: null,
@@ -1037,6 +1049,7 @@ export async function runImage4090Batch(deps = defaultDeps()) {
     const requestBody = buildHttpRuntimeCreateOrderBody({
       serverId: candidate.serverId,
       currency: config.rentalCurrency,
+      gpuProfile: requestedGpuClass,
       requiredPrice:
         candidate.priceOriginalCurrency === "USD" && candidate.priceOriginalUnit === "day" && candidate.priceOriginalAmount !== null
           ? candidate.priceOriginalAmount
@@ -1048,7 +1061,7 @@ export async function runImage4090Batch(deps = defaultDeps()) {
       (activeBeforeCreate.length === 1 ? activeBeforeCreate[0] : null);
     if (matchingBeforeCreate?.orderId) {
       orderId = matchingBeforeCreate.orderId;
-      persistRecoveredActiveOrder(orderId, candidate, requestBody);
+      persistRecoveredActiveOrder(orderId, candidate, requestBody, requestedGpuClass);
       updateRunner({
         state: "running",
         stage: "order_created_waiting_http",
@@ -1066,7 +1079,7 @@ export async function runImage4090Batch(deps = defaultDeps()) {
       throw new Error(`已有其他活动订单：${activeBeforeCreate[0].orderId ?? "未知"}`);
     } else {
       attemptedCreate = true;
-      orderId = await createOrderWithNetworkRetry({ deps, config, execution, candidate, requestBody, selectedServerId });
+      orderId = await createOrderWithNetworkRetry({ deps, config, execution, candidate, requestBody, selectedServerId, gpuClass: requestedGpuClass });
     }
     updateRunner({
       state: "running",
@@ -1146,7 +1159,7 @@ export async function runImage4090Batch(deps = defaultDeps()) {
     rootError = error;
     if (error instanceof CreateOrderNoOrderFailure) throw error;
     if (attemptedCreate && !orderId && config) orderId = await reconcileCreatedOrder(deps, config, selectedServerId).catch(() => null);
-    failRunner(attemptedCreate ? "RTX 4090 图像 Runner" : IMAGE_RUNNER_PRECHECK_STAGE, error);
+    failRunner(attemptedCreate ? `${requestedGpuClass === "rtx5090" ? "RTX 5090" : "RTX 4090"} 图像 Runner` : IMAGE_RUNNER_PRECHECK_STAGE, error);
     throw error;
   } finally {
     if (orderId && config && execution) {
@@ -1169,8 +1182,9 @@ export async function dryRun() {
     updateRunner({ state: "running", stage: IMAGE_RUNNER_PRECHECK_STAGE, error: null, blocker: null });
     const tasks = readJson<ImageTask[]>(taskPath, []);
     const frozen = tasks.filter((task) => session.frozenTaskIds.includes(task.id));
-    if (!frozen.length || frozen.some((task) => !isValidFrozenTask(task)) || session.gpuClass !== "rtx4090") {
-      throw new Error("frozen_batch_invalid_for_rtx4090_text_generation");
+    const requestedGpuClass = session.gpuClass;
+    if (!requestedGpuClass || !frozen.length || frozen.some((task) => !isValidFrozenTask(task, requestedGpuClass))) {
+      throw new Error("frozen_batch_invalid_for_text_generation_gpu_class");
     }
     updateRunner({ stage: "正在检查模型缓存" });
     const readiness = assertImageExecutorReady({ restoreManifestPath: restorePath, sourceManifestPath });

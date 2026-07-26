@@ -81,6 +81,12 @@ async function main() {
   const rtx5090Task = listImageTasks().find((task) => task.id === rtx5090Payload.createdTaskIds[0]);
   assert.equal(rtx5090Task?.gpuClass, "rtx5090");
   assert.equal(rtx5090Task?.status, "pending_confirmation");
+  const tooLarge = await request({ ...source, width: 1792, height: 1024, requestedCount: 1 });
+  assert.equal(tooLarge.status, 400);
+  assert.match(String((await tooLarge.json() as { error?: unknown }).error), /1536/);
+  const nonGrid = await request({ ...source, width: 1537, height: 1024, requestedCount: 1 });
+  assert.equal(nonGrid.status, 400);
+  assert.match(String((await nonGrid.json() as { error?: unknown }).error), /256/);
   const status = await GET(new NextRequest("http://127.0.0.1/api/local-lab/image-tasks", { headers: { host: "127.0.0.1" } }));
   assert.equal(status.status, 200);
   const statusPayload = await status.json() as { localProgram?: { cpuLogicalCores?: number; totalRamBytes?: number; availableRamBytes?: number; processMemoryBytes?: number; taskStoreAvailable?: boolean } };

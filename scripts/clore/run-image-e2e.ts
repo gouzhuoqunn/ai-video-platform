@@ -6,6 +6,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { claimImageTask, failImageTask, finalizeImageTask, mutateImageTasks, readImageTask, renewImageTaskLease, type LocalImageTask, type LocalTaskStoreOptions } from "../../src/lib/image-generation/local-image-task-store";
+import { classifyImageGpu } from "../../src/lib/image-generation/flux-stack";
 import { publishLocalImageArtifact, type LocalArtifactReference } from "../../src/lib/image-generation/local-image-artifacts";
 import { sanitizeImageModelPreflight, toAgentModelManifest, validateAgentModelManifestContract, verifyFiveImageModelSources } from "./image-model-preflight";
 import { runImageE2e, claimTokenHash, type ModelEntry, type SanitizedImageE2eSession } from "./image-e2e-coordinator";
@@ -128,8 +129,8 @@ export async function submitInferenceStage(endpoint:string,token:string,payload:
 
 export function resolveExactEligibleImageTask(taskId: string, options: LocalTaskStoreOptions = {}): EligibleImageTask {
   const task = readImageTask(taskId, options);
-  if (!task || task.status !== "waiting_for_gpu" || task.mode !== "text_generation" || task.referenceImage || !Number.isInteger(task.width) || !Number.isInteger(task.height) || task.width > 1280 || task.height > 1280) {
-    throw new Error("image_task_not_eligible_for_restricted_4090_run");
+  if (!task || task.status !== "waiting_for_gpu" || task.mode !== "text_generation" || task.referenceImage || classifyImageGpu(Number(task.width), Number(task.height)) !== task.gpuClass) {
+    throw new Error("image_task_not_eligible_for_restricted_text_run");
   }
   return task as EligibleImageTask;
 }
