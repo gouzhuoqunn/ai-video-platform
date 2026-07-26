@@ -6,15 +6,16 @@ import { agentArtifactMetadataResponse, agentGetJsonWithRetry, agentHealthRespon
 import { freshRunRequiresManualRecovery, getArtifactMetadataWithRetry, pollInferenceStage, prepareFreshReceipt, type FreshReceipt, waitForStage } from "./run-image-e2e";
 
 const token = "fixture-agent-token";
+const stageRunId = "11111111-1111-4111-8111-111111111111";
 function response(status: number, body = "", contentType = "application/json") { return new Response(body, { status, headers: { "content-type": contentType, "content-length": String(Buffer.byteLength(body)) } }); }
-function status(stage = "models", state = "succeeded") { return JSON.stringify({ alive: true, current_stage: "idle", last_error: null, stages: { [stage]: { status: state, data: { verified: true } } }, models: {} }); }
+function status(stage = "models", state = "succeeded", runId = stageRunId) { return JSON.stringify({ alive: true, current_stage: "idle", last_error: null, stages: { [stage]: { stage_run_id: runId, status: state, data: { verified: true } } }, models: {} }); }
 function health() { return JSON.stringify({ alive: true, agent: "restricted-clore-diagnostic", current_stage: "idle", last_error: null }); }
 function virtualClock() { let value = 0; return { now: () => value, timestamp: () => new Date(value).toISOString(), sleep: async (milliseconds: number) => { value += milliseconds; } }; }
 function sequence(values: Response[]) { let index = 0; return async () => values[Math.min(index++, values.length - 1)]; }
 
 async function recoverFromNonAgent(body: string, expectedKind: string, contentType = "application/json") {
   let stagePosts = 1; let gets = 0; const diagnostics: unknown[] = [];
-  const result = await waitForStage({ endpoint: "https://agent.example", token, stage: "models", timeoutMs: 60_000, sleepImpl: async () => undefined, onDiagnostic: (value) => diagnostics.push(value), fetchImpl: sequence([response(200, body, contentType), response(200, status())]) });
+  const result = await waitForStage({ endpoint: "https://agent.example", token, stage: "models", expectedStageRunId: stageRunId, timeoutMs: 60_000, sleepImpl: async () => undefined, onDiagnostic: (value) => diagnostics.push(value), fetchImpl: sequence([response(200, body, contentType), response(200, status())]) });
   gets = 2;
   assert.equal(result.status, "succeeded"); assert.equal(stagePosts, 1); assert.equal(gets, 2);
   const diagnostic = diagnostics[0] as { message: string; responseKind: string; bodySha256: string; bodyPreview: string };
@@ -42,13 +43,16 @@ async function main() {
   for (const statusCode of [401, 404]) await assert.rejects(() => agentGetJsonWithRetry({ endpoint: "https://agent.example", token, route: "/status", validator: agentStatusResponse, attempt: 1, fetchImpl: sequence([response(statusCode)]) }), AgentGetTerminalError);
 
   const outageClock = virtualClock(); let stagePosts = 1; let reconcileCalls = 0; const outageDiagnostics: unknown[] = [];
-  const outage = await waitForStage({ endpoint: "https://agent.example", token, stage: "models", timeoutMs: 45 * 60_000, now: outageClock.now, timestamp: outageClock.timestamp, sleepImpl: outageClock.sleep, onDiagnostic: (value) => outageDiagnostics.push(value), reconcileExactOrder: async () => { reconcileCalls += 1; return true; }, fetchImpl: async () => response(200, "<html>persistent proxy</html>", "text/html") });
+  const outage = await waitForStage({ endpoint: "https://agent.example", token, stage: "models", expectedStageRunId: stageRunId, timeoutMs: 45 * 60_000, now: outageClock.now, timestamp: outageClock.timestamp, sleepImpl: outageClock.sleep, onDiagnostic: (value) => outageDiagnostics.push(value), reconcileExactOrder: async () => { reconcileCalls += 1; return true; }, fetchImpl: async () => response(200, "<html>persistent proxy</html>", "text/html") });
   assert.equal(outage.status, "failed"); assert.equal(stagePosts, 1); assert.equal(reconcileCalls, 1);
   const outageDetail = JSON.parse(outage.error!); assert.equal(outageDetail.code, "agent_transport_outage_exceeded"); assert.equal(outageDetail.last_http_status, 200); assert.equal(outageDetail.last_response_kind, "html"); assert.equal(outageDetail.last_content_type, "text/html"); assert.match(outageDetail.last_body_sha256, /^[a-f0-9]{64}$/); assert.ok(!JSON.stringify(outageDiagnostics).includes(token) && !JSON.stringify(outageDiagnostics).includes("agent.example"));
 
   let inferencePosts = 1; let inferenceGets = 0;
-  const inference = await pollInferenceStage("https://agent.example", token, { sleepImpl: async () => undefined, fetchImpl: sequence([response(200, "<html>proxy</html>", "text/html"), response(200, status("inference"))]) });
+  const inference = await pollInferenceStage("https://agent.example", token, stageRunId, { sleepImpl: async () => undefined, fetchImpl: sequence([response(200, "<html>proxy</html>", "text/html"), response(200, status("inference"))]) });
   inferenceGets = 2; assert.equal(inference.status, "succeeded"); assert.equal(inferencePosts, 1); assert.equal(inferenceGets, 2);
+  const taskA = "22222222-2222-4222-8222-222222222222"; const taskB = "33333333-3333-4333-8333-333333333333";
+  const secondInference = await pollInferenceStage("https://agent.example", token, taskB, { sleepImpl: async () => undefined, fetchImpl: sequence([response(200, status("inference", "succeeded", taskA)), response(200, status("inference", "succeeded", taskB))]) });
+  assert.equal(secondInference.status, "succeeded", "task B must ignore task A's stale inference terminal record");
 
   let metadataGets = 0; let inferenceReruns = 0;
   const metadata = await getArtifactMetadataWithRetry({ endpoint: "https://agent.example", token, taskId: "fixture-task", sleepImpl: async () => undefined, fetchImpl: sequence([response(200, JSON.stringify({ task_id: "fixture-task", width: 0, height: 1, byte_size: 1, sha256: "a".repeat(64) })), response(200, JSON.stringify({ task_id: "fixture-task", width: 768, height: 768, byte_size: 1, sha256: "a".repeat(64) }))]) });

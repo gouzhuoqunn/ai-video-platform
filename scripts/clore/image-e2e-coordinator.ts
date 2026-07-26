@@ -29,6 +29,7 @@ export type RemoteArtifact = NonNullable<SanitizedImageE2eSession["remoteArtifac
 export type ModelEntry = { role: string; filename: string; url: string; sha256: string; size_bytes: number };
 export type InferenceReceiptDetail = {
   acceptedHttpStatus?: number;
+  stageRunId?: string;
   error?: string;
   controllerPromptId?: string | null;
   failure?: Record<string, unknown>;
@@ -48,8 +49,8 @@ export type CoordinatorDeps = {
   disarmWatchdog: () => Promise<void>;
   health: (endpoint: string) => Promise<{ alive: boolean; currentStage: string; lastError: string | null }>;
   stage: (endpoint: string, stage: "environment" | "gpu" | "controller" | "comfyui" | "models" | "inference", payload?: object) => Promise<{ status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> }>;
-  submitInference: (endpoint: string, payload: object) => Promise<{ acceptedHttpStatus: 202 }>;
-  pollInference: (endpoint: string) => Promise<{ status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> }>;
+  submitInference: (endpoint: string, payload: object) => Promise<{ acceptedHttpStatus: 202; stageRunId: string }>;
+  pollInference: (endpoint: string, expectedStageRunId: string) => Promise<{ status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> }>;
   inferenceReceipt?: (event: "submitting" | "accepted" | "succeeded" | "failed", detail?: InferenceReceiptDetail) => Promise<void>;
   receiptEvent?: (event: ReceiptEvent, detail?: InferenceReceiptDetail) => Promise<void>;
   resolveModels: () => Promise<ModelEntry[]>;
@@ -174,8 +175,8 @@ export async function runImageE2e(input: { taskId: string; immutableCommit: stri
     // If this fails, the POST is never allowed to occur.
     await deps.inferenceReceipt?.("submitting");
     const accepted = await deps.submitInference(session.endpoint, inferencePayload(task));
-    await deps.inferenceReceipt?.("accepted", { acceptedHttpStatus: accepted.acceptedHttpStatus });
-    const inference = await deps.pollInference(session.endpoint);
+    await deps.inferenceReceipt?.("accepted", { acceptedHttpStatus: accepted.acceptedHttpStatus, stageRunId: accepted.stageRunId });
+    const inference = await deps.pollInference(session.endpoint, accepted.stageRunId);
     session.stages.inference = inference.status; deps.persist(session);
     if (inference.status !== "succeeded") { await deps.inferenceReceipt?.("failed", { error: clean(inference.error ?? "unknown"), ...inferenceFailureReceiptDetail(inference.data) }); throw new Error(`inference_stage_failed:${clean(inference.error ?? "unknown")}`); }
     await deps.inferenceReceipt?.("succeeded", inferenceReceiptDetail(inference.data));

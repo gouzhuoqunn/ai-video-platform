@@ -44,12 +44,15 @@ def main():
                 if time.monotonic() >= end: raise AssertionError("agent health did not start")
                 time.sleep(0.1)
             assert health["current_stage"] == "idle" and health["last_error"] is None
-            first_status, _ = request(port, "POST", "/stage/environment", token); assert first_status == 202
+            first_status, first = request(port, "POST", "/stage/environment", token); assert first_status == 202
+            first_run_id = first.get("stage_run_id"); assert isinstance(first_run_id, str) and first["stage"] == "environment"
+            persisted = request(port, "GET", "/status")[1]; assert persisted["stages"]["environment"]["stage_run_id"] == first_run_id
             second_status, _ = request(port, "POST", "/stage/gpu", token); assert second_status == 409
             terminal = wait_for(port, lambda status: status.get("stages", {}).get("environment", {}).get("status") in ("succeeded", "failed"))
+            assert terminal["stages"]["environment"]["stage_run_id"] == first_run_id
             assert terminal["current_stage"] == "idle"
             health_status, health = request(port, "GET", "/healthz"); assert health_status == 200 and health["alive"] is True
-            third_status, _ = request(port, "POST", "/stage/gpu", token); assert third_status == 202
+            third_status, third = request(port, "POST", "/stage/gpu", token); assert third_status == 202 and third["stage_run_id"] != first_run_id
             wait_for(port, lambda status: status.get("stages", {}).get("gpu", {}).get("status") in ("succeeded", "failed"))
             health_status, health = request(port, "GET", "/healthz"); assert health_status == 200 and health["current_stage"] == "idle"
         finally:

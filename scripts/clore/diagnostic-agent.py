@@ -57,7 +57,7 @@ APPROVED_MODELS = {
 }
 STATE_LOCK = threading.Lock()
 STAGE_GATE = threading.Lock()
-STATE: dict[str, Any] = {"alive": True, "started_at": None, "current_stage": "idle", "last_error": None, "stages": {}, "models": {}}
+STATE: dict[str, Any] = {"alive": True, "started_at": None, "current_stage": "idle", "current_stage_run_id": None, "last_error": None, "stages": {}, "models": {}}
 CHILDREN: dict[str, subprocess.Popen[str]] = {}
 CONFIG: dict[str, str] = {}
 
@@ -178,30 +178,41 @@ def request_json(url: str, method: str = "GET", payload: dict[str, Any] | None =
             return error.code, {"error": clean(raw)}
 
 
-def begin(name: str) -> None:
+def begin(name: str, stage_run_id: str) -> None:
     with STATE_LOCK:
         STATE["current_stage"] = name
+        STATE["current_stage_run_id"] = stage_run_id
         STATE["last_error"] = None
-        STATE["stages"][name] = {"status": "running", "started_at": now(), "completed_at": None, "exit_code": None, "log_tail": []}
+        STATE["stages"][name] = {"stage_run_id": stage_run_id, "status": "running", "started_at": now(), "completed_at": None, "exit_code": None, "log_tail": []}
         save_locked()
 
 
-def complete(name: str, data: dict[str, Any]) -> None:
+def complete(name: str, stage_run_id: str, data: dict[str, Any]) -> bool:
     with STATE_LOCK:
-        record = STATE["stages"][name]
+        record = STATE["stages"].get(name)
+        if not isinstance(record, dict) or record.get("stage_run_id") != stage_run_id:
+            return False
         record.update({"status": "succeeded", "completed_at": now(), "exit_code": 0, "data": data})
-        STATE["current_stage"] = "idle"
+        if STATE.get("current_stage_run_id") == stage_run_id:
+            STATE["current_stage"] = "idle"
+            STATE["current_stage_run_id"] = None
         save_locked()
+        return True
 
 
-def failed(name: str, error: object, data: dict[str, Any] | None = None) -> None:
+def failed(name: str, stage_run_id: str, error: object, data: dict[str, Any] | None = None) -> bool:
     with STATE_LOCK:
-        record = STATE["stages"].setdefault(name, {})
+        record = STATE["stages"].get(name)
+        if not isinstance(record, dict) or record.get("stage_run_id") != stage_run_id:
+            return False
         existing = record.get("data") if isinstance(record.get("data"), dict) else {}
         record.update({"status": "failed", "completed_at": now(), "first_exact_failure": clean(error), "data": {**existing, **(data or {})}})
         STATE["last_error"] = clean(error)
-        STATE["current_stage"] = "idle"
+        if STATE.get("current_stage_run_id") == stage_run_id:
+            STATE["current_stage"] = "idle"
+            STATE["current_stage_run_id"] = None
         save_locked()
+        return True
 
 
 def stage_environment(_: dict[str, Any]) -> dict[str, Any]:
@@ -583,7 +594,7 @@ def stage_inference(payload: dict[str, Any]) -> dict[str, Any]:
     artifact = ARTIFACT_DIR / task_id
     artifact.mkdir(parents=True, exist_ok=True)
     image_path = artifact / "image.png"; image_path.write_bytes(image)
-    metadata = {"task_id": task_id, "width": width, "height": height, "byte_size": len(image), "sha256": sha256(image_path), "generation_duration_seconds": round(time.monotonic() - started, 3), "controller_prompt_id": job.get("prompt_id")}
+    metadata = {"task_id": task_id, "width": width, "height": height, "byte_size": len(image), "sha256": sha256(image_path), "generation_duration_seconds": round(time.monotonic() - started, 3), "controller_job_id": job_id, "controller_prompt_id": job.get("prompt_id")}
     (artifact / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return metadata
 
@@ -609,21 +620,28 @@ STAGES: dict[str, tuple[str, Any, int]] = {
 }
 
 
-def run_stage(route: str, payload: dict[str, Any]) -> bool:
+def run_stage(route: str, payload: dict[str, Any]) -> str | None:
     name, action, _ = STAGES[route]
     if not STAGE_GATE.acquire(blocking=False):
-        return False
+        return None
+    stage_run_id = str(uuid.uuid4())
+    try:
+        # Persist the accepted invocation before exposing HTTP 202.  This is a
+        # separate gate from STATE_LOCK: worker completion never waits on it.
+        begin(name, stage_run_id)
+    except Exception:
+        STAGE_GATE.release()
+        raise
     def worker() -> None:
         try:
-            begin(name)
             time.sleep(test_stage_delay())
-            complete(name, action(payload))
+            complete(name, stage_run_id, action(payload))
         except Exception as error:
-            failed(name, error, getattr(error, "data", None))
+            failed(name, stage_run_id, error, getattr(error, "data", None))
         finally:
             STAGE_GATE.release()
     threading.Thread(target=worker, daemon=True).start()
-    return True
+    return stage_run_id
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -639,7 +657,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         route = urllib.parse.urlsplit(self.path).path
         if route == "/healthz":
-            with STATE_LOCK: value = {"alive": True, "agent": "restricted-clore-diagnostic", "current_stage": STATE["current_stage"], "last_error": STATE["last_error"]}
+            with STATE_LOCK: value = {"alive": True, "agent": "restricted-clore-diagnostic", "current_stage": STATE["current_stage"], "current_stage_run_id": STATE.get("current_stage_run_id"), "last_error": STATE["last_error"]}
             self.send_json(200, value); return
         if route in {"/status", "/logs"}:
             with STATE_LOCK:
@@ -677,8 +695,9 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/stage/inference": validate_inference_shape(payload)
         except ValueError as error:
             self.send_json(400, {"error": str(error)}); return
-        if not run_stage(route, payload): self.send_json(409, {"error": "stage_already_running"}); return
-        self.send_json(202, {"accepted": route})
+        stage_run_id = run_stage(route, payload)
+        if not stage_run_id: self.send_json(409, {"error": "stage_already_running"}); return
+        self.send_json(202, {"accepted": True, "stage": item[0], "stage_run_id": stage_run_id})
 
 
 def main() -> None:
