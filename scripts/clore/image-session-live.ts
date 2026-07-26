@@ -31,7 +31,7 @@ export async function runLiveImageSession(input: { taskIds: string[]; immutable:
     receipt.orderId = order.orderId; receipt.endpointHostname = order.hostname; receipt.timestamps.orderCreated = stamp(); persist(receipt);
     await waitForAgentIdle(order);
     receipt.sessionState = "running"; receipt.timestamps.agentReady = stamp(); persist(receipt);
-    for (const stage of ["environment", "gpu", "controller", "comfyui"] as const) { const result = await invokeStage(order, stage); if (result.status !== "succeeded") throw new Error(`${stage}_stage_failed:${sanitizedError(result.error)}`); receipt.timestamps[`${stage}:${result.stageRunId}`] = stamp(); persist(receipt); }
+    for (const stage of ["environment", "gpu", "controller", "comfyui"] as const) { (receipt as any).currentRemoteStage = stage; persist(receipt); const result = await invokeStage(order, stage); (receipt as any).currentStageRunId = result.stageRunId; if (result.status !== "succeeded") throw new Error(`${stage}_stage_failed:${sanitizedError(result.error)}`); receipt.timestamps[`${stage}:${result.stageRunId}`] = stamp(); persist(receipt); }
     const models = await installModelsOnce(order); receipt.modelStage = { state: models.status === "succeeded" ? "succeeded" : "failed", stageRunId: models.stageRunId }; persist(receipt); if (models.status !== "succeeded") throw new Error(`models_stage_failed:${sanitizedError(models.error)}`);
     for (const taskId of exact) {
       receipt.currentTaskId = taskId; persist(receipt);
