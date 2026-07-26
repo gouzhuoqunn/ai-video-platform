@@ -116,11 +116,51 @@ def request_upstream(url: str, method: str = "GET", body: bytes | None = None) -
         return 503, {}, json.dumps({"error": "upstream_unavailable", "detail": str(error)}).encode()
 
 
+def request_upstream_json(url: str, method: str, payload: object) -> tuple[int, dict[str, str], bytes]:
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return request_upstream(url, method, encoded)
+
+
 def json_payload(data: bytes) -> object:
     try:
         return json.loads(data.decode("utf-8")) if data else {}
     except json.JSONDecodeError:
         return {"error": "invalid_upstream_json"}
+
+
+def sanitize_upstream_value(value: object, depth: int = 0) -> object:
+    if depth > 5:
+        return "<truncated>"
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            name = str(key)
+            if any(marker in name.lower() for marker in ("prompt", "url", "token", "credential", "signature", "authorization", "cookie")):
+                result[name] = "<redacted>"
+            else:
+                result[name] = sanitize_upstream_value(item, depth + 1)
+        return result
+    if isinstance(value, list):
+        return [sanitize_upstream_value(item, depth + 1) for item in value[:32]]
+    if isinstance(value, str):
+        return sanitize_text(value, 1000)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return sanitize_text(value, 1000)
+
+
+def structured_comfy_prompt_error(status: int, upstream: object) -> dict[str, object]:
+    result: dict[str, object] = {"http_status": status, "upstream_error": sanitize_upstream_value(upstream)}
+    if isinstance(upstream, dict):
+        if "error" in upstream:
+            result["error"] = sanitize_upstream_value(upstream["error"])
+        if "node_errors" in upstream:
+            result["node_errors"] = sanitize_upstream_value(upstream["node_errors"])
+        for key in ("prompt_validation", "prompt_error", "validation_error"):
+            if key in upstream:
+                result["prompt_validation"] = sanitize_upstream_value(upstream[key])
+                break
+    return result
 
 
 def make_handler(state: ControllerState):
@@ -144,8 +184,7 @@ def make_handler(state: ControllerState):
             self.wfile.write(body)
 
         def proxy_json(self, path: str, method: str = "GET", body: object | None = None) -> None:
-            encoded = json.dumps(body).encode("utf-8") if body is not None else None
-            status, _headers, response = request_upstream(f"{state.comfy_base_url}{path}", method, encoded)
+            status, _headers, response = request_upstream_json(f"{state.comfy_base_url}{path}", method, body) if body is not None else request_upstream(f"{state.comfy_base_url}{path}", method)
             self.send_json(status, json_payload(response))
 
         def do_GET(self) -> None:
@@ -233,10 +272,10 @@ def make_handler(state: ControllerState):
                     return
                 job_id = str(payload.get("task_id") or uuid.uuid4())
                 workflow = build_text_workflow(job_id, options)
-                status, _headers, response = request_upstream(f"{state.comfy_base_url}/prompt", "POST", {"prompt": workflow, "client_id": job_id})
+                status, _headers, response = request_upstream_json(f"{state.comfy_base_url}/prompt", "POST", {"prompt": workflow, "client_id": job_id})
                 upstream = json_payload(response)
                 if status >= 300 or not isinstance(upstream, dict) or not upstream.get("prompt_id"):
-                    self.send_json(status, {"error": "comfy_prompt_failed", "upstream": upstream})
+                    self.send_json(status, {"error": "comfy_prompt_failed", "upstream": structured_comfy_prompt_error(status, upstream)})
                     return
                 state.jobs[job_id] = {"job_id": job_id, "task_id": payload.get("task_id"), "mode": "text_generation", "status": "generating", "prompt_id": upstream["prompt_id"], "metadata": workflow_metadata(options), "created_at": int(time.time())}
                 self.send_json(202, state.jobs[job_id])
