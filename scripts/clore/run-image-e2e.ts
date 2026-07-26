@@ -5,7 +5,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { claimImageTask, failImageTask, finalizeImageTask, readImageTask, renewImageTaskLease, type LocalImageTask, type LocalTaskStoreOptions } from "../../src/lib/image-generation/local-image-task-store";
+import { claimImageTask, failImageTask, finalizeImageTask, mutateImageTasks, readImageTask, renewImageTaskLease, type LocalImageTask, type LocalTaskStoreOptions } from "../../src/lib/image-generation/local-image-task-store";
 import { publishLocalImageArtifact, type LocalArtifactReference } from "../../src/lib/image-generation/local-image-artifacts";
 import { sanitizeImageModelPreflight, toAgentModelManifest, validateAgentModelManifestContract, verifyFiveImageModelSources } from "./image-model-preflight";
 import { runImageE2e, claimTokenHash, type ModelEntry, type SanitizedImageE2eSession } from "./image-e2e-coordinator";
@@ -44,12 +44,28 @@ function receiptWrite(value:FreshReceipt,receiptPath=RECEIPT_PATH){mkdirSync(pat
 export function freshRunRequiresManualRecovery(receipt: Pick<FreshReceipt, "taskId" | "inferenceState"> | null, taskId: string, taskStatus: string | undefined) { return receipt?.taskId === taskId && ["submitting", "accepted", "succeeded"].includes(receipt.inferenceState) && taskStatus !== "completed"; }
 function freshReceipt(taskId:string):FreshReceipt{return {schema:1,runId:randomBytes(12).toString("hex"),taskId,orderId:null,endpoint:null,currentStep:"prerental",inferenceState:"not_started",inferenceSubmitted:false,inferenceSucceeded:false,inferenceSubmittingAt:null,inferenceAcceptedAt:null,acceptedHttpStatus:null,inferenceCompletedAt:null,remoteArtifactAvailable:false,controllerPromptId:null,remoteArtifact:null,artifactDownloaded:false,localArtifactPublished:false,taskFinalized:false,uiVerified:false,orderCancelled:false,timestamps:{prerental:new Date().toISOString()},firstError:null}}
 export function isSafeFailedReceiptForFreshRun(receipt:FreshReceipt|null,taskId:string,taskStatus:string|undefined){
-  if (receipt?.taskId !== taskId || receipt.inferenceState !== "not_started" || receipt.inferenceSubmitted || receipt.inferenceSucceeded || receipt.taskFinalized || receipt.localArtifactPublished || receipt.artifactDownloaded || taskStatus !== "waiting_for_gpu") return false;
+  if (receipt?.taskId !== taskId || receipt.inferenceSucceeded || receipt.taskFinalized || receipt.localArtifactPublished || receipt.artifactDownloaded || receipt.remoteArtifactAvailable || taskStatus !== "waiting_for_gpu") return false;
   const preOrderFailure = receipt.orderId === null && receipt.endpoint === null;
   const cancelledPostOrderFailure = Boolean(receipt.orderId && receipt.orderCancelled);
-  return preOrderFailure || cancelledPostOrderFailure;
+  const safePreInferenceFailure = receipt.inferenceState === "not_started" && !receipt.inferenceSubmitted;
+  const safeControllerPromptFailure = receipt.inferenceState === "failed" && receipt.inferenceSubmitted && receipt.controllerPromptId === null && !receipt.remoteArtifact && Boolean(receipt.firstError?.includes("controller_generate_failed"));
+  return (safePreInferenceFailure || safeControllerPromptFailure) && (preOrderFailure || cancelledPostOrderFailure);
 }
 export async function prepareFreshReceipt(input:{taskId:string;taskStatus:string|undefined;activeOrderCount:()=>Promise<number>;receiptPath?:string;archiveDir?:string}){const receiptPath=input.receiptPath??RECEIPT_PATH;const archiveDir=input.archiveDir??RECEIPT_ARCHIVE_DIR;const previous=receiptRead(receiptPath);if(freshRunRequiresManualRecovery(previous,input.taskId,input.taskStatus))throw new Error("previous_inference_state_requires_manual_recovery");if(previous?.taskId===input.taskId){if(!isSafeFailedReceiptForFreshRun(previous,input.taskId,input.taskStatus))throw new Error("previous_receipt_not_safe_to_rotate");if(await input.activeOrderCount()!==0)throw new Error("previous_receipt_active_order_exists");mkdirSync(archiveDir,{recursive:true});const archivePath=path.join(archiveDir,`${previous.taskId}-${previous.runId}.json`);renameSync(receiptPath,archivePath)}const receipt=freshReceipt(input.taskId);receiptWrite(receipt,receiptPath);return receipt}
+
+/** Requeues only a canceled, artifact-free Controller prompt failure for one exact retry. */
+export function requeueSafeFailedExactImageTask(input:{taskId:string;receipt:FreshReceipt|null;activeOrderCount:number;options?:LocalTaskStoreOptions}){
+  if (input.activeOrderCount !== 0) throw new Error("safe_exact_retry_active_order_exists");
+  const receipt = input.receipt;
+  if (!receipt || receipt.taskId !== input.taskId || receipt.inferenceState !== "failed" || receipt.inferenceSucceeded || !receipt.inferenceSubmitted || receipt.controllerPromptId !== null || receipt.remoteArtifact || receipt.remoteArtifactAvailable || receipt.artifactDownloaded || receipt.localArtifactPublished || receipt.taskFinalized || !receipt.orderCancelled || !receipt.firstError?.includes("controller_generate_failed")) throw new Error("safe_exact_retry_receipt_not_eligible");
+  return mutateImageTasks((tasks) => {
+    const task = tasks.find((candidate) => candidate.id === input.taskId);
+    const error = task?.error as { retryable?: unknown; message?: unknown } | undefined;
+    if (!task || task.status !== "failed" || task.result || task.localClaim || error?.retryable !== true || !String(error.message ?? "").includes("controller_generate_failed")) throw new Error("safe_exact_retry_task_not_eligible");
+    task.status = "waiting_for_gpu"; task.updatedAt = new Date().toISOString(); task.attempts = Number(task.attempts ?? 0) + 1; delete task.error;
+    return { tasks, value: structuredClone(task) };
+  }, input.options);
+}
 
 export type ActiveOrderSnapshot = { orders: Awaited<ReturnType<typeof readLiveOrdersSummary>>; checkedAt: number };
 export type CreateRateLimitDiagnostic = { httpStatus: 429; retryAfterMs: number | null; code: number; message: string | null; attempt: number };
@@ -317,7 +333,7 @@ async function main() {
   if (process.argv.includes("--execute-fresh")) {
     const commit = argument("--immutable-commit"); const agent = argument("--agent-sha256"); const controller = argument("--controller-sha256"); const workflow = argument("--workflow-sha256");
     if (!commit || !agent || !controller || !workflow) throw new Error("immutable_commit_and_agent_hashes_required");
-    const task=readImageTask(taskId);const config={...loadCloreConfig(),targetGpu:"NVIDIA GeForce RTX 4090" as const,minGpuVramGb:24,maxGpuPricePerHour:MAX_HOURLY,orderType:"on-demand" as const};const initialOrderSnapshot:ActiveOrderSnapshot={orders:await readLiveOrdersSummary(config,{forceRefresh:true}),checkedAt:Date.now()};const receipt=await prepareFreshReceipt({taskId,taskStatus:task?.status,activeOrderCount:async()=>initialOrderSnapshot.orders.filter((item)=>item.active).length});ACTIVE_RECEIPT=receipt;
+    let task=readImageTask(taskId);const config={...loadCloreConfig(),targetGpu:"NVIDIA GeForce RTX 4090" as const,minGpuVramGb:24,maxGpuPricePerHour:MAX_HOURLY,orderType:"on-demand" as const};const initialOrderSnapshot:ActiveOrderSnapshot={orders:await readLiveOrdersSummary(config,{forceRefresh:true}),checkedAt:Date.now()};if(task?.status==="failed"){requeueSafeFailedExactImageTask({taskId,receipt:receiptRead(),activeOrderCount:initialOrderSnapshot.orders.filter((item)=>item.active).length});task=readImageTask(taskId)}const receipt=await prepareFreshReceipt({taskId,taskStatus:task?.status,activeOrderCount:async()=>initialOrderSnapshot.orders.filter((item)=>item.active).length});ACTIVE_RECEIPT=receipt;
     try{console.log(JSON.stringify(await runLive(taskId,false,commit,agent,controller,workflow,initialOrderSnapshot),null,2));receiptWrite({...ACTIVE_RECEIPT!,currentStep:"done",timestamps:{...ACTIVE_RECEIPT!.timestamps,done:new Date().toISOString()}})}catch(error){receiptWrite({...ACTIVE_RECEIPT!,currentStep:"failed",firstError:error instanceof Error?error.message.slice(0,800):"fresh_run_failed",timestamps:{...ACTIVE_RECEIPT!.timestamps,failed:new Date().toISOString()}});throw error}finally{ACTIVE_RECEIPT=null} return;
   }
   const preflight = await preflightExactLocalImageTask(taskId);

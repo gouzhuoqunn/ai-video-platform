@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { claimImageTask, readImageTask } from "../../src/lib/image-generation/local-image-task-store";
-import { createOrderWithRateLimit, freshRunRequiresManualRecovery, prepareFreshReceipt, persistAndFinalizeExactLocalTask, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, type FreshReceipt } from "./run-image-e2e";
+import { createOrderWithRateLimit, freshRunRequiresManualRecovery, prepareFreshReceipt, persistAndFinalizeExactLocalTask, preflightExactLocalImageTask, requeueSafeFailedExactImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, type FreshReceipt } from "./run-image-e2e";
 import { CloreRateLimitError } from "./client";
 
 const taskId = "723e4567-e89b-42d3-a456-426614174000";
@@ -50,6 +50,16 @@ async function main() {
     writeFileSync(receiptPath, JSON.stringify(preOrderReceipt), "utf8");
     await assert.rejects(() => prepareFreshReceipt({ taskId, taskStatus: "waiting_for_gpu", receiptPath, archiveDir, activeOrderCount: async () => 1 }), /previous_receipt_active_order_exists/);
 
+    const controllerFailure = { ...failedReceipt("failed"), firstError: "inference_stage_failed:controller_generate_failed:fixture", orderCancelled: true, controllerPromptId: null, remoteArtifact: null, remoteArtifactAvailable: false, artifactDownloaded: false, localArtifactPublished: false, taskFinalized: false };
+    writeFileSync(taskPath, JSON.stringify([{ ...task, status: "failed", attempts: 1, error: { retryable: true, message: "controller_generate_failed:fixture" } }]), "utf8");
+    const requeued = requeueSafeFailedExactImageTask({ taskId, receipt: controllerFailure, activeOrderCount: 0, options });
+    assert.equal(requeued.status, "waiting_for_gpu"); assert.equal(Number(requeued.attempts), 2);
+    assert.equal(readImageTask(taskId, options)?.status, "waiting_for_gpu");
+    assert.throws(() => requeueSafeFailedExactImageTask({ taskId, receipt: { ...controllerFailure, controllerPromptId: "ambiguous" }, activeOrderCount: 0, options }), /safe_exact_retry_receipt_not_eligible/);
+    writeFileSync(receiptPath, JSON.stringify(controllerFailure), "utf8");
+    const rotatedControllerFailure = await prepareFreshReceipt({ taskId, taskStatus: "waiting_for_gpu", receiptPath, archiveDir, activeOrderCount: async () => 0 });
+    assert.equal(rotatedControllerFailure.inferenceState, "not_started");
+
     const emptySnapshot = { orders: [], checkedAt: 0 };
     let firstCreateReconciliations = 0;
     await createOrderWithRateLimit({ serverId: "98682", createOnce: async () => ({ id: "created-first" }), reconcile: async () => { firstCreateReconciliations += 1; return emptySnapshot; } });
@@ -73,7 +83,7 @@ async function main() {
     heartbeat.assertHealthy(); heartbeat.stop();
     assert.equal(result.completed.status, "completed");
     assert.equal(readImageTask(taskId, options)?.result?.pngSha256, result.artifact.pngSha256);
-    console.log(JSON.stringify({ ok: true, preflight_does_not_claim: true, prior_submitting_blocks_fresh_provider_mutation: true, safe_failed_receipt_archived_and_rotated: true, safe_preorder_receipt_archived_and_rotated: true, active_order_blocks_preorder_rotation: true, single_snapshot_before_first_create: true, exact_429_retry_after_and_fallback: true, reconciled_order_adopted_without_second_create: true, second_429_stops_without_alternate: true, model_failure_leaves_task_unchanged: true, local_lease_heartbeat: true, persistence_and_exact_finalization: true }));
+    console.log(JSON.stringify({ ok: true, preflight_does_not_claim: true, prior_submitting_blocks_fresh_provider_mutation: true, safe_failed_receipt_archived_and_rotated: true, safe_preorder_receipt_archived_and_rotated: true, exact_safe_controller_failure_requeued_and_archived: true, ambiguous_prompt_failure_stays_blocked: true, active_order_blocks_preorder_rotation: true, single_snapshot_before_first_create: true, exact_429_retry_after_and_fallback: true, reconciled_order_adopted_without_second_create: true, second_429_stops_without_alternate: true, model_failure_leaves_task_unchanged: true, local_lease_heartbeat: true, persistence_and_exact_finalization: true }));
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 void main();
