@@ -112,13 +112,19 @@ export async function createOrderWithRateLimit(input: {
   }
 }
 function url(endpoint: string, part: string) { return `${endpoint.replace(/\/$/, "")}${part}`; }
-async function agentPostJson(endpoint: string, token: string, route: string, payload?: object) {
+export type AcceptedStage = { acceptedHttpStatus: 202; stage: string; stageRunId: string };
+function acceptedStage(route: string, status: number, body: Record<string, unknown>): AcceptedStage {
+  const stage = route.replace(/^\/stage\//, ""); const stageRunId = body.stage_run_id;
+  if (status !== 202 || body.accepted !== true || body.stage !== stage || typeof stageRunId !== "string" || !/^[a-f0-9]{8}-[a-f0-9-]{27}$/i.test(stageRunId)) throw new Error(`agent_stage_acceptance_invalid:${stage}`);
+  return { acceptedHttpStatus: 202, stage, stageRunId };
+}
+export async function agentPostJson(endpoint: string, token: string, route: string, payload?: object): Promise<AcceptedStage> {
   const response = await fetch(url(endpoint, route), { method: "POST", headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" }, body: payload === undefined ? undefined : JSON.stringify(payload) });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(`agent_post_http_${response.status}:${JSON.stringify(body).slice(0, 500)}`);
-  return body as Record<string, unknown>;
+  return acceptedStage(route, response.status, body as Record<string, unknown>);
 }
-export async function submitInferenceStage(endpoint:string,token:string,payload:object){const r=await fetch(url(endpoint,"/stage/inference"),{method:"POST",headers:{Authorization:`Bearer ${token}`,"content-type":"application/json"},body:JSON.stringify(payload)});if(r.status!==202)throw new Error(`inference_submit_http_${r.status}`);return {acceptedHttpStatus:202 as const}}
+export async function submitInferenceStage(endpoint:string,token:string,payload:object){return await agentPostJson(endpoint,token,"/stage/inference",payload)}
 
 export function resolveExactEligibleImageTask(taskId: string, options: LocalTaskStoreOptions = {}): EligibleImageTask {
   const task = readImageTask(taskId, options);
@@ -180,6 +186,7 @@ export type WaitForStageOptions = {
   endpoint: string;
   token: string;
   stage: string;
+  expectedStageRunId: string;
   timeoutMs: number;
   fetchImpl?: typeof fetch;
   now?: () => number;
@@ -209,8 +216,10 @@ export async function waitForStage(input: WaitForStageOptions) {
       if (status.ok) {
         consecutiveFailures = 0; outageStartedAt = null; healthProbed = false; lastSuccessfulStatusAt = timestamp();
         const stageRecord = (status.body.stages as Record<string, Record<string, unknown>> | undefined)?.[input.stage];
-        if (stageRecord?.status === "succeeded") return { status: "succeeded" as const, data: typeof stageRecord.data === "object" && stageRecord.data !== null ? stageRecord.data as Record<string, unknown> : undefined };
-        if (stageRecord?.status === "failed") return { status: "failed" as const, error: String(stageRecord.first_exact_failure ?? "agent_stage_failed"), data: typeof stageRecord.data === "object" && stageRecord.data !== null ? stageRecord.data as Record<string, unknown> : undefined };
+        // A same-name terminal record from a prior POST is stale evidence.  Only
+        // the immutable accepted stage_run_id may complete this invocation.
+        if (stageRecord?.stage_run_id === input.expectedStageRunId && stageRecord.status === "succeeded") return { status: "succeeded" as const, data: typeof stageRecord.data === "object" && stageRecord.data !== null ? stageRecord.data as Record<string, unknown> : undefined };
+        if (stageRecord?.stage_run_id === input.expectedStageRunId && stageRecord.status === "failed") return { status: "failed" as const, error: String(stageRecord.first_exact_failure ?? "agent_stage_failed"), data: typeof stageRecord.data === "object" && stageRecord.data !== null ? stageRecord.data as Record<string, unknown> : undefined };
         await sleepImpl(2_000); continue;
       }
       record(status.diagnostic);
@@ -247,7 +256,7 @@ export async function waitForStage(input: WaitForStageOptions) {
   return { status: "failed" as const, error: "agent_stage_timeout" };
 }
 
-export async function pollInferenceStage(endpoint:string,token:string,options: Partial<Omit<WaitForStageOptions, "endpoint" | "token" | "stage" | "timeoutMs">> = {}) { return await waitForStage({ endpoint, token, stage: "inference", timeoutMs: 25*60*1000, ...options }); }
+export async function pollInferenceStage(endpoint:string,token:string,expectedStageRunId:string,options: Partial<Omit<WaitForStageOptions, "endpoint" | "token" | "stage" | "expectedStageRunId" | "timeoutMs">> = {}) { return await waitForStage({ endpoint, token, stage: "inference", expectedStageRunId, timeoutMs: 25*60*1000, ...options }); }
 
 export async function getArtifactMetadataWithRetry(input: { endpoint: string; token: string; taskId: string; fetchImpl?: typeof fetch; onDiagnostic?: (diagnostic: AgentTransportDiagnostic) => void; sleepImpl?: (milliseconds: number) => Promise<void> }) {
   const sleepImpl = input.sleepImpl ?? sleep;
@@ -313,8 +322,8 @@ async function runLive(taskId: string, resume: boolean, commit: string, agentSha
     reconnect: async (orderId: string) => { activeOrderId = orderId; const order = (await readLiveOrdersSummary(config, { forceRefresh: true })).find((item) => item.orderId === orderId); return { active: Boolean(order?.active), endpoint: order?.controllerUrl ?? null }; },
     armWatchdog: async () => undefined, disarmWatchdog: async () => { const current = sessionRead(); if (current) writeLocalWatchdogArmState({ schemaVersion: 1, armed: false, sessionNonce: createSessionNonce(), serverId: selected?.serverId ?? "98682", orderType: "on-demand", currency: config.rentalCurrency, startingBalanceUsd: startingBalance, armedAt: new Date().toISOString(), drainingAt: new Date().toISOString(), hardDeadlineAt: new Date().toISOString(), hardBudgetUsd: MAX_TOTAL, budgetSafetyUsd: .05, emergencyStop: false }); },
     health: async (endpoint: string) => { const deadline = Date.now() + 5 * 60 * 1000; let last: { alive: boolean; currentStage: string; lastError: string | null } = { alive: false, currentStage: "", lastError: "health_not_reached" }; let attempt = 0; while (Date.now() < deadline) { attempt += 1; try { const result = await agentGetJsonWithRetry({ endpoint, token, route: "/healthz", validator: agentHealthResponse, stage: null, attempt }); if (!result.ok) { appendTransportDiagnostic(result.diagnostic); last.lastError = result.diagnostic.message; await sleep(5_000); continue; } last = { alive: result.body.alive === true, currentStage: String(result.body.current_stage ?? ""), lastError: result.body.last_error ? String(result.body.last_error) : null }; if (last.alive && last.currentStage === "idle" && !last.lastError) return last; } catch (error) { if (error instanceof AgentGetTerminalError) { appendTransportDiagnostic(error.diagnostic); last.lastError = error.message; break; } throw error; } await sleep(5_000); } return last; },
-    stage: async (endpoint: string, stage: "environment" | "gpu" | "controller" | "comfyui" | "models" | "inference", payload?: object) => { if(stage==="inference")throw new Error("legacy_combined_inference_forbidden"); await agentPostJson(endpoint, token, `/stage/${stage}`, payload); return await waitForStage({ endpoint, token, stage, timeoutMs: stage === "models" ? 3 * 60 * 60 * 1000 : 45 * 60 * 1000, onDiagnostic: appendTransportDiagnostic, reconcileExactOrder: async () => { if (!activeOrderId) return null; return Boolean((await readLiveOrdersSummary(config, { forceRefresh: true })).find((order) => order.orderId === activeOrderId)?.active); } }); },
-    submitInference: (endpoint:string,payload:object)=>submitInferenceStage(endpoint,token,payload),pollInference:(endpoint:string)=>pollInferenceStage(endpoint,token,{onDiagnostic:appendTransportDiagnostic,reconcileExactOrder:async()=>{if(!activeOrderId)return null;return Boolean((await readLiveOrdersSummary(config,{forceRefresh:true})).find((order)=>order.orderId===activeOrderId)?.active)}}),
+    stage: async (endpoint: string, stage: "environment" | "gpu" | "controller" | "comfyui" | "models" | "inference", payload?: object) => { if(stage==="inference")throw new Error("legacy_combined_inference_forbidden"); const accepted=await agentPostJson(endpoint, token, `/stage/${stage}`, payload); return await waitForStage({ endpoint, token, stage, expectedStageRunId:accepted.stageRunId, timeoutMs: stage === "models" ? 3 * 60 * 60 * 1000 : 45 * 60 * 1000, onDiagnostic: appendTransportDiagnostic, reconcileExactOrder: async () => { if (!activeOrderId) return null; return Boolean((await readLiveOrdersSummary(config, { forceRefresh: true })).find((order) => order.orderId === activeOrderId)?.active); } }); },
+    submitInference: (endpoint:string,payload:object)=>submitInferenceStage(endpoint,token,payload),pollInference:(endpoint:string,stageRunId:string)=>pollInferenceStage(endpoint,token,stageRunId,{onDiagnostic:appendTransportDiagnostic,reconcileExactOrder:async()=>{if(!activeOrderId)return null;return Boolean((await readLiveOrdersSummary(config,{forceRefresh:true})).find((order)=>order.orderId===activeOrderId)?.active)}}),
     inferenceReceipt:async(event,detail)=>{if(!ACTIVE_RECEIPT)throw new Error("fresh_receipt_missing");const now=new Date().toISOString();const base={...ACTIVE_RECEIPT,currentStep:`inference_${event}`,inferenceState:event,inferenceSubmitted:event!=="submitting",inferenceSucceeded:event==="succeeded",timestamps:{...ACTIVE_RECEIPT.timestamps,[`inference_${event}`]:now}};const next:FreshReceipt=event==="submitting"?{...base,inferenceSubmittingAt:now,inferenceAcceptedAt:null,acceptedHttpStatus:null,inferenceCompletedAt:null,remoteArtifactAvailable:false,controllerPromptId:null,inferenceFailure:null,remoteArtifact:null,firstError:null}:event==="accepted"?{...base,inferenceAcceptedAt:now,acceptedHttpStatus:detail?.acceptedHttpStatus===202?202:null}:event==="succeeded"?{...base,inferenceCompletedAt:now,remoteArtifactAvailable:Boolean(detail?.remoteArtifact),controllerPromptId:detail?.controllerPromptId??null,inferenceFailure:null,remoteArtifact:detail?.remoteArtifact??null}: {...base,inferenceCompletedAt:now,controllerPromptId:detail?.controllerPromptId??base.controllerPromptId,inferenceFailure:detail?.failure??null,firstError:detail?.error??"inference_failed"};receiptWrite(next);ACTIVE_RECEIPT=next},
     receiptEvent:async(event,detail)=>{if(!ACTIVE_RECEIPT)throw new Error("fresh_receipt_missing");const now=new Date().toISOString();let next:FreshReceipt={...ACTIVE_RECEIPT,timestamps:{...ACTIVE_RECEIPT.timestamps,[event]:now}};if(event==="artifact_downloaded")next={...next,currentStep:event,artifactDownloaded:true,remoteArtifactAvailable:Boolean(detail?.remoteArtifact),controllerPromptId:detail?.controllerPromptId??next.controllerPromptId,remoteArtifact:detail?.remoteArtifact??next.remoteArtifact};else if(event==="task_finalized")next={...next,currentStep:event,taskFinalized:true};else if(event==="ui_verified")next={...next,currentStep:event,uiVerified:true};else next={...next,currentStep:event,orderCancelled:true};receiptWrite(next);ACTIVE_RECEIPT=next},
     resolveModels: async () => toAgentModelManifest((await verifyFiveImageModelSources()).models).models as ModelEntry[],

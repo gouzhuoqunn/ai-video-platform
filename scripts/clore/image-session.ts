@@ -3,8 +3,8 @@ import path from "node:path";
 import type { LocalImageTask } from "../../src/lib/image-generation/local-image-task-store";
 import type { EligibleImageTask } from "./run-image-e2e";
 
-export const IMAGE_SESSION_LIMITS = { maxBatchSize: 8, maxHours: 4, maxHourlyUsd: .30, maxCostUsd: 1.50, idleMinutes: 15, normalGenerationMinutes: 12, cleanupMinutes: 5 } as const;
-export type ImageSessionPlan = { selectedTaskIds: string[]; count: number; eligibleCount: number; estimatedMaximumSessionHours: number; selectedGpuClass: "RTX 4090"; modelSetIdentity: "fluxed-up-10.2-five-file"; oneModelStageServesAll: boolean; projectedProviderCostCeilingUsd: number; activeOrderCount: number; executionEligible: boolean };
+export const IMAGE_SESSION_LIMITS = { maxBatchSize: 8, maxHours: 4, maxHourlyUsd: .30, maxCostUsd: 1.50, creationFeeUsd: .10, minimumWalletReserveUsd: 1.00, idleMinutes: 15, normalGenerationMinutes: 12, cleanupMinutes: 5 } as const;
+export type ImageSessionPlan = { selectedTaskIds: string[]; count: number; eligibleCount: number; estimatedMaximumSessionHours: number; selectedGpuClass: "RTX 4090"; modelSetIdentity: "fluxed-up-10.2-five-file"; oneModelStageServesAll: boolean; selectedHourlyUsd: number; projectedRentalCostUsd: number; projectedCreationFeeUsd: number; projectedProviderCostCeilingUsd: number; minimumWalletReserveUsd: number; walletBalanceUsd: number | null; activeOrderCount: number; executionEligible: boolean };
 export type ImageTaskTerminal = "completed" | "failed" | "not_started" | "ambiguous";
 export type ImageSessionReceipt = { schemaVersion: 1; sessionId: string; orderId: string | null; selectedTaskIds: string[]; currentTaskId: string | null; modelStage: "not_started" | "succeeded" | "failed"; tasks: Record<string, { terminal: ImageTaskTerminal; inferenceState: "not_started" | "submitting" | "accepted" | "succeeded" | "failed" }>; completedTaskCount: number; failedTaskCount: number; timestamps: Record<string, string>; idleDeadlineAt: string; hardDeadlineAt: string; cancellationState: "not_started" | "cancelled"; firstInfrastructureError: string | null };
 
@@ -19,18 +19,40 @@ export function isSessionEligibleTask(task: LocalImageTask): task is EligibleIma
     positiveInteger(task.steps) && Number(task.steps) >= 25 && Number(task.steps) <= 40 && Number.isFinite(task.cfg) && Number(task.cfg) >= 3.5 && Number(task.cfg) <= 5 && Number.isFinite(task.loraStrength) && Number(task.loraStrength) >= .6 && Number(task.loraStrength) <= 1.1 && Number.isInteger(task.seed) && Number(task.seed) >= 0 && Number(task.seed) <= 2_147_483_647 && (task.sampler === "Euler" || task.sampler === "FlowMatch") && !Number.isNaN(Date.parse(String(task.createdAt)));
 }
 
-export function planImageSession(tasks: readonly LocalImageTask[], input: { maxBatchSize?: number; activeOrderCount?: number } = {}): ImageSessionPlan {
+export function planImageSession(tasks: readonly LocalImageTask[], input: { maxBatchSize?: number; activeOrderCount?: number; selectedHourlyUsd?: number; walletBalanceUsd?: number | null } = {}): ImageSessionPlan {
   const maxBatchSize = Math.max(1, Math.min(IMAGE_SESSION_LIMITS.maxBatchSize, Math.floor(input.maxBatchSize ?? IMAGE_SESSION_LIMITS.maxBatchSize)));
   const eligible = tasks.filter(isSessionEligibleTask).sort((a, b) => taskPriority(a) - taskPriority(b) || Date.parse(String(a.createdAt)) - Date.parse(String(b.createdAt)) || a.id.localeCompare(b.id));
   const selected = eligible.slice(0, maxBatchSize); const hours = selected.length ? Math.min(IMAGE_SESSION_LIMITS.maxHours, .75 + selected.length * .35) : 0;
   const activeOrderCount = Math.max(0, Math.floor(input.activeOrderCount ?? 0));
-  return { selectedTaskIds: selected.map((task) => task.id), count: selected.length, eligibleCount: eligible.length, estimatedMaximumSessionHours: Number(hours.toFixed(2)), selectedGpuClass: "RTX 4090", modelSetIdentity: "fluxed-up-10.2-five-file", oneModelStageServesAll: selected.length > 0, projectedProviderCostCeilingUsd: Number(Math.min(IMAGE_SESSION_LIMITS.maxCostUsd, hours * IMAGE_SESSION_LIMITS.maxHourlyUsd).toFixed(2)), activeOrderCount, executionEligible: selected.length > 0 && activeOrderCount === 0 };
+  const selectedHourlyUsd = Number(input.selectedHourlyUsd ?? IMAGE_SESSION_LIMITS.maxHourlyUsd);
+  const projectedRentalCostUsd = Number((hours * selectedHourlyUsd).toFixed(2));
+  const projectedProviderCostCeilingUsd = Number((projectedRentalCostUsd + IMAGE_SESSION_LIMITS.creationFeeUsd).toFixed(2));
+  const walletBalanceUsd = input.walletBalanceUsd ?? null;
+  const executionEligible = selected.length > 0 && activeOrderCount === 0 && selectedHourlyUsd <= IMAGE_SESSION_LIMITS.maxHourlyUsd && projectedProviderCostCeilingUsd <= IMAGE_SESSION_LIMITS.maxCostUsd && (walletBalanceUsd === null || walletBalanceUsd - projectedProviderCostCeilingUsd >= IMAGE_SESSION_LIMITS.minimumWalletReserveUsd);
+  return { selectedTaskIds: selected.map((task) => task.id), count: selected.length, eligibleCount: eligible.length, estimatedMaximumSessionHours: Number(hours.toFixed(2)), selectedGpuClass: "RTX 4090", modelSetIdentity: "fluxed-up-10.2-five-file", oneModelStageServesAll: selected.length > 0, selectedHourlyUsd, projectedRentalCostUsd, projectedCreationFeeUsd: IMAGE_SESSION_LIMITS.creationFeeUsd, projectedProviderCostCeilingUsd, minimumWalletReserveUsd: IMAGE_SESSION_LIMITS.minimumWalletReserveUsd, walletBalanceUsd, activeOrderCount, executionEligible };
 }
 
 export function formatImageSessionPlanChinese(plan: ImageSessionPlan) {
   return [
     `可生成任务数量：${plan.eligibleCount}`, `本次选择任务数量：${plan.count}`, `预计使用的GPU：${plan.selectedGpuClass}`, `是否需要新租用：${plan.count > 0 && plan.activeOrderCount === 0 ? "是（仅计划）" : "否"}`,
     `预计最高费用：$${plan.projectedProviderCostCeilingUsd.toFixed(2)}`, `模型是否可共享：${plan.oneModelStageServesAll ? "是" : "否"}`, `当前是否存在活动订单：${plan.activeOrderCount > 0 ? "是" : "否"}`, `是否满足执行条件：${plan.executionEligible ? "是（仍需实时复核）" : "否"}`,
+  ].join("\n");
+}
+
+/** Cost-aware operator output; it deliberately contains no prompt or endpoint. */
+export function formatImageSessionCostPlanChinese(plan: ImageSessionPlan) {
+  return [
+    `可生成任务数量：${plan.eligibleCount}`,
+    `本次选择任务数量：${plan.count}`,
+    `预计使用的GPU：${plan.selectedGpuClass}`,
+    `是否需要新租用：${plan.count > 0 && plan.activeOrderCount === 0 ? "是（仅计划）" : "否"}`,
+    `预计租用费用：$${plan.projectedRentalCostUsd.toFixed(2)}`,
+    `预计创建费用：$${plan.projectedCreationFeeUsd.toFixed(2)}`,
+    `预计总费用：$${plan.projectedProviderCostCeilingUsd.toFixed(2)}`,
+    `执行后最低保留余额要求：$${plan.minimumWalletReserveUsd.toFixed(2)}`,
+    `模型是否可共享：${plan.oneModelStageServesAll ? "是" : "否"}`,
+    `当前是否存在活动订单：${plan.activeOrderCount > 0 ? "是" : "否"}`,
+    `是否满足执行条件：${plan.executionEligible ? "是（仍需实时复核）" : "否"}`,
   ].join("\n");
 }
 

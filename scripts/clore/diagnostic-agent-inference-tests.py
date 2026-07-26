@@ -34,7 +34,7 @@ def main():
     payload = {"task_id": TASK_ID, "mode": "text_generation", "prompt": "sensitive user input", "width": 768, "height": 768, "steps": 25, "cfg": 4.0, "lora_strength": 0.8, "seed": 1, "sampler": "Euler"}
     with tempfile.TemporaryDirectory(prefix="agent-inference-") as temp:
         agent.ROOT = Path(temp); agent.STATE_FILE = agent.ROOT / "state.json"; agent.ARTIFACT_DIR = agent.ROOT / "artifacts"
-        agent.STATE = {"alive": True, "started_at": None, "current_stage": "idle", "last_error": None, "stages": {}, "models": {role: {"status": "verified"} for role in agent.APPROVED_MODELS}}
+        agent.STATE = {"alive": True, "started_at": None, "current_stage": "idle", "current_stage_run_id": None, "last_error": None, "stages": {}, "models": {role: {"status": "verified"} for role in agent.APPROVED_MODELS}}
         original_request, original_open = agent.request_json, agent.urllib.request.urlopen
         def request(url, *_args, **_kwargs):
             if url.endswith("/healthz"): return 200, {"controller": "alive"}
@@ -44,14 +44,15 @@ def main():
             raise AssertionError(url)
         agent.request_json = request; agent.urllib.request.urlopen = lambda *_args, **_kwargs: Response(png(384, 384))
         try:
-            agent.begin("inference")
+            stage_run_id = str(agent.uuid.uuid4())
+            agent.begin("inference", stage_run_id)
             try: agent.stage_inference(payload)
-            except agent.StageFailure as error: agent.failed("inference", error, error.data)
+            except agent.StageFailure as error: agent.failed("inference", stage_run_id, error, error.data)
             else: raise AssertionError("384x384 result must fail")
         finally:
             agent.request_json, agent.urllib.request.urlopen = original_request, original_open
         record = agent.STATE["stages"]["inference"]
-        assert record["status"] == "failed" and agent.STATE["current_stage"] == "idle"
+        assert record["status"] == "failed" and record["stage_run_id"] == stage_run_id and agent.STATE["current_stage"] == "idle"
         data = record["data"]
         assert data["controller_job_id"] == "job-fixture" and data["controller_prompt_id"] == "prompt-fixture"
         assert data["requested_width"] == 768 and data["requested_height"] == 768

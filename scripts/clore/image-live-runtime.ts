@@ -1,0 +1,94 @@
+/** Shared live adapter for the restricted Agent.  Importing it has no provider side effects. */
+import { createHash, randomBytes } from "node:crypto";
+import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync, writeSync } from "node:fs";
+import path from "node:path";
+import { claimImageTask, failImageTask, readImageTask } from "../../src/lib/image-generation/local-image-task-store";
+import { type LocalArtifactReference } from "../../src/lib/image-generation/local-image-artifacts";
+import { loadCloreConfig } from "./config";
+import { cloreRequest, CloreApiError, sleep } from "./client";
+import { readLiveMarketplace, readLiveOrdersSummary, readWalletSummary } from "./live";
+import { normalizeCloreServer } from "./marketplace";
+import { createSessionNonce, isLocalWatchdogTaskInstalled, writeLocalWatchdogArmState } from "./watchdog-io";
+import { agentGetJsonWithRetry, agentHealthResponse, agentStatusResponse, agentArtifactMetadataResponse } from "./agent-get-transport";
+import { agentPostJson, buildPublicAgentBootstrap, createOrderWithRateLimit, getArtifactMetadataWithRetry, persistAndFinalizeExactLocalTask, pollInferenceStage, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, waitForStage, type AcceptedStage, type EligibleImageTask } from "./run-image-e2e";
+import { toAgentModelManifest, verifyFiveImageModelSources } from "./image-model-preflight";
+import { ensureLocalUi, verifyImageUi } from "./image-e2e-ui";
+import { IMAGE_SESSION_LIMITS, planImageSession, type ImageSessionPlan } from "./image-session";
+
+export type ImmutableRuntime = { commit: string; agentSha256: string; controllerSha256: string; workflowSha256: string };
+export type LiveSessionOrder = { orderId: string; endpoint: string; hostname: string; serverId: string; hourlyUsd: number; startingBalanceUsd: number; plan: ImageSessionPlan; token: string; tokenSha256: string; hardDeadlineAt: string };
+export type StageTerminal = { stageRunId: string; status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> };
+
+const MAX_HOURS = 4;
+const MAX_TOTAL = 1.50;
+const SESSION_SECRET_ROOT = path.join(process.cwd(), ".secrets", "diagnostics", "image-sessions");
+const fixedConfig = () => ({ ...loadCloreConfig(), targetGpu: "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: 24, maxGpuPricePerHour: IMAGE_SESSION_LIMITS.maxHourlyUsd, orderType: "on-demand" as const });
+const compact = (value: unknown) => String(value instanceof Error ? value.message : value).replace(/(bearer\s+)[^\s]+/gi, "$1<redacted>").replace(/([?&](?:signature|token|credential)[^=&]*=)[^&\s]+/gi, "$1<redacted>").slice(0, 700);
+const atomicJson = (file: string, value: unknown) => { mkdirSync(path.dirname(file), { recursive: true }); const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`; const fd = openSync(tmp, "w", 0o600); try { writeSync(fd, `${JSON.stringify(value, null, 2)}\n`); fsyncSync(fd); } finally { closeSync(fd); } renameSync(tmp, file); };
+
+export function sessionPaths(sessionId: string) { const root = path.join(SESSION_SECRET_ROOT, sessionId); return { root, token: path.join(root, "agent-token.txt"), taskReceipt: (taskId: string) => path.join(root, "tasks", `${taskId}.json`), sessionReceipt: path.join(process.cwd(), ".secrets", "clore-image-session-receipt.json") }; }
+export function writeSessionReceipt(value: Record<string, unknown>) { atomicJson(sessionPaths(String(value.sessionId)).sessionReceipt, value); }
+export function writeTaskReceipt(sessionId: string, taskId: string, value: Record<string, unknown>) { atomicJson(sessionPaths(sessionId).taskReceipt(taskId), value); }
+export function newSessionToken(sessionId: string) { const token = randomBytes(32).toString("base64url"); const file = sessionPaths(sessionId).token; mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, `${token}\n`, { mode: 0o600 }); return { token, sha256: createHash("sha256").update(token).digest("hex"), file }; }
+function exactTaskIds(taskIds: readonly string[]) { if (!taskIds.length || new Set(taskIds).size !== taskIds.length) throw new Error("image_session_exact_task_ids_required"); return taskIds.map((id) => resolveExactEligibleImageTask(id)); }
+
+/** Read-only prerequisites plus one explicit order creation.  No replacement order is attempted. */
+export async function createLiveSessionOrder(input: { sessionId: string; taskIds: string[]; immutable: ImmutableRuntime; execute: boolean }): Promise<LiveSessionOrder> {
+  if (!input.execute) throw new Error("image_session_execute_flag_required");
+  const config = fixedConfig();
+  const before = await readLiveOrdersSummary(config, { forceRefresh: true });
+  if (before.some((order) => order.active)) throw new Error("active_clore_order_exists");
+  const tasks = exactTaskIds(input.taskIds);
+  for (const task of tasks) await preflightExactLocalImageTask(task.id);
+  const market = await readLiveMarketplace(config, { forceRefresh: true });
+  const candidates = market.map((raw) => normalizeCloreServer(raw, config)).filter((item) => item.gpuNormalizedName === "NVIDIA GeForce RTX 4090" && item.orderType === "on-demand" && item.hostOnline !== false && item.priceUsdPerHour !== null && item.priceUsdPerHour <= IMAGE_SESSION_LIMITS.maxHourlyUsd && item.priceOriginalAmount !== null && item.priceOriginalUnit === "day");
+  const selected = candidates.find((item) => item.serverId === "98682") ?? null;
+  if (!selected?.priceUsdPerHour || !selected.priceOriginalAmount) throw new Error("preferred_rtx4090_98682_unavailable");
+  const wallet = await readWalletSummary(config, { forceRefresh: true });
+  const plan = planImageSession(tasks, { activeOrderCount: 0, selectedHourlyUsd: selected.priceUsdPerHour, walletBalanceUsd: wallet.availableUsdBalance });
+  if (!plan.executionEligible || wallet.availableUsdBalance === null || wallet.availableUsdBalance - plan.projectedProviderCostCeilingUsd < IMAGE_SESSION_LIMITS.minimumWalletReserveUsd) throw new Error("image_session_cost_or_wallet_guard_failed");
+  if (!isLocalWatchdogTaskInstalled()) throw new Error("local_watchdog_not_installed");
+  const token = newSessionToken(input.sessionId); const command = buildPublicAgentBootstrap({ ...input.immutable, tokenSha256: token.sha256 });
+  if (Buffer.byteLength(command, "utf8") >= 700) throw new Error("image_session_bootstrap_too_long");
+  const fresh = await readLiveOrdersSummary(config, { forceRefresh: true }); if (fresh.some((order) => order.active)) throw new Error("active_clore_order_exists");
+  const payload = { currency: config.rentalCurrency, image: "cloreai/jupyter:ubuntu24.04-v2", renting_server: Number(selected.serverId), type: "on-demand", ports: { "8080": "http" }, required_price: selected.priceOriginalAmount, command };
+  let created: unknown = null;
+  try { created = (await createOrderWithRateLimit({ serverId: selected.serverId, createOnce: () => cloreRequest(config, "/create_order", { method: "POST", body: JSON.stringify(payload) }, { maxNetworkRetries: 0, maxRateLimitRetries: 0 }), reconcile: async () => ({ orders: await readLiveOrdersSummary(config, { forceRefresh: true }) }) })).created; }
+  catch (error) { if (error instanceof CloreApiError && error.failure.code === 1) { const retryOrders = await readLiveOrdersSummary(config, { forceRefresh: true }); if (retryOrders.some((order) => order.active)) throw error; await sleep(60_000); created = (await createOrderWithRateLimit({ serverId: selected.serverId, createOnce: () => cloreRequest(config, "/create_order", { method: "POST", body: JSON.stringify(payload) }, { maxNetworkRetries: 0, maxRateLimitRetries: 0 }), reconcile: async () => ({ orders: await readLiveOrdersSummary(config, { forceRefresh: true }) }) })).created; } else throw error; }
+  const direct = created && typeof created === "object" ? String((created as Record<string, unknown>).id ?? (created as Record<string, unknown>).order_id ?? "") : "";
+  const active = await readLiveOrdersSummary(config, { forceRefresh: true }); const order = direct ? active.find((item) => item.orderId === direct) : active.filter((item) => item.active && item.serverId === selected.serverId)[0];
+  if (!order?.orderId) throw new Error("create_order_unreconciled");
+  const hardDeadlineAt = new Date(Date.now() + MAX_HOURS * 3_600_000).toISOString();
+  writeLocalWatchdogArmState({ schemaVersion: 1, armed: true, sessionNonce: createSessionNonce(), serverId: selected.serverId, orderType: "on-demand", currency: config.rentalCurrency, startingBalanceUsd: wallet.availableUsdBalance, armedAt: new Date().toISOString(), drainingAt: new Date(Date.parse(hardDeadlineAt) - 10 * 60_000).toISOString(), hardDeadlineAt, hardBudgetUsd: MAX_TOTAL, budgetSafetyUsd: .05, emergencyStop: false });
+  let endpoint = order.controllerUrl; const deadline = Date.now() + 10 * 60_000; while (!endpoint && Date.now() < deadline) { await sleep(10_000); endpoint = (await readLiveOrdersSummary(config, { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.controllerUrl ?? null; }
+  if (!endpoint) throw new Error("order_endpoint_not_published_within_timeout");
+  return { orderId: order.orderId, endpoint, hostname: new URL(endpoint).hostname, serverId: selected.serverId, hourlyUsd: selected.priceUsdPerHour, startingBalanceUsd: wallet.availableUsdBalance, plan, token: token.token, tokenSha256: token.sha256, hardDeadlineAt };
+}
+
+export async function waitForAgentIdle(order: LiveSessionOrder) { for (let attempt = 1; attempt <= 60; attempt += 1) { const result = await agentGetJsonWithRetry({ endpoint: order.endpoint, token: order.token, route: "/healthz", validator: agentHealthResponse, attempt }); if (result.ok && result.body.current_stage === "idle" && result.body.last_error === null) return; await sleep(5_000); } throw new Error("agent_health_not_ready"); }
+export async function invokeStage(order: LiveSessionOrder, stage: "environment" | "gpu" | "controller" | "comfyui" | "models", payload?: object): Promise<StageTerminal> { const accepted = await agentPostJson(order.endpoint, order.token, `/stage/${stage}`, payload); const terminal = await waitForStage({ endpoint: order.endpoint, token: order.token, stage, expectedStageRunId: accepted.stageRunId, timeoutMs: stage === "models" ? 3 * 60 * 60_000 : 45 * 60_000, reconcileExactOrder: async () => Boolean((await readLiveOrdersSummary(fixedConfig(), { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.active) }); return { stageRunId: accepted.stageRunId, ...terminal }; }
+export async function installModelsOnce(order: LiveSessionOrder) { const models = toAgentModelManifest((await verifyFiveImageModelSources()).models); return await invokeStage(order, "models", models); }
+export async function submitTaskInference(order: LiveSessionOrder, task: EligibleImageTask, receipt?: { submitting: () => void; accepted: (value: AcceptedStage) => void }): Promise<{ accepted: AcceptedStage; terminal: StageTerminal; artifact: LocalArtifactReference; controllerJobId: string | null; controllerPromptId: string | null }> {
+  const claim = claimImageTask(task.id, `clore-image-session-${process.pid}`, 10 * 60_000); const heartbeat = startImageTaskLeaseHeartbeat({ taskId: task.id, claimToken: claim.claimToken, leaseMs: 10 * 60_000 });
+  try {
+    heartbeat.assertHealthy(); const payload = { task_id: task.id, mode: "text_generation", prompt: task.prompt, width: task.width, height: task.height, steps: task.steps, cfg: task.cfg, lora_strength: task.loraStrength, seed: task.seed, sampler: task.sampler };
+    receipt?.submitting(); const accepted = await agentPostJson(order.endpoint, order.token, "/stage/inference", payload); receipt?.accepted(accepted);
+    const terminal = await pollInferenceStage(order.endpoint, order.token, accepted.stageRunId, { reconcileExactOrder: async () => Boolean((await readLiveOrdersSummary(fixedConfig(), { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.active) });
+    if (terminal.status !== "succeeded") throw new Error(`inference_stage_failed:${compact(terminal.error)}`);
+    const metadata = await getArtifactMetadataWithRetry({ endpoint: order.endpoint, token: order.token, taskId: task.id }); const image = await fetch(`${order.endpoint.replace(/\/$/, "")}/artifacts/${task.id}/image`, { headers: { Authorization: `Bearer ${order.token}` } }); const png = Buffer.from(await image.arrayBuffer());
+    if (!image.ok || createHash("sha256").update(png).digest("hex") !== metadata.sha256) throw new Error("remote_png_verification_failed");
+    const artifact = (await persistAndFinalizeExactLocalTask({ task, claimToken: claim.claimToken, png, remote: { generationDurationSeconds: Number(metadata.generation_duration_seconds), orderId: order.orderId, gpuModel: "RTX 4090", controllerPromptId: typeof metadata.controller_prompt_id === "string" ? metadata.controller_prompt_id : null } })).artifact;
+    const ui = await ensureLocalUi({}); try { await verifyImageUi({ taskId: task.id }); } finally { if (ui.started) ui.stop(); }
+    return { accepted, terminal: { stageRunId: accepted.stageRunId, ...terminal }, artifact, controllerJobId: typeof terminal.data?.controller_job_id === "string" ? terminal.data.controller_job_id : null, controllerPromptId: typeof terminal.data?.controller_prompt_id === "string" ? terminal.data.controller_prompt_id : null };
+  } catch (error) { failImageTask(task.id, claim.claimToken, compact(error)); throw error; } finally { heartbeat.stop(); }
+}
+
+/** Best-effort cleanup: each safety action runs even if an earlier network operation failed. */
+export async function cleanupLiveSession(order: Pick<LiveSessionOrder, "orderId" | "serverId" | "startingBalanceUsd">) {
+  const config = fixedConfig(); const errors: string[] = []; let cancellationState: "cancelled" | "reconciled_inactive" | "cancellation_failed" = "cancellation_failed";
+  try { await cloreRequest(config, "/cancel_order", { method: "POST", body: JSON.stringify({ id: order.orderId, issue: "image_session_complete_or_failed" }) }); cancellationState = "cancelled"; } catch (error) { errors.push(compact(error)); }
+  let zero = false; for (let attempt = 0; attempt < 2; attempt += 1) { try { const active = await readLiveOrdersSummary(config, { forceRefresh: true }); zero = !active.some((item) => item.active); if (!zero) errors.push("active_order_remains_after_cleanup"); } catch (error) { errors.push(compact(error)); } if (attempt === 0) await sleep(1_200); }
+  if (zero && cancellationState !== "cancelled") cancellationState = "reconciled_inactive";
+  try { writeLocalWatchdogArmState({ schemaVersion: 1, armed: false, sessionNonce: createSessionNonce(), serverId: order.serverId, orderType: "on-demand", currency: config.rentalCurrency, startingBalanceUsd: order.startingBalanceUsd, armedAt: new Date().toISOString(), drainingAt: new Date().toISOString(), hardDeadlineAt: new Date().toISOString(), hardBudgetUsd: MAX_TOTAL, budgetSafetyUsd: .05, emergencyStop: false }); } catch (error) { errors.push(compact(error)); }
+  return { cancellationState, zeroConfirmations: zero ? 2 : 0, cleanupErrors: errors };
+}

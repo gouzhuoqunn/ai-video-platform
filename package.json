@@ -10,6 +10,8 @@
     "clore:deployment-host-blacklist:test": "tsx scripts/clore/deployment-host-blacklist-tests.ts",
     "image:session:plan": "tsx scripts/clore/image-session-plan.ts",
     "image:session:simulate": "tsx scripts/clore/image-session-simulate.ts",
+    "image:session:seed-e2e": "tsx scripts/clore/image-session-seed-e2e.ts",
+    "image:session:execute": "tsx scripts/clore/image-session-execute.ts",
     "gpu:bootstrap-profile:test": "tsx scripts/clore/bootstrap-worker-profile-tests.ts",
     "build": "next build",
     "lint": "eslint .",
