@@ -8,6 +8,8 @@
     "dev:local": "cross-env NEXT_PUBLIC_APP_MODE=local_lab LOCAL_LAB_ENABLED=true next dev --hostname 127.0.0.1 --port 3000",
     "start:local": "cross-env NEXT_PUBLIC_APP_MODE=local_lab LOCAL_LAB_ENABLED=true next start --hostname 127.0.0.1 --port 3000",
     "clore:deployment-host-blacklist:test": "tsx scripts/clore/deployment-host-blacklist-tests.ts",
+    "image:session:plan": "tsx scripts/clore/image-session-plan.ts",
+    "image:session:simulate": "tsx scripts/clore/image-session-simulate.ts",
     "gpu:bootstrap-profile:test": "tsx scripts/clore/bootstrap-worker-profile-tests.ts",
     "build": "next build",
     "lint": "eslint .",

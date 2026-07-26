@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "productBaselineCommit": "c9d0a3392cd1dbbaacb7b3d01cdf906c509d6aaf",
+  "runtime": {
+    "agentSha256": "5ca7af58319b048ad3d79836db251207ee72dd0e6ed91d756833969e6a55d4cd",
+    "controllerSha256": "96569eb5eee895f974d7b8304bb15f3b38e8f806115aae90f06bf0f8b927563e",
+    "workflowSha256": "e5b3e4cc7f347888f3231a82068d746740d5cb575905351ac4c7949d4b1cdd0d"
+  },
+  "task": {
+    "id": "eefc2b5b-5f25-4d82-aeeb-3b8ff501a1a0",
+    "inferencePosts": 1,
+    "finalStatus": "completed",
+    "attempts": 3,
+    "artifactRelativeDir": "2026-07-26/eefc2b5b-5f25-4d82-aeeb-3b8ff501a1a0"
+  },
+  "models": [
+    { "role": "transformer", "filename": "fluxedUpFluxNSFW_102BF16.safetensors", "sha256": "92efbd0f58900ab899fecc80b143eba332f0079faa9749f989f23521088c6165" },
+    { "role": "lora", "filename": "aidmaNSFWunlock-FLUX-V0.2.safetensors", "sha256": "7d3408f4a7b7890f470c1cce7f7255b6d8e03ea770a2829066c1ce41145562ec" },
+    { "role": "vae", "filename": "ae.safetensors", "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38" },
+    { "role": "clip_l", "filename": "clip_l.safetensors", "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd" },
+    { "role": "t5", "filename": "t5xxl_fp8_e4m3fn_scaled.safetensors", "sha256": "a498f0485dc9536735258018417c3fd7758dc3bccc0a645feaa472b34955557a" }
+  ],
+  "png": { "width": 768, "height": 768, "bytes": 677412, "sha256": "b87fb7e844105473d30f6817c07372878cbaca4ce464954b485ff46ef7d16752" },
+  "thumbnail": { "width": 512, "height": 512, "bytes": 13498 },
+  "browserVerified": true,
+  "activeOrderCount": 0
+}
