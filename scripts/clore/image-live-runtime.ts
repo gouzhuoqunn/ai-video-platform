@@ -2,14 +2,14 @@
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
-import { claimImageTask, failImageTask, readImageTask } from "../../src/lib/image-generation/local-image-task-store";
+import { claimImageTask, failImageTask } from "../../src/lib/image-generation/local-image-task-store";
 import { type LocalArtifactReference } from "../../src/lib/image-generation/local-image-artifacts";
 import { loadCloreConfig } from "./config";
 import { cloreRequest, CloreApiError, sleep } from "./client";
 import { readLiveMarketplace, readLiveOrdersSummary, readWalletSummary } from "./live";
 import { normalizeCloreServer } from "./marketplace";
 import { createSessionNonce, isLocalWatchdogTaskInstalled, writeLocalWatchdogArmState } from "./watchdog-io";
-import { agentGetJsonWithRetry, agentHealthResponse, agentStatusResponse, agentArtifactMetadataResponse } from "./agent-get-transport";
+import { agentGetJsonWithRetry, agentHealthResponse } from "./agent-get-transport";
 import { agentPostJson, buildPublicAgentBootstrap, createOrderWithRateLimit, getArtifactMetadataWithRetry, persistAndFinalizeExactLocalTask, pollInferenceStage, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, waitForStage, type AcceptedStage, type EligibleImageTask } from "./run-image-e2e";
 import { toAgentModelManifest, verifyFiveImageModelSources } from "./image-model-preflight";
 import { ensureLocalUi, verifyImageUi } from "./image-e2e-ui";
@@ -73,8 +73,9 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
 export async function waitForAgentIdle(order: LiveSessionOrder) { for (let attempt = 1; attempt <= 60; attempt += 1) { const result = await agentGetJsonWithRetry({ endpoint: order.endpoint, token: order.token, route: "/healthz", validator: agentHealthResponse, attempt }); if (result.ok && result.body.current_stage === "idle" && result.body.last_error === null) return; await sleep(5_000); } throw new Error("agent_health_not_ready"); }
 export async function invokeStage(order: LiveSessionOrder, stage: "environment" | "gpu" | "controller" | "comfyui" | "models", payload?: object): Promise<StageTerminal> { const accepted = await agentPostJson(order.endpoint, order.token, `/stage/${stage}`, payload); const terminal = await waitForStage({ endpoint: order.endpoint, token: order.token, stage, expectedStageRunId: accepted.stageRunId, timeoutMs: stage === "models" ? 3 * 60 * 60_000 : 45 * 60_000, reconcileExactOrder: async () => Boolean((await readLiveOrdersSummary(fixedConfig(), { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.active) }); return { stageRunId: accepted.stageRunId, ...terminal }; }
 export async function installModelsOnce(order: LiveSessionOrder) { const models = toAgentModelManifest((await verifyFiveImageModelSources()).models); return await invokeStage(order, "models", models); }
-export async function submitTaskInference(order: LiveSessionOrder, task: EligibleImageTask, receipt?: { submitting: () => void; accepted: (value: AcceptedStage) => void }): Promise<{ accepted: AcceptedStage; terminal: StageTerminal; artifact: LocalArtifactReference; controllerJobId: string | null; controllerPromptId: string | null }> {
+export async function submitTaskInference(order: LiveSessionOrder, task: EligibleImageTask, receipt?: { submitting: () => void; accepted: (value: AcceptedStage) => void }): Promise<{ accepted: AcceptedStage; terminal: StageTerminal; artifact: LocalArtifactReference; controllerJobId: string | null; controllerPromptId: string | null; uiVerified: boolean; uiVerificationError: string | null }> {
   const claim = claimImageTask(task.id, `clore-image-session-${process.pid}`, 10 * 60_000); const heartbeat = startImageTaskLeaseHeartbeat({ taskId: task.id, claimToken: claim.claimToken, leaseMs: 10 * 60_000 });
+  let finalized = false;
   try {
     heartbeat.assertHealthy(); const payload = { task_id: task.id, mode: "text_generation", prompt: task.prompt, width: task.width, height: task.height, steps: task.steps, cfg: task.cfg, lora_strength: task.loraStrength, seed: task.seed, sampler: task.sampler };
     receipt?.submitting(); const accepted = await agentPostJson(order.endpoint, order.token, "/stage/inference", payload); receipt?.accepted(accepted);
@@ -83,9 +84,11 @@ export async function submitTaskInference(order: LiveSessionOrder, task: Eligibl
     const metadata = await getArtifactMetadataWithRetry({ endpoint: order.endpoint, token: order.token, taskId: task.id }); const image = await fetch(`${order.endpoint.replace(/\/$/, "")}/artifacts/${task.id}/image`, { headers: { Authorization: `Bearer ${order.token}` } }); const png = Buffer.from(await image.arrayBuffer());
     if (!image.ok || createHash("sha256").update(png).digest("hex") !== metadata.sha256) throw new Error("remote_png_verification_failed");
     const artifact = (await persistAndFinalizeExactLocalTask({ task, claimToken: claim.claimToken, png, remote: { generationDurationSeconds: Number(metadata.generation_duration_seconds), orderId: order.orderId, gpuModel: "RTX 4090", controllerPromptId: typeof metadata.controller_prompt_id === "string" ? metadata.controller_prompt_id : null } })).artifact;
-    const ui = await ensureLocalUi({}); try { await verifyImageUi({ taskId: task.id }); } finally { if (ui.started) ui.stop(); }
-    return { accepted, terminal: { stageRunId: accepted.stageRunId, ...terminal }, artifact, controllerJobId: typeof terminal.data?.controller_job_id === "string" ? terminal.data.controller_job_id : null, controllerPromptId: typeof terminal.data?.controller_prompt_id === "string" ? terminal.data.controller_prompt_id : null };
-  } catch (error) { failImageTask(task.id, claim.claimToken, compact(error)); throw error; } finally { heartbeat.stop(); }
+    finalized = true;
+    let uiVerified = true; let uiVerificationError: string | null = null;
+    try { const ui = await ensureLocalUi({}); try { await verifyImageUi({ taskId: task.id }); } finally { if (ui.started) ui.stop(); } } catch (error) { uiVerified = false; uiVerificationError = compact(error); }
+    return { accepted, terminal: { stageRunId: accepted.stageRunId, ...terminal }, artifact, controllerJobId: typeof terminal.data?.controller_job_id === "string" ? terminal.data.controller_job_id : null, controllerPromptId: typeof terminal.data?.controller_prompt_id === "string" ? terminal.data.controller_prompt_id : null, uiVerified, uiVerificationError };
+  } catch (error) { if (!finalized) { try { failImageTask(task.id, claim.claimToken, compact(error)); } catch { /* Preserve the primary inference error. */ } } throw error; } finally { heartbeat.stop(); }
 }
 
 /** Best-effort cleanup: each safety action runs even if an earlier network operation failed. */
@@ -94,6 +97,7 @@ export async function cleanupLiveSession(order: Pick<LiveSessionOrder, "orderId"
   try { await cloreRequest(config, "/cancel_order", { method: "POST", body: JSON.stringify({ id: order.orderId, issue: "image_session_complete_or_failed" }) }); cancellationState = "cancelled"; } catch (error) { errors.push(compact(error)); }
   let zero = false; for (let attempt = 0; attempt < 2; attempt += 1) { try { const active = await readLiveOrdersSummary(config, { forceRefresh: true }); zero = !active.some((item) => item.active); if (!zero) errors.push("active_order_remains_after_cleanup"); } catch (error) { errors.push(compact(error)); } if (attempt === 0) await sleep(1_200); }
   if (zero && cancellationState !== "cancelled") cancellationState = "reconciled_inactive";
-  try { writeLocalWatchdogArmState({ schemaVersion: 1, armed: false, sessionNonce: createSessionNonce(), serverId: order.serverId, orderType: "on-demand", currency: config.rentalCurrency, startingBalanceUsd: order.startingBalanceUsd, armedAt: new Date().toISOString(), drainingAt: new Date().toISOString(), hardDeadlineAt: new Date().toISOString(), hardBudgetUsd: MAX_TOTAL, budgetSafetyUsd: .05, emergencyStop: false }); } catch (error) { errors.push(compact(error)); }
-  return { cancellationState, zeroConfirmations: zero ? 2 : 0, cleanupErrors: errors };
+  let watchdogDisarmed = false;
+  try { writeLocalWatchdogArmState({ schemaVersion: 1, armed: false, sessionNonce: createSessionNonce(), serverId: order.serverId, orderType: "on-demand", currency: config.rentalCurrency, startingBalanceUsd: order.startingBalanceUsd, armedAt: new Date().toISOString(), drainingAt: new Date().toISOString(), hardDeadlineAt: new Date().toISOString(), hardBudgetUsd: MAX_TOTAL, budgetSafetyUsd: .05, emergencyStop: false }); watchdogDisarmed = true; } catch (error) { errors.push(compact(error)); }
+  return { cancellationState, zeroConfirmations: zero ? 2 : 0, watchdogDisarmed, cleanupErrors: errors };
 }

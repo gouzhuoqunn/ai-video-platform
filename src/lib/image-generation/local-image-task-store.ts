@@ -152,6 +152,20 @@ export async function finalizeImageTask(taskId: string, claimToken: string, arti
   }, options);
 }
 
+/** Recover only a locally finalized task whose existing artifact still verifies byte-for-byte. */
+export async function recoverCompletedImageTaskFromVerifiedArtifact(taskId: string, options: LocalTaskStoreOptions = {}) {
+  const id = assertTaskId(taskId);
+  const current = readImageTask(id, options);
+  if (!current || !current.result || !current.finalizedClaimTokenHash) throw new Error("local_task_recovery_requires_finalized_artifact");
+  const verified = await verifyPublishedLocalImageArtifact({ taskId: id, artifact: current.result, root: options.artifactRoot });
+  return mutateImageTasks((tasks) => {
+    const task = tasks.find((candidate) => candidate.id === id);
+    if (!task || !task.result || !task.finalizedClaimTokenHash || task.result.pngSha256 !== verified.pngSha256 || task.result.relativeDir !== verified.relativeDir) throw new Error("local_task_recovery_state_changed");
+    if (task.status !== "completed") { task.status = "completed"; task.updatedAt = now(options); delete task.localClaim; delete task.error; }
+    return { tasks, value: structuredClone(task) };
+  }, options);
+}
+
 export function failImageTask(taskId: string, claimToken: string, error: string, options: LocalTaskStoreOptions = {}) {
   const id = assertTaskId(taskId);
   return mutateImageTasks((tasks) => {
