@@ -31,6 +31,7 @@ export type InferenceReceiptDetail = {
   acceptedHttpStatus?: number;
   error?: string;
   controllerPromptId?: string | null;
+  failure?: Record<string, unknown>;
   remoteArtifact?: Omit<NonNullable<SanitizedImageE2eSession["remoteArtifact"]>, "controllerPromptId">;
 };
 export type ReceiptEvent = "artifact_downloaded" | "task_finalized" | "ui_verified" | "order_cancelled";
@@ -98,6 +99,12 @@ function inferenceReceiptDetail(data: Record<string, unknown> | undefined): Infe
     controllerPromptId: typeof data.controller_prompt_id === "string" ? data.controller_prompt_id.slice(0, 200) : null,
     remoteArtifact,
   };
+}
+
+function inferenceFailureReceiptDetail(data: Record<string, unknown> | undefined): InferenceReceiptDetail {
+  const allowed = ["code", "controller_job_id", "controller_prompt_id", "requested_width", "requested_height", "actual_width", "actual_height", "png_byte_size", "png_sha256"];
+  const failure = Object.fromEntries(allowed.flatMap((key) => data && key in data ? [[key, data[key]]] : []));
+  return { controllerPromptId: typeof failure.controller_prompt_id === "string" ? failure.controller_prompt_id.slice(0, 200) : null, failure };
 }
 
 async function requiredStage(deps: CoordinatorDeps, session: SanitizedImageE2eSession, endpoint: string, name: "environment" | "gpu" | "controller" | "comfyui", payload?: object) {
@@ -168,7 +175,7 @@ export async function runImageE2e(input: { taskId: string; immutableCommit: stri
     await deps.inferenceReceipt?.("accepted", { acceptedHttpStatus: accepted.acceptedHttpStatus });
     const inference = await deps.pollInference(session.endpoint);
     session.stages.inference = inference.status; deps.persist(session);
-    if (inference.status !== "succeeded") { await deps.inferenceReceipt?.("failed", { error: clean(inference.error ?? "unknown") }); throw new Error(`inference_stage_failed:${clean(inference.error ?? "unknown")}`); }
+    if (inference.status !== "succeeded") { await deps.inferenceReceipt?.("failed", { error: clean(inference.error ?? "unknown"), ...inferenceFailureReceiptDetail(inference.data) }); throw new Error(`inference_stage_failed:${clean(inference.error ?? "unknown")}`); }
     await deps.inferenceReceipt?.("succeeded", inferenceReceiptDetail(inference.data));
     preserveRemoteArtifact = true;
     session = mark(deps, session, "INFERENCE");
