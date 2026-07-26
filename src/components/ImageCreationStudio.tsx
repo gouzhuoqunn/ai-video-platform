@@ -1,479 +1,108 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { formatHourlyPrice, safeFixed } from "@/lib/image-generation/formatters";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { groupImageTasks, type GroupableImageTask, type ImageTaskGroup } from "@/lib/image-generation/image-task-groups";
+import { safeFixed } from "@/lib/image-generation/formatters";
 
-type PersistedImageResult = {
-  imagePath?: string;
-  thumbnailPath?: string;
-  sha256?: string;
-  width: number;
-  height: number;
-  metadataPath?: string;
-  persistedAt?: string;
-  relativeDir?: string;
-  pngSha256?: string;
-  pngBytes?: number;
-  completedAt?: string;
+type Result = { width?: number; height?: number; completedAt?: string; persistedAt?: string; pngSha256?: string; sha256?: string; relativeDir?: string };
+type Task = GroupableImageTask & {
+  referenceImage?: string | null; steps?: number | string | null; cfg?: number | string | null; loraStrength?: number | string | null;
+  sampler?: string | null; seed?: number; gpuClass?: "rtx4090" | "rtx5090" | null; result?: Result;
 };
-
-type Task = {
-  id: string;
-  prompt?: string;
-  referenceImage?: string | null;
-  mode?: "text_generation" | "kontext_edit";
-  steps?: number | string | null;
-  loraStrength?: number | string | null;
-  cfg?: number | string | null;
-  sampler?: "Euler" | "FlowMatch" | string | null;
-  width?: number | string | null;
-  height?: number | string | null;
-  gpuClass?: "rtx4090" | "rtx5090" | null;
-  badge?: "低" | "高" | string;
-  status?: string;
-  attempts?: number;
-  result?: PersistedImageResult;
-};
-
-type Runner = {
-  state?: "idle" | "running" | "failed" | "completed" | "cancelling" | string;
-  stage?: string;
-  frozenTaskIds?: string[];
-  gpuClass?: "rtx4090" | "rtx5090" | null;
-  maxHourlyPrice?: number | string | null;
-  currentTaskIndex?: number | null;
-  currentModel?: string | null;
-  promptSummary?: string | null;
-  startedAt?: string | null;
-  updatedAt?: string | null;
-  host?: {
-    gpu?: string | null;
-    priceHourly?: number | string | null;
-    serverId?: string | null;
-    orderId?: string | null;
-    vram?: string | null;
-    cpu?: string | null;
-    ram?: string | null;
-    disk?: string | null;
-    network?: string | null;
-    location?: string | null;
-    runtimeDigest?: string | null;
-    httpState?: string | null;
-    sshDiagnostic?: string | null;
-    orderStatus?: string | null;
-    deploymentState?: string | null;
-    clorePorts?: string[] | null;
-    cloreHttpUrls?: string[] | null;
-    controllerUrl?: string | null;
-    selectedControllerUrl?: string | null;
-    healthUrl?: string | null;
-    endpointSource?: string | null;
-    rawHttpPub?: string | null;
-    httpExternalPort?: number | string | null;
-    lastHealthStatus?: number | string | null;
-    lastHealthError?: string | null;
-    readinessElapsedSeconds?: number | string | null;
-    lastPollAt?: string | null;
-    message?: string | null;
-    lastCreateOrderError?: string | null;
-    lastCreateOrderTechnicalCause?: string | null;
-    createOrderAttempts?: Record<string, unknown>[] | null;
-  } | null;
-  error?: {
-    stage?: string;
-    message?: string;
-    at?: string;
-    cancellationError?: string;
-    billingRisk?: string;
-    operation?: string;
-    method?: string;
-    targetHost?: string;
-    targetPath?: string;
-    classification?: string;
-    technicalCause?: string;
-  } | null;
-  blocker?: string | null;
-};
-
-type StudioResponse = { tasks?: Task[]; runner?: Runner; executionReady?: boolean; maxHourlyPrice?: number };
+type Runner = { state?: string; stage?: string; frozenTaskIds?: string[]; currentTaskIndex?: number | null; host?: { orderId?: string | null; serverId?: string | null; gpu?: string | null; priceHourly?: number | null; controllerUrl?: string | null } | null; error?: { message?: string } | null };
+type Response = { tasks?: Task[]; runner?: Runner; executionReady?: boolean };
+type Settings = { steps: number; loraStrength: number; cfg: number; sampler: "Euler" | "FlowMatch" };
 type Point = [number, number];
 
-const initialSettings: { steps: number; loraStrength: number; cfg: number; sampler: "Euler" | "FlowMatch" } = { steps: 30, loraStrength: 0.8, cfg: 4, sampler: "FlowMatch" };
+const initialSettings: Settings = { steps: 30, loraStrength: 0.8, cfg: 4, sampler: "FlowMatch" };
 const cells = Array.from({ length: 64 }, (_, index) => [index % 8, Math.floor(index / 8)] as Point);
-const panelStorageKey = "image-studio-gpu-panel-open";
+const tabKey = "image-studio-selected-tab";
+const countKey = "image-studio-generation-count";
 
-function numberOrFallback(value: unknown, fallback: number) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
+function validCount(value: string | number) {
+  const count = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(count) && count >= 1 ? count : null;
 }
-
 function rectangle(start: Point, end: Point) {
-  const left = Math.min(start[0], end[0]);
-  const top = Math.min(start[1], end[1]);
-  const widthCells = Math.max(3, Math.abs(end[0] - start[0]) + 1);
-  const heightCells = Math.max(3, Math.abs(end[1] - start[1]) + 1);
+  const left = Math.min(start[0], end[0]); const top = Math.min(start[1], end[1]);
+  const widthCells = Math.max(3, Math.abs(end[0] - start[0]) + 1); const heightCells = Math.max(3, Math.abs(end[1] - start[1]) + 1);
   return { left, top, right: left + widthCells - 1, bottom: top + heightCells - 1, width: widthCells * 256, height: heightCells * 256 };
 }
+function display(value: string | undefined | null) { return value ? new Date(value).toLocaleString() : "—"; }
+function title(group: ImageTaskGroup<Task>) { return group.title || "未命名图像组"; }
 
-function className(gpuClass: "rtx4090" | "rtx5090" | null | undefined) {
-  return gpuClass === "rtx5090" ? "RTX 5090 · 高" : "RTX 4090 · 低";
+export function ImageStudioNavigation({ tab, onChange }: { tab: "prompt" | "results"; onChange: (tab: "prompt" | "results") => void }) {
+  return <nav className="flex gap-2 border-b border-stone-700 px-4 pt-4" aria-label="图像工作区导航">
+    <button type="button" aria-pressed={tab === "prompt"} onClick={() => onChange("prompt")} className={`rounded-t-lg px-4 py-2 text-sm ${tab === "prompt" ? "bg-indigo-500 text-white" : "bg-stone-800 text-stone-300"}`}>提示词</button>
+    <button type="button" aria-pressed={tab === "results"} onClick={() => onChange("results")} className={`rounded-t-lg px-4 py-2 text-sm ${tab === "results" ? "bg-indigo-500 text-white" : "bg-stone-800 text-stone-300"}`}>成果</button>
+  </nav>;
 }
 
-function elapsed(startedAt: string | null | undefined) {
-  if (!startedAt) return "—";
-  const timestamp = new Date(startedAt).getTime();
-  if (!Number.isFinite(timestamp)) return "—";
-  return `${Math.max(0, Math.floor((Date.now() - timestamp) / 1000 / 60))} 分钟`;
+function ComputerPanel({ tasks, runner }: { tasks: Task[]; runner: Runner | null }) {
+  return <aside className="h-fit rounded-2xl border border-stone-700 bg-stone-900 p-4 lg:sticky lg:top-4" aria-label="当前电脑情况">
+    <h2 className="text-lg font-semibold">当前电脑情况</h2>
+    <p className="mt-2 text-sm text-stone-300">GPU / 运行环境：{runner?.state ?? "空闲"}</p>
+    <p className="mt-1 text-xs text-stone-400">阶段：{runner?.stage ?? "当前未租用显卡"}</p>
+    <dl className="mt-4 grid grid-cols-2 gap-2 text-xs"><dt>待处理</dt><dd>{tasks.filter((task) => task.status !== "completed").length}</dd><dt>已完成</dt><dd>{tasks.filter((task) => task.status === "completed").length}</dd><dt>订单</dt><dd>{runner?.host?.orderId ?? "无"}</dd><dt>主机</dt><dd>{runner?.host?.serverId ?? "—"}</dd></dl>
+    {runner?.error?.message ? <p className="mt-4 rounded bg-rose-500/10 p-2 text-xs text-rose-200">{runner.error.message}</p> : null}
+  </aside>;
 }
 
-function displayDate(value: string | null | undefined) {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString() : "—";
+export function ActiveImageTaskRail({ groups }: { groups: ImageTaskGroup<Task>[] }) {
+  return <aside className="rounded-2xl border border-stone-700 bg-stone-900 p-4" aria-label="活动任务组">
+    <h2 className="font-semibold">活动任务组</h2><p className="mb-3 text-xs text-stone-400">仅显示仍在执行流程中的图像组</p>
+    <div className="space-y-3">{groups.length ? groups.map((group) => {
+      const generating = group.tasks.find((task) => task.status === "generating"); const representative = group.tasks[0];
+      return <article key={group.id} className="rounded-xl border border-stone-700 p-3 text-xs"><b>{title(group)}</b><p className="mt-1 text-stone-400">{representative?.width} × {representative?.height}{representative?.referenceImage ? " · 有参考图" : ""}</p><p className="mt-2 text-emerald-300">已完成 {group.completedCount} / {group.requestedCount}</p><p className="text-stone-300">待处理 {group.pendingCount} · 生成中 {group.generatingCount} · 失败 {group.failedCount}</p>{generating ? <p className="mt-1 text-indigo-200">正在生成第 {generating.groupIndex ?? 1} 张</p> : null}</article>;
+    }) : <p className="text-sm text-stone-500">没有活动任务组。</p>}</div>
+  </aside>;
 }
 
-function stageLabel(stage: string | null | undefined, orderId?: string | null) {
-  const labels: Record<string, string> = {
-    creating_order: "正在创建订单",
-    order_created_waiting_http: "订单已创建，正在等待图片运行环境",
-    order_created_waiting_deployment: "订单已创建，正在等待部署",
-    waiting_http_endpoint: "订单已创建，正在等待 HTTP 地址",
-    checking_http_health: "正在检查 /healthz",
-    runtime_ready: "图片运行环境已就绪",
-    create_order_failed: "创建订单失败",
-    active_order_conflict: "检测到活动订单冲突",
-    runner_exited_order_active: "Runner 已退出，订单仍活跃",
-    runner_exited: "Runner 已退出",
-    http_readiness_timeout_cancel_failed: "HTTP 未就绪，退租失败",
-  };
-  if (orderId && stage === "creating_order") return "订单已创建，正在等待图片运行环境";
-  return labels[String(stage ?? "")] ?? stage ?? "当前未租用显卡";
+export function ImagePromptWorkspace({ selection, prompt, setPrompt, referenceImage, setReferenceImage, settings, setSettings, count, setCount, error, onCreate }: {
+  selection: ReturnType<typeof rectangle>; prompt: string; setPrompt: (value: string) => void; referenceImage: string | null; setReferenceImage: (value: string | null) => void; settings: Settings; setSettings: (value: Settings) => void; count: string; setCount: (value: string) => void; error: string | null; onCreate: () => void;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  const readFile = (file: File) => { if (!file.type.startsWith("image/")) return; const reader = new FileReader(); reader.onload = () => setReferenceImage(String(reader.result)); reader.readAsDataURL(file); };
+  return <section className="rounded-2xl border border-stone-700 bg-stone-900 p-5">
+    <h1 className="text-2xl font-semibold">图像工作台</h1><p className="mt-1 text-sm text-stone-400">创建本地任务组不会自动开始 GPU 执行。</p>
+    <label className="mt-5 block text-sm font-medium">提示词<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="mt-2 min-h-28 w-full rounded-lg border border-stone-600 bg-stone-950 p-3" placeholder="描述想要创建的图像" /></label>
+    <div onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files[0]; if (file) readFile(file); }} onClick={() => input.current?.click()} className="mt-3 cursor-pointer rounded-lg border border-dashed border-stone-600 p-3 text-sm text-stone-400">参考图 / 首帧图（可选）：点击、拖入或粘贴{referenceImage ? <img src={referenceImage} alt="参考图预览" className="mt-2 max-h-40 rounded" /> : null}<input ref={input} className="hidden" type="file" accept="image/*" onChange={(event) => { const file = event.target.files?.[0]; if (file) readFile(file); }} /></div>
+    <div className="mt-4 grid gap-3 md:grid-cols-2"><label>步数 {settings.steps}<input className="w-full" type="range" min="25" max="40" value={settings.steps} onChange={(event) => setSettings({ ...settings, steps: Number(event.target.value) })} /></label><label>LoRA 强度 {safeFixed(settings.loraStrength, 1)}<input className="w-full" type="range" min="0.6" max="1.1" step="0.1" value={settings.loraStrength} onChange={(event) => setSettings({ ...settings, loraStrength: Number(event.target.value) })} /></label><label>CFG {safeFixed(settings.cfg, 1)}<input className="w-full" type="range" min="3.5" max="5" step="0.1" value={settings.cfg} onChange={(event) => setSettings({ ...settings, cfg: Number(event.target.value) })} /></label><div><p>采样器</p>{(["Euler", "FlowMatch"] as const).map((sampler) => <button type="button" key={sampler} onClick={() => setSettings({ ...settings, sampler })} className={`mr-2 mt-2 rounded px-3 py-1 ${settings.sampler === sampler ? "bg-indigo-500" : "bg-stone-700"}`}>{sampler}</button>)}</div></div>
+    <div className="mt-5"><b>分辨率：{selection.width} × {selection.height}</b><div className="mt-2 grid max-w-md grid-cols-8 gap-1">{cells.map(([x, y]) => <span key={`${x}-${y}`} className={`aspect-square rounded-sm ${x >= selection.left && x <= selection.right && y >= selection.top && y <= selection.bottom ? "bg-indigo-400" : "bg-stone-700"}`} />)}</div></div>
+    <label className="mt-5 block text-sm font-medium">连续生成 <input aria-label="连续生成张数" type="number" min="1" value={count} onChange={(event) => setCount(event.target.value)} className="mx-2 w-24 rounded border border-stone-600 bg-stone-950 px-2 py-1" /> 张</label>
+    {error ? <p className="mt-2 text-sm text-rose-200">{error}</p> : null}<button disabled={!prompt.trim()} onClick={onCreate} className="mt-4 rounded-lg bg-indigo-500 px-5 py-2 font-medium disabled:opacity-40">创建图像任务组</button>
+  </section>;
 }
 
-function secondsLabel(value: unknown) {
-  const seconds = Number(value);
-  if (!Number.isFinite(seconds) || seconds < 0) return "—";
-  const minutes = Math.floor(seconds / 60);
-  const rest = Math.floor(seconds % 60);
-  return minutes ? `${minutes}分${rest}秒` : `${rest}秒`;
+export function ImageResultCard({ group, selected, onSelect, onOpen }: { group: ImageTaskGroup<Task>; selected: boolean; onSelect: () => void; onOpen: () => void }) {
+  const completed = group.tasks.filter((task) => task.status === "completed"); const task = completed[0]; const compactTitle = Array.from(title(group)); const shortened = compactTitle.length > 12 ? `${compactTitle.slice(0, 12).join("")}…` : compactTitle.join("");
+  return <button type="button" aria-label={`${title(group)} 成果组`} aria-pressed={selected} onClick={onSelect} onDoubleClick={onOpen} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); onOpen(); } }} className={`group relative min-w-0 rounded-xl border p-2 text-left transition ${selected ? "border-indigo-300 bg-indigo-500/20 shadow-[0_0_18px_rgba(129,140,248,.8)]" : "border-stone-700 bg-stone-900 hover:border-stone-500"}`}>
+    <span className="absolute right-2 top-2 z-10 rounded bg-black/70 px-1.5 py-0.5 text-xs">{group.completedCount < group.requestedCount ? `${group.completedCount} / ${group.requestedCount}` : group.completedCount}</span>
+    {task?.result?.relativeDir ? <img alt={`${shortened} 缩略图`} src={`/api/local-images/${encodeURIComponent(task.id)}/thumbnail`} className="aspect-square w-full rounded object-cover" /> : <div className="aspect-square rounded bg-stone-800" />}
+    <p className="mt-2 truncate text-xs">{shortened}</p><p className="text-xs text-stone-400">{task?.width} × {task?.height}</p>
+  </button>;
 }
 
-function listLabel(value: unknown) {
-  return Array.isArray(value) && value.length ? value.join(", ") : "—";
+export function ImageResultsGallery({ groups, selected, setSelected, open }: { groups: ImageTaskGroup<Task>[]; selected: string | null; setSelected: (id: string) => void; open: (group: ImageTaskGroup<Task>) => void }) {
+  return <section className="min-h-[calc(100vh-100px)] p-4" aria-label="成果图库"><header className="mb-4"><h1 className="text-2xl font-semibold">成果</h1><p className="text-sm text-stone-400">按任务组保存，单击选择，双击或 Enter 查看详情。</p></header><div className="grid grid-cols-9 gap-3">{groups.map((group) => <ImageResultCard key={group.id} group={group} selected={selected === group.id} onSelect={() => setSelected(group.id)} onOpen={() => open(group)} />)}</div>{groups.length === 0 ? <p className="text-stone-500">尚无已完成成果。</p> : null}</section>;
+}
+
+export function ImageResultModal({ group, onClose, onRegenerate }: { group: ImageTaskGroup<Task>; onClose: () => void; onRegenerate: (count: string) => void }) {
+  const completed = group.tasks.filter((task) => task.status === "completed"); const [index, setIndex] = useState(0); const [count, setCount] = useState("1"); const cardRef = useRef<HTMLButtonElement>(null); const task = completed[index] ?? completed[0];
+  useEffect(() => { const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); }; const old = document.body.style.overflow; document.body.style.overflow = "hidden"; window.addEventListener("keydown", close); return () => { document.body.style.overflow = old; window.removeEventListener("keydown", close); }; }, [onClose]);
+  if (!task) return null;
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="presentation" onMouseDown={onClose}><section role="dialog" aria-modal="true" aria-label="图像成果详情" onMouseDown={(event) => event.stopPropagation()} className="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-2xl border border-stone-600 bg-stone-950 p-5"><div className="flex justify-between"><h2 className="text-xl font-semibold">成果详情</h2><button type="button" onClick={onClose}>关闭</button></div><a href={`/api/local-images/${encodeURIComponent(task.id)}/output`} target="_blank" rel="noreferrer"><img src={`/api/local-images/${encodeURIComponent(task.id)}/output`} alt="原始成果图像" className="mt-4 max-h-[48vh] w-full rounded object-contain" /></a><p className="mt-2 text-sm text-stone-300">{index + 1} / {completed.length}</p><div className="mt-3 flex gap-2 overflow-x-auto">{completed.map((child, childIndex) => <button ref={childIndex === index ? cardRef : undefined} type="button" key={child.id} onClick={() => setIndex(childIndex)} className={`rounded px-3 py-2 text-xs ${childIndex === index ? "bg-indigo-500" : "bg-stone-800"}`}>第 {childIndex + 1} 张</button>)}</div><dl className="mt-5 grid gap-2 text-sm md:grid-cols-2"><dt>提示词</dt><dd className="break-words">{task.prompt}</dd><dt>分辨率</dt><dd>{task.width} × {task.height}</dd><dt>步数 / CFG</dt><dd>{task.steps} / {task.cfg}</dd><dt>LoRA / 采样器</dt><dd>{task.loraStrength} / {task.sampler}</dd><dt>种子</dt><dd>{task.seed ?? "—"}</dd><dt>创建 / 完成</dt><dd>{display(task.createdAt)} / {display(task.result?.completedAt ?? task.result?.persistedAt)}</dd><dt>本地制品</dt><dd>{task.result?.pngSha256 ?? task.result?.sha256 ?? "已验证本地输出"}</dd></dl>{task.referenceImage ? <img src={task.referenceImage} alt="参考图" className="mt-4 max-h-40 rounded" /> : null}<div className="mt-6 border-t border-stone-700 pt-4"><label>重新生成 <input aria-label="重新生成张数" type="number" min="1" value={count} onChange={(event) => setCount(event.target.value)} className="mx-2 w-24 rounded border border-stone-600 bg-stone-900 px-2 py-1" /> 张图片</label><button type="button" onClick={() => onRegenerate(count)} className="ml-2 rounded bg-indigo-500 px-3 py-1">确认</button></div></section></div>;
 }
 
 export function ImageCreationStudio() {
-  const [prompt, setPrompt] = useState("");
-  const [referenceImage, setReferenceImage] = useState<string | null>(null);
-  const [settings, setSettings] = useState(initialSettings);
-  const [corner, setCorner] = useState<Point | null>([0, 0]);
-  const [hover, setHover] = useState<Point>([2, 2]);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [runner, setRunner] = useState<Runner | null>(null);
-  const [executionReady, setExecutionReady] = useState(false);
-  const [maxHourlyPrice, setMaxHourlyPrice] = useState(0.6);
-  const [panelOpen, setPanelOpen] = useState(false);
-  const [hostDetails, setHostDetails] = useState(false);
-  const [starting, setStarting] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const selection = rectangle(corner ?? [0, 0], hover);
-  const draftGpuClass = selection.width <= 1280 && selection.height <= 1280 ? "rtx4090" : "rtx5090";
-  const selectedTask = tasks.find((task) => task.id === selected) ?? null;
-  const confirmed = tasks.filter((task) => task.status === "waiting_for_gpu");
-  const completed = tasks.filter((task) => task.status === "completed").length;
-  const failed = tasks.filter((task) => task.status === "failed").length;
-  const selectedBatch = selectedTask?.status === "waiting_for_gpu" ? [selectedTask] : [];
-  const runnerBusy = runner?.state === "running" || runner?.state === "cancelling";
-  const startBlocker = runnerBusy
-    ? "已有图像批次正在启动或执行，请先等待或退租。"
-    : !selectedTask
-      ? "请选择一个已确认的图像任务。"
-      : selectedTask.status !== "waiting_for_gpu"
-        ? "请先确认图像任务。"
-        : selectedTask.gpuClass === "rtx5090"
-          ? "RTX 5090 高分辨率执行器尚未完成"
-          : selectedTask.mode !== "text_generation" || selectedTask.referenceImage
-            ? "FLUX Kontext 执行器尚未完成"
-            : numberOrFallback(selectedTask.width, 0) > 1280 || numberOrFallback(selectedTask.height, 0) > 1280
-              ? "RTX 4090 仅支持不超过 1280 × 1280 的任务。"
-              : runner?.blocker;
-  const startDisabled = starting || !executionReady || Boolean(startBlocker) || selectedBatch.length === 0 || selectedBatch.some((task) => task.gpuClass !== selectedBatch[0].gpuClass);
-
-  const applyResponse = useCallback((data: StudioResponse) => {
-    setTasks(Array.isArray(data.tasks) ? data.tasks : []);
-    setRunner(data.runner ?? null);
-    setExecutionReady(data.executionReady === true);
-    const serverPrice = Number(data.maxHourlyPrice);
-    setMaxHourlyPrice((value) => (Number.isFinite(value) && value > 0 ? value : Number.isFinite(serverPrice) && serverPrice > 0 ? serverPrice : 0.6));
-  }, []);
-
-  const refresh = useCallback(async () => {
-    const response = await fetch("/api/local-lab/image-tasks", { cache: "no-store" });
-    if (response.ok) applyResponse((await response.json()) as StudioResponse);
-  }, [applyResponse]);
-
-  useEffect(() => {
-    setPanelOpen(window.localStorage.getItem(panelStorageKey) === "true");
-    const saved = Number(window.localStorage.getItem("image-studio-max-hourly-price"));
-    if (Number.isFinite(saved) && saved > 0) setMaxHourlyPrice(saved);
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 5000);
-    return () => window.clearInterval(timer);
-  }, [refresh]);
-
-  useEffect(() => {
-    const paste = (event: ClipboardEvent) => {
-      const file = [...(event.clipboardData?.files ?? [])].find((candidate) => candidate.type.startsWith("image/"));
-      if (file) {
-        event.preventDefault();
-        readFile(file);
-      }
-    };
-    window.addEventListener("paste", paste);
-    return () => window.removeEventListener("paste", paste);
-  }, []);
-
-  const setDrawer = (open: boolean) => {
-    setPanelOpen(open);
-    window.localStorage.setItem(panelStorageKey, String(open));
-  };
-
-  const persistPrice = async () => {
-    const value = Number(safeFixed(maxHourlyPrice, 2));
-    if (!Number.isFinite(value) || value <= 0) return;
-    window.localStorage.setItem("image-studio-max-hourly-price", String(value));
-    const response = await fetch("/api/local-lab/image-tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "set_price", maxHourlyPrice: value }) });
-    if (response.ok) applyResponse((await response.json()) as StudioResponse);
-  };
-
-  const mutate = async (action: "confirm" | "retry" | "delete", id: string) => {
-    const response = await fetch("/api/local-lab/image-tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, id }) });
-    if (response.ok) applyResponse((await response.json()) as StudioResponse);
-  };
-
-  const create = async () => {
-    if (!prompt.trim()) return;
-    const response = await fetch("/api/local-lab/image-tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "create", prompt, referenceImage, width: selection.width, height: selection.height, ...settings }) });
-    if (response.ok) {
-      const data = (await response.json()) as StudioResponse & { task: Task };
-      applyResponse(data);
-      setSelected(data.task.id);
-      setPrompt("");
-    }
-  };
-
-  const startBatch = async () => {
-    if (startDisabled) return;
-    setStarting(true);
-    try {
-      const response = await fetch("/api/local-lab/image-tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "start_batch", taskIds: selectedBatch.map((task) => task.id), maxHourlyPrice }) });
-      applyResponse((await response.json()) as StudioResponse);
-    } finally {
-      setStarting(false);
-    }
-  };
-
-  const cancelBatch = async () => {
-    const response = await fetch("/api/local-lab/image-tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "cancel_batch" }) });
-    applyResponse((await response.json()) as StudioResponse);
-  };
-
-  const readFile = (file: File) => {
-    if (!file.type.startsWith("image/")) return;
-    const reader = new FileReader();
-    reader.onload = () => setReferenceImage(String(reader.result));
-    reader.readAsDataURL(file);
-  };
-
-  const clickCell = (point: Point) => {
-    if (corner === null) {
-      setCorner(point);
-      setHover(point);
-      return;
-    }
-    setHover(point);
-    setCorner(null);
-  };
-
-  const currentClass = runner?.gpuClass ?? selectedBatch[0]?.gpuClass ?? draftGpuClass;
-  const runnerError = runner?.error ?? null;
-  const host = runner?.host ?? null;
-  const orderCreated = Boolean(host?.orderId);
-  const httpAddressState = !orderCreated ? "—" : host?.controllerUrl ? "已获得" : "正在等待";
-  const controllerDisplay = host?.selectedControllerUrl ?? host?.controllerUrl ?? host?.rawHttpPub ?? null;
-  const copiedRunnerError = runnerError
-    ? [
-        runnerError.stage ?? "执行错误",
-        runnerError.message ?? "未知错误",
-        runnerError.at ?? "",
-        runnerError.operation ? `operation=${runnerError.operation}` : null,
-        runnerError.method && runnerError.targetHost ? `${runnerError.method} ${runnerError.targetHost}${runnerError.targetPath ?? ""}` : null,
-        runnerError.classification ? `classification=${runnerError.classification}` : null,
-        runnerError.technicalCause ?? null,
-      ].filter(Boolean).join("\n")
-    : "";
-  const rawStage = runner?.stage ?? "当前未租用显卡";
-  const stage = stageLabel(rawStage, host?.orderId);
-
-  const panel = (
-    <aside className="h-fit border-r border-stone-700 bg-stone-900 p-4 lg:sticky lg:top-0 lg:max-h-screen lg:overflow-y-auto" aria-label="显卡状态">
-      <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-lg font-semibold">显卡状态</h2>
-        <span className={`rounded px-2 py-1 text-xs ${runner?.state === "failed" ? "bg-rose-500/20 text-rose-200" : "bg-stone-800 text-stone-300"}`}>{stage}</span>
-      </div>
-      <section className="space-y-2 rounded-lg border border-stone-700 p-3 text-sm">
-        <div className="flex justify-between"><span>未确认任务</span><b>{tasks.filter((task) => task.status === "pending_confirmation").length}</b></div>
-        <div className="flex justify-between"><span>已确认任务</span><b>{confirmed.length}</b></div>
-        <div className="flex justify-between"><span>当前选中任务</span><b>{selectedTask ? 1 : 0}</b></div>
-        <div className="flex justify-between"><span>当前冻结批次</span><b>{runner?.frozenTaskIds?.length ?? 0}</b></div>
-        <div className="flex justify-between"><span>已完成 / 失败</span><b>{completed} / {failed}</b></div>
-      </section>
-      <section className="mt-3 rounded-lg border border-stone-700 p-3 text-sm">
-        <b className={currentClass === "rtx4090" ? "text-sky-300" : "text-violet-300"}>{className(currentClass)}</b>
-        <p className="mt-1 text-xs text-stone-400">当前尺寸 {selectedTask ? `${selectedTask.width ?? "—"} × ${selectedTask.height ?? "—"}` : `${selection.width} × ${selection.height}`}；服务端要求 {className(currentClass)}</p>
-      </section>
-      <section className="mt-3 rounded-lg border border-stone-700 p-3">
-        <label className="block text-sm font-medium">
-          最高时价
-          <input aria-label="最高时价" className="mt-2 w-full rounded border border-stone-600 bg-stone-950 px-2 py-1" type="number" min="0.01" max="100" step="0.01" value={maxHourlyPrice} onChange={(event) => setMaxHourlyPrice(Number(event.target.value))} onBlur={() => void persistPrice()} />
-        </label>
-        <p className="mt-1 text-xs text-stone-400">${safeFixed(maxHourlyPrice, 2)} / 小时；批次开始时会冻结此值。</p>
-        <button type="button" disabled={startDisabled} title={startBlocker ?? undefined} onClick={() => void startBatch()} className="mt-3 w-full rounded bg-indigo-500 px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-40">开始 {selectedBatch.length} 个任务并租用显卡</button>
-        {runnerBusy ? <button type="button" onClick={() => void cancelBatch()} className="mt-2 w-full rounded border border-rose-400 px-3 py-2 text-sm font-semibold text-rose-100">停止并退租 / 取消本批次</button> : null}
-        {startBlocker ? <p className="mt-2 text-xs text-amber-200">{startBlocker}</p> : null}
-      </section>
-      {host ? (
-        <section className="mt-3 rounded-lg border border-stone-700 p-3 text-sm">
-          <p>{host.gpu ?? "RTX 4090"} · {formatHourlyPrice(host.priceHourly)} · 主机 {host.serverId ?? "—"} · {stage}</p>
-          <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-stone-300">
-            <span>订单已创建</span><b>{orderCreated ? "是" : "否"}</b>
-            <span>订单 ID</span><b>{host.orderId ?? "—"}</b>
-            <span>Clore 部署</span><b>{host.deploymentState ?? "—"}</b>
-            <span>HTTP 地址</span><b>{httpAddressState}</b>
-            <span>HTTP 主机</span><b className="break-all">{controllerDisplay ?? "—"}</b>
-            <span>/healthz</span><b>{host.httpState ?? "—"}</b>
-            <span>等待时间</span><b>{secondsLabel(host.readinessElapsedSeconds)}</b>
-          </div>
-          {host.lastHealthError ? <p className="mt-2 break-words text-xs text-amber-200">最新错误：{host.lastHealthError}</p> : null}
-          {!orderCreated && host.lastCreateOrderError ? <p className="mt-2 break-words text-xs text-amber-200">创建订单错误：{host.lastCreateOrderError}</p> : null}
-          {!orderCreated && host.createOrderAttempts?.length ? <p className="mt-1 text-xs text-stone-400">创建尝试 {host.createOrderAttempts.length} 次；已先核对 Clore 订单列表。</p> : null}
-          <button className="mt-2 text-xs text-indigo-300" type="button" onClick={() => setHostDetails(!hostDetails)}>查看详细配置</button>
-          {hostDetails ? (
-            <dl className="mt-2 grid grid-cols-2 gap-1 text-xs text-stone-300">
-              {[
-                ["GPU", host.gpu],
-                ["VRAM", host.vram],
-                ["CPU", host.cpu],
-                ["RAM", host.ram],
-                ["磁盘", host.disk],
-                ["网络", host.network],
-                ["位置", host.location],
-                ["订单", host.orderId],
-                ["Runtime", host.runtimeDigest],
-                ["HTTP", host.httpState],
-                ["订单状态", host.orderStatus],
-                ["部署状态", host.deploymentState],
-                ["Clore 端口", listLabel(host.clorePorts)],
-                ["HTTP URLs", listLabel(host.cloreHttpUrls)],
-                ["Controller", host.controllerUrl],
-                ["Selected Controller", host.selectedControllerUrl],
-                ["Health URL", host.healthUrl],
-                ["Endpoint Source", host.endpointSource],
-                ["HTTP Pub", host.rawHttpPub],
-                ["外部 8080 端口", host.httpExternalPort],
-                ["Health 状态码", host.lastHealthStatus],
-                ["Health 错误", host.lastHealthError],
-                ["最后轮询", displayDate(host.lastPollAt)],
-                ["创建订单错误", host.lastCreateOrderError],
-                ["创建订单技术原因", host.lastCreateOrderTechnicalCause],
-                ["SSH（诊断）", host.sshDiagnostic],
-              ].map(([key, value]) => <div key={String(key)}><dt className="text-stone-500">{key}</dt><dd>{value ?? "—"}</dd></div>)}
-            </dl>
-          ) : null}
-        </section>
-      ) : null}
-      <section className="mt-3 rounded-lg border border-stone-700 p-3 text-sm">
-        <h3 className="font-medium">运行进程</h3>
-        <p className="mt-1">{stage}</p>
-        {host?.message ? <p className="mt-1 text-xs text-stone-300">{host.message}</p> : null}
-        {host?.orderId ? <p className="mt-1 text-xs text-stone-400">订单 {host.orderId} · 部署 {host.deploymentState ?? "—"} · HTTP {host.controllerUrl ? "已获得" : "等待中"} · /healthz {host.lastHealthStatus ?? host.lastHealthError ?? "—"}</p> : null}
-        <p className="mt-1 text-xs text-stone-400">任务 {runner?.currentTaskIndex === null || runner?.currentTaskIndex === undefined ? "—" : runner.currentTaskIndex + 1}/{runner?.frozenTaskIds?.length ?? 0} · {runner?.currentModel ?? "—"}</p>
-        <p className="mt-1 line-clamp-2 text-xs text-stone-400">{runner?.promptSummary ?? "尚未冻结图像批次"}</p>
-        <p className="mt-1 text-xs text-stone-500">已用时 {elapsed(runner?.startedAt)} · HTTP 等待 {secondsLabel(host?.readinessElapsedSeconds)} · 更新于 {displayDate(runner?.updatedAt)}</p>
-        {host?.lastPollAt ? <p className="mt-1 text-xs text-stone-500">最后轮询 {displayDate(host.lastPollAt)}</p> : null}
-      </section>
-      {runnerError ? (
-        <section className="mt-3 rounded-lg border border-rose-700/60 bg-rose-950/20 p-3 text-sm">
-          <p className="font-medium text-rose-200">{runnerError.stage ?? "执行错误"}</p>
-          <p className="mt-1 break-words text-rose-100">{runnerError.message ?? "未知错误"}</p>
-          {runnerError.operation ? <p className="mt-1 break-words text-xs text-rose-200/80">{runnerError.method ?? "请求"} {runnerError.targetHost ?? ""}{runnerError.targetPath ?? ""} · {runnerError.classification ?? "unknown"}</p> : null}
-          {runnerError.billingRisk ? <p className="mt-1 text-xs text-amber-200">{runnerError.billingRisk}</p> : null}
-          {runnerError.cancellationError ? <p className="mt-1 break-words text-xs text-rose-200">退租错误：{runnerError.cancellationError}</p> : null}
-          <p className="mt-1 text-xs text-rose-200/70">{displayDate(runnerError.at)}</p>
-          <button className="mt-2 text-xs text-rose-100 underline" type="button" onClick={() => void navigator.clipboard.writeText(copiedRunnerError)}>复制错误</button>
-        </section>
-      ) : null}
-    </aside>
-  );
-
-  return (
-    <main className="min-h-screen bg-stone-950 text-stone-100">
-      <button type="button" className="fixed bottom-4 left-4 z-30 rounded bg-stone-100 px-3 py-2 text-sm font-semibold text-stone-950 lg:hidden" onClick={() => setDrawer(true)}>显卡状态</button>
-      {panelOpen ? <div className="fixed inset-0 z-40 bg-black/50 lg:hidden" onClick={() => setDrawer(false)}><div className="h-full w-[min(340px,90vw)] overflow-y-auto" onClick={(event) => event.stopPropagation()}>{panel}</div></div> : null}
-      <div className="mx-auto grid min-h-screen max-w-[1600px] lg:grid-cols-[320px_minmax(0,1fr)_360px]">
-        <div className="hidden lg:block">{panel}</div>
-        <section className="m-4 rounded-2xl border border-stone-700 bg-stone-900 p-5">
-          <header className="mb-5 flex items-center justify-between gap-4">
-            <div>
-              <h1 className="text-2xl font-semibold">图像工作台</h1>
-              <p className="text-sm text-stone-400">Fluxed Up 10.2 · FLUX.1-Kontext-dev · AIDMA</p>
-            </div>
-            <span className="rounded bg-emerald-500/20 px-2 py-1 text-xs text-emerald-300">仅图像</span>
-          </header>
-          <label className="block text-sm font-medium">
-            提示词
-            <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="mt-2 min-h-28 w-full rounded-lg border border-stone-600 bg-stone-950 p-3" placeholder="描述想要创建，或基于参考图编辑的图像。" />
-          </label>
-          <div onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files[0]; if (file) readFile(file); }} onClick={() => inputRef.current?.click()} className="mt-3 cursor-pointer rounded-lg border border-dashed border-stone-600 p-3 text-sm text-stone-400">
-            参考图（可选）：点击、拖入或直接粘贴。
-            {referenceImage ? <img src={referenceImage} alt="参考图预览" className="mt-2 max-h-40 rounded" /> : null}
-            <input ref={inputRef} className="hidden" type="file" accept="image/*" onChange={(event) => { const file = event.target.files?.[0]; if (file) readFile(file); }} />
-          </div>
-          <div className="mt-4 grid gap-3 md:grid-cols-2">
-            <label>步数 {settings.steps}<input className="w-full" type="range" min="25" max="40" value={settings.steps} onChange={(event) => setSettings({ ...settings, steps: Number(event.target.value) })} /></label>
-            <label>LoRA 强度 {safeFixed(settings.loraStrength, 1)}<input className="w-full" type="range" min="0.6" max="1.1" step="0.1" value={settings.loraStrength} onChange={(event) => setSettings({ ...settings, loraStrength: Number(event.target.value) })} /></label>
-            <label>CFG {safeFixed(settings.cfg, 1)}<input className="w-full" type="range" min="3.5" max="5" step="0.1" value={settings.cfg} onChange={(event) => setSettings({ ...settings, cfg: Number(event.target.value) })} /></label>
-            <div><p className="mb-1">采样器</p>{(["Euler", "FlowMatch"] as const).map((sampler) => <button type="button" key={sampler} onClick={() => setSettings({ ...settings, sampler })} className={`mr-2 rounded px-3 py-1 ${settings.sampler === sampler ? "bg-indigo-500" : "bg-stone-700"}`}>{sampler}</button>)}</div>
-          </div>
-          <div className="mt-5">
-            <div className="mb-2 flex justify-between"><b>分辨率：{selection.width} × {selection.height}</b><span className={draftGpuClass === "rtx4090" ? "text-sky-300" : "text-violet-300"}>{className(draftGpuClass)}</span></div>
-            <div className="grid w-full max-w-md grid-cols-8 gap-1">{cells.map(([x, y]) => { const active = x >= selection.left && x <= selection.right && y >= selection.top && y <= selection.bottom; return <button type="button" aria-label={`${x + 1} by ${y + 1} grid cell`} onMouseEnter={() => corner && setHover([x, y])} onClick={() => clickCell([x, y])} key={`${x}-${y}`} className={`aspect-square rounded-sm ${active ? "bg-indigo-400" : "bg-stone-700 hover:bg-stone-500"}`} />; })}</div>
-          </div>
-          <button disabled={!prompt.trim()} onClick={() => void create()} className="mt-5 rounded-lg bg-indigo-500 px-5 py-2 font-medium disabled:opacity-40">创建图像任务</button>
-        </section>
-        <aside className="m-4 ml-0 rounded-2xl border border-stone-700 bg-stone-900 p-4">
-          <h2 className="font-semibold">图像任务池</h2>
-          <p className="mb-3 text-xs text-stone-400">{tasks.length} 项 · 仅图像</p>
-          <div className="space-y-2">
-            {tasks.map((task) => (
-              <article onClick={() => setSelected(task.id)} key={task.id} className={`cursor-pointer rounded-lg border p-3 text-xs ${selected === task.id ? "border-indigo-400 bg-indigo-500/10" : "border-stone-700"}`}>
-                <div className="flex justify-between"><span className={task.gpuClass === "rtx4090" ? "text-sky-300" : "text-violet-300"}>{className(task.gpuClass)}</span><span>{task.status ?? "pending_confirmation"}</span></div>
-                <p className="mt-1 line-clamp-2">{task.prompt ?? ""}</p>
-                <p className="mt-1 text-stone-400">{task.width ?? "—"}×{task.height ?? "—"} · {task.steps ?? "—"} 步 · {task.sampler ?? "—"} · LoRA {safeFixed(task.loraStrength, 1)} · CFG {safeFixed(task.cfg, 1)}{task.referenceImage ? " · 参考图" : ""}</p>
-                {task.result ? <p className="mt-1 text-emerald-300">结果：{task.result.width}×{task.result.height} · SHA {(task.result.pngSha256 ?? task.result.sha256 ?? "unknown").slice(0, 12)}</p> : null}
-                {task.status === "completed" && task.result?.relativeDir ? <img className="mt-2 max-h-40 w-full rounded object-contain" alt="已完成图像缩略图" src={`/api/local-images/${encodeURIComponent(task.id)}/thumbnail`} /> : null}
-                <div className="mt-2 flex gap-2">
-                  <button type="button" onClick={(event) => { event.stopPropagation(); void mutate("confirm", task.id); }}>确认</button>
-                  <button type="button" onClick={(event) => { event.stopPropagation(); void mutate("retry", task.id); }}>重试</button>
-                  <button type="button" className="text-rose-300" onClick={(event) => { event.stopPropagation(); void mutate("delete", task.id); }}>删除</button>
-                </div>
-              </article>
-            ))}
-          </div>
-        </aside>
-      </div>
-    </main>
-  );
+  const [tab, setTab] = useState<"prompt" | "results">(() => typeof window !== "undefined" && window.localStorage.getItem(tabKey) === "results" ? "results" : "prompt"); const [tasks, setTasks] = useState<Task[]>([]); const [runner, setRunner] = useState<Runner | null>(null); const [prompt, setPrompt] = useState(""); const [referenceImage, setReferenceImage] = useState<string | null>(null); const [settings, setSettings] = useState<Settings>(initialSettings); const [count, setCount] = useState(() => { const saved = typeof window === "undefined" ? null : window.localStorage.getItem(countKey); return validCount(saved ?? "") === null ? "1" : saved!; }); const [countError, setCountError] = useState<string | null>(null); const [corner] = useState<Point>([0, 0]); const [hover] = useState<Point>([2, 2]); const [selected, setSelected] = useState<string | null>(null); const [modal, setModal] = useState<ImageTaskGroup<Task> | null>(null); const lastCard = useRef<HTMLElement | null>(null);
+  const selection = rectangle(corner, hover);
+  const applyResponse = useCallback((data: Response) => { if (Array.isArray(data.tasks)) setTasks(data.tasks); if (data.runner !== undefined) setRunner(data.runner ?? null); }, []);
+  const refresh = useCallback(async () => { const response = await fetch("/api/local-lab/image-tasks", { cache: "no-store" }); if (response.ok) applyResponse(await response.json() as Response); }, [applyResponse]);
+  useEffect(() => { const initial = window.setTimeout(() => void refresh(), 0); const timer = window.setInterval(() => void refresh(), 5000); return () => { window.clearTimeout(initial); window.clearInterval(timer); }; }, [refresh]);
+  const changeTab = (next: "prompt" | "results") => { setTab(next); window.localStorage.setItem(tabKey, next); };
+  const groups = useMemo(() => groupImageTasks(tasks), [tasks]); const activeGroups = groups.filter((group) => group.isActive); const resultGroups = groups.filter((group) => group.completedCount > 0).sort((a, b) => (b.latestCompletedAt ?? "").localeCompare(a.latestCompletedAt ?? ""));
+  const create = async () => { const requestedCount = validCount(count); if (!requestedCount) { setCountError("连续生成数量必须是正的安全整数。"); return; } if (!prompt.trim()) return; const response = await fetch("/api/local-lab/image-tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "create_group", prompt, referenceImage, width: selection.width, height: selection.height, ...settings, requestedCount }) }); if (!response.ok) { setCountError("创建任务组失败。"); return; } const data = await response.json() as Response & { groupId?: string }; applyResponse(data); window.localStorage.setItem(countKey, String(requestedCount)); setCountError(null); setSelected(data.groupId ?? null); setPrompt(""); };
+  const regenerate = async (value: string) => { const requestedCount = validCount(value); if (!requestedCount || !modal) return; const response = await fetch("/api/local-lab/image-tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "regenerate_group", groupId: modal.id, requestedCount }) }); if (!response.ok) return; applyResponse(await response.json() as Response); setModal(null); changeTab("prompt"); };
+  return <main className="min-h-screen bg-stone-950 text-stone-100"><ImageStudioNavigation tab={tab} onChange={changeTab} />{tab === "prompt" ? <div className="mx-auto grid max-w-[1600px] gap-4 p-4 lg:grid-cols-[280px_minmax(0,1fr)_340px]"><ComputerPanel tasks={tasks} runner={runner} /><ImagePromptWorkspace selection={selection} prompt={prompt} setPrompt={setPrompt} referenceImage={referenceImage} setReferenceImage={setReferenceImage} settings={settings} setSettings={setSettings} count={count} setCount={setCount} error={countError} onCreate={() => void create()} /><ActiveImageTaskRail groups={activeGroups} /></div> : <ImageResultsGallery groups={resultGroups} selected={selected} setSelected={(id) => { lastCard.current = document.activeElement as HTMLElement; setSelected(id); }} open={(group) => { lastCard.current = document.activeElement as HTMLElement; setModal(group); }} />}{modal ? <ImageResultModal group={groups.find((group) => group.id === modal.id) ?? modal} onClose={() => { setModal(null); lastCard.current?.focus(); }} onRegenerate={(value) => void regenerate(value)} /> : null}</main>;
 }

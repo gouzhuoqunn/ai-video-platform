@@ -12,6 +12,13 @@ export type LocalImageTask = Record<string, unknown> & {
   status: "pending_confirmation" | "waiting_for_gpu" | "generating" | "completed" | "failed";
   updatedAt: string;
   result?: LocalArtifactReference;
+  /** Optional grouping metadata. Legacy tasks intentionally omit these fields. */
+  groupId?: string;
+  groupIndex?: number;
+  groupRequestedCount?: number;
+  groupCreatedAt?: string;
+  groupTitle?: string;
+  sourceGroupId?: string;
   localClaim?: { workerId: string; claimedAt: string; leaseExpiresAt: string; claimTokenHash: string };
   finalizedClaimTokenHash?: string;
 };

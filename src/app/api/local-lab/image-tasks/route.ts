@@ -26,19 +26,16 @@ type PersistedImageResult = {
   persistedAt: string;
 };
 
-type ImageTask = ImageTaskSettings & {
-  id: string;
+type ImageTask = LocalImageTask & ImageTaskSettings & {
   seed: number;
   mode: "text_generation" | "kontext_edit";
   referenceImage: string | null;
   gpuClass: ImageGpuClass;
   badge: "低" | "高";
   modelStack: typeof FLUX_IMAGE_STACK;
-  status: "pending_confirmation" | "waiting_for_gpu" | "generating" | "completed" | "failed";
   createdAt: string;
-  updatedAt: string;
   attempts: number;
-  result?: PersistedImageResult;
+  result?: LocalImageTask["result"] & Partial<PersistedImageResult>;
 };
 
 export type ImageRunnerSession = {
@@ -522,6 +519,72 @@ function taskFrom(input: Record<string, unknown>): ImageTask {
   };
 }
 
+function positiveSafeInteger(value: unknown) {
+  const count = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(count) || count < 1) throw new Error("invalid_requested_count");
+  return count;
+}
+
+function groupTitle(prompt: string) {
+  return Array.from(prompt).slice(0, 12).join("");
+}
+
+function createGroupChildren(input: Record<string, unknown>, requestedCount: number, groupId: string = randomUUID(), startIndex = 0, sharedCreatedAt = new Date().toISOString()): ImageTask[] {
+  const title = groupTitle(String(input.prompt ?? "").trim());
+  return Array.from({ length: requestedCount }, (_, offset) => {
+    const task = taskFrom(input);
+    return {
+      ...task,
+      groupId,
+      groupIndex: startIndex + offset + 1,
+      groupRequestedCount: startIndex + requestedCount,
+      groupCreatedAt: sharedCreatedAt,
+      groupTitle: title,
+      createdAt: sharedCreatedAt,
+      updatedAt: sharedCreatedAt,
+    };
+  });
+}
+
+function groupIdentity(task: ImageTask) { return task.groupId || task.id; }
+
+function createGroupedTasks(input: Record<string, unknown>) {
+  const requestedCount = positiveSafeInteger(input.requestedCount);
+  const groupId = randomUUID();
+  const children = createGroupChildren(input, requestedCount, groupId);
+  const result = mutateImageTasks<ImageTask[]>((current) => ({ tasks: [...children, ...current], value: children }));
+  return { groupId, createdTaskIds: result.map((task) => task.id), tasks: result };
+}
+
+function regenerateGroupedTasks(input: Record<string, unknown>) {
+  const requestedCount = positiveSafeInteger(input.requestedCount);
+  const requestedGroupId = String(input.groupId ?? "");
+  if (!requestedGroupId) throw new Error("invalid_group_id");
+  return mutateImageTasks<{ groupId: string; createdTaskIds: string[]; tasks: ImageTask[] }>((current) => {
+    const tasks = current as ImageTask[];
+    const source = tasks.filter((task) => groupIdentity(task) === requestedGroupId);
+    if (!source.length) throw new Error("image_group_not_found");
+    const origin = source[0];
+    const highestIndex = Math.max(source.length, ...source.map((task) => Number.isSafeInteger(task.groupIndex) ? task.groupIndex! : 0));
+    const total = highestIndex + requestedCount;
+    const explicit = source.filter((task) => task.groupId === requestedGroupId).map((task) => ({ ...task, groupRequestedCount: total }));
+    const retained = tasks.map((task) => explicit.find((updated) => updated.id === task.id) ?? task);
+    const childInput: Record<string, unknown> = {
+      prompt: origin.prompt,
+      referenceImage: origin.referenceImage,
+      width: origin.width,
+      height: origin.height,
+      steps: origin.steps,
+      cfg: origin.cfg,
+      loraStrength: origin.loraStrength,
+      sampler: origin.sampler,
+    };
+    const children = createGroupChildren(childInput, requestedCount, requestedGroupId, highestIndex);
+    const next = [...children.map((task) => ({ ...task, groupRequestedCount: total })), ...retained];
+    return { tasks: next, value: { groupId: requestedGroupId, createdTaskIds: children.map((task) => task.id), tasks: next } };
+  });
+}
+
 function assertStartableBatch(batch: ImageTask[], maxHourlyPrice: number) {
   const classes = [...new Set(batch.map((task) => task.gpuClass))];
   const blocker = readinessBlocker();
@@ -640,6 +703,26 @@ export async function POST(request: NextRequest) {
       const task = taskFrom(body);
       tasks = updateTasks((current) => [task, ...current.filter((candidate) => candidate.id !== task.id)]);
       return NextResponse.json({ task, ...(await responsePayload()) });
+    }
+
+    if (action === "create_group") {
+      const created = createGroupedTasks(body);
+      return NextResponse.json({
+        groupId: created.groupId,
+        createdTaskIds: created.createdTaskIds,
+        group: { id: created.groupId, requestedCount: created.tasks.length, title: created.tasks[0]?.groupTitle ?? "" },
+        tasks: readTasks(),
+      });
+    }
+
+    if (action === "regenerate_group") {
+      const regenerated = regenerateGroupedTasks(body);
+      return NextResponse.json({
+        groupId: regenerated.groupId,
+        createdTaskIds: regenerated.createdTaskIds,
+        group: { id: regenerated.groupId, requestedCount: regenerated.tasks.filter((task) => groupIdentity(task) === regenerated.groupId).length },
+        tasks: readTasks(),
+      });
     }
 
     if (action === "set_price") {
