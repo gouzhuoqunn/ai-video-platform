@@ -74,7 +74,13 @@ async function main() {
   assert.equal((await request({ action: "confirm_group", groupId: legacy })).status, 200);
   assert.equal(listImageTasks().find((task) => task.id === legacy)?.status, "waiting_for_gpu");
 
-  assert.equal((await request({ ...source, width: 1536, height: 1536, requestedCount: 1 })).status, 400);
+  const rtx5090 = await request({ ...source, width: 1536, height: 1536, requestedCount: 1 });
+  assert.equal(rtx5090.status, 200);
+  const rtx5090Payload = await rtx5090.json() as { createdTaskIds: string[] };
+  assert.equal(rtx5090Payload.createdTaskIds.length, 1);
+  const rtx5090Task = listImageTasks().find((task) => task.id === rtx5090Payload.createdTaskIds[0]);
+  assert.equal(rtx5090Task?.gpuClass, "rtx5090");
+  assert.equal(rtx5090Task?.status, "pending_confirmation");
   const status = await GET(new NextRequest("http://127.0.0.1/api/local-lab/image-tasks", { headers: { host: "127.0.0.1" } }));
   assert.equal(status.status, 200);
   const statusPayload = await status.json() as { localProgram?: { cpuLogicalCores?: number; totalRamBytes?: number; availableRamBytes?: number; processMemoryBytes?: number; taskStoreAvailable?: boolean } };

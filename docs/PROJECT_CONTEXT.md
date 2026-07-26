@@ -10,6 +10,7 @@ The active product is an image-only, local-first FLUX creation workspace. The on
 - Prompt is required. Reference-image tasks are intentionally deferred and blocked as `FLUX Kontext 执行器尚未完成`.
 - Supported text controls: steps 25-40, LoRA 0.6-1.1, CFG 3.5-5.0, Euler or FlowMatch, and 768-2048 px dimensions in 256 px increments.
 - Tasks at or below 1280 x 1280 use RTX 4090 (`低`); all larger dimensions use RTX 5090 (`高`).
+- RTX 5090-class tasks enter the same local pending-confirmation queue as RTX 4090 tasks. The execution readiness gate is applied only when starting a confirmed batch, never during task creation.
 
 ## RTX 4090 executor checkpoint
 

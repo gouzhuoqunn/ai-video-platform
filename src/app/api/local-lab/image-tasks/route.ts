@@ -516,7 +516,6 @@ function taskFrom(input: Record<string, unknown>): ImageTask {
   }
   const referenceImage = typeof input.referenceImage === "string" && input.referenceImage.startsWith("data:image/") && input.referenceImage.length <= 6_000_000 ? input.referenceImage : null;
   const gpuClass = classifyImageGpu(width, height);
-  if (gpuClass === "rtx5090") throw new Error(RTX5090_BLOCKER);
   const now = new Date().toISOString();
   return {
     id: randomUUID(),
