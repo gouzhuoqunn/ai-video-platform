@@ -16,7 +16,7 @@ import { computeCloreProjectedCost, normalizeCloreServer } from "./marketplace";
 import { createSessionNonce, isLocalWatchdogTaskInstalled, writeLocalWatchdogArmState } from "./watchdog-io";
 import { sleep } from "./client";
 import { ensureLocalUi, verifyImageUi } from "./image-e2e-ui";
-import { agentGetJsonWithRetry, AgentGetTerminalError, type AgentTransportDiagnostic } from "./agent-get-transport";
+import { agentArtifactMetadataResponse, agentGetJsonWithRetry, agentHealthResponse, agentStatusResponse, AgentGetTerminalError, type AgentTransportDiagnostic } from "./agent-get-transport";
 
 export type EligibleImageTask = LocalImageTask & { prompt: string; mode: "text_generation"; referenceImage: null; width: number; height: number; steps: number; cfg: number; loraStrength: number; seed: number; sampler: "Euler" | "FlowMatch" };
 const SESSION_PATH = path.join(process.cwd(), ".secrets", "clore-image-e2e-session.json");
@@ -190,7 +190,7 @@ export type WaitForStageOptions = {
 };
 
 function compactTransportOutage(input: { stage: string; outageStartedAt: number; now: number; getAttemptCount: number; last: AgentTransportDiagnostic | null; lastSuccessAt: string | null; exactOrderActive: boolean | null }) {
-  return JSON.stringify({ code: "agent_transport_outage_exceeded", stage: input.stage, outage_duration_ms: Math.max(0, input.now - input.outageStartedAt), get_attempt_count: input.getAttemptCount, last_http_status: input.last?.httpStatus ?? null, nested_cause_code: input.last?.causeCode ?? null, last_success_agent_status_at: input.lastSuccessAt, exact_order_active: input.exactOrderActive });
+  return JSON.stringify({ code: "agent_transport_outage_exceeded", stage: input.stage, outage_duration_ms: Math.max(0, input.now - input.outageStartedAt), get_attempt_count: input.getAttemptCount, last_http_status: input.last?.httpStatus ?? null, last_response_kind: input.last?.responseKind ?? null, last_content_type: input.last?.contentType ?? null, last_body_sha256: input.last?.bodySha256 ?? null, last_success_agent_status_at: input.lastSuccessAt, exact_order_active: input.exactOrderActive });
 }
 
 /** GET-only stage polling. A stage POST is issued exactly once by the caller. */
@@ -205,7 +205,7 @@ export async function waitForStage(input: WaitForStageOptions) {
   while (now() < deadline) {
     statusAttempt += 1; getAttemptCount += 1;
     try {
-      const status = await agentGetJsonWithRetry({ endpoint: input.endpoint, token: input.token, route: "/status", stage: input.stage, attempt: statusAttempt, fetchImpl: input.fetchImpl, timestamp });
+      const status = await agentGetJsonWithRetry({ endpoint: input.endpoint, token: input.token, route: "/status", validator: agentStatusResponse, stage: input.stage, attempt: statusAttempt, fetchImpl: input.fetchImpl, timestamp });
       if (status.ok) {
         consecutiveFailures = 0; outageStartedAt = null; healthProbed = false; lastSuccessfulStatusAt = timestamp();
         const stageRecord = (status.body.stages as Record<string, Record<string, unknown>> | undefined)?.[input.stage];
@@ -223,7 +223,7 @@ export async function waitForStage(input: WaitForStageOptions) {
     if (consecutiveFailures >= 3 && !healthProbed) {
       healthProbed = true; getAttemptCount += 1;
       try {
-        const health = await agentGetJsonWithRetry({ endpoint: input.endpoint, token: input.token, route: "/healthz", stage: input.stage, attempt: statusAttempt, fetchImpl: input.fetchImpl, timestamp });
+        const health = await agentGetJsonWithRetry({ endpoint: input.endpoint, token: input.token, route: "/healthz", validator: agentHealthResponse, stage: input.stage, attempt: statusAttempt, fetchImpl: input.fetchImpl, timestamp });
         if (health.ok && health.body.alive === true && health.body.current_stage === input.stage) record({ route: "/healthz", stage: input.stage, attempt: statusAttempt, httpStatus: health.status, errorName: null, causeCode: null, message: "agent_alive", timestamp: timestamp() });
         else if (!health.ok) record(health.diagnostic);
       } catch (error) {
@@ -236,7 +236,7 @@ export async function waitForStage(input: WaitForStageOptions) {
       for (let attempt = 1; attempt <= 3; attempt += 1) {
         for (const route of ["/healthz", "/status"] as const) {
           getAttemptCount += 1;
-          try { const result = await agentGetJsonWithRetry({ endpoint: input.endpoint, token: input.token, route, stage: input.stage, attempt: statusAttempt + attempt, fetchImpl: input.fetchImpl, timestamp }); if (!result.ok) record(result.diagnostic); }
+          try { const result = await agentGetJsonWithRetry({ endpoint: input.endpoint, token: input.token, route, validator: route === "/healthz" ? agentHealthResponse : agentStatusResponse, stage: input.stage, attempt: statusAttempt + attempt, fetchImpl: input.fetchImpl, timestamp }); if (!result.ok) record(result.diagnostic); }
           catch (error) { if (error instanceof AgentGetTerminalError) record(error.diagnostic); else throw error; }
         }
       }
@@ -253,7 +253,7 @@ export async function getArtifactMetadataWithRetry(input: { endpoint: string; to
   const sleepImpl = input.sleepImpl ?? sleep;
   for (let attempt = 1; attempt <= 4; attempt += 1) {
     try {
-      const result = await agentGetJsonWithRetry({ endpoint: input.endpoint, token: input.token, route: `/artifacts/${input.taskId}/metadata`, stage: "artifact_metadata", attempt, fetchImpl: input.fetchImpl });
+      const result = await agentGetJsonWithRetry({ endpoint: input.endpoint, token: input.token, route: `/artifacts/${input.taskId}/metadata`, validator: agentArtifactMetadataResponse(input.taskId), stage: "artifact_metadata", attempt, fetchImpl: input.fetchImpl });
       if (result.ok) return result.body;
       input.onDiagnostic?.(result.diagnostic);
     } catch (error) {
@@ -312,7 +312,7 @@ async function runLive(taskId: string, resume: boolean, commit: string, agentSha
     },
     reconnect: async (orderId: string) => { activeOrderId = orderId; const order = (await readLiveOrdersSummary(config, { forceRefresh: true })).find((item) => item.orderId === orderId); return { active: Boolean(order?.active), endpoint: order?.controllerUrl ?? null }; },
     armWatchdog: async () => undefined, disarmWatchdog: async () => { const current = sessionRead(); if (current) writeLocalWatchdogArmState({ schemaVersion: 1, armed: false, sessionNonce: createSessionNonce(), serverId: selected?.serverId ?? "98682", orderType: "on-demand", currency: config.rentalCurrency, startingBalanceUsd: startingBalance, armedAt: new Date().toISOString(), drainingAt: new Date().toISOString(), hardDeadlineAt: new Date().toISOString(), hardBudgetUsd: MAX_TOTAL, budgetSafetyUsd: .05, emergencyStop: false }); },
-    health: async (endpoint: string) => { const deadline = Date.now() + 5 * 60 * 1000; let last: { alive: boolean; currentStage: string; lastError: string | null } = { alive: false, currentStage: "", lastError: "health_not_reached" }; let attempt = 0; while (Date.now() < deadline) { attempt += 1; try { const result = await agentGetJsonWithRetry({ endpoint, token, route: "/healthz", stage: null, attempt }); if (!result.ok) { appendTransportDiagnostic(result.diagnostic); last.lastError = result.diagnostic.message; await sleep(5_000); continue; } last = { alive: result.body.alive === true, currentStage: String(result.body.current_stage ?? ""), lastError: result.body.last_error ? String(result.body.last_error) : null }; if (last.alive && last.currentStage === "idle" && !last.lastError) return last; } catch (error) { if (error instanceof AgentGetTerminalError) { appendTransportDiagnostic(error.diagnostic); last.lastError = error.message; break; } throw error; } await sleep(5_000); } return last; },
+    health: async (endpoint: string) => { const deadline = Date.now() + 5 * 60 * 1000; let last: { alive: boolean; currentStage: string; lastError: string | null } = { alive: false, currentStage: "", lastError: "health_not_reached" }; let attempt = 0; while (Date.now() < deadline) { attempt += 1; try { const result = await agentGetJsonWithRetry({ endpoint, token, route: "/healthz", validator: agentHealthResponse, stage: null, attempt }); if (!result.ok) { appendTransportDiagnostic(result.diagnostic); last.lastError = result.diagnostic.message; await sleep(5_000); continue; } last = { alive: result.body.alive === true, currentStage: String(result.body.current_stage ?? ""), lastError: result.body.last_error ? String(result.body.last_error) : null }; if (last.alive && last.currentStage === "idle" && !last.lastError) return last; } catch (error) { if (error instanceof AgentGetTerminalError) { appendTransportDiagnostic(error.diagnostic); last.lastError = error.message; break; } throw error; } await sleep(5_000); } return last; },
     stage: async (endpoint: string, stage: "environment" | "gpu" | "controller" | "comfyui" | "models" | "inference", payload?: object) => { if(stage==="inference")throw new Error("legacy_combined_inference_forbidden"); await agentPostJson(endpoint, token, `/stage/${stage}`, payload); return await waitForStage({ endpoint, token, stage, timeoutMs: stage === "models" ? 3 * 60 * 60 * 1000 : 45 * 60 * 1000, onDiagnostic: appendTransportDiagnostic, reconcileExactOrder: async () => { if (!activeOrderId) return null; return Boolean((await readLiveOrdersSummary(config, { forceRefresh: true })).find((order) => order.orderId === activeOrderId)?.active); } }); },
     submitInference: (endpoint:string,payload:object)=>submitInferenceStage(endpoint,token,payload),pollInference:(endpoint:string)=>pollInferenceStage(endpoint,token,{onDiagnostic:appendTransportDiagnostic,reconcileExactOrder:async()=>{if(!activeOrderId)return null;return Boolean((await readLiveOrdersSummary(config,{forceRefresh:true})).find((order)=>order.orderId===activeOrderId)?.active)}}),
     inferenceReceipt:async(event,detail)=>{if(!ACTIVE_RECEIPT)throw new Error("fresh_receipt_missing");const now=new Date().toISOString();const base={...ACTIVE_RECEIPT,currentStep:`inference_${event}`,inferenceState:event,inferenceSubmitted:event!=="submitting",inferenceSucceeded:event==="succeeded",timestamps:{...ACTIVE_RECEIPT.timestamps,[`inference_${event}`]:now}};const next:FreshReceipt=event==="submitting"?{...base,inferenceSubmittingAt:now,inferenceAcceptedAt:null,acceptedHttpStatus:null,inferenceCompletedAt:null,remoteArtifactAvailable:false,controllerPromptId:null,inferenceFailure:null,remoteArtifact:null,firstError:null}:event==="accepted"?{...base,inferenceAcceptedAt:now,acceptedHttpStatus:detail?.acceptedHttpStatus===202?202:null}:event==="succeeded"?{...base,inferenceCompletedAt:now,remoteArtifactAvailable:Boolean(detail?.remoteArtifact),controllerPromptId:detail?.controllerPromptId??null,inferenceFailure:null,remoteArtifact:detail?.remoteArtifact??null}: {...base,inferenceCompletedAt:now,controllerPromptId:detail?.controllerPromptId??base.controllerPromptId,inferenceFailure:detail?.failure??null,firstError:detail?.error??"inference_failed"};receiptWrite(next);ACTIVE_RECEIPT=next},
