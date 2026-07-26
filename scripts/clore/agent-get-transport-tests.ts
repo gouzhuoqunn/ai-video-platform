@@ -1,61 +1,64 @@
 import assert from "node:assert/strict";
-import { agentGetJsonWithRetry, AgentGetTerminalError } from "./agent-get-transport";
-import { getArtifactMetadataWithRetry, pollInferenceStage, waitForStage } from "./run-image-e2e";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { agentArtifactMetadataResponse, agentGetJsonWithRetry, agentHealthResponse, agentStatusResponse, AgentGetTerminalError } from "./agent-get-transport";
+import { freshRunRequiresManualRecovery, getArtifactMetadataWithRetry, pollInferenceStage, prepareFreshReceipt, type FreshReceipt, waitForStage } from "./run-image-e2e";
 
-function response(status: number, body: object = {}) { return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }); }
-function transient(code: string, message = "fetch failed") { return new TypeError(message, { cause: { code } }); }
+const token = "fixture-agent-token";
+function response(status: number, body = "", contentType = "application/json") { return new Response(body, { status, headers: { "content-type": contentType, "content-length": String(Buffer.byteLength(body)) } }); }
+function status(stage = "models", state = "succeeded") { return JSON.stringify({ alive: true, current_stage: "idle", last_error: null, stages: { [stage]: { status: state, data: { verified: true } } }, models: {} }); }
+function health() { return JSON.stringify({ alive: true, agent: "restricted-clore-diagnostic", current_stage: "idle", last_error: null }); }
 function virtualClock() { let value = 0; return { now: () => value, timestamp: () => new Date(value).toISOString(), sleep: async (milliseconds: number) => { value += milliseconds; } }; }
+function sequence(values: Response[]) { let index = 0; return async () => values[Math.min(index++, values.length - 1)]; }
+
+async function recoverFromNonAgent(body: string, expectedKind: string, contentType = "application/json") {
+  let stagePosts = 1; let gets = 0; const diagnostics: unknown[] = [];
+  const result = await waitForStage({ endpoint: "https://agent.example", token, stage: "models", timeoutMs: 60_000, sleepImpl: async () => undefined, onDiagnostic: (value) => diagnostics.push(value), fetchImpl: sequence([response(200, body, contentType), response(200, status())]) });
+  gets = 2;
+  assert.equal(result.status, "succeeded"); assert.equal(stagePosts, 1); assert.equal(gets, 2);
+  const diagnostic = diagnostics[0] as { message: string; responseKind: string; bodySha256: string; bodyPreview: string };
+  assert.equal(diagnostic.message, "agent_proxy_non_agent_response"); assert.equal(diagnostic.responseKind, expectedKind); assert.match(diagnostic.bodySha256, /^[a-f0-9]{64}$/); assert.ok(!JSON.stringify(diagnostics).includes(token) && !JSON.stringify(diagnostics).includes("agent.example"));
+}
 
 async function main() {
-  // The caller performs the one stage POST; polling never replays it.
-  let comfyPosts = 1; let comfyGets = 0;
-  const comfy = await waitForStage({ endpoint: "https://agent.example", token: "fixture-token", stage: "comfyui", timeoutMs: 60_000, sleepImpl: async () => undefined, fetchImpl: async () => {
-    comfyGets += 1;
-    if (comfyGets === 1) throw transient("ECONNRESET");
-    return response(200, { stages: { comfyui: { status: "succeeded", data: { ready: true } } } });
-  } });
-  assert.equal(comfy.status, "succeeded"); assert.equal(comfyPosts, 1); assert.equal(comfyGets, 2);
+  await recoverFromNonAgent("<html>https://agent.example/status?token=signed-fixture</html>", "html", "text/html");
+  await recoverFromNonAgent("", "empty");
+  await recoverFromNonAgent("{not-json", "invalid_json");
+  await recoverFromNonAgent(JSON.stringify({ alive: true, current_stage: "idle", stages: [] }), "wrong_schema");
 
-  const resetClock = virtualClock(); let resetGets = 0;
-  const reset = await waitForStage({ endpoint: "https://agent.example", token: "fixture-token", stage: "comfyui", timeoutMs: 60_000, now: resetClock.now, timestamp: resetClock.timestamp, sleepImpl: resetClock.sleep, fetchImpl: async () => {
-    resetGets += 1;
-    if (resetGets === 1) return response(502);
-    if (resetGets === 2) throw transient("ECONNRESET");
-    if (resetGets === 3) throw transient("ETIMEDOUT", "timeout");
-    if (resetGets === 4) return response(200, { stages: { comfyui: { status: "running" } } });
-    return response(200, { stages: { comfyui: { status: "succeeded" } } });
-  } });
-  assert.equal(reset.status, "succeeded"); assert.equal(resetGets, 5, "successful status resets the outage sequence");
+  const validStatus = await agentGetJsonWithRetry({ endpoint: "https://agent.example", token, route: "/status", validator: agentStatusResponse, attempt: 1, fetchImpl: sequence([response(200, status())]) });
+  assert.equal(validStatus.ok, true);
+  const validHealth = await agentGetJsonWithRetry({ endpoint: "https://agent.example", token, route: "/healthz", validator: agentHealthResponse, attempt: 1, fetchImpl: sequence([response(200, health())]) });
+  assert.equal(validHealth.ok, true);
 
-  const healthClock = virtualClock(); let statusGets = 0; let healthGets = 0;
-  const healthRecovery = await waitForStage({ endpoint: "https://agent.example", token: "fixture-token", stage: "comfyui", timeoutMs: 60_000, now: healthClock.now, timestamp: healthClock.timestamp, sleepImpl: healthClock.sleep, fetchImpl: async (input) => {
-    if (String(input).endsWith("/healthz")) { healthGets += 1; return response(200, { alive: true, current_stage: "comfyui" }); }
-    statusGets += 1;
-    if (statusGets <= 3) throw transient("UND_ERR_SOCKET");
-    return response(200, { stages: { comfyui: { status: "succeeded" } } });
-  } });
-  assert.equal(healthRecovery.status, "succeeded"); assert.equal(healthGets, 1, "health is probed after three status failures");
+  const oversized = await agentGetJsonWithRetry({ endpoint: "https://agent.example", token, route: "/status", validator: agentStatusResponse, attempt: 1, fetchImpl: sequence([new Response("ignored", { status: 200, headers: { "content-type": "application/json", "content-length": String(1024 * 1024 + 1) } })]) });
+  assert.equal(oversized.ok, false); if (!oversized.ok) assert.equal(oversized.diagnostic.responseKind, "oversized");
 
-  for (const status of [401, 404]) {
-    await assert.rejects(() => agentGetJsonWithRetry({ endpoint: "https://agent.example", token: "fixture-token", route: "/status", attempt: 1, fetchImpl: async () => response(status) }), AgentGetTerminalError);
-  }
-  const timedOut = await agentGetJsonWithRetry({ endpoint: "https://agent.example", token: "fixture-token", route: "/status", attempt: 1, timeoutMs: 1, fetchImpl: async (_url, init) => await new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(transient("ETIMEDOUT", "timeout")), { once: true })) });
-  assert.equal(timedOut.ok, false); if (!timedOut.ok) assert.equal(timedOut.diagnostic.causeCode, "ETIMEDOUT");
+  let requestUrl = ""; let requestHeaders: Headers | undefined;
+  await agentGetJsonWithRetry({ endpoint: "https://agent.example", token, route: "/status", validator: agentStatusResponse, attempt: 7, fetchImpl: async (input, init) => { requestUrl = String(input); requestHeaders = new Headers(init?.headers); return response(200, status()); } });
+  assert.match(requestUrl, /\/status\?poll_attempt=7$/); assert.equal(requestHeaders?.get("cache-control"), "no-cache, no-store"); assert.equal(requestHeaders?.get("pragma"), "no-cache"); assert.equal(requestHeaders?.get("accept"), "application/json");
 
-  const outageClock = virtualClock(); let reconcileCalls = 0; let outageFetches = 0; const diagnostics: unknown[] = [];
-  const outage = await waitForStage({ endpoint: "https://agent.example", token: "fixture-token", stage: "comfyui", timeoutMs: 45 * 60_000, now: outageClock.now, timestamp: outageClock.timestamp, sleepImpl: outageClock.sleep, onDiagnostic: (value) => diagnostics.push(value), reconcileExactOrder: async () => { reconcileCalls += 1; return true; }, fetchImpl: async () => { outageFetches += 1; throw transient("ECONNRESET", "fetch failed bearer secret-fixture"); } });
-  assert.equal(outage.status, "failed"); assert.match(outage.error ?? "", /agent_transport_outage_exceeded/); assert.equal(reconcileCalls, 1); assert.ok(outageFetches >= 6, "final health/status probes were attempted");
-  const outageDetail = JSON.parse(outage.error!); assert.equal(outageDetail.exact_order_active, true); assert.equal(outageDetail.nested_cause_code, "ECONNRESET");
-  assert.ok(JSON.stringify(diagnostics).includes("ECONNRESET")); assert.ok(!JSON.stringify(diagnostics).includes("secret-fixture"));
+  for (const statusCode of [401, 404]) await assert.rejects(() => agentGetJsonWithRetry({ endpoint: "https://agent.example", token, route: "/status", validator: agentStatusResponse, attempt: 1, fetchImpl: sequence([response(statusCode)]) }), AgentGetTerminalError);
+
+  const outageClock = virtualClock(); let stagePosts = 1; let reconcileCalls = 0; const outageDiagnostics: unknown[] = [];
+  const outage = await waitForStage({ endpoint: "https://agent.example", token, stage: "models", timeoutMs: 45 * 60_000, now: outageClock.now, timestamp: outageClock.timestamp, sleepImpl: outageClock.sleep, onDiagnostic: (value) => outageDiagnostics.push(value), reconcileExactOrder: async () => { reconcileCalls += 1; return true; }, fetchImpl: async () => response(200, "<html>persistent proxy</html>", "text/html") });
+  assert.equal(outage.status, "failed"); assert.equal(stagePosts, 1); assert.equal(reconcileCalls, 1);
+  const outageDetail = JSON.parse(outage.error!); assert.equal(outageDetail.code, "agent_transport_outage_exceeded"); assert.equal(outageDetail.last_http_status, 200); assert.equal(outageDetail.last_response_kind, "html"); assert.equal(outageDetail.last_content_type, "text/html"); assert.match(outageDetail.last_body_sha256, /^[a-f0-9]{64}$/); assert.ok(!JSON.stringify(outageDiagnostics).includes(token) && !JSON.stringify(outageDiagnostics).includes("agent.example"));
 
   let inferencePosts = 1; let inferenceGets = 0;
-  const inference = await pollInferenceStage("https://agent.example", "fixture-token", { sleepImpl: async () => undefined, fetchImpl: async () => { inferenceGets += 1; if (inferenceGets === 1) throw transient("EAI_AGAIN"); return response(200, { stages: { inference: { status: "succeeded" } } }); } });
-  assert.equal(inference.status, "succeeded"); assert.equal(inferencePosts, 1, "GET outage cannot add an inference POST");
+  const inference = await pollInferenceStage("https://agent.example", token, { sleepImpl: async () => undefined, fetchImpl: sequence([response(200, "<html>proxy</html>", "text/html"), response(200, status("inference"))]) });
+  inferenceGets = 2; assert.equal(inference.status, "succeeded"); assert.equal(inferencePosts, 1); assert.equal(inferenceGets, 2);
 
   let metadataGets = 0; let inferenceReruns = 0;
-  const metadata = await getArtifactMetadataWithRetry({ endpoint: "https://agent.example", token: "fixture-token", taskId: "fixture", sleepImpl: async () => undefined, fetchImpl: async () => { metadataGets += 1; return metadataGets === 1 ? response(502) : response(200, { sha256: "a".repeat(64), byte_size: 1 }); } });
-  assert.equal(metadata.sha256, "a".repeat(64)); assert.equal(metadataGets, 2); assert.equal(inferenceReruns, 0);
-  console.log(JSON.stringify({ ok: true, single_post_poll_recovery: true, repeated_transients_reset: true, health_probe_recovery: true, terminal_auth_and_not_found: true, bounded_outage_reconciles_and_final_probes: true, inference_post_single: true, metadata_get_retries_without_inference: true, diagnostics_redacted: true }));
+  const metadata = await getArtifactMetadataWithRetry({ endpoint: "https://agent.example", token, taskId: "fixture-task", sleepImpl: async () => undefined, fetchImpl: sequence([response(200, JSON.stringify({ task_id: "fixture-task", width: 0, height: 1, byte_size: 1, sha256: "a".repeat(64) })), response(200, JSON.stringify({ task_id: "fixture-task", width: 768, height: 768, byte_size: 1, sha256: "a".repeat(64) }))]) });
+  metadataGets = 2; assert.equal(metadata.sha256, "a".repeat(64)); assert.equal(inferenceReruns, 0); assert.equal(agentArtifactMetadataResponse("fixture-task")(metadata), true);
+
+  const root = mkdtempSync(path.join(os.tmpdir(), "agent-get-receipt-")); const receiptPath = path.join(root, "receipt.json"); const archiveDir = path.join(root, "archive"); const taskId = "safe-preinference";
+  const prior: FreshReceipt = { schema: 1, runId: "prior", taskId, orderId: null, endpoint: null, currentStep: "failed", inferenceState: "not_started", inferenceSubmitted: false, inferenceSucceeded: false, inferenceSubmittingAt: null, inferenceAcceptedAt: null, acceptedHttpStatus: null, inferenceCompletedAt: null, remoteArtifactAvailable: false, controllerPromptId: null, inferenceFailure: null, remoteArtifact: null, artifactDownloaded: false, localArtifactPublished: false, taskFinalized: false, uiVerified: false, orderCancelled: false, timestamps: {}, firstError: "preflight" };
+  try { writeFileSync(receiptPath, JSON.stringify(prior)); const rotated = await prepareFreshReceipt({ taskId, taskStatus: "waiting_for_gpu", receiptPath, archiveDir, activeOrderCount: async () => 0 }); assert.equal(rotated.inferenceState, "not_started"); assert.equal(freshRunRequiresManualRecovery({ taskId, inferenceState: "accepted" }, taskId, "waiting_for_gpu"), true); }
+  finally { rmSync(root, { recursive: true, force: true }); }
+  console.log(JSON.stringify({ ok: true, non_agent_200_get_only_recovery: true, validators_and_no_cache: true, persistent_proxy_outage_evidence: true, terminal_auth_and_not_found: true, inference_post_single: true, artifact_get_retries_without_inference: true, safe_preinference_rotates: true, ambiguous_receipt_blocks: true, diagnostics_redacted: true }));
 }
 
 void main();
