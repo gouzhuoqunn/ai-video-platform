@@ -1,7 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { CloreConfig } from "./types";
-import { readTemporaryDeploymentDeniedServerIds, temporaryDeploymentDenylistPath } from "./deployment-host-blacklist";
+import {
+  readDeploymentBlacklistedServerIds,
+  readTemporaryDeploymentDeniedServerIds,
+  temporaryDeploymentDenylistPath,
+} from "./deployment-host-blacklist";
 
 const CLORE_ENV_PATH = path.join(process.cwd(), ".secrets", "clore.env");
 export const PROJECT_TAG = "ai-video-platform-wan22";
@@ -75,17 +79,20 @@ function readTargetGpu(fileValues: Map<string, string>) {
   throw new Error("CLORE_TARGET_GPU must be NVIDIA GeForce RTX 4090 or NVIDIA GeForce RTX 5090.");
 }
 
-function readExcludedServerIds(fileValues: Map<string, string>) {
+function readExcludedServerIds(fileValues: Map<string, string>, deploymentProfileFingerprint?: string) {
   const fromEnv = readString("CLORE_EXCLUDED_SERVER_IDS", "", fileValues)
     .split(",")
     .map((serverId) => serverId.trim())
     .filter((serverId) => /^\d+$/.test(serverId));
   const denylistPath = temporaryDeploymentDenylistPath();
-  const fromFile = existsSync(denylistPath) ? readTemporaryDeploymentDeniedServerIds(denylistPath) : [];
-  return [...new Set([...fromEnv, ...fromFile])];
+  const fromTemporaryDenylist = existsSync(denylistPath)
+    ? readTemporaryDeploymentDeniedServerIds(denylistPath, Date.now(), deploymentProfileFingerprint)
+    : [];
+  const fromDeploymentHistory = readDeploymentBlacklistedServerIds(undefined, deploymentProfileFingerprint);
+  return [...new Set([...fromEnv, ...fromDeploymentHistory, ...fromTemporaryDenylist])];
 }
 
-export function loadCloreConfig(): CloreConfig {
+export function loadCloreConfig(options: { deploymentProfileFingerprint?: string } = {}): CloreConfig {
   const fileValues = parseEnvFile(CLORE_ENV_PATH);
   const apiKey = readOptionalString("CLORE_API_KEY", fileValues);
   const targetGpu = readTargetGpu(fileValues);
@@ -112,7 +119,7 @@ export function loadCloreConfig(): CloreConfig {
     sshPublicKeyPath: readOptionalString("CLORE_SSH_PUBLIC_KEY_PATH", fileValues) ?? path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".ssh", "clore_ai_video_worker_ed25519.pub"),
     projectTag: readString("CLORE_PROJECT_TAG", PROJECT_TAG, fileValues) || PROJECT_TAG,
     assumedMinimumRentalHours: readNumber("CLORE_MIN_RENTAL_HOURS", 6, fileValues),
-    excludedServerIds: readExcludedServerIds(fileValues),
+    excludedServerIds: readExcludedServerIds(fileValues, options.deploymentProfileFingerprint),
   };
 }
 

@@ -12,7 +12,26 @@ const sessionId = "8520171f-1be2-4f8a-8e36-4d8a8c02d032";
 const taskA = "66d42c71-61e3-49f4-a867-2b2745bc0102";
 const taskB = "1c77684f-5632-4aec-9d86-3f3ee0380101";
 const now = "2026-07-26T11:07:22.000Z";
-const worker: WorkerState = { schemaVersion: 1, sessionId, pid: 1, state: "running", taskIds: [taskA, taskB], immutableCommit: "a".repeat(40), startedAt: now, lastHeartbeatAt: now, completedAt: null, exitCode: null, sanitizedError: null, sessionReceiptPath: "receipt.json", logPath: "worker.log" };
+const worker: WorkerState = {
+  schemaVersion: 1,
+  sessionId,
+  pid: 1,
+  state: "running",
+  taskIds: [taskA, taskB],
+  deploymentProfileFingerprint: "b".repeat(64),
+  immutableCommit: "a".repeat(40),
+  agentSourceSha256: "c".repeat(64),
+  agentSha256: "d".repeat(64),
+  controllerSha256: "e".repeat(64),
+  workflowSha256: "f".repeat(64),
+  startedAt: now,
+  lastHeartbeatAt: now,
+  completedAt: null,
+  exitCode: null,
+  sanitizedError: null,
+  sessionReceiptPath: "receipt.json",
+  logPath: "worker.log",
+};
 const receipt = { sessionId, sessionState: "running", currentTaskId: taskA, cleanupEvidence: { zeroActiveOrderConfirmations: 2, watchdogDisarmed: true }, tasks: { [taskA]: { terminal: "not_started", inferenceState: "accepted" }, [taskB]: { terminal: "not_started", inferenceState: "not_started" } }, timestamps: {} };
 
 const ambiguous = terminalizeWorkerSnapshot(worker, receipt, { error: "unhandled_rejection:simulated", exitCode: 1, now });
@@ -58,6 +77,8 @@ try {
 const supervisorSource = readFileSync("scripts/clore/image-session-supervisor.ts", "utf8");
 assert.match(supervisorSource, /terminalizeDeadWorker\b/);
 assert.doesNotMatch(supervisorSource, /terminalizeDeadWorkerWithCleanup/);
+const workerSource = readFileSync("scripts/clore/image-session-worker.ts", "utf8");
+assert.match(workerSource, /if \(!terminal && !finishing\) save\(\{ lastHeartbeatAt:/, "a queued heartbeat cannot overwrite terminal worker state");
 
 async function testVerifiedArtifactRecovery() {
 const temp = mkdtempSync(path.join(os.tmpdir(), "image-session-terminalization-"));

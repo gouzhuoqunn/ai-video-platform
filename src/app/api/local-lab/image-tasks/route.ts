@@ -16,7 +16,7 @@ import { loadCloreExecutionConfig } from "../../../../../scripts/clore/execution
 import { readLiveOrdersSummary, type CloreOrderSummary } from "../../../../../scripts/clore/live";
 import { ACTIVE_ORDER_PATH, LEGACY_ORDER_CREATE_LOCK_PATH, ORDER_CREATE_LOCK_PATH, clearActiveOrder, clearOrderCreateLocks, readActiveOrder } from "../../../../../scripts/clore/order-state";
 import { finalSanitizedLogLines, imageExecutorReadinessForGpuClass, processExists, STALE_RUNNER_NO_ORDER_MESSAGE } from "../../../../../scripts/image-executor/readiness";
-import { assertRtx4090GoldenDeploymentProfile } from "../../../../../scripts/image-executor/rtx4090-golden-deployment-profile";
+import { assertRtx4090GoldenDeploymentProfile, rtx4090GoldenDeploymentFingerprint } from "../../../../../scripts/image-executor/rtx4090-golden-deployment-profile";
 import { planExecutableImageBatch, planImageSession } from "../../../../../scripts/clore/image-session";
 import { projectRunnerStatus } from "@/lib/image-generation/runner-status-projection";
 
@@ -90,7 +90,7 @@ export type ImageRunnerSession = {
     candidateRole?: "candidate" | "rented_host" | null;
     market?: { phase: string; scannedAt: string | null; nextScanAt: string | null; totalServerCount: number | null; compliantCandidateCount: number | null; rejectedServerIds: string[]; attemptedServerIds: string[]; selectedServerId: string | null; selectedHourlyUsd: number | null; filterCounts?: Record<string, unknown> | null; marketplaceRead?: Record<string, unknown> | null } | null;
     marketplaceRefreshedAt?: string | null;
-    candidateAttempts?: Array<{ serverId?: string; hourlyUsd?: number | null; event?: string; marketplaceRefreshedAt?: string | null }> | null;
+    candidateAttempts?: Array<{ serverId?: string; hourlyUsd?: number | null; event?: string; classification?: string | null; requestAttempts?: number; marketplaceRefreshedAt?: string | null }> | null;
   } | null;
   error: {
     stage: string;
@@ -123,6 +123,7 @@ const DEFAULT_MAX_HOURLY_PRICE = 0.6;
 const KONTEXT_BLOCKER = "FLUX Kontext 执行器尚未完成";
 const DUPLICATE_START_MESSAGE = "已有图像批次正在启动或执行，请先等待或退租。";
 const CREATE_ORDER_STALE_MS = 3 * 60 * 1000;
+const SUPERVISOR_HANDOFF_GRACE_MS = 60 * 1000;
 
 function readJson<T>(filePath: string, fallback: T): T {
   try {
@@ -265,7 +266,7 @@ function normalizeHost(value: unknown): ImageRunnerSession["host"] {
     createOrderAttempts: recordArrayOrNull(host.createOrderAttempts),
     candidateRole: host.candidateRole === "candidate" || host.candidateRole === "rented_host" ? host.candidateRole : null,
     marketplaceRefreshedAt: stringOrNull(host.marketplaceRefreshedAt),
-    candidateAttempts: recordArrayOrNull(host.candidateAttempts)?.map((attempt) => ({ serverId: stringOrNull(attempt.serverId) ?? undefined, hourlyUsd: finiteNumber(attempt.hourlyUsd), event: stringOrNull(attempt.event) ?? undefined, marketplaceRefreshedAt: stringOrNull(attempt.marketplaceRefreshedAt) })) ?? null,
+    candidateAttempts: recordArrayOrNull(host.candidateAttempts)?.map((attempt) => ({ serverId: stringOrNull(attempt.serverId) ?? undefined, hourlyUsd: finiteNumber(attempt.hourlyUsd), event: stringOrNull(attempt.event) ?? undefined, classification: stringOrNull(attempt.classification), requestAttempts: Number.isSafeInteger(attempt.requestAttempts) ? Number(attempt.requestAttempts) : undefined, marketplaceRefreshedAt: stringOrNull(attempt.marketplaceRefreshedAt) })) ?? null,
     market: host.market && typeof host.market === "object" && !Array.isArray(host.market) ? {
       phase: stringOrNull((host.market as Record<string, unknown>).phase) ?? "unknown",
       scannedAt: stringOrNull((host.market as Record<string, unknown>).scannedAt),
@@ -463,6 +464,21 @@ async function reconcileStaleRunner(runner: ImageRunnerSession) {
   const localActive = activeStateLooksImageOrder();
   const pidLive = processExists(runner.pid);
   const staleCreatingOrder = creatingOrderLooksStale(runner);
+  const launchStartedAt = runner.createAttempt?.startedAt ?? runner.startedAt;
+  const launchAge = launchStartedAt ? Date.now() - Date.parse(launchStartedAt) : Number.POSITIVE_INFINITY;
+  const launchPending =
+    runner.state === "running" &&
+    Boolean(runner.createAttempt?.id) &&
+    !localActive &&
+    !staleCreatingOrder &&
+    launchAge >= 0 &&
+    launchAge < SUPERVISOR_HANDOFF_GRACE_MS &&
+    !pidLive;
+  // The route publishes no authoritative PID until the detached supervisor
+  // hands back the real worker PID. During that bounded handoff window a
+  // second start must not release the task freeze while the worker can still
+  // create an order.
+  if (launchPending) return runner;
   const shouldReconcile = Boolean(localActive) || (!terminalRunnerState(runner.state) && !pidLive) || staleCreatingOrder;
   if (!shouldReconcile) return runner;
   const activeOrders = await activeCloreOrders().catch(() => null);
@@ -961,8 +977,12 @@ export async function POST(request: NextRequest) {
         attemptId,
         "--task-ids",
         planned.selectedTaskIds.join(","),
+        "--deployment-profile-fingerprint",
+        rtx4090GoldenDeploymentFingerprint(profile),
         "--immutable-commit",
         profile.immutable.commit,
+        "--agent-source-sha256",
+        profile.immutable.agentSourceSha256,
         "--agent-sha256",
         profile.immutable.agentSha256,
         "--controller-sha256",
@@ -975,7 +995,6 @@ export async function POST(request: NextRequest) {
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
-      saveRunner({ ...readRunner(), pid: child.pid ?? null, startedAt, logPath: RUNNER_LOG_PATH });
       let supervisorStdoutBuffer = "";
       const publishWorkerStart = (line: string) => {
         if (!line.trim()) return;
@@ -1007,7 +1026,7 @@ export async function POST(request: NextRequest) {
       child.on("error", (error) => {
         appendRunnerLog("event", `child_error:${error.message}`);
         const current = readRunner();
-        if (!terminalRunnerState(current.state)) {
+        if (!terminalRunnerState(current.state) && current.createAttempt?.id === attemptId) {
           saveRunner({
             ...current,
             state: "failed",
@@ -1023,7 +1042,10 @@ export async function POST(request: NextRequest) {
         supervisorStdoutBuffer = "";
         appendRunnerLog("event", `supervisor_close code=${code ?? "null"} signal=${signal ?? "null"}`);
         const current = readRunner();
-        if (!terminalRunnerState(current.state) && current.pid === child.pid) {
+        const supervisorDidNotPublishWorker =
+          current.createAttempt?.id === attemptId &&
+          (current.pid === null || current.pid === child.pid);
+        if (!terminalRunnerState(current.state) && supervisorDidNotPublishWorker) {
           const stderr = existsSync(RUNNER_LOG_PATH) ? finalSanitizedLogLines(readFileSync(RUNNER_LOG_PATH, "utf8"), 8).join("\n") : "";
           saveRunner({
             ...current,

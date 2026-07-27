@@ -61,7 +61,13 @@ assert.equal(buildHttpRuntimeCreateOrderBody({ serverId: "5090", currency: "USD-
 assert.equal(buildHttpRuntimeCreateOrderBody({ serverId: "4090", currency: "USD-Blockchain", requiredPrice: 7.2 }).env?.COMFY_GPU_PROFILE, "rtx4090");
 
 assert.doesNotThrow(() => assertStageGpuMatches("RTX 5090", { nvidia_smi: { stdout: "NVIDIA GeForce RTX 5090" } }));
+assert.doesNotThrow(() => assertStageGpuMatches("RTX 5090", { nvidia_smi: { first_output_lines: ["NVIDIA GeForce RTX 5090"], final_output_lines: ["NVIDIA GeForce RTX 5090"] } }));
+assert.doesNotThrow(() => assertStageGpuMatches("RTX 4090", { nvidia_smi: { final_output_lines: ["| 0  NVIDIA GeForce RTX 4090  On |"] } }));
+assert.doesNotThrow(() => assertStageGpuMatches("RTX 4090", { nvidia_smi: { output: "| 0  NVIDIA GeForce RTX 4090  On |" } }), "the pinned Agent exec_fixed contract uses output");
 assert.throws(() => assertStageGpuMatches("RTX 5090", { nvidia_smi: { stdout: "NVIDIA GeForce RTX 4090" } }), /gpu_hardware_mismatch/);
+assert.throws(() => assertStageGpuMatches("RTX 4090", { nvidia_smi: { final_output_lines: [] } }), /gpu_hardware_mismatch/);
+assert.throws(() => assertStageGpuMatches("RTX 4090", { nvidia_smi: { final_output_lines: ["x".repeat(501)] } }), /gpu_stage_output_contract_invalid/);
+assert.throws(() => assertStageGpuMatches("RTX 4090", { nvidia_smi: { first_output_lines: "NVIDIA GeForce RTX 4090" } }), /gpu_stage_output_contract_invalid/);
 
 const workflow = path.join(process.cwd(), "comfy-runtime", "image_workflow.py").replace(/\\/g, "/");
 const output = execFileSync("python", ["-c", `import importlib.util,json; s=importlib.util.spec_from_file_location('workflow','${workflow}'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); o=m.validate_request({'mode':'text_generation','prompt':'fixture','width':1536,'height':1536,'steps':30,'cfg':4,'lora_strength':.8,'seed':9,'sampler':'FlowMatch'}); w=m.build_text_workflow('fixture',o); print(json.dumps({'width':w['6']['inputs']['width'],'height':w['6']['inputs']['height']}))`], { encoding: "utf8" });

@@ -10,7 +10,26 @@ import { cleanupLiveSession, type CleanupLiveSessionResult } from "./image-live-
 type ReceiptRecord = Record<string, unknown>;
 type ReceiptTask = Record<string, unknown>;
 export type WorkerTerminalState = "succeeded" | "failed" | "ambiguous";
-export type WorkerState = { schemaVersion: 1; sessionId: string; pid: number | null; state: "starting" | "running" | WorkerTerminalState; taskIds: string[]; immutableCommit: string; startedAt: string; lastHeartbeatAt: string; completedAt: string | null; exitCode: number | null; sanitizedError: string | null; sessionReceiptPath: string; logPath: string };
+export type WorkerState = {
+  schemaVersion: 1;
+  sessionId: string;
+  pid: number | null;
+  state: "starting" | "running" | WorkerTerminalState;
+  taskIds: string[];
+  deploymentProfileFingerprint: string;
+  immutableCommit: string;
+  agentSourceSha256: string;
+  agentSha256: string;
+  controllerSha256: string;
+  workflowSha256: string;
+  startedAt: string;
+  lastHeartbeatAt: string;
+  completedAt: string | null;
+  exitCode: number | null;
+  sanitizedError: string | null;
+  sessionReceiptPath: string;
+  logPath: string;
+};
 export const root = (id: string) => path.join(process.cwd(), ".secrets", "diagnostics", "image-sessions", id);
 export const workerPath = (id: string) => path.join(root(id), "worker-state.json");
 export const sessionReceiptPath = path.join(process.cwd(), ".secrets", "clore-image-session-receipt.json");
@@ -160,13 +179,24 @@ export function isSafeTerminalReceipt(receipt: ReceiptRecord | null) {
   return Number(evidence?.zeroActiveOrderConfirmations) === 2 && evidence?.watchdogDisarmed === true && evidence?.localOrderStateCleared === true;
 }
 
-export async function archiveSafePrior(taskIds: string[], options: { allowedRunnerAttemptId?: string; allowedRunnerPid?: number } = {}) {
+export async function archiveSafePrior(
+  taskIds: string[],
+  options: {
+    allowedRunnerAttemptId?: string;
+    allowedRunnerPid?: number;
+    immutableSourcePreflight?: () => Promise<unknown>;
+  } = {},
+) {
   const receipt = readReceipt();
   if (!receipt) return null;
   const terminalAndClean = isSafeTerminalReceipt(receipt);
   const safePreOrder = isSafePreOrderReceipt(receipt);
   if (!terminalAndClean && !safePreOrder) throw new Error("prior_session_receipt_unsafe");
   if (hasUnfinishedLocalExecution(options)) throw new Error("prior_session_local_execution_state_present");
+  // A failed immutable-source gate must not be preceded by a provider read.
+  // The supervisor performs this canonical, read-only source check before the
+  // mandatory active-order reconciliation.
+  await options.immutableSourcePreflight?.();
   const active = await readLiveOrdersSummary(loadCloreConfig(), { forceRefresh: true });
   if (active.some((order) => order.active)) throw new Error("prior_session_active_order_exists");
   const tasks = listImageTasks();

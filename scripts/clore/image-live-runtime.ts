@@ -11,20 +11,26 @@ import { normalizeCloreServer } from "./marketplace";
 import { rankFreshMarketplaceCandidates, type MarketScanEvidence } from "./live-market-selection";
 import { createSessionNonce, isLocalWatchdogTaskInstalled, writeLocalWatchdogArmState } from "./watchdog-io";
 import { agentGetJsonWithRetry, agentHealthResponse } from "./agent-get-transport";
+import { clearTemporaryDeploymentDeny, recordDeploymentFailure, recordDeploymentSuccess, recordTemporaryDeploymentDeny } from "./deployment-host-blacklist";
 import { agentPostJson, assertCallerAgentStageAcceptanceContract, buildPublicAgentBootstrap, createOrderWithRateLimit, getArtifactMetadataWithRetry, persistAndFinalizeExactLocalTask, pollInferenceStage, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, waitForStage, type AcceptedStage, type AgentStageAcceptanceEvidence, type EligibleImageTask } from "./run-image-e2e";
 import { toAgentModelManifest, verifyFiveImageModelSources } from "./image-model-preflight";
 import { ensureLocalUi, verifyImageUi } from "./image-e2e-ui";
 import { IMAGE_SESSION_LIMITS, planImageSession, type ImageSessionPlan } from "./image-session";
 import type { ImageGpuClass } from "../../src/lib/image-generation/flux-stack";
-import { assertRtx4090GoldenDeploymentProfile, buildRtx4090GoldenBootstrap } from "../image-executor/rtx4090-golden-deployment-profile";
+import {
+  assertRtx4090GoldenDeploymentProfile,
+  buildRtx4090GoldenBootstrap,
+  rtx4090GoldenDeploymentFingerprint,
+  verifyRtx4090GoldenPublishedSources,
+} from "../image-executor/rtx4090-golden-deployment-profile";
 import { resilientCreateOrder, type ResilientCreateAttempt, type ResilientCreateCandidate } from "./resilient-create";
 import { acquireOrderCreateLock, clearActiveOrder, readActiveOrder, writeActiveOrder, type ActiveCloreOrder } from "./order-state";
 
-export type ImmutableRuntime = { commit: string; agentSha256: string; controllerSha256: string; workflowSha256: string };
-export type LiveSessionOrder = { orderId: string; endpoint: string; hostname: string; serverId: string; hourlyUsd: number; startingBalanceUsd: number; plan: ImageSessionPlan; token: string; tokenSha256: string; hardDeadlineAt: string };
-export type OwnedSessionOrder = Pick<LiveSessionOrder, "orderId" | "serverId" | "hourlyUsd" | "startingBalanceUsd" | "hardDeadlineAt">;
+export type ImmutableRuntime = { commit: string; agentSourceSha256: string; agentSha256: string; controllerSha256: string; workflowSha256: string };
+export type LiveSessionOrder = { orderId: string; endpoint: string; hostname: string; serverId: string; hourlyUsd: number; startingBalanceUsd: number; plan: ImageSessionPlan; token: string; tokenSha256: string; hardDeadlineAt: string; deploymentProfileFingerprint: string };
+export type OwnedSessionOrder = Pick<LiveSessionOrder, "orderId" | "serverId" | "hourlyUsd" | "startingBalanceUsd" | "hardDeadlineAt" | "deploymentProfileFingerprint">;
 export type StageTerminal = { stageRunId: string; status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> };
-export type CandidateAttemptEvent = { attempt: number; serverId: string; hourlyUsd: number | null; event: "selected" | "candidate_already_rented" | "candidate_failed" | "order_created"; classification: string | null; marketplaceRefreshedAt: string; logicalAttemptId?: string };
+export type CandidateAttemptEvent = { attempt: number; serverId: string; hourlyUsd: number | null; event: "selected" | "candidate_already_rented" | "candidate_failed" | "order_created"; classification: string | null; marketplaceRefreshedAt: string; logicalAttemptId?: string; requestAttempts?: number };
 export type MarketWaitEvent = MarketScanEvidence & { phase: "scanning_market" | "waiting_for_market" | "market_rate_limited" | "market_authentication_failed" | "market_transport_failed" | "market_invalid_json" | "market_schema_incompatible" | "market_provider_error"; cycle: number; nextScanAt: string | null; marketplaceRead?: Pick<MarketplaceReadEvidence, "classification" | "httpStatus" | "contentType" | "responseByteLength" | "bodySha256" | "selectedListField" | "rawListingCount"> };
 
 const MAX_HOURS = 4;
@@ -36,7 +42,15 @@ export const MARKET_REFRESH_INTERVAL_MS = 20_000;
 export const MARKET_WAIT_TIMEOUT_MS = 30 * 60_000;
 export const NO_COMPLIANT_RTX4090_CANDIDATE_MESSAGE = "当前符合价格和配置要求的 RTX 4090 已被租用，请稍后重试。";
 const SESSION_SECRET_ROOT = path.join(process.cwd(), ".secrets", "diagnostics", "image-sessions");
-const fixedConfig = (gpuClass: ImageGpuClass = "rtx4090") => ({ ...loadCloreConfig(), targetGpu: gpuClass === "rtx5090" ? "NVIDIA GeForce RTX 5090" as const : "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: gpuClass === "rtx5090" ? 32 : 24, maxGpuPricePerHour: IMAGE_SESSION_LIMITS.maxHourlyUsd, orderType: "on-demand" as const });
+const fixedConfig = (gpuClass: ImageGpuClass = "rtx4090") => ({
+  ...loadCloreConfig(gpuClass === "rtx4090"
+    ? { deploymentProfileFingerprint: rtx4090GoldenDeploymentFingerprint() }
+    : {}),
+  targetGpu: gpuClass === "rtx5090" ? "NVIDIA GeForce RTX 5090" as const : "NVIDIA GeForce RTX 4090" as const,
+  minGpuVramGb: gpuClass === "rtx5090" ? 32 : 24,
+  maxGpuPricePerHour: IMAGE_SESSION_LIMITS.maxHourlyUsd,
+  orderType: "on-demand" as const,
+});
 const compact = (value: unknown) => String(value instanceof Error ? value.message : value).replace(/(bearer\s+)[^\s]+/gi, "$1<redacted>").replace(/([?&](?:signature|token|credential)[^=&]*=)[^&\s]+/gi, "$1<redacted>").slice(0, 700);
 const atomicJson = (file: string, value: unknown) => { mkdirSync(path.dirname(file), { recursive: true }); const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`; const fd = openSync(tmp, "w", 0o600); try { writeSync(fd, `${JSON.stringify(value, null, 2)}\n`); fsyncSync(fd); } finally { closeSync(fd); } renameSync(tmp, file); };
 
@@ -153,6 +167,7 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
   const tasks = exactTaskIds(input.taskIds);
   const profile = assertRtx4090GoldenDeploymentProfile();
   assertCallerAgentStageAcceptanceContract(profile);
+  await verifyRtx4090GoldenPublishedSources();
   const gpuClass = tasks[0].gpuClass as ImageGpuClass;
   if (gpuClass !== "rtx4090") throw new Error("rtx4090_golden_session_requires_rtx4090_tasks");
   const config = fixedConfig(gpuClass);
@@ -161,7 +176,7 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
   for (const task of tasks) await preflightExactLocalImageTask(task.id);
   if (!isLocalWatchdogTaskInstalled()) throw new Error("local_watchdog_not_installed");
   const token = newSessionToken(input.sessionId); const command = buildPublicAgentBootstrap({ ...input.immutable, tokenSha256: token.sha256 });
-  if (input.immutable.commit !== profile.immutable.commit || input.immutable.agentSha256 !== profile.immutable.agentSha256 || input.immutable.controllerSha256 !== profile.immutable.controllerSha256 || input.immutable.workflowSha256 !== profile.immutable.workflowSha256) throw new Error("rtx4090_golden_profile_identity_mismatch");
+  if (input.immutable.commit !== profile.immutable.commit || input.immutable.agentSourceSha256 !== profile.immutable.agentSourceSha256 || input.immutable.agentSha256 !== profile.immutable.agentSha256 || input.immutable.controllerSha256 !== profile.immutable.controllerSha256 || input.immutable.workflowSha256 !== profile.immutable.workflowSha256) throw new Error("rtx4090_golden_profile_identity_mismatch");
   if (command !== buildRtx4090GoldenBootstrap(token.sha256)) throw new Error("rtx4090_golden_profile_bootstrap_mismatch");
   type CandidateContext = { candidate: ReturnType<typeof normalizeCloreServer>; wallet: Awaited<ReturnType<typeof readWalletSummary>>; plan: ImageSessionPlan; marketplaceRefreshedAt: string; logicalAttemptNumber: number };
   const contexts = new Map<string, CandidateContext>();
@@ -178,6 +193,7 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
       hourlyUsd: context.candidate.priceUsdPerHour ?? 0,
       startingBalanceUsd: context.wallet.availableUsdBalance ?? 0,
       hardDeadlineAt,
+      deploymentProfileFingerprint: rtx4090GoldenDeploymentFingerprint(profile),
     };
     persistedOrders.set(orderId, owned);
     try {
@@ -197,6 +213,7 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
         gpu_type: context.candidate.gpu,
         gpu_profile: gpuClass,
         bootstrap_image: profile.image,
+        deployment_profile_fingerprint: owned.deploymentProfileFingerprint,
         create_attempt_id: input.sessionId,
       });
       writeLocalWatchdogArmState({
@@ -340,7 +357,10 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
       const context = contexts.get(attempt.candidateId);
       if (!context) return;
       const classification = attempt.failure && "classification" in attempt.failure ? attempt.failure.classification : null;
-      await input.onCandidateAttempt?.({ attempt: context.logicalAttemptNumber, serverId: attempt.candidateId, hourlyUsd: context.candidate.priceUsdPerHour, event: attempt.result === "failed_request" ? (classification === "candidate_already_rented" ? "candidate_already_rented" : "candidate_failed") : "order_created", classification, marketplaceRefreshedAt: context.marketplaceRefreshedAt, logicalAttemptId: input.sessionId });
+      const requestAttempts = attempt.failure && typeof attempt.failure === "object" && "requestAttempts" in attempt.failure && Number.isSafeInteger(attempt.failure.requestAttempts)
+        ? attempt.failure.requestAttempts
+        : attempt.result === "failed_request" || attempt.result === "reconciled_order" ? 1 : undefined;
+      await input.onCandidateAttempt?.({ attempt: context.logicalAttemptNumber, serverId: attempt.candidateId, hourlyUsd: context.candidate.priceUsdPerHour, event: attempt.result === "failed_request" ? (classification === "candidate_already_rented" ? "candidate_already_rented" : "candidate_failed") : "order_created", classification, marketplaceRefreshedAt: context.marketplaceRefreshedAt, logicalAttemptId: input.sessionId, requestAttempts });
     },
     });
     break;
@@ -388,8 +408,16 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
     await sleep(10_000);
     endpoint = (await readLiveOrdersSummary(config, { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.controllerUrl ?? null;
   }
-  if (!endpoint) throw new Error("order_endpoint_not_published_within_timeout");
-  return { orderId: order.orderId, endpoint, hostname: new URL(endpoint).hostname, serverId: persisted.serverId, hourlyUsd: persisted.hourlyUsd, startingBalanceUsd: persisted.startingBalanceUsd, plan, token: token.token, tokenSha256: token.sha256, hardDeadlineAt: persisted.hardDeadlineAt };
+  if (!endpoint) {
+    recordGoldenRuntimeDeploymentFailureEvidence({
+      orderId: order.orderId,
+      serverId: order.serverId,
+      lastHttpStatus: null,
+      profileFingerprint: persisted.deploymentProfileFingerprint,
+    });
+    throw new Error("order_endpoint_not_published_within_timeout");
+  }
+  return { orderId: order.orderId, endpoint, hostname: new URL(endpoint).hostname, serverId: persisted.serverId, hourlyUsd: persisted.hourlyUsd, startingBalanceUsd: persisted.startingBalanceUsd, plan, token: token.token, tokenSha256: token.sha256, hardDeadlineAt: persisted.hardDeadlineAt, deploymentProfileFingerprint: persisted.deploymentProfileFingerprint };
 }
 
 export class RuntimeDeploymentFailure extends Error {
@@ -399,14 +427,50 @@ export class RuntimeDeploymentFailure extends Error {
   }
 }
 
+export function recordGoldenRuntimeDeploymentFailureEvidence(
+  input: { orderId: string; serverId: string; lastHttpStatus: number | null; profileFingerprint: string },
+  paths: { historyPath?: string; denylistPath?: string } = {},
+) {
+  const reason = input.lastHttpStatus === 502 ? "golden_agent_proxy_502_timeout" : "golden_agent_health_timeout";
+  const record = {
+    serverId: input.serverId,
+    orderId: input.orderId,
+    reason,
+    profileFingerprint: input.profileFingerprint,
+  };
+  // Retaining either record is useful, but an evidence-write failure must not
+  // replace the deployment error or interrupt exact-order cleanup.
+  try { recordDeploymentFailure(record, paths.historyPath); } catch { /* Preserve the primary deployment failure. */ }
+  try { recordTemporaryDeploymentDeny(record, paths.denylistPath); } catch { /* Preserve the primary deployment failure. */ }
+  return record;
+}
+
+export function recordGoldenRuntimeDeploymentSuccessEvidence(
+  input: { orderId: string; serverId: string; profileFingerprint: string },
+  paths: { historyPath?: string; denylistPath?: string } = {},
+) {
+  const record = {
+    serverId: input.serverId,
+    orderId: input.orderId,
+    profileFingerprint: input.profileFingerprint,
+  };
+  try { recordDeploymentSuccess(record, paths.historyPath); } catch { /* Health success must remain authoritative. */ }
+  try { clearTemporaryDeploymentDeny({ serverId: input.serverId, profileFingerprint: input.profileFingerprint }, paths.denylistPath); } catch { /* A stale deny entry must not replace a proven health success. */ }
+  return record;
+}
+
 export async function waitForAgentIdle(order: LiveSessionOrder) {
   const started = Date.now(); let lastHttpStatus: number | null = null; let lastStartupDiagnostic: string | null = null;
   for (let attempt = 1; attempt <= 60; attempt += 1) {
     const result = await agentGetJsonWithRetry({ endpoint: order.endpoint, token: order.token, route: "/healthz", validator: (body) => agentHealthResponse(body) && body.agent_contract === "stage-acceptance-v2" && body.agent_sha256 === assertRtx4090GoldenDeploymentProfile().immutable.agentSha256, attempt });
-    if (result.ok && result.body.current_stage === "idle" && result.body.last_error === null) return;
+    if (result.ok && result.body.current_stage === "idle" && result.body.last_error === null) {
+      recordGoldenRuntimeDeploymentSuccessEvidence({ orderId: order.orderId, serverId: order.serverId, profileFingerprint: order.deploymentProfileFingerprint });
+      return;
+    }
     if (!result.ok) { lastHttpStatus = result.diagnostic.httpStatus; lastStartupDiagnostic = result.diagnostic.message; }
     await sleep(5_000);
   }
+  recordGoldenRuntimeDeploymentFailureEvidence({ orderId: order.orderId, serverId: order.serverId, lastHttpStatus, profileFingerprint: order.deploymentProfileFingerprint });
   throw new RuntimeDeploymentFailure({ order, elapsedMs: Date.now() - started, lastHttpStatus, lastStartupDiagnostic });
 }
 export async function invokeStage(order: LiveSessionOrder, stage: "environment" | "gpu" | "controller" | "comfyui" | "models", payload?: object, receipt?: { requested: (stageRunId: string) => void; accepted: (value: { stageRunId: string }) => void; evidence: (value: AgentStageAcceptanceEvidence) => void }): Promise<StageTerminal> { const accepted = await agentPostJson(order.endpoint, order.token, `/stage/${stage}`, payload, { onRequested: receipt?.requested, onEvidence: receipt?.evidence }); receipt?.accepted(accepted); const terminal = await waitForStage({ endpoint: order.endpoint, token: order.token, stage, expectedStageRunId: accepted.stageRunId, timeoutMs: stage === "models" ? 3 * 60 * 60_000 : 45 * 60_000, reconcileExactOrder: async () => Boolean((await readLiveOrdersSummary(fixedConfig(order.plan.selectedGpuClass === "RTX 5090" ? "rtx5090" : "rtx4090"), { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.active) }); return { stageRunId: accepted.stageRunId, ...terminal }; }

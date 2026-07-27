@@ -33,7 +33,7 @@ def model_entries(agent, url="https://models.example.invalid/download"):
 
 class FakeResponse:
     status = 200
-    def __init__(self, data): self.data = data; self.offset = 0
+    def __init__(self, data): self.data = data; self.offset = 0; self.headers = {"Content-Type": "text/plain", "Content-Length": str(len(data))}
     def read(self, size=-1):
         if size < 0: size = len(self.data) - self.offset
         chunk = self.data[self.offset:self.offset + size]; self.offset += len(chunk); return chunk
@@ -106,15 +106,15 @@ def test_raw_fetch_and_controller_failure(agent, temp):
     original = agent.urllib.request.urlopen
     agent.urllib.request.urlopen = lambda *_args, **_kwargs: FakeResponse(source)
     try:
-        agent.fetch_small_verified("https://raw.githubusercontent.com/example/file", destination, expected)
+        agent.fetch_small_verified([("fixture", "https://raw.githubusercontent.com/example/file")], destination, expected)
         assert destination.read_bytes() == source
-        assert_raises(lambda: agent.fetch_small_verified("https://raw.githubusercontent.com/example/file", destination, "0" * 64), "raw_sha256_mismatch")
+        assert_raises(lambda: agent.fetch_small_verified([("fixture", "https://raw.githubusercontent.com/example/file")], destination, "0" * 64), "immutable_source_sha256_mismatch")
     finally:
         agent.urllib.request.urlopen = original
     agent.CONFIG.update({"project_commit": "f" * 40, "controller_sha256": "0" * 64, "workflow_sha256": "0" * 64})
     def missing(*_args, **_kwargs): raise urllib.error.HTTPError("https://raw.githubusercontent.com/x", 404, "not found", {}, None)
     agent.urllib.request.urlopen = missing
-    try: assert_raises(agent.project_runtime, "raw_download_failed")
+    try: assert_raises(agent.project_runtime, "immutable_source_unavailable")
     finally: agent.urllib.request.urlopen = original
 
 

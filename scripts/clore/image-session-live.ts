@@ -4,23 +4,47 @@ import { listImageTasks } from "../../src/lib/image-generation/local-image-task-
 import { hydrateFrozenImageSessionPlan, planImageSession, type ImageSessionPlan } from "./image-session";
 import { cleanupLiveSession, createLiveSessionOrder, installModelsOnce, invokeStage, submitTaskInference, waitForAgentIdle, writeSessionReceipt, writeTaskReceipt, type CandidateAttemptEvent, type ImmutableRuntime, type MarketWaitEvent, type OwnedSessionOrder } from "./image-live-runtime";
 import { resolveExactEligibleImageTask, sanitizeAgentStageAcceptanceEvidence, type AgentStageAcceptanceEvidence } from "./run-image-e2e";
-import { RTX4090_GOLDEN_DEPLOYMENT_PROFILE } from "../image-executor/rtx4090-golden-deployment-profile";
+import { RTX4090_GOLDEN_DEPLOYMENT_PROFILE, rtx4090GoldenDeploymentFingerprint } from "../image-executor/rtx4090-golden-deployment-profile";
 import type { MarketplaceReadEvidence } from "./live";
 
 export type SessionTaskState = { terminal: "not_started" | "completed" | "failed" | "ambiguous"; inferenceState: "not_started" | "submitting" | "accepted" | "succeeded" | "failed"; stageRunId: string | null };
-export type SessionReceipt = { schemaVersion: 1; sessionId: string; sessionState: "planned" | "starting" | "running" | "draining" | "completed" | "failed" | "ambiguous"; orderId: string | null; serverId: string | null; endpointHostname: string | null; deploymentProfile: { id: string; image: string; bootstrapTemplateSha256: string; controllerSha256: string; agentSha256: string; workflowSha256: string }; requestedGpuClass: "RTX 4090" | "RTX 5090"; selectedGpuModel: string | null; selectedHourlyUsd: number; projectedRentalCostUsd: number; projectedCreationFeeUsd: number; projectedProviderCostCeilingUsd: number; selectedTaskIds: string[]; selectedDimensions: Array<{ taskId: string; width: number; height: number }>; currentTaskId: string | null; modelStage: { state: "not_started" | "succeeded" | "failed"; stageRunId: string | null }; tasks: Record<string, SessionTaskState>; completedCount: number; failedCount: number; cancellationState: string; cleanupErrors: string[]; cleanupEvidence: { zeroActiveOrderConfirmations: number; watchdogDisarmed: boolean; localOrderStateCleared: boolean } | null; agentAcceptanceEvidence: AgentStageAcceptanceEvidence[]; agentAcceptanceFailure: ReturnType<typeof sanitizeAgentStageAcceptanceEvidence>; firstError: string | null; timestamps: Record<string, string>; candidateAttempts: CandidateAttemptEvent[]; marketplaceEvidence: MarketplaceReadEvidence[] };
+export type SessionReceipt = { schemaVersion: 1; sessionId: string; sessionState: "planned" | "starting" | "running" | "draining" | "completed" | "failed" | "ambiguous"; orderId: string | null; serverId: string | null; endpointHostname: string | null; deploymentProfile: { id: string; fingerprint: string; image: string; commit: string; agentSourceSha256: string; bootstrapTemplateSha256: string; controllerSha256: string; agentSha256: string; workflowSha256: string }; requestedGpuClass: "RTX 4090" | "RTX 5090"; selectedGpuModel: string | null; selectedHourlyUsd: number; projectedRentalCostUsd: number; projectedCreationFeeUsd: number; projectedProviderCostCeilingUsd: number; selectedTaskIds: string[]; selectedDimensions: Array<{ taskId: string; width: number; height: number }>; currentTaskId: string | null; modelStage: { state: "not_started" | "succeeded" | "failed"; stageRunId: string | null }; tasks: Record<string, SessionTaskState>; completedCount: number; failedCount: number; cancellationState: string; cleanupErrors: string[]; cleanupEvidence: { zeroActiveOrderConfirmations: number; watchdogDisarmed: boolean; localOrderStateCleared: boolean } | null; agentAcceptanceEvidence: AgentStageAcceptanceEvidence[]; agentAcceptanceFailure: ReturnType<typeof sanitizeAgentStageAcceptanceEvidence>; firstError: string | null; timestamps: Record<string, string>; candidateAttempts: CandidateAttemptEvent[]; marketplaceEvidence: MarketplaceReadEvidence[] };
 type LiveSessionReceipt = SessionReceipt & { currentRemoteStage?: string; currentStageRunId?: string };
 const stamp = () => new Date().toISOString();
 const sanitizedError = (error: unknown) => String(error instanceof Error ? error.message : error).replace(/(bearer\s+)[^\s]+/gi, "$1<redacted>").slice(0, 700);
 const deterministic = (error: unknown) => /result_dimensions_mismatch|inference_stage_failed:.*(?:validation|dimensions)/i.test(sanitizedError(error));
 
 export function assertStageGpuMatches(selectedGpuClass: "RTX 4090" | "RTX 5090", data: Record<string, unknown> | undefined) {
-  const hardware = String((data?.nvidia_smi as { stdout?: unknown } | undefined)?.stdout ?? "");
+  const nvidiaSmi = data?.nvidia_smi as {
+    output?: unknown;
+    stdout?: unknown;
+    first_output_lines?: unknown;
+    final_output_lines?: unknown;
+  } | undefined;
+  const boundedText = (value: unknown, maximum: number, field: string) => {
+    if (value === undefined) return "";
+    if (typeof value !== "string" || value.length > maximum) throw new Error(`gpu_stage_output_contract_invalid:${field}`);
+    return value;
+  };
+  const boundedLines = (value: unknown, maximumLines: number, field: string) => {
+    if (value === undefined) return [] as string[];
+    if (!Array.isArray(value) || value.length > maximumLines || value.some((line) => typeof line !== "string" || line.length > 500)) {
+      throw new Error(`gpu_stage_output_contract_invalid:${field}`);
+    }
+    return value as string[];
+  };
+  const outputLines = [
+    boundedText(nvidiaSmi?.output, 6_000, "output"),
+    boundedText(nvidiaSmi?.stdout, 6_000, "stdout"),
+    ...boundedLines(nvidiaSmi?.first_output_lines, 30, "first_output_lines"),
+    ...boundedLines(nvidiaSmi?.final_output_lines, 120, "final_output_lines"),
+  ];
+  const hardware = outputLines.join("\n");
   const expected = selectedGpuClass === "RTX 5090" ? /RTX\s*5090/i : /RTX\s*4090/i;
   if (!expected.test(hardware)) throw new Error(`gpu_hardware_mismatch:expected_${selectedGpuClass.replace(" ", "_")}`);
 }
 
-function initial(sessionId: string, plan: ReturnType<typeof planImageSession>): SessionReceipt { return { schemaVersion: 1, sessionId, sessionState: "planned", orderId: null, serverId: null, endpointHostname: null, deploymentProfile: { id: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.id, image: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.image, bootstrapTemplateSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.bootstrapTemplateSha256, controllerSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.controllerSha256, agentSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.agentSha256, workflowSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.workflowSha256 }, requestedGpuClass: plan.selectedGpuClass, selectedGpuModel: plan.selectedGpuModel, selectedHourlyUsd: plan.selectedHourlyUsd, projectedRentalCostUsd: plan.projectedRentalCostUsd, projectedCreationFeeUsd: plan.projectedCreationFeeUsd, projectedProviderCostCeilingUsd: plan.projectedProviderCostCeilingUsd, selectedTaskIds: plan.selectedTaskIds, selectedDimensions: plan.selectedDimensions, currentTaskId: null, modelStage: { state: "not_started", stageRunId: null }, tasks: Object.fromEntries(plan.selectedTaskIds.map((id) => [id, { terminal: "not_started", inferenceState: "not_started", stageRunId: null }])), completedCount: 0, failedCount: 0, cancellationState: "not_started", cleanupErrors: [], cleanupEvidence: null, agentAcceptanceEvidence: [], agentAcceptanceFailure: null, firstError: null, timestamps: { planned: stamp() }, candidateAttempts: [], marketplaceEvidence: [] }; }
+function initial(sessionId: string, plan: ReturnType<typeof planImageSession>): SessionReceipt { return { schemaVersion: 1, sessionId, sessionState: "planned", orderId: null, serverId: null, endpointHostname: null, deploymentProfile: { id: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.id, fingerprint: rtx4090GoldenDeploymentFingerprint(), image: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.image, commit: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.commit, agentSourceSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.agentSourceSha256, bootstrapTemplateSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.bootstrapTemplateSha256, controllerSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.controllerSha256, agentSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.agentSha256, workflowSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.workflowSha256 }, requestedGpuClass: plan.selectedGpuClass, selectedGpuModel: plan.selectedGpuModel, selectedHourlyUsd: plan.selectedHourlyUsd, projectedRentalCostUsd: plan.projectedRentalCostUsd, projectedCreationFeeUsd: plan.projectedCreationFeeUsd, projectedProviderCostCeilingUsd: plan.projectedProviderCostCeilingUsd, selectedTaskIds: plan.selectedTaskIds, selectedDimensions: plan.selectedDimensions, currentTaskId: null, modelStage: { state: "not_started", stageRunId: null }, tasks: Object.fromEntries(plan.selectedTaskIds.map((id) => [id, { terminal: "not_started", inferenceState: "not_started", stageRunId: null }])), completedCount: 0, failedCount: 0, cancellationState: "not_started", cleanupErrors: [], cleanupEvidence: null, agentAcceptanceEvidence: [], agentAcceptanceFailure: null, firstError: null, timestamps: { planned: stamp() }, candidateAttempts: [], marketplaceEvidence: [] }; }
 function persist(receipt: SessionReceipt) { writeSessionReceipt(receipt); }
 function taskReceipt(receipt: SessionReceipt, taskId: string, patch: Record<string, unknown>) { writeTaskReceipt(receipt.sessionId, taskId, { taskId, inferenceState: receipt.tasks[taskId].inferenceState, stageRunId: receipt.tasks[taskId].stageRunId, timestamps: { updatedAt: stamp() }, ...patch }); }
 function persistAgentAcceptanceEvidence(receipt: SessionReceipt, evidence: AgentStageAcceptanceEvidence) { receipt.agentAcceptanceEvidence = [...receipt.agentAcceptanceEvidence, evidence].slice(-24); persist(receipt); }

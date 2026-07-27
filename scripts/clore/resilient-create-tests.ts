@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { classifyCloreFailure, CloreApiError, CloreRequestScheduler, isRetryableCloreCreateError, type CloreFailureClassification } from "./client";
-import { resilientCreateOrder } from "./resilient-create";
+import { resilientCreateOrder, type ResilientCreateAttempt } from "./resilient-create";
 import type { CloreConfig } from "./types";
 
 type Candidate = { id: string };
@@ -148,6 +148,24 @@ assert.equal(classifyCloreFailure({ httpStatus: 500, code: 6, error: "currency-n
 assert.equal(currencyRejected.failure.classification, "invalid_field");
 assert.equal(isRetryableCloreCreateError(currencyRejected), false);
 
+const rateLimitFailure = Object.assign(new Error(JSON.stringify({ code: "create_order_rate_limit_persisted", http_status: 429, clore_code: 5, attempt: 2 })), {
+  classification: "rate_limited" as const,
+  httpStatus: 429 as const,
+  code: 5,
+  requestAttempts: 2 as const,
+});
+let rateLimitAttempt: ResilientCreateAttempt | null = null;
+await assert.rejects(() => resilientCreateOrder<Candidate, unknown>({
+  maximumCreateRequests: 1,
+  activeOrderCount: async () => 0,
+  selectFreshCandidate: async () => ({ id: "rate-limit" }),
+  create: async () => { throw rateLimitFailure; },
+  reconcile: async () => null,
+  onAttempt: (attempt) => { rateLimitAttempt = attempt; },
+}), /create_order_rate_limit_persisted/);
+assert.equal(rateLimitAttempt?.failure && "classification" in rateLimitAttempt.failure ? rateLimitAttempt.failure.classification : null, "rate_limited");
+assert.equal(rateLimitAttempt?.failure && "requestAttempts" in rateLimitAttempt.failure ? rateLimitAttempt.failure.requestAttempts : null, 2);
+
 console.log(JSON.stringify({
   resilient_create_tests_passed: true,
   code6_without_order_retried: true,
@@ -163,6 +181,7 @@ console.log(JSON.stringify({
   full_sanitized_error_preserved: true,
   currency_not_allowed_stops_immediately: true,
   secrets_redacted: true,
+  rate_limit_attempt_typed: true,
 }));
 }
 

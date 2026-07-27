@@ -1,14 +1,24 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   assertDownloadedPngMatchesMetadata,
   capturePostFinalizationUiVerification,
   cleanupLiveSession,
+  recordGoldenRuntimeDeploymentFailureEvidence,
+  recordGoldenRuntimeDeploymentSuccessEvidence,
   resolveSingleCreatedOrder,
   RuntimeDeploymentFailure,
   type CleanupLiveSessionResult,
 } from "./image-live-runtime";
+import {
+  deploymentFailureCount,
+  readTemporaryDeploymentDeniedServerIds,
+  scopedDeploymentFailureCount,
+} from "./deployment-host-blacklist";
+import { rtx4090GoldenDeploymentFingerprint } from "../image-executor/rtx4090-golden-deployment-profile";
 import { cleanupReceiptOwnedOrder } from "./image-session-supervision";
 import { applySelectedPlanToReceipt } from "./image-session-live";
 import type { CloreOrderSummary } from "./live";
@@ -153,7 +163,44 @@ async function main() {
   assert.equal("proxyUrl" in deploymentFailureEvidence, false);
   assert.doesNotMatch(deploymentFailure.message, /https?:\/\//i);
 
+  const deploymentEvidenceRoot = mkdtempSync(path.join(os.tmpdir(), "golden-runtime-failure-"));
+  try {
+    const historyPath = path.join(deploymentEvidenceRoot, "history.json");
+    const denylistPath = path.join(deploymentEvidenceRoot, "denylist.json");
+    const profileFingerprint = rtx4090GoldenDeploymentFingerprint();
+    const recorded = recordGoldenRuntimeDeploymentFailureEvidence(
+      { orderId: "order-1", serverId: "1001", lastHttpStatus: 502, profileFingerprint },
+      { historyPath, denylistPath },
+    );
+    assert.deepEqual(recorded, {
+      orderId: "order-1",
+      serverId: "1001",
+      reason: "golden_agent_proxy_502_timeout",
+      profileFingerprint,
+    });
+    assert.equal(deploymentFailureCount("1001", historyPath), 1);
+    assert.equal(scopedDeploymentFailureCount("1001", profileFingerprint, historyPath), 1);
+    assert.deepEqual(readTemporaryDeploymentDeniedServerIds(denylistPath, Date.now(), profileFingerprint), ["1001"]);
+    assert.deepEqual(recordGoldenRuntimeDeploymentSuccessEvidence(
+      { orderId: "order-3", serverId: "1001", profileFingerprint },
+      { historyPath, denylistPath },
+    ), { orderId: "order-3", serverId: "1001", profileFingerprint });
+    assert.equal(scopedDeploymentFailureCount("1001", profileFingerprint, historyPath), 0);
+    assert.deepEqual(readTemporaryDeploymentDeniedServerIds(denylistPath, Date.now(), profileFingerprint), []);
+    assert.doesNotThrow(() => recordGoldenRuntimeDeploymentFailureEvidence(
+      { orderId: "order-2", serverId: "1002", lastHttpStatus: null, profileFingerprint },
+      { historyPath: deploymentEvidenceRoot, denylistPath: deploymentEvidenceRoot },
+    ), "failure-evidence persistence must not replace the primary deployment error");
+  } finally {
+    rmSync(deploymentEvidenceRoot, { recursive: true, force: true });
+  }
+
   const liveRuntimeSource = readFileSync(new URL("./image-live-runtime.ts", import.meta.url), "utf8");
+  assert.match(liveRuntimeSource, /recordGoldenRuntimeDeploymentFailureEvidence\(\{ orderId: order\.orderId, serverId: order\.serverId, lastHttpStatus, profileFingerprint: order\.deploymentProfileFingerprint \}\)/);
+  assert.match(liveRuntimeSource, /recordGoldenRuntimeDeploymentSuccessEvidence\(\{ orderId: order\.orderId, serverId: order\.serverId, profileFingerprint: order\.deploymentProfileFingerprint \}\)/);
+  const publishedSourcePreflight = liveRuntimeSource.indexOf("await verifyRtx4090GoldenPublishedSources();");
+  const preCreateOrderRead = liveRuntimeSource.indexOf("const before = await readLiveOrdersSummary", publishedSourcePreflight);
+  assert.ok(publishedSourcePreflight >= 0 && preCreateOrderRead > publishedSourcePreflight, "published immutable runtime sources are verified before any Clore order reconciliation or creation");
   const receiptPersistence = liveRuntimeSource.indexOf("await input.onOrderPersisted?.(owned);");
   const activeOrderPersistence = liveRuntimeSource.indexOf("writeActiveOrder({", receiptPersistence);
   const directOrderPersistence = liveRuntimeSource.indexOf("if (direct) await persistCandidateOrder(context, direct);");
@@ -168,6 +215,18 @@ async function main() {
   assert.ok(statusStart >= 0 && waitStart > statusStart);
   assert.match(statusSource, /terminalizeDeadWorker\b/, "status may terminalize local worker metadata");
   assert.doesNotMatch(statusSource, /cleanupLiveSession|cleanupReceiptOwnedOrder|readLiveOrdersSummary|cloreRequest|cancelOrder/, "status polling must not read or mutate provider state");
+  assert.match(supervisorSource, /--deployment-profile-fingerprint/, "supervisor handoff carries the complete deployment profile identity");
+  assert.match(supervisorSource, /--agent-source-sha256/, "supervisor handoff carries the immutable Agent source hash");
+  assert.match(supervisorSource, /rtx4090GoldenDeploymentFingerprint/, "supervisor validates the profile fingerprint before spawning the worker");
+  assert.match(supervisorSource, /deploymentProfileFingerprint: fingerprint/, "the exact profile fingerprint is retained in worker state");
+  assert.match(supervisorSource, /immutableSourcePreflight: \(\) => verifyRtx4090GoldenPublishedSources\(\)/, "source preflight is wired before prior-session reconciliation");
+  const supervisionSource = readFileSync(new URL("./image-session-supervision.ts", import.meta.url), "utf8");
+  const sourcePreflightCall = supervisionSource.indexOf("await options.immutableSourcePreflight?.();");
+  const priorOrderRead = supervisionSource.indexOf("const active = await readLiveOrdersSummary", sourcePreflightCall);
+  assert.ok(sourcePreflightCall >= 0 && priorOrderRead > sourcePreflightCall, "a failed immutable-source preflight performs no Clore read");
+  const workerSource = readFileSync(new URL("./image-session-worker.ts", import.meta.url), "utf8");
+  assert.match(workerSource, /--deployment-profile-fingerprint/, "worker receives the complete deployment profile identity");
+  assert.match(workerSource, /agentSourceSha256 !== profile\.immutable\.agentSourceSha256/, "worker rejects a mismatched immutable Agent source hash");
 
   const apiRouteSource = readFileSync(new URL("../../src/app/api/local-lab/image-tasks/route.ts", import.meta.url), "utf8");
   const responsePayloadStart = apiRouteSource.indexOf("async function responsePayload(");
@@ -176,6 +235,8 @@ async function main() {
   assert.ok(responsePayloadStart >= 0 && localProgramStart > responsePayloadStart);
   assert.doesNotMatch(responsePayloadSource, /reconcileStaleRunner|clearLocalActiveImageState|clearOrderCreateLocks|stopRunnerProcessTree|saveRunner|cloreRequest|readLiveOrdersSummary/, "UI status polling must remain read-only");
   assert.match(apiRouteSource, /scripts", "clore", "image-session-supervisor\.ts"/, "the guarded UI start uses the detached session supervisor");
+  assert.match(apiRouteSource, /"--deployment-profile-fingerprint"/, "the guarded UI start passes the exact deployment profile fingerprint");
+  assert.match(apiRouteSource, /"--agent-source-sha256"/, "the guarded UI start passes the immutable Agent source hash");
   assert.doesNotMatch(apiRouteSource, /scripts", "image-4090-runner\.ts"/, "the UI must not start the legacy runner directly");
   const directExecuteSource = readFileSync(new URL("./image-session-execute.ts", import.meta.url), "utf8");
   assert.doesNotMatch(directExecuteSource, /runLiveImageSession/, "the legacy execute command must not bypass the detached worker");

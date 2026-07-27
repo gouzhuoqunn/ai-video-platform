@@ -1,14 +1,27 @@
-import { CloreApiError, isRetryableCloreCreateError, type SanitizedCloreFailure } from "./client";
+import { CloreApiError, CloreRateLimitError, isRetryableCloreCreateError, type SanitizedCloreFailure } from "./client";
 
 export type ResilientCreateCandidate = { id: string };
 export type ResilientCreatedOrder = { orderId: string; value: unknown; reconciled: boolean };
+type RateLimitAttemptFailure = {
+  httpStatus: 429;
+  code: number;
+  error: null;
+  message: string | null;
+  details: null;
+  field: null;
+  requestId: null;
+  classification: "rate_limited";
+  retryAfterMs: number | null;
+  attempt: number;
+  requestAttempts: number;
+};
 export type ResilientCreateAttempt = {
   requestNumber: number;
   candidateId: string;
   startedAt: string;
   completedAt: string;
   result: "failed_request" | "successful_order" | "reconciled_order";
-  failure: SanitizedCloreFailure | { message: string; classification: "non_provider_error" } | null;
+  failure: SanitizedCloreFailure | RateLimitAttemptFailure | { message: string; classification: "non_provider_error" } | null;
 };
 
 export type ResilientCreateResult = {
@@ -38,6 +51,52 @@ export type ResilientCreateOptions<Candidate extends ResilientCreateCandidate, V
 
 function safeFailure(error: unknown): ResilientCreateAttempt["failure"] {
   if (error instanceof CloreApiError) return error.failure;
+  if (error instanceof CloreRateLimitError) {
+    return {
+      httpStatus: 429,
+      code: error.failure.code,
+      error: null,
+      message: error.failure.message,
+      details: null,
+      field: null,
+      requestId: null,
+      classification: "rate_limited",
+      retryAfterMs: error.failure.retryAfterMs,
+      attempt: error.failure.attempt,
+      requestAttempts: error.failure.attempt,
+    };
+  }
+  if (error && typeof error === "object") {
+    const value = error as Record<string, unknown>;
+    const message = typeof value.message === "string" ? value.message : String(error);
+    const classification = value.classification;
+    const httpStatus = value.httpStatus;
+    const code = value.code;
+    const requestAttempts = value.requestAttempts;
+    if (
+      classification === "rate_limited" &&
+      httpStatus === 429 &&
+      typeof code === "number" &&
+      Number.isSafeInteger(code) &&
+      typeof requestAttempts === "number" &&
+      Number.isSafeInteger(requestAttempts) &&
+      requestAttempts > 0
+    ) {
+      return {
+        httpStatus: 429,
+        code,
+        error: null,
+        message: message.includes("create_order_rate_limit_persisted") ? "create_order_rate_limit_persisted" : message,
+        details: null,
+        field: null,
+        requestId: null,
+        classification: "rate_limited",
+        retryAfterMs: typeof value.retryAfterMs === "number" ? value.retryAfterMs : null,
+        attempt: requestAttempts,
+        requestAttempts,
+      };
+    }
+  }
   return {
     message: String(error instanceof Error ? error.message : error).replace(/ssh-(?:ed25519|rsa)\s+\S+/g, "<redacted-ssh-key>").slice(0, 4000),
     classification: "non_provider_error",

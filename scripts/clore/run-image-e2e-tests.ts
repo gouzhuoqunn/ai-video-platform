@@ -74,7 +74,16 @@ async function main() {
     const adopted = await createOrderWithRateLimit({ serverId: "98682", createOnce: async () => { createCalls += 1; throw rateLimit(null, 1); }, reconcile: async (): Promise<ActiveOrderSnapshot> => ({ orders: [{ orderId: "adopted", serverId: "98682", active: true }], checkedAt: 0 }), sleepImpl: async () => undefined, jitter: () => 0 });
     assert.equal(adopted.adoptedOrderId, "adopted"); assert.equal(createCalls, 1);
     createCalls = 0; const diagnostics: unknown[] = [];
-    await assert.rejects(() => createOrderWithRateLimit({ serverId: "98682", createOnce: async () => { createCalls += 1; throw rateLimit(null, createCalls, "token=fixture-secret"); }, reconcile: async () => emptySnapshot, sleepImpl: async () => undefined, jitter: () => 0, onDiagnostic: (value) => diagnostics.push(value) }), /create_order_rate_limit_persisted/);
+    let persistedRateLimit: unknown = null;
+    try {
+      await createOrderWithRateLimit({ serverId: "98682", createOnce: async () => { createCalls += 1; throw rateLimit(null, createCalls, "token=fixture-secret"); }, reconcile: async () => emptySnapshot, sleepImpl: async () => undefined, jitter: () => 0, onDiagnostic: (value) => diagnostics.push(value) });
+    } catch (error) {
+      persistedRateLimit = error;
+    }
+    assert.match(String((persistedRateLimit as Error)?.message), /create_order_rate_limit_persisted/);
+    assert.equal((persistedRateLimit as { classification?: unknown })?.classification, "rate_limited");
+    assert.equal((persistedRateLimit as { httpStatus?: unknown })?.httpStatus, 429);
+    assert.equal((persistedRateLimit as { requestAttempts?: unknown })?.requestAttempts, 2);
     assert.equal(createCalls, 2); assert.ok(!JSON.stringify(diagnostics).includes("fixture-secret"));
     const claim = claimImageTask(taskId, "coordinator-fixture", 60_000, options);
     const heartbeat = startImageTaskLeaseHeartbeat({ taskId, claimToken: claim.claimToken, leaseMs: 60_000, options });

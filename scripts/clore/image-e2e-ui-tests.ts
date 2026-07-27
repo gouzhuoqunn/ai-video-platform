@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import sharp from "sharp";
 import { LocalUiVerificationError, ensureLocalUi, validateImageResponse } from "./image-e2e-ui";
 
@@ -14,9 +15,9 @@ async function expectCode(action: () => Promise<unknown>, code: string) {
 
 async function main() {
   let killed = false;
-  const fake: any = () => ({ pid: 123, killed: false, stdout: { on: () => undefined }, stderr: { on: () => undefined }, kill() { killed = true; this.killed = true; } });
+  const fake = (() => ({ pid: 123, killed: false, stdout: { on: () => undefined }, stderr: { on: () => undefined }, kill() { killed = true; this.killed = true; } })) as unknown as Parameters<typeof ensureLocalUi>[0]["spawnImpl"];
   const originalFetch = global.fetch; let checks = 0;
-  global.fetch = (async () => ({ ok: ++checks > 1 })) as any;
+  global.fetch = (async () => ({ ok: ++checks > 1 })) as unknown as typeof fetch;
   const handle = await ensureLocalUi({ baseUrl: "http://127.0.0.1:9", spawnImpl: fake, timeoutMs: 50 });
   handle.stop(); assert.equal(killed, true);
   global.fetch = originalFetch;
@@ -32,6 +33,8 @@ async function main() {
   await expectCode(() => validateImageResponse("thumbnail", response(Buffer.from("not-a-webp"), "image/webp"), 768, 768), "local_ui_thumbnail_decode_failed");
   const wrongPng = await sharp({ create: { width: 384, height: 384, channels: 3, background: "#248" } }).png().toBuffer();
   await expectCode(() => validateImageResponse("output", response(wrongPng, "image/png"), 768, 768), "local_ui_output_dimensions_invalid");
+  const verifierSource = readFileSync(new URL("./image-e2e-ui.ts", import.meta.url), "utf8");
+  assert.match(verifierSource, /getByRole\("button", \{ name: \/\^成果\//, "the browser verifier must switch to the separate Results tab before locating thumbnails");
   console.log(JSON.stringify({ ok: true, ui_start_bounded: true, coordinator_child_only: true, body_without_content_length: true, content_length_consistency: true, empty_mime_decode_and_dimension_failures: true }));
 }
 

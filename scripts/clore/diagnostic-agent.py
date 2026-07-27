@@ -8,6 +8,7 @@ it is not a shell, file browser, workflow runner, or general proxy.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import http.client
 import hashlib
 import hmac
@@ -41,7 +42,10 @@ COMFY_URL = "https://github.com/comfyanonymous/ComfyUI.git"
 COMFY_COMMIT = "da2608926eaf68fd532bba4e1ace3402c5d21399"
 PYTORCH_CU128_INDEX = "https://download.pytorch.org/whl/cu128"
 TORCH_REQUIREMENTS = ("torch==2.8.0", "torchvision==0.23.0", "torchaudio==2.8.0")
-RAW_ROOT = "https://raw.githubusercontent.com/gouzhuoqunn/ai-video-platform"
+IMMUTABLE_SOURCE_ROOTS = (
+    ("jsdelivr_commit_cdn", "https://cdn.jsdelivr.net/gh/gouzhuoqunn/ai-video-platform"),
+    ("github_raw_commit", "https://raw.githubusercontent.com/gouzhuoqunn/ai-video-platform"),
+)
 MAX_TEXT = 6000
 MAX_MODEL_BODY = 64 * 1024
 MAX_INFERENCE_BODY = 16 * 1024
@@ -126,9 +130,19 @@ def exec_logged(name: str, command: list[str], timeout: int, cwd: Path | None = 
             try: exit_code = process.wait(timeout=20)
             except subprocess.TimeoutExpired:
                 process.kill(); exit_code = process.wait(timeout=10)
-    lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
     patterns = re.compile(r"ERROR|WARNING: Retrying|ResolutionImpossible|No matching distribution|Could not find|dependency conflict|Requires-Python|Killed|No space left|Traceback|subprocess-exited-with-error|externally-managed-environment", re.I)
-    return {"command": " ".join(command), "log_path": str(log), "started_at": started_at, "finished_at": now(), "duration_seconds": round(time.monotonic() - started, 3), "exit_code": exit_code, "timed_out": timed_out, "first_output_lines": [clean(line, 500) for line in lines[:30]], "final_output_lines": [clean(line, 500) for line in lines[-120:]], "error_matches": [clean(line, 500) for line in lines if patterns.search(line)]}
+    first_output_lines: list[str] = []
+    final_output_lines: deque[str] = deque(maxlen=120)
+    error_matches: list[str] = []
+    with log.open("r", encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            line = clean(raw_line.rstrip("\r\n"), 500)
+            if len(first_output_lines) < 30:
+                first_output_lines.append(line)
+            final_output_lines.append(line)
+            if len(error_matches) < 120 and patterns.search(line):
+                error_matches.append(line)
+    return {"command": " ".join(command), "log_path": str(log), "started_at": started_at, "finished_at": now(), "duration_seconds": round(time.monotonic() - started, 3), "exit_code": exit_code, "timed_out": timed_out, "first_output_lines": first_output_lines, "final_output_lines": list(final_output_lines), "error_matches": error_matches}
 
 
 class StageFailure(RuntimeError):
@@ -227,23 +241,46 @@ def stage_gpu(_: dict[str, Any]) -> dict[str, Any]:
     return {"nvidia_smi": smi, "torch": torch}
 
 
-def raw_file_url(path: str) -> str:
-    return f"{RAW_ROOT}/{CONFIG['project_commit']}/{path}"
+def immutable_file_urls(path: str) -> list[tuple[str, str]]:
+    commit = CONFIG["project_commit"]
+    return [
+        ("jsdelivr_commit_cdn", f"{IMMUTABLE_SOURCE_ROOTS[0][1]}@{commit}/{path}"),
+        ("github_raw_commit", f"{IMMUTABLE_SOURCE_ROOTS[1][1]}/{commit}/{path}"),
+    ]
 
 
-def fetch_small_verified(url: str, destination: Path, expected: str) -> None:
-    try:
-        with urllib.request.urlopen(url, timeout=45) as response:
-            if response.status != 200:
-                raise RuntimeError(f"raw_download_http_{response.status}")
-            content = response.read(2 * 1024 * 1024)
-    except Exception as error:
-        raise RuntimeError(f"raw_download_failed:{clean(error, 400)}") from error
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(content)
-    if sha256(destination) != expected:
-        destination.unlink(missing_ok=True)
-        raise RuntimeError(f"raw_sha256_mismatch:{destination.name}")
+def fetch_small_verified(sources: list[tuple[str, str]], destination: Path, expected: str) -> dict[str, Any]:
+    failures: list[str] = []
+    for source_id, url in sources:
+        try:
+            with urllib.request.urlopen(url, timeout=45) as response:
+                if response.status != 200:
+                    failures.append(f"{source_id}:http_{response.status}")
+                    continue
+                content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                content = response.read(2 * 1024 * 1024 + 1)
+        except Exception:
+            failures.append(f"{source_id}:transport_failed")
+            continue
+        if not content or len(content) > 2 * 1024 * 1024:
+            failures.append(f"{source_id}:size_invalid")
+            continue
+        actual = hashlib.sha256(content).hexdigest()
+        if actual != expected:
+            raise RuntimeError(f"immutable_source_sha256_mismatch:{source_id}:{destination.name}")
+        try:
+            text = content.decode("utf-8")
+            prefix = text.lstrip()[:32].lower()
+            safe_text = "\x00" not in text and not prefix.startswith("<!doctype html") and not prefix.startswith("<html")
+        except UnicodeDecodeError:
+            safe_text = False
+        if content_type not in {"application/octet-stream", "application/x-python", "text/plain", "text/x-python"} and not safe_text:
+            failures.append(f"{source_id}:content_incompatible")
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+        return {"endpoint_id": source_id, "bytes": len(content), "sha256": actual}
+    raise RuntimeError("immutable_source_unavailable:" + ",".join(failures))
 
 
 def project_runtime() -> tuple[Path, dict[str, str]]:
@@ -251,12 +288,12 @@ def project_runtime() -> tuple[Path, dict[str, str]]:
     runtime.mkdir(parents=True, exist_ok=True)
     controller = runtime / "controller.py"
     workflow = runtime / "image_workflow.py"
-    fetch_small_verified(raw_file_url("comfy-runtime/controller.py"), controller, CONFIG["controller_sha256"])
-    fetch_small_verified(raw_file_url("comfy-runtime/image_workflow.py"), workflow, CONFIG["workflow_sha256"])
+    controller_source = fetch_small_verified(immutable_file_urls("comfy-runtime/controller.py"), controller, CONFIG["controller_sha256"])
+    workflow_source = fetch_small_verified(immutable_file_urls("comfy-runtime/image_workflow.py"), workflow, CONFIG["workflow_sha256"])
     check = exec_fixed([sys.executable, "-c", "import sys;sys.path.insert(0,sys.argv[1]);import image_workflow,controller;print('runtime_import_ok')", str(runtime)], 45)
     if check["exit_code"]:
         raise RuntimeError("runtime_import_failed:" + check["output"])
-    return runtime, {"project_commit": CONFIG["project_commit"], "controller_sha256": sha256(controller), "image_workflow_sha256": sha256(workflow), "import": check}
+    return runtime, {"project_commit": CONFIG["project_commit"], "controller_sha256": sha256(controller), "image_workflow_sha256": sha256(workflow), "controller_source": controller_source, "workflow_source": workflow_source, "import": check}
 
 
 def stage_controller(_: dict[str, Any]) -> dict[str, Any]:

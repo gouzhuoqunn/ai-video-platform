@@ -1,12 +1,17 @@
 import { runImage4090Batch } from "../image-4090-runner";
-import { assertRtx4090GoldenDeploymentProfile } from "../image-executor/rtx4090-golden-deployment-profile";
+import { assertRtx4090GoldenDeploymentProfile, rtx4090GoldenDeploymentFingerprint } from "../image-executor/rtx4090-golden-deployment-profile";
 import { atomic, clean, cleanupReceiptOwnedOrder, readReceipt, root, sessionReceiptPath, terminalizeWorkerSnapshot, workerPath, type WorkerState } from "./image-session-supervision";
 
 const arg = (name: string) => { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; };
 const taskIds = (arg("--task-ids") ?? "").split(",").filter(Boolean);
 const sessionId = arg("--session-id") ?? "";
+const deploymentProfileFingerprint = arg("--deployment-profile-fingerprint") ?? "";
 const immutableCommit = arg("--immutable-commit") ?? "";
-const worker: WorkerState = { schemaVersion: 1, sessionId, pid: process.pid, state: "starting", taskIds, immutableCommit, startedAt: new Date().toISOString(), lastHeartbeatAt: new Date().toISOString(), completedAt: null, exitCode: null, sanitizedError: null, sessionReceiptPath, logPath: `${root(sessionId)}/worker.log` };
+const agentSourceSha256 = arg("--agent-source-sha256") ?? "";
+const agentSha256 = arg("--agent-sha256") ?? "";
+const controllerSha256 = arg("--controller-sha256") ?? "";
+const workflowSha256 = arg("--workflow-sha256") ?? "";
+const worker: WorkerState = { schemaVersion: 1, sessionId, pid: process.pid, state: "starting", taskIds, deploymentProfileFingerprint, immutableCommit, agentSourceSha256, agentSha256, controllerSha256, workflowSha256, startedAt: new Date().toISOString(), lastHeartbeatAt: new Date().toISOString(), completedAt: null, exitCode: null, sanitizedError: null, sessionReceiptPath, logPath: `${root(sessionId)}/worker.log` };
 let timer: NodeJS.Timeout | null = null;
 let terminal = false;
 let finishing = false;
@@ -51,22 +56,26 @@ process.on("exit", (code) => {
 });
 
 async function main() {
-  if (!sessionId || taskIds.length < 1 || taskIds.length > 8 || new Set(taskIds).size !== taskIds.length || !immutableCommit || !process.argv.includes("--execute")) {
+  if (!sessionId || taskIds.length < 1 || taskIds.length > 8 || new Set(taskIds).size !== taskIds.length || !deploymentProfileFingerprint || !immutableCommit || !agentSourceSha256 || !agentSha256 || !controllerSha256 || !workflowSha256 || !process.argv.includes("--execute")) {
     await fatal("worker_arguments_invalid", "image_session_worker_arguments_invalid");
     return;
   }
   const profile = assertRtx4090GoldenDeploymentProfile();
   if (
+    deploymentProfileFingerprint !== rtx4090GoldenDeploymentFingerprint(profile) ||
     immutableCommit !== profile.immutable.commit ||
-    arg("--agent-sha256") !== profile.immutable.agentSha256 ||
-    arg("--controller-sha256") !== profile.immutable.controllerSha256 ||
-    arg("--workflow-sha256") !== profile.immutable.workflowSha256
+    agentSourceSha256 !== profile.immutable.agentSourceSha256 ||
+    agentSha256 !== profile.immutable.agentSha256 ||
+    controllerSha256 !== profile.immutable.controllerSha256 ||
+    workflowSha256 !== profile.immutable.workflowSha256
   ) {
     await fatal("worker_arguments_invalid", "image_session_worker_immutable_profile_mismatch");
     return;
   }
   save({ state: "running" });
-  timer = setInterval(() => save({ lastHeartbeatAt: new Date().toISOString() }), 15_000);
+  timer = setInterval(() => {
+    if (!terminal && !finishing) save({ lastHeartbeatAt: new Date().toISOString() });
+  }, 15_000);
   try {
     await runImage4090Batch(undefined, { sessionId, taskIds });
     await finish(null, 0);

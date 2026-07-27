@@ -57,7 +57,11 @@ export async function verifyImageUi(input: { taskId: string; baseUrl?: string; s
   const output = await validateImageResponse("output", await fetchImpl(`${base}/api/local-images/${input.taskId}/output`), expectedWidth, expectedHeight);
   const { chromium } = await import("playwright"); const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH; const browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
   try {
-    const page = await browser.newPage(); await page.goto(base, { waitUntil: "networkidle" }); const image = page.locator(`img[src*="/api/local-images/${input.taskId}/thumbnail"]`);
+    const page = await browser.newPage(); await page.goto(base, { waitUntil: "networkidle" });
+    const resultsTab = page.getByRole("button", { name: /^成果/ });
+    if (await resultsTab.count()) await resultsTab.first().click();
+    const image = page.locator(`img[src*="/api/local-images/${input.taskId}/thumbnail"]`);
+    await image.waitFor({ state: "visible", timeout: 10_000 }).catch(() => undefined);
     if (!await image.isVisible() || !(await image.boundingBox())?.width) throw new Error("local_ui_thumbnail_not_rendered");
     const natural = await image.evaluate((element: HTMLImageElement) => ({ width: element.naturalWidth, height: element.naturalHeight }));
     if (natural.width <= 0 || natural.height <= 0) throw new Error("local_ui_thumbnail_not_rendered");

@@ -21,6 +21,7 @@ export type ActiveCloreOrder = {
   gpu_type?: string;
   gpu_profile?: GpuProfile;
   bootstrap_image?: string;
+  deployment_profile_fingerprint?: string;
   create_attempt_id?: string;
 };
 

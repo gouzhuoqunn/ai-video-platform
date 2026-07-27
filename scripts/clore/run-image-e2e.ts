@@ -18,15 +18,15 @@ export type EligibleImageTask = LocalImageTask & { prompt: string; mode: "text_g
 const RECEIPT_PATH = path.join(process.cwd(), ".secrets", "clore-image-e2e-fresh-receipt.json");
 const RECEIPT_ARCHIVE_DIR = path.join(process.cwd(), ".secrets", "diagnostics", "clore-image-e2e-receipts");
 
-export function buildPublicAgentBootstrap(input: { commit: string; agentSha256: string; controllerSha256: string; workflowSha256: string; tokenSha256: string }) {
-  if (![input.commit, input.agentSha256, input.controllerSha256, input.workflowSha256, input.tokenSha256].every((value) => /^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(value))) throw new Error("immutable_agent_bootstrap_values_required");
+export function buildPublicAgentBootstrap(input: { commit: string; agentSourceSha256: string; agentSha256: string; controllerSha256: string; workflowSha256: string; tokenSha256: string }) {
+  if (![input.commit, input.agentSourceSha256, input.agentSha256, input.controllerSha256, input.workflowSha256, input.tokenSha256].every((value) => /^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(value))) throw new Error("immutable_agent_bootstrap_values_required");
   const profile = assertGoldenBootstrapIdentity(input);
   return buildRtx4090GoldenBootstrap(profile.tokenSha256);
 }
 
-function assertGoldenBootstrapIdentity(input: { commit: string; agentSha256: string; controllerSha256: string; workflowSha256: string; tokenSha256: string }) {
+function assertGoldenBootstrapIdentity(input: { commit: string; agentSourceSha256: string; agentSha256: string; controllerSha256: string; workflowSha256: string; tokenSha256: string }) {
   const immutable = RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable;
-  if (input.commit !== immutable.commit || input.agentSha256 !== immutable.agentSha256 || input.controllerSha256 !== immutable.controllerSha256 || input.workflowSha256 !== immutable.workflowSha256) {
+  if (input.commit !== immutable.commit || input.agentSourceSha256 !== immutable.agentSourceSha256 || input.agentSha256 !== immutable.agentSha256 || input.controllerSha256 !== immutable.controllerSha256 || input.workflowSha256 !== immutable.workflowSha256) {
     throw new Error("rtx4090_golden_bootstrap_identity_mismatch");
   }
   return { tokenSha256: input.tokenSha256 };
@@ -108,7 +108,15 @@ export async function createOrderWithRateLimit(input: {
     const second = rateLimitFailure(error); if (!second) throw error;
     input.onDiagnostic?.(second);
     const adopted = await reconcileAndAdopt(); if (adopted) return { created: null, adoptedOrderId: adopted, attempts: 2 };
-    throw new Error(JSON.stringify({ code: "create_order_rate_limit_persisted", http_status: 429, retry_after_ms: second.retryAfterMs, clore_code: second.code, attempt: 2 }));
+    const persisted = new Error(JSON.stringify({ code: "create_order_rate_limit_persisted", http_status: 429, retry_after_ms: second.retryAfterMs, clore_code: second.code, attempt: 2 }));
+    Object.assign(persisted, {
+      classification: "rate_limited" as const,
+      httpStatus: 429 as const,
+      code: second.code,
+      retryAfterMs: second.retryAfterMs,
+      requestAttempts: 2 as const,
+    });
+    throw persisted;
   }
 }
 function url(endpoint: string, part: string) { return `${endpoint.replace(/\/$/, "")}${part}`; }

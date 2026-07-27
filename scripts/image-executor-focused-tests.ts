@@ -394,6 +394,7 @@ async function main() {
   assert.equal(classifyImageGpu(1280, 1536), "rtx5090");
 
   const route = readFileSync("src/app/api/local-lab/image-tasks/route.ts", "utf8");
+  const runnerSource = readFileSync("scripts/image-4090-runner.ts", "utf8");
   const studio = readFileSync("src/components/ImageCreationStudio.tsx", "utf8");
   assert.match(route, /frozenTaskIds:\s*planned\.selectedTaskIds/);
   assert.match(route, /writeJson\(PREFERENCES_PATH, \{ maxHourlyPrice \}\)/);
@@ -404,8 +405,20 @@ async function main() {
   assert.match(route, /child\.on\("error"/);
   assert.match(route, /image_session_worker_start_failed/);
   assert.match(route, /image-session-supervisor\.ts/);
+  assert.match(route, /"--deployment-profile-fingerprint"/, "the supervisor receives the exact deployment profile fingerprint");
+  assert.match(route, /"--agent-source-sha256"/, "the supervisor receives the immutable Agent source hash");
+  assert.doesNotMatch(route, /saveRunner\(\{\s*\.\.\.readRunner\(\),\s*pid:\s*child\.pid/, "the transient tsx launcher PID must not become the paid worker owner");
+  assert.match(route, /current\.createAttempt\?\.id === attemptId/);
+  assert.match(route, /current\.pid === null \|\| current\.pid === child\.pid/);
+  assert.match(route, /!terminalRunnerState\(current\.state\) && current\.createAttempt\?\.id === attemptId/, "a stale supervisor error cannot overwrite a newer attempt");
+  assert.match(route, /SUPERVISOR_HANDOFF_GRACE_MS = 60 \* 1000/);
+  assert.match(route, /const launchPending =/);
+  assert.match(route, /if \(launchPending\) return runner;/, "a fresh PID handoff cannot be reconciled as stale");
   assert.match(route, /reconcileStaleRunner/);
   assert.match(route, /projectRunnerStatus/);
+  assert.match(runnerSource, /recordDeploymentFailure\(\{ serverId, orderId, reason: "deploying_proxy_502_timeout", profileFingerprint: deploymentProfileFingerprint \}\)/, "legacy HTTP readiness failures retain the exact deployment profile scope");
+  assert.match(runnerSource, /recordTemporaryDeploymentDeny\(\{ serverId, orderId, reason: "deploying_proxy_502_timeout", profileFingerprint: deploymentProfileFingerprint \}\)/, "legacy temporary deployment denials retain the exact deployment profile scope");
+  assert.match(runnerSource, /requestedGpuClass === "rtx4090" \? rtx4090GoldenDeploymentFingerprint\(\) : undefined/, "legacy HTTP readiness does not mis-scope non-golden GPU profiles");
   assert.match(studio, /task\??\.result/);
 
   const workflow = readFileSync("comfy-runtime/image_workflow.py", "utf8");

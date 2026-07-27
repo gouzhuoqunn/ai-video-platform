@@ -338,6 +338,13 @@ export class CloreRequestScheduler {
 
   async request<T>(config: CloreConfig, endpoint: string, init: RequestInit = {}, options: CloreRequestOptions = {}): Promise<T> {
     if (!config.apiKey) throw new Error("Missing CLORE_API_KEY for real Clore API request.");
+    if (
+      process.env.CLORE_PROVIDER_MUTATIONS_DISABLED === "true" &&
+      (endpoint === "/create_order" || endpoint === "/cancel_order") &&
+      this.fetchFn === fetch
+    ) {
+      throw new Error("provider_mutation_disabled_for_focused_validation");
+    }
     const ttl = cacheTtl(endpoint);
     const cacheKey = endpoint;
     const cached = this.cache.get(cacheKey);

@@ -1,8 +1,11 @@
 export const HISTORICAL_RENTED_CANDIDATE_MESSAGE = "候选显卡已被其他用户租用，上次启动已结束，可以重新尝试。";
 export const HISTORICAL_RUNNER_GENERIC_MESSAGE = "上次启动未完成，当前没有活动订单，可以重新尝试。";
 export const HISTORICAL_AGENT_STAGE_MESSAGE = "运行环境控制服务响应不兼容，尚未进入模型加载或图片生成，订单已安全退租。";
+export const CURRENT_CREATE_RATE_LIMIT_MESSAGE = "创建订单请求受到限流，正在核对订单状态，请稍候重试。";
+export const HISTORICAL_CREATE_RATE_LIMIT_MESSAGE = "上次创建订单请求受到限流，当前没有活动订单，可以重新尝试。";
+export const CREATE_RATE_LIMIT_CLASSIFICATION = "create_rate_limited";
 
-type RunnerError = { stage: string; message: string; at: string; classification?: string };
+type RunnerError = { stage: string; message: string; at: string; classification?: string; operation?: string };
 type RunnerLike = { state: string; pid?: number | null; host?: { orderId?: string | null } | null; blocker?: string | null; error?: RunnerError | null };
 
 export type RunnerStatusProjection = {
@@ -11,7 +14,7 @@ export type RunnerStatusProjection = {
 };
 
 function providerPayload(message: string) {
-  return /(?:clore api failed:\s*\{|unknown_code6|server[-_\s]*already[-_\s]*rented)/i.test(message);
+  return /(?:clore api failed:\s*\{|unknown_code6|server[-_\s]*already[-_\s]*rented|create_order_rate_limit_persisted|(?:http[_\s-]?status|status)\s*["':=]?\s*429)/i.test(message);
 }
 
 function rentedCandidateCode6(message: string, classification?: string) {
@@ -23,6 +26,16 @@ function agentStageAcceptanceFailure(message: string) {
   return /^agent_stage_acceptance_invalid:[a-z_]+$/i.test(message);
 }
 
+function createRateLimitFailure(input: Pick<RunnerError, "stage" | "message" | "classification" | "operation">) {
+  const context = `${input.stage} ${input.operation ?? ""} ${input.classification ?? ""} ${input.message}`;
+  const createOrderContext = /create[_\s-]?order|creating[_\s-]?order|reconcil(?:e|ing)|clore\.create_order/i.test(context);
+  if (/create_order_rate_limit_persisted|create[_\s-]?rate[_\s-]?limit(?:ed)?/i.test(context)) return true;
+  if (createOrderContext && /(?:\b429\b|rate[_\s-]?limit|http[_\s-]?status|clore[_\s-]?code)/i.test(context)) return true;
+  if (input.classification === "create_rate_limited") return true;
+  if (input.classification !== "rate_limited") return false;
+  return createOrderContext;
+}
+
 function historicalMarketMessage(classification?: string) {
   if (classification === "rate_limited") return "上次市场读取受到限流，当前没有活动订单，可以重新尝试。";
   if (classification === "authentication_failed") return "上次市场认证失败，当前没有活动订单，请检查本地凭据后重试。";
@@ -32,13 +45,15 @@ function historicalMarketMessage(classification?: string) {
   return null;
 }
 
-function safeCurrentMessage(message: string) {
-  return providerPayload(message) ? "启动请求遇到服务端错误，请先停止并检查运行状态。" : message;
+function safeCurrentMessage(error: RunnerError) {
+  if (createRateLimitFailure(error)) return CURRENT_CREATE_RATE_LIMIT_MESSAGE;
+  return providerPayload(error.message) ? "启动请求遇到服务端错误，请先停止并检查运行状态。" : error.message;
 }
 
-function safeClassification(message: string, classification?: string) {
-  if (rentedCandidateCode6(message, classification)) return "candidate_already_rented";
-  if (["rate_limited", "authentication_failed", "transport_failed", "invalid_json", "schema_incompatible", "provider_error"].includes(classification ?? "")) return classification;
+function safeClassification(error: RunnerError) {
+  if (createRateLimitFailure(error)) return CREATE_RATE_LIMIT_CLASSIFICATION;
+  if (rentedCandidateCode6(error.message, error.classification)) return "candidate_already_rented";
+  if (["rate_limited", "authentication_failed", "transport_failed", "invalid_json", "schema_incompatible", "provider_error"].includes(error.classification ?? "")) return error.classification;
   return undefined;
 }
 
@@ -47,22 +62,45 @@ function safeClassification(message: string, classification?: string) {
  * persisted runner receipt or log evidence.
  */
 export function projectRunnerStatus(runner: RunnerLike, state: { pidAlive: boolean; activeOrder: boolean; createLock: boolean }): RunnerStatusProjection {
-  if (!runner.error) return { error: null, blocker: runner.blocker ?? null };
+  if (!runner.error) {
+    if (!runner.blocker) return { error: null, blocker: null };
+    const blockerError: RunnerError = { stage: "", message: runner.blocker, at: "" };
+    if (createRateLimitFailure(blockerError)) return { error: null, blocker: CURRENT_CREATE_RATE_LIMIT_MESSAGE };
+    return { error: null, blocker: providerPayload(runner.blocker) ? "启动请求遇到服务端错误，请先停止并检查运行状态。" : runner.blocker };
+  }
   // A terminal record can retain its old host/order identifiers as evidence.
   // Only live PID, reconciled active-order state, or a create lock makes it current.
   const historical = ["idle", "failed", "completed"].includes(runner.state) && !state.pidAlive && !state.activeOrder && !state.createLock;
   if (historical) {
     const rented = rentedCandidateCode6(runner.error.message, runner.error.classification);
+    const createRateLimited = createRateLimitFailure(runner.error);
     const marketMessage = historicalMarketMessage(runner.error.classification);
-    const displayMessage = rented ? HISTORICAL_RENTED_CANDIDATE_MESSAGE : marketMessage ?? (agentStageAcceptanceFailure(runner.error.message) ? HISTORICAL_AGENT_STAGE_MESSAGE : HISTORICAL_RUNNER_GENERIC_MESSAGE);
+    const displayMessage = createRateLimited
+      ? HISTORICAL_CREATE_RATE_LIMIT_MESSAGE
+      : rented
+        ? HISTORICAL_RENTED_CANDIDATE_MESSAGE
+        : marketMessage ?? (agentStageAcceptanceFailure(runner.error.message) ? HISTORICAL_AGENT_STAGE_MESSAGE : HISTORICAL_RUNNER_GENERIC_MESSAGE);
     return {
-      error: { stage: runner.error.stage, at: runner.error.at, displayMessage, isBlocking: false, historical: true, classification: rented ? "candidate_already_rented" : marketMessage ? runner.error.classification : undefined },
+      error: {
+        stage: runner.error.stage,
+        at: runner.error.at,
+        displayMessage,
+        isBlocking: false,
+        historical: true,
+        classification: createRateLimited
+          ? CREATE_RATE_LIMIT_CLASSIFICATION
+          : rented
+            ? "candidate_already_rented"
+            : marketMessage
+              ? runner.error.classification
+              : undefined,
+      },
       blocker: null,
     };
   }
-  const displayMessage = safeCurrentMessage(runner.error.message);
+  const displayMessage = safeCurrentMessage(runner.error);
   return {
-    error: { stage: runner.error.stage, at: runner.error.at, displayMessage, isBlocking: true, historical: false, classification: safeClassification(runner.error.message, runner.error.classification) },
-    blocker: runner.blocker && providerPayload(runner.blocker) ? displayMessage : runner.blocker ?? displayMessage,
+    error: { stage: runner.error.stage, at: runner.error.at, displayMessage, isBlocking: true, historical: false, classification: safeClassification(runner.error) },
+    blocker: runner.blocker && (providerPayload(runner.blocker) || createRateLimitFailure({ ...runner.error, message: runner.blocker })) ? displayMessage : runner.blocker ?? displayMessage,
   };
 }

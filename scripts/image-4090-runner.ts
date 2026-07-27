@@ -16,7 +16,7 @@ import { recordDeploymentFailure, recordTemporaryDeploymentDeny } from "./clore/
 import { persistImageResult } from "./image-executor/result-persistence";
 import { readSourceAcquisitionManifest, readValidatedRestoreManifest, validateValidatedRestoreManifest, type SourceAcquisitionManifest, type ValidatedRestoreManifest } from "./image-executor/manifests";
 import { assertImageExecutorReady, IMAGE_RUNNER_PRECHECK_STAGE, RESTORE_OR_BOOTSTRAP_BLOCKER } from "./image-executor/readiness";
-import { assertRtx4090GoldenDeploymentProfile } from "./image-executor/rtx4090-golden-deployment-profile";
+import { assertRtx4090GoldenDeploymentProfile, rtx4090GoldenDeploymentFingerprint } from "./image-executor/rtx4090-golden-deployment-profile";
 import { runLiveImageSession, type SessionReceipt } from "./clore/image-session-live";
 import { FrozenImageSessionMembershipChangedError, hydrateFrozenImageSessionPlan } from "./clore/image-session";
 
@@ -844,7 +844,12 @@ export async function createOrderWithNetworkRetry(input: {
   }
 }
 
-async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId: string) {
+async function waitForController(
+  deps: RunnerDeps,
+  config: CloreConfig,
+  orderId: string,
+  deploymentProfileFingerprint?: string,
+) {
   const attempts = Math.ceil(HTTP_READINESS_TIMEOUT_MS / HTTP_READINESS_POLL_MS);
   const started = Date.now();
   let deployingProxy502SinceMs: number | null = null;
@@ -931,9 +936,9 @@ async function waitForController(deps: RunnerDeps, config: CloreConfig, orderId:
       deployingProxy502SinceMs ??= elapsedMs;
       if (elapsedMs - deployingProxy502SinceMs >= DEPLOYING_PROXY_502_TIMEOUT_MS) {
         const serverId = parsed?.serverId ?? (typeof readRunner().host?.serverId === "string" ? readRunner().host.serverId : null);
-        if (serverId) {
-          recordDeploymentFailure({ serverId, orderId, reason: "deploying_proxy_502_timeout" });
-          recordTemporaryDeploymentDeny({ serverId, orderId, reason: "deploying_proxy_502_timeout" });
+        if (serverId && deploymentProfileFingerprint) {
+          recordDeploymentFailure({ serverId, orderId, reason: "deploying_proxy_502_timeout", profileFingerprint: deploymentProfileFingerprint });
+          recordTemporaryDeploymentDeny({ serverId, orderId, reason: "deploying_proxy_502_timeout", profileFingerprint: deploymentProfileFingerprint });
         }
         throw new DeployingProxy502TimeoutError(orderId, serverId);
       }
@@ -1105,8 +1110,21 @@ export async function runImage4090Batch(
       readSourceAcquisitionManifest(sourceManifestPath);
       const receipt = await deps.runLiveSession({ sessionId: readRunner().createAttempt?.id, taskIds: frozenPlan.selectedTaskIds, immutable: profile.immutable, execute: true, onCandidateAttempt: (event) => {
         const current = readRunner(); const prior = Array.isArray(current.host?.candidateAttempts) ? current.host.candidateAttempts : [];
+        const createAttempt = current.createAttempt && event.event !== "selected"
+          ? {
+            ...current.createAttempt,
+            requestAttempts: Math.max(current.createAttempt.requestAttempts, event.requestAttempts ?? event.attempt),
+            phase: event.event === "order_created"
+              ? "order_created_waiting_deployment" as const
+              : event.classification === "rate_limited"
+                ? "create_order_rate_limited" as const
+                : "waiting_create_retry" as const,
+          }
+          : event.event === "selected" && current.createAttempt
+            ? { ...current.createAttempt, phase: "creating_order" as const }
+            : current.createAttempt;
         const message = event.event === "candidate_already_rented" ? "候选显卡已被其他用户租用，正在重新扫描市场。" : event.event === "candidate_failed" ? "候选显卡启动失败，已停止本次启动。" : `正在尝试第 ${event.attempt} 台候选显卡`;
-        updateRunner({ state: "running", stage: message, host: { ...(current.host ?? {}), serverId: event.serverId, orderId: current.host?.orderId ?? null, priceHourly: event.hourlyUsd, candidateRole: "candidate", attemptedServerIds: [...new Set([...prior.map((item) => String((item as Record<string, unknown>).serverId ?? "")).filter(Boolean), event.serverId])], candidateAttempts: [...prior, event].slice(-10), marketplaceRefreshedAt: event.marketplaceRefreshedAt, message } });
+        updateRunner({ state: "running", stage: message, createAttempt, host: { ...(current.host ?? {}), serverId: event.serverId, orderId: current.host?.orderId ?? null, priceHourly: event.hourlyUsd, candidateRole: "candidate", attemptedServerIds: [...new Set([...prior.map((item) => String((item as Record<string, unknown>).serverId ?? "")).filter(Boolean), event.serverId])], candidateAttempts: [...prior, event].slice(-10), marketplaceRefreshedAt: event.marketplaceRefreshedAt, message } });
       }, onMarketWait: (market) => {
         const current = readRunner();
         const message = market.phase === "waiting_for_market"
@@ -1226,7 +1244,12 @@ export async function runImage4090Batch(
       },
     });
 
-    const base = await waitForController(deps, config, orderId);
+    const base = await waitForController(
+      deps,
+      config,
+      orderId,
+      requestedGpuClass === "rtx4090" ? rtx4090GoldenDeploymentFingerprint() : undefined,
+    );
     updateRunner({ stage: "runtime_ready", host: { ...(readRunner().host ?? {}), orderId, httpState: "healthz ok", message: "图片运行环境已就绪" } });
 
     if (restore.source === "first_run_source_bootstrap") {
