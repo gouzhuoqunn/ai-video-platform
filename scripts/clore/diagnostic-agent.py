@@ -620,11 +620,10 @@ STAGES: dict[str, tuple[str, Any, int]] = {
 }
 
 
-def run_stage(route: str, payload: dict[str, Any]) -> str | None:
+def run_stage(route: str, payload: dict[str, Any], stage_run_id: str) -> str | None:
     name, action, _ = STAGES[route]
     if not STAGE_GATE.acquire(blocking=False):
         return None
-    stage_run_id = str(uuid.uuid4())
     try:
         # Persist the accepted invocation before exposing HTTP 202.  This is a
         # separate gate from STATE_LOCK: worker completion never waits on it.
@@ -657,7 +656,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         route = urllib.parse.urlsplit(self.path).path
         if route == "/healthz":
-            with STATE_LOCK: value = {"alive": True, "agent": "restricted-clore-diagnostic", "current_stage": STATE["current_stage"], "current_stage_run_id": STATE.get("current_stage_run_id"), "last_error": STATE["last_error"]}
+            with STATE_LOCK: value = {"alive": True, "agent": "restricted-clore-diagnostic", "agent_contract": "stage-acceptance-v2", "agent_sha256": CONFIG.get("agent_sha256"), "current_stage": STATE["current_stage"], "current_stage_run_id": STATE.get("current_stage_run_id"), "last_error": STATE["last_error"]}
             self.send_json(200, value); return
         if route in {"/status", "/logs"}:
             with STATE_LOCK:
@@ -686,18 +685,20 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError: self.send_json(400, {"error": "invalid_content_length"}); return
         if length < 0 or length > limit: self.send_json(413, {"error": "stage_body_too_large"}); return
         raw = self.rfile.read(length) if length else b""
-        if limit == 0 and raw: self.send_json(400, {"error": "stage_parameters_forbidden"}); return
         try: payload = json.loads(raw.decode("utf-8")) if raw else {}
         except Exception: self.send_json(400, {"error": "invalid_json"}); return
         if not isinstance(payload, dict): self.send_json(400, {"error": "invalid_stage_payload"}); return
+        stage_run_id = payload.pop("stage_run_id", None)
+        if not isinstance(stage_run_id, str) or not UUID_RE.fullmatch(stage_run_id): self.send_json(400, {"error": "stage_run_id_required"}); return
+        if limit == 0 and payload: self.send_json(400, {"error": "stage_parameters_forbidden"}); return
         try:
             if route == "/stage/models": validate_manifest(payload)
             if route == "/stage/inference": validate_inference_shape(payload)
         except ValueError as error:
             self.send_json(400, {"error": str(error)}); return
-        stage_run_id = run_stage(route, payload)
+        stage_run_id = run_stage(route, payload, stage_run_id)
         if not stage_run_id: self.send_json(409, {"error": "stage_already_running"}); return
-        self.send_json(202, {"accepted": True, "stage": item[0], "stage_run_id": stage_run_id})
+        self.send_json(202, {"accepted": True, "state": "accepted", "status": "running", "stage": item[0], "stage_run_id": stage_run_id})
 
 
 def main() -> None:
@@ -708,15 +709,16 @@ def main() -> None:
     parser.add_argument("--workflow-sha256")
     parser.add_argument("--immutable", help="commit:controller_sha256:workflow_sha256")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--agent-sha256", required=True)
     args = parser.parse_args()
     if args.immutable:
         parts = args.immutable.split(":")
         if len(parts) != 3:
             raise SystemExit("immutable_sha256_and_project_commit_required")
         args.project_commit, args.controller_sha256, args.workflow_sha256 = parts
-    if not args.project_commit or not args.controller_sha256 or not args.workflow_sha256 or not COMMIT_RE.fullmatch(args.project_commit) or not SHA_RE.fullmatch(args.controller_sha256) or not SHA_RE.fullmatch(args.workflow_sha256) or not SHA_RE.fullmatch(args.token_sha256):
+    if not args.project_commit or not args.controller_sha256 or not args.workflow_sha256 or not COMMIT_RE.fullmatch(args.project_commit) or not SHA_RE.fullmatch(args.controller_sha256) or not SHA_RE.fullmatch(args.workflow_sha256) or not SHA_RE.fullmatch(args.token_sha256) or not SHA_RE.fullmatch(args.agent_sha256):
         raise SystemExit("immutable_sha256_and_project_commit_required")
-    CONFIG.update({"project_commit": args.project_commit.lower(), "controller_sha256": args.controller_sha256.lower(), "workflow_sha256": args.workflow_sha256.lower()})
+    CONFIG.update({"project_commit": args.project_commit.lower(), "controller_sha256": args.controller_sha256.lower(), "workflow_sha256": args.workflow_sha256.lower(), "agent_sha256": args.agent_sha256.lower()})
     ROOT.mkdir(parents=True, exist_ok=True); LOG_DIR.mkdir(parents=True, exist_ok=True)
     with STATE_LOCK:
         STATE["started_at"] = now(); save_locked()

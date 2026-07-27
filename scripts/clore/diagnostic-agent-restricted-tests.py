@@ -280,7 +280,7 @@ def test_http_artifacts():
         artifact = Path(temp) / "artifacts" / task_id; artifact.mkdir(parents=True)
         artifact.joinpath("image.png").write_bytes(b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR" + (768).to_bytes(4, "big") + (768).to_bytes(4, "big") + b"\x08\x06\x00\x00\x00")
         artifact.joinpath("metadata.json").write_text(json.dumps({"task_id": task_id, "width": 768, "height": 768}), encoding="utf-8")
-        args = [sys.executable, str(AGENT_PATH), "--token-sha256", token_sha, "--project-commit", "0" * 40, "--controller-sha256", "0" * 64, "--workflow-sha256", "0" * 64, "--port", str(port)]
+        args = [sys.executable, str(AGENT_PATH), "--token-sha256", token_sha, "--agent-sha256", "0" * 64, "--project-commit", "0" * 40, "--controller-sha256", "0" * 64, "--workflow-sha256", "0" * 64, "--port", str(port)]
         process = subprocess.Popen(args, env={**__import__("os").environ, "DIAG_ROOT": temp}, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         try:
             for _ in range(40):
