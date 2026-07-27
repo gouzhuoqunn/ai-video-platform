@@ -292,7 +292,7 @@ def test_http_artifacts():
             assert request(port, "GET", f"/artifacts/{task_id}/image")[0] == 401
             assert request(port, "GET", f"/artifacts/{task_id}/image", token)[0] == 200
             assert request(port, "GET", "/artifacts/not-a-uuid/image", token)[0] == 404
-            status, data = request(port, "POST", "/stage/inference", token, json.dumps({"workflow": {}})); assert status == 400 and b"invalid_inference_fields" in data
+            status, data = request(port, "POST", "/stage/inference", token, json.dumps({"stage_run_id": "11111111-1111-4111-8111-111111111111", "workflow": {}})); assert status == 400 and b"invalid_inference_fields" in data
         finally:
             process.terminate(); process.wait(timeout=5)
 

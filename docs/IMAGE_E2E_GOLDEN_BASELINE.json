@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "productBaselineCommit": "c9d0a3392cd1dbbaacb7b3d01cdf906c509d6aaf",
   "runtime": {
-    "agentSha256": "5ca7af58319b048ad3d79836db251207ee72dd0e6ed91d756833969e6a55d4cd",
+    "agentSha256": "7e270c7ba6773f0eaab467370ab8a72adfc5b38de1f4441f6dee19af9430467c",
     "controllerSha256": "96569eb5eee895f974d7b8304bb15f3b38e8f806115aae90f06bf0f8b927563e",
     "workflowSha256": "e5b3e4cc7f347888f3231a82068d746740d5cb575905351ac4c7949d4b1cdd0d"
   },

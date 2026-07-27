@@ -2,7 +2,7 @@
  * Provider mutation remains deliberately absent until the full preflight path
  * invokes these exact-task primitives after runtime/model success.
  */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { claimImageTask, failImageTask, finalizeImageTask, mutateImageTasks, readImageTask, renewImageTaskLease, type LocalImageTask, type LocalTaskStoreOptions } from "../../src/lib/image-generation/local-image-task-store";
@@ -123,16 +123,38 @@ export async function createOrderWithRateLimit(input: {
 }
 function url(endpoint: string, part: string) { return `${endpoint.replace(/\/$/, "")}${part}`; }
 export type AcceptedStage = { acceptedHttpStatus: 202; stage: string; stageRunId: string };
-function acceptedStage(route: string, status: number, body: Record<string, unknown>): AcceptedStage {
-  const stage = route.replace(/^\/stage\//, ""); const stageRunId = body.stage_run_id;
-  if (status !== 202 || body.accepted !== true || body.stage !== stage || typeof stageRunId !== "string" || !/^[a-f0-9]{8}-[a-f0-9-]{27}$/i.test(stageRunId)) throw new Error(`agent_stage_acceptance_invalid:${stage}`);
-  return { acceptedHttpStatus: 202, stage, stageRunId };
+export type AgentStageAcceptanceEvidence = { route: string; stage: string; requestedStageRunId: string; httpStatus: number; contentType: string | null; responseKind: "json" | "html" | "invalid_json" | "wrong_schema"; body: { accepted: boolean | null; stage: string | null; stageRunId: string | null; state: string | null; status: string | null } | null };
+export class AgentStageAcceptanceError extends Error {
+  constructor(readonly evidence: AgentStageAcceptanceEvidence) { super(`agent_stage_acceptance_invalid:${evidence.stage}`); }
 }
-export async function agentPostJson(endpoint: string, token: string, route: string, payload?: object): Promise<AcceptedStage> {
-  const response = await fetch(url(endpoint, route), { method: "POST", headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" }, body: payload === undefined ? undefined : JSON.stringify(payload) });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`agent_post_http_${response.status}:${JSON.stringify(body).slice(0, 500)}`);
-  return acceptedStage(route, response.status, body as Record<string, unknown>);
+function safeStageAcceptanceBody(body: Record<string, unknown> | null) {
+  if (!body) return null;
+  return {
+    accepted: typeof body.accepted === "boolean" ? body.accepted : null,
+    stage: typeof body.stage === "string" ? body.stage : null,
+    stageRunId: typeof body.stage_run_id === "string" ? body.stage_run_id : null,
+    state: typeof body.state === "string" ? body.state : null,
+    status: typeof body.status === "string" ? body.status : null,
+  };
+}
+export function sanitizeAgentStageAcceptanceEvidence(error: unknown) {
+  if (!(error instanceof AgentStageAcceptanceError)) return null;
+  const { route, stage, requestedStageRunId, httpStatus, contentType, responseKind, body } = error.evidence;
+  return { route, stage, requestedStageRunId, httpStatus, contentType, responseKind, body };
+}
+function acceptedStage(route: string, status: number, body: Record<string, unknown>, requestedStageRunId: string, contentType: string | null): AcceptedStage {
+  const stage = route.replace(/^\/stage\//, ""); const stageRunId = body.stage_run_id;
+  const valid = status === 202 && (body.accepted === true || body.state === "accepted") && (body.state === "accepted" || body.status === "running") && body.stage === stage && stageRunId === requestedStageRunId;
+  if (!valid) throw new AgentStageAcceptanceError({ route, stage, requestedStageRunId, httpStatus: status, contentType, responseKind: "wrong_schema", body: safeStageAcceptanceBody(body) });
+  return { acceptedHttpStatus: 202, stage, stageRunId: requestedStageRunId };
+}
+export async function agentPostJson(endpoint: string, token: string, route: string, payload?: object, options: { stageRunId?: string; onRequested?: (stageRunId: string) => void; fetchImpl?: typeof fetch } = {}): Promise<AcceptedStage> {
+  const stage = route.replace(/^\/stage\//, ""); const stageRunId = options.stageRunId ?? randomUUID(); options.onRequested?.(stageRunId);
+  const response = await (options.fetchImpl ?? fetch)(url(endpoint, route), { method: "POST", headers: { Authorization: `Bearer ${token}`, "content-type": "application/json", Accept: "application/json" }, body: JSON.stringify({ ...(payload ?? {}), stage_run_id: stageRunId }) });
+  const contentType = response.headers.get("content-type"); const text = await response.text(); let body: Record<string, unknown> | null = null;
+  try { const parsed: unknown = JSON.parse(text); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Record<string, unknown>; } catch { /* classified below */ }
+  if (!response.ok || !body) throw new AgentStageAcceptanceError({ route, stage, requestedStageRunId: stageRunId, httpStatus: response.status, contentType, responseKind: /text\/html/i.test(contentType ?? "") ? "html" : body ? "wrong_schema" : "invalid_json", body: safeStageAcceptanceBody(body) });
+  return acceptedStage(route, response.status, body, stageRunId, contentType);
 }
 export async function submitInferenceStage(endpoint:string,token:string,payload:object){return await agentPostJson(endpoint,token,"/stage/inference",payload)}
 

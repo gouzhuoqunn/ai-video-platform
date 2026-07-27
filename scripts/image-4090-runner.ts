@@ -229,6 +229,9 @@ function readableError(error: unknown) {
   const detail = createOrderFailureDetailFromError(error);
   if (detail) return detail.readableMessage;
   const message = error instanceof Error ? error.message : String(error);
+  if (message.startsWith("agent_stage_acceptance_invalid:")) {
+    return "运行环境控制服务响应不兼容，尚未进入模型加载或图片生成，订单已安全退租。";
+  }
   if (message === "validated_restore_manifest_missing_and_bootstrap_not_configured" || message === RESTORE_OR_BOOTSTRAP_BLOCKER) {
     return "未找到已验证的 FLUX 模型恢复清单，且首次模型下载配置尚未完成。";
   }

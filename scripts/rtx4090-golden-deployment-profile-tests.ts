@@ -13,6 +13,7 @@ assert.equal(profile.image, "cloreai/jupyter:ubuntu24.04-v2");
 assert.deepEqual(profile.ports, { "8080": "http" });
 assert.equal(profile.healthPath, "/healthz");
 assert.equal(profile.controllerBind, "0.0.0.0:8080");
+assert.equal(profile.agentContract, "stage-acceptance-v2");
 assert.equal(profile.immutable.agentSha256, baseline.runtime.agentSha256);
 assert.equal(profile.immutable.controllerSha256, baseline.runtime.controllerSha256);
 assert.equal(profile.immutable.workflowSha256, baseline.runtime.workflowSha256);

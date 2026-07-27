@@ -533,7 +533,9 @@ async function responsePayload(extra: Record<string, unknown> = {}) {
   const createLockPresent = existsSync(ORDER_CREATE_LOCK_PATH) || existsSync(LEGACY_ORDER_CREATE_LOCK_PATH) || existsSync(RUNNER_START_LOCK_PATH);
   const display = projectRunnerStatus(runner, {
     pidAlive: processExists(runner.pid),
-    activeOrder: Boolean(activeStateLooksImageOrder() || runner.host?.orderId),
+    // A terminal host/order field is retained as historical evidence.  Billing
+    // state comes only from the active-order record reconciled against Clore.
+    activeOrder: Boolean(activeStateLooksImageOrder()),
     createLock: createLockPresent,
   });
   const tasks = readTasks();

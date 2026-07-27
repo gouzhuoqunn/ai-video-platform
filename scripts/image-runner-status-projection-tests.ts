@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { HISTORICAL_RENTED_CANDIDATE_MESSAGE, HISTORICAL_RUNNER_GENERIC_MESSAGE, projectRunnerStatus } from "../src/lib/image-generation/runner-status-projection";
+import { HISTORICAL_AGENT_STAGE_MESSAGE, HISTORICAL_RENTED_CANDIDATE_MESSAGE, HISTORICAL_RUNNER_GENERIC_MESSAGE, projectRunnerStatus } from "../src/lib/image-generation/runner-status-projection";
 
 const historicalCode6 = { state: "failed", pid: 27900, host: { orderId: null }, blocker: "Clore API failed", error: { stage: "preflight", at: "2026-07-26T18:26:08.488Z", message: "Clore API failed: {\"httpStatus\":200,\"code\":6,\"error\":\"server-already-rented\",\"classification\":\"unknown_code6\"}" } };
 
@@ -14,6 +14,12 @@ function main() {
 
   const unknown = projectRunnerStatus({ ...historicalCode6, error: { ...historicalCode6.error, message: "Clore API failed: {\"code\":9,\"error\":\"other\"}" } }, { pidAlive: false, activeOrder: false, createLock: false });
   assert.equal(unknown.error?.displayMessage, HISTORICAL_RUNNER_GENERIC_MESSAGE);
+
+  const historicalAgent = projectRunnerStatus({ ...historicalCode6, host: { orderId: "1983946" }, error: { ...historicalCode6.error, message: "agent_stage_acceptance_invalid:environment" } }, { pidAlive: false, activeOrder: false, createLock: false });
+  assert.equal(historicalAgent.error?.displayMessage, HISTORICAL_AGENT_STAGE_MESSAGE);
+  assert.equal(historicalAgent.error?.historical, true);
+  assert.equal(historicalAgent.error?.isBlocking, false);
+  assert.equal(JSON.stringify(historicalAgent).includes("agent_stage_acceptance_invalid"), false);
 
   const active = projectRunnerStatus({ ...historicalCode6, state: "running" }, { pidAlive: true, activeOrder: false, createLock: false });
   assert.equal(active.error?.isBlocking, true);
