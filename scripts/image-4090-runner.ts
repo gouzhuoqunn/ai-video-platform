@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { loadCloreConfig, COMFY_RUNTIME_IMAGE, PROJECT_TAG } from "./clore/config";
 import { classifyImageGpu, type ImageGpuClass } from "../src/lib/image-generation/flux-stack";
 import { loadCloreExecutionConfig } from "./clore/execution-config";
-import { readLiveMarketplace, readLiveOrdersSummary } from "./clore/live";
+import { MarketplaceReadError, readLiveMarketplace, readLiveOrdersSummary } from "./clore/live";
 import { evaluateMarketplace } from "./clore/marketplace";
 import { buildHttpRuntimeCreateOrderBody, createCloreOrder } from "./clore/order-execution";
 import { cancelCloreOrder } from "./clore/cancel-execution";
@@ -155,6 +155,8 @@ class DeployingProxy502TimeoutError extends Error {
 export type RunnerDeps = {
   loadConfig: () => CloreConfig;
   loadExecution: () => CloreExecution;
+  /** Test harnesses may point at an isolated, validated source manifest. */
+  sourceManifestPath?: string;
   readMarketplace: (config: CloreConfig) => Promise<MarketplacePayload>;
   readOrders: (config: CloreConfig) => Promise<OrderSummary[]>;
   createOrder: typeof createCloreOrder;
@@ -228,6 +230,14 @@ function readableError(error: unknown) {
   }
   const detail = createOrderFailureDetailFromError(error);
   if (detail) return detail.readableMessage;
+  if (error instanceof MarketplaceReadError) {
+    if (error.outcome.classification === "rate_limited") return "Clore 市场请求受到限流，本次读取未被当作空市场。";
+    if (error.outcome.classification === "authentication_failed") return "Clore 市场认证失败，尚未创建订单。";
+    if (error.outcome.classification === "transport_failed") return "无法连接 Clore 市场，本次读取未被当作空市场。";
+    if (error.outcome.classification === "invalid_json") return "Clore 市场返回了无效响应，尚未创建订单。";
+    if (error.outcome.classification === "schema_incompatible") return "Clore 市场响应结构不兼容，尚未创建订单。";
+    return "Clore 市场返回服务错误，尚未创建订单。";
+  }
   const message = error instanceof Error ? error.message : String(error);
   if (message.startsWith("agent_stage_acceptance_invalid:")) {
     return "运行环境控制服务响应不兼容，尚未进入模型加载或图片生成，订单已安全退租。";
@@ -385,7 +395,7 @@ function failRunner(stage: string, error: unknown, cancellationError?: unknown, 
   updateRunner({
     state: "failed",
     stage,
-    blocker: blocker ?? (membershipChanged ? readableError(error) : machine),
+    blocker: blocker ?? (membershipChanged || error instanceof MarketplaceReadError ? readableError(error) : machine),
     error: {
       stage,
       message: readableError(error),
@@ -396,8 +406,8 @@ function failRunner(stage: string, error: unknown, cancellationError?: unknown, 
       method: detail?.method,
       targetHost: detail?.targetHost,
       targetPath: detail?.targetPath,
-      classification: detail?.classification,
-      technicalCause: detail ? technicalCauseText(detail) : undefined,
+      classification: detail?.classification ?? (error instanceof MarketplaceReadError ? error.outcome.classification : undefined),
+      technicalCause: detail ? technicalCauseText(detail) : error instanceof MarketplaceReadError ? JSON.stringify({ classification: error.outcome.classification, evidence: { capturedAt: error.outcome.evidence.capturedAt, httpStatus: error.outcome.evidence.httpStatus, contentType: error.outcome.evidence.contentType, responseByteLength: error.outcome.evidence.responseByteLength, bodySha256: error.outcome.evidence.bodySha256, selectedListField: error.outcome.evidence.selectedListField, rawListingCount: error.outcome.evidence.rawListingCount } }) : undefined,
     },
   });
 }
@@ -1024,8 +1034,13 @@ async function cancelAndVerify(deps: RunnerDeps, config: CloreConfig, execution:
   return true;
 }
 
-export async function runImage4090Batch(deps = defaultDeps()) {
-  const { taskPath, restorePath, sourceManifestPath, resultsDir } = runnerPaths();
+export async function runImage4090Batch(
+  deps = defaultDeps(),
+  expectedSupervisor?: { sessionId: string; taskIds: readonly string[] },
+) {
+  const paths = runnerPaths();
+  const { taskPath, restorePath, resultsDir } = paths;
+  const sourceManifestPath = deps.sourceManifestPath ?? paths.sourceManifestPath;
   let orderId: string | null = null;
   let attemptedCreate = false;
   let selectedServerId: string | null = null;
@@ -1036,6 +1051,13 @@ export async function runImage4090Batch(deps = defaultDeps()) {
 
   try {
     const session = readRunner();
+    if (expectedSupervisor && (
+      session.createAttempt?.id !== expectedSupervisor.sessionId ||
+      session.frozenTaskIds.length !== expectedSupervisor.taskIds.length ||
+      session.frozenTaskIds.some((taskId, index) => taskId !== expectedSupervisor.taskIds[index])
+    )) {
+      throw new Error("image_session_worker_runner_projection_mismatch");
+    }
     updateRunner({
       state: "running",
       stage: IMAGE_RUNNER_PRECHECK_STAGE,
@@ -1087,8 +1109,22 @@ export async function runImage4090Batch(deps = defaultDeps()) {
         updateRunner({ state: "running", stage: message, host: { ...(current.host ?? {}), serverId: event.serverId, orderId: current.host?.orderId ?? null, priceHourly: event.hourlyUsd, candidateRole: "candidate", attemptedServerIds: [...new Set([...prior.map((item) => String((item as Record<string, unknown>).serverId ?? "")).filter(Boolean), event.serverId])], candidateAttempts: [...prior, event].slice(-10), marketplaceRefreshedAt: event.marketplaceRefreshedAt, message } });
       }, onMarketWait: (market) => {
         const current = readRunner();
-        const message = market.phase === "waiting_for_market" ? "当前没有可用候选，等待市场刷新。" : "正在刷新 Clore 市场并排序候选显卡。";
-        updateRunner({ state: "running", stage: message, host: { ...(current.host ?? {}), candidateRole: "candidate", market: { phase: market.phase, scannedAt: market.scannedAt, nextScanAt: market.nextScanAt, totalServerCount: market.totalServerCount, compliantCandidateCount: market.compliantCandidateCount, rejectedServerIds: market.rejectedServerIds, selectedServerId: market.selectedServerId, selectedHourlyUsd: market.selectedHourlyUsd }, message } });
+        const message = market.phase === "waiting_for_market"
+          ? "当前有效市场中没有可用候选，正在等待刷新。"
+          : market.phase === "market_rate_limited"
+            ? "Clore 市场请求受到限流，本次读取未被当作空市场。"
+            : market.phase === "market_authentication_failed"
+              ? "Clore 市场认证失败，尚未创建订单。"
+              : market.phase === "market_transport_failed"
+                ? "无法连接 Clore 市场，本次读取未被当作空市场。"
+                : market.phase === "market_invalid_json"
+                  ? "Clore 市场返回了无效响应，尚未创建订单。"
+                  : market.phase === "market_schema_incompatible"
+                    ? "Clore 市场响应结构不兼容，尚未创建订单。"
+                    : market.phase === "market_provider_error"
+                      ? "Clore 市场返回服务错误，尚未创建订单。"
+                      : "正在刷新 Clore 市场并排序候选显卡。";
+        updateRunner({ state: "running", stage: message, host: { ...(current.host ?? {}), candidateRole: market.selectedServerId ? "candidate" : null, market: { phase: market.phase, scannedAt: market.scannedAt, nextScanAt: market.nextScanAt, totalServerCount: market.totalServerCount, compliantCandidateCount: market.compliantCandidateCount, rejectedServerIds: market.rejectedServerIds, attemptedServerIds: market.attemptedServerIds, selectedServerId: market.selectedServerId, selectedHourlyUsd: market.selectedHourlyUsd, filterCounts: market.filterCounts, marketplaceRead: market.marketplaceRead }, message } });
       }, onOrderCreated: (order, deploymentProfile) => {
         updateRunner({ stage: "订单已创建，正在等待已验证运行环境", host: { ...(readRunner().host ?? {}), candidateRole: "rented_host", orderId: order.orderId, serverId: order.serverId, controllerUrl: order.endpoint, deploymentProfileId: deploymentProfile.id, bootstrapTemplateSha256: deploymentProfile.bootstrapTemplateSha256, runtimeDigest: deploymentProfile.image, healthPath: profile.healthPath, controllerBind: profile.controllerBind } });
       } });
@@ -1325,8 +1361,7 @@ if (invoked) {
       process.exitCode = 1;
     });
   } else {
-    void runImage4090Batch().catch(() => {
-      process.exitCode = 1;
-    });
+    console.error("legacy_direct_image_runner_disabled_use_image_session_supervisor");
+    process.exitCode = 1;
   }
 }

@@ -1,13 +1,14 @@
-/** One-order, sequential two-task image session.  The CLI gates provider mutation. */
+/** One-order, sequential one-to-eight-task image session. The CLI gates provider mutation. */
 import { randomUUID } from "node:crypto";
 import { listImageTasks } from "../../src/lib/image-generation/local-image-task-store";
-import { hydrateFrozenImageSessionPlan, planImageSession } from "./image-session";
-import { cleanupLiveSession, createLiveSessionOrder, installModelsOnce, invokeStage, submitTaskInference, waitForAgentIdle, writeSessionReceipt, writeTaskReceipt, type CandidateAttemptEvent, type ImmutableRuntime, type MarketWaitEvent } from "./image-live-runtime";
+import { hydrateFrozenImageSessionPlan, planImageSession, type ImageSessionPlan } from "./image-session";
+import { cleanupLiveSession, createLiveSessionOrder, installModelsOnce, invokeStage, submitTaskInference, waitForAgentIdle, writeSessionReceipt, writeTaskReceipt, type CandidateAttemptEvent, type ImmutableRuntime, type MarketWaitEvent, type OwnedSessionOrder } from "./image-live-runtime";
 import { resolveExactEligibleImageTask, sanitizeAgentStageAcceptanceEvidence, type AgentStageAcceptanceEvidence } from "./run-image-e2e";
 import { RTX4090_GOLDEN_DEPLOYMENT_PROFILE } from "../image-executor/rtx4090-golden-deployment-profile";
+import type { MarketplaceReadEvidence } from "./live";
 
 export type SessionTaskState = { terminal: "not_started" | "completed" | "failed" | "ambiguous"; inferenceState: "not_started" | "submitting" | "accepted" | "succeeded" | "failed"; stageRunId: string | null };
-export type SessionReceipt = { schemaVersion: 1; sessionId: string; sessionState: "planned" | "starting" | "running" | "draining" | "completed" | "failed" | "ambiguous"; orderId: string | null; endpointHostname: string | null; deploymentProfile: { id: string; image: string; bootstrapTemplateSha256: string; controllerSha256: string; agentSha256: string; workflowSha256: string }; requestedGpuClass: "RTX 4090" | "RTX 5090"; selectedGpuModel: string | null; selectedHourlyUsd: number; projectedRentalCostUsd: number; projectedCreationFeeUsd: number; projectedProviderCostCeilingUsd: number; selectedTaskIds: string[]; selectedDimensions: Array<{ taskId: string; width: number; height: number }>; currentTaskId: string | null; modelStage: { state: "not_started" | "succeeded" | "failed"; stageRunId: string | null }; tasks: Record<string, SessionTaskState>; completedCount: number; failedCount: number; cancellationState: string; cleanupErrors: string[]; cleanupEvidence: { zeroActiveOrderConfirmations: number; watchdogDisarmed: boolean } | null; agentAcceptanceEvidence: AgentStageAcceptanceEvidence[]; agentAcceptanceFailure: ReturnType<typeof sanitizeAgentStageAcceptanceEvidence>; firstError: string | null; timestamps: Record<string, string>; candidateAttempts: CandidateAttemptEvent[] };
+export type SessionReceipt = { schemaVersion: 1; sessionId: string; sessionState: "planned" | "starting" | "running" | "draining" | "completed" | "failed" | "ambiguous"; orderId: string | null; serverId: string | null; endpointHostname: string | null; deploymentProfile: { id: string; image: string; bootstrapTemplateSha256: string; controllerSha256: string; agentSha256: string; workflowSha256: string }; requestedGpuClass: "RTX 4090" | "RTX 5090"; selectedGpuModel: string | null; selectedHourlyUsd: number; projectedRentalCostUsd: number; projectedCreationFeeUsd: number; projectedProviderCostCeilingUsd: number; selectedTaskIds: string[]; selectedDimensions: Array<{ taskId: string; width: number; height: number }>; currentTaskId: string | null; modelStage: { state: "not_started" | "succeeded" | "failed"; stageRunId: string | null }; tasks: Record<string, SessionTaskState>; completedCount: number; failedCount: number; cancellationState: string; cleanupErrors: string[]; cleanupEvidence: { zeroActiveOrderConfirmations: number; watchdogDisarmed: boolean; localOrderStateCleared: boolean } | null; agentAcceptanceEvidence: AgentStageAcceptanceEvidence[]; agentAcceptanceFailure: ReturnType<typeof sanitizeAgentStageAcceptanceEvidence>; firstError: string | null; timestamps: Record<string, string>; candidateAttempts: CandidateAttemptEvent[]; marketplaceEvidence: MarketplaceReadEvidence[] };
 type LiveSessionReceipt = SessionReceipt & { currentRemoteStage?: string; currentStageRunId?: string };
 const stamp = () => new Date().toISOString();
 const sanitizedError = (error: unknown) => String(error instanceof Error ? error.message : error).replace(/(bearer\s+)[^\s]+/gi, "$1<redacted>").slice(0, 700);
@@ -19,10 +20,20 @@ export function assertStageGpuMatches(selectedGpuClass: "RTX 4090" | "RTX 5090",
   if (!expected.test(hardware)) throw new Error(`gpu_hardware_mismatch:expected_${selectedGpuClass.replace(" ", "_")}`);
 }
 
-function initial(sessionId: string, plan: ReturnType<typeof planImageSession>): SessionReceipt { return { schemaVersion: 1, sessionId, sessionState: "planned", orderId: null, endpointHostname: null, deploymentProfile: { id: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.id, image: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.image, bootstrapTemplateSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.bootstrapTemplateSha256, controllerSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.controllerSha256, agentSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.agentSha256, workflowSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.workflowSha256 }, requestedGpuClass: plan.selectedGpuClass, selectedGpuModel: plan.selectedGpuModel, selectedHourlyUsd: plan.selectedHourlyUsd, projectedRentalCostUsd: plan.projectedRentalCostUsd, projectedCreationFeeUsd: plan.projectedCreationFeeUsd, projectedProviderCostCeilingUsd: plan.projectedProviderCostCeilingUsd, selectedTaskIds: plan.selectedTaskIds, selectedDimensions: plan.selectedDimensions, currentTaskId: null, modelStage: { state: "not_started", stageRunId: null }, tasks: Object.fromEntries(plan.selectedTaskIds.map((id) => [id, { terminal: "not_started", inferenceState: "not_started", stageRunId: null }])), completedCount: 0, failedCount: 0, cancellationState: "not_started", cleanupErrors: [], cleanupEvidence: null, agentAcceptanceEvidence: [], agentAcceptanceFailure: null, firstError: null, timestamps: { planned: stamp() }, candidateAttempts: [] }; }
+function initial(sessionId: string, plan: ReturnType<typeof planImageSession>): SessionReceipt { return { schemaVersion: 1, sessionId, sessionState: "planned", orderId: null, serverId: null, endpointHostname: null, deploymentProfile: { id: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.id, image: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.image, bootstrapTemplateSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.bootstrapTemplateSha256, controllerSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.controllerSha256, agentSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.agentSha256, workflowSha256: RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.workflowSha256 }, requestedGpuClass: plan.selectedGpuClass, selectedGpuModel: plan.selectedGpuModel, selectedHourlyUsd: plan.selectedHourlyUsd, projectedRentalCostUsd: plan.projectedRentalCostUsd, projectedCreationFeeUsd: plan.projectedCreationFeeUsd, projectedProviderCostCeilingUsd: plan.projectedProviderCostCeilingUsd, selectedTaskIds: plan.selectedTaskIds, selectedDimensions: plan.selectedDimensions, currentTaskId: null, modelStage: { state: "not_started", stageRunId: null }, tasks: Object.fromEntries(plan.selectedTaskIds.map((id) => [id, { terminal: "not_started", inferenceState: "not_started", stageRunId: null }])), completedCount: 0, failedCount: 0, cancellationState: "not_started", cleanupErrors: [], cleanupEvidence: null, agentAcceptanceEvidence: [], agentAcceptanceFailure: null, firstError: null, timestamps: { planned: stamp() }, candidateAttempts: [], marketplaceEvidence: [] }; }
 function persist(receipt: SessionReceipt) { writeSessionReceipt(receipt); }
 function taskReceipt(receipt: SessionReceipt, taskId: string, patch: Record<string, unknown>) { writeTaskReceipt(receipt.sessionId, taskId, { taskId, inferenceState: receipt.tasks[taskId].inferenceState, stageRunId: receipt.tasks[taskId].stageRunId, timestamps: { updatedAt: stamp() }, ...patch }); }
 function persistAgentAcceptanceEvidence(receipt: SessionReceipt, evidence: AgentStageAcceptanceEvidence) { receipt.agentAcceptanceEvidence = [...receipt.agentAcceptanceEvidence, evidence].slice(-24); persist(receipt); }
+export function applySelectedPlanToReceipt(
+  receipt: Pick<SessionReceipt, "selectedGpuModel" | "selectedHourlyUsd" | "projectedRentalCostUsd" | "projectedCreationFeeUsd" | "projectedProviderCostCeilingUsd">,
+  plan: Pick<ImageSessionPlan, "selectedGpuModel" | "selectedHourlyUsd" | "projectedRentalCostUsd" | "projectedCreationFeeUsd" | "projectedProviderCostCeilingUsd">,
+) {
+  receipt.selectedGpuModel = plan.selectedGpuModel;
+  receipt.selectedHourlyUsd = plan.selectedHourlyUsd;
+  receipt.projectedRentalCostUsd = plan.projectedRentalCostUsd;
+  receipt.projectedCreationFeeUsd = plan.projectedCreationFeeUsd;
+  receipt.projectedProviderCostCeilingUsd = plan.projectedProviderCostCeilingUsd;
+}
 
 export async function runLiveImageSession(input: { taskIds: string[]; immutable: ImmutableRuntime; execute: boolean; sessionId?: string; onOrderCreated?: (order: { orderId: string; serverId: string; endpoint: string }, profile: SessionReceipt["deploymentProfile"]) => Promise<void> | void; onCandidateAttempt?: (event: CandidateAttemptEvent) => Promise<void> | void; onMarketWait?: (event: MarketWaitEvent) => Promise<void> | void }) {
   if (!input.execute) {
@@ -34,11 +45,33 @@ export async function runLiveImageSession(input: { taskIds: string[]; immutable:
   // never sort or independently rebuild it after the batch has been frozen.
   const selected = hydrateFrozenImageSessionPlan(exact.map((id) => resolveExactEligibleImageTask(id)), exact, { activeOrderCount: 0 });
   const receipt: LiveSessionReceipt = initial(input.sessionId ?? randomUUID(), selected); persist(receipt);
-  let order: Awaited<ReturnType<typeof createLiveSessionOrder>> | null = null; let primary: unknown = null;
+  let order: Awaited<ReturnType<typeof createLiveSessionOrder>> | null = null;
+  let ownedOrder: OwnedSessionOrder | null = null;
+  let primary: unknown = null;
   try {
     receipt.sessionState = "starting"; receipt.timestamps.starting = stamp(); persist(receipt);
-    order = await createLiveSessionOrder({ sessionId: receipt.sessionId, taskIds: exact, immutable: input.immutable, execute: true, onCandidateAttempt: async (event) => { receipt.candidateAttempts = [...receipt.candidateAttempts, event].slice(-10); receipt.timestamps[`candidate:${event.attempt}:${event.event}`] = stamp(); persist(receipt); await input.onCandidateAttempt?.(event); }, onMarketWait: input.onMarketWait });
-    receipt.orderId = order.orderId; receipt.endpointHostname = order.hostname; receipt.timestamps.orderCreated = stamp(); persist(receipt);
+    order = await createLiveSessionOrder({
+      sessionId: receipt.sessionId,
+      taskIds: exact,
+      immutable: input.immutable,
+      execute: true,
+      onOrderPersisted: (persisted) => {
+        ownedOrder = persisted;
+        receipt.orderId = persisted.orderId;
+        receipt.serverId = persisted.serverId;
+        receipt.timestamps.orderCreated ??= stamp();
+        persist(receipt);
+      },
+      onCandidateAttempt: async (event) => { receipt.candidateAttempts = [...receipt.candidateAttempts, event].slice(-10); receipt.timestamps[`candidate:${event.attempt}:${event.event}`] = stamp(); persist(receipt); await input.onCandidateAttempt?.(event); },
+      onMarketEvidence: (evidence) => { receipt.marketplaceEvidence = [...receipt.marketplaceEvidence, evidence].slice(-24); persist(receipt); },
+      onMarketWait: input.onMarketWait,
+    });
+    ownedOrder ??= order;
+    receipt.orderId = order.orderId;
+    receipt.endpointHostname = order.hostname;
+    applySelectedPlanToReceipt(receipt, order.plan);
+    receipt.timestamps.endpointPublished = stamp();
+    persist(receipt);
     await input.onOrderCreated?.({ orderId: order.orderId, serverId: order.serverId, endpoint: order.endpoint }, receipt.deploymentProfile);
     await waitForAgentIdle(order);
     receipt.sessionState = "running"; receipt.timestamps.agentReady = stamp(); persist(receipt);
@@ -62,7 +95,40 @@ export async function runLiveImageSession(input: { taskIds: string[]; immutable:
     return receipt;
   } catch (error) { primary = error; if (receipt.sessionState !== "ambiguous") receipt.sessionState = "failed"; receipt.agentAcceptanceFailure ??= sanitizeAgentStageAcceptanceEvidence(error); receipt.firstError ??= sanitizedError(error); receipt.timestamps.failed = stamp(); persist(receipt); throw error;
   } finally {
-    if (order) { const cleanup = await cleanupLiveSession(order); receipt.cancellationState = cleanup.cancellationState; receipt.cleanupErrors = cleanup.cleanupErrors; receipt.cleanupEvidence = { zeroActiveOrderConfirmations: cleanup.zeroConfirmations, watchdogDisarmed: cleanup.watchdogDisarmed }; receipt.timestamps.cleanup = stamp(); persist(receipt); }
-    if (primary && order === null) { /* no watchdog was armed before a successful order */ }
+    if (ownedOrder) {
+      let cleanupFailure: Error | null = null;
+      try {
+        const cleanup = await cleanupLiveSession(ownedOrder);
+        receipt.cancellationState = cleanup.cancellationState;
+        receipt.cleanupErrors = cleanup.cleanupErrors;
+        receipt.cleanupEvidence = { zeroActiveOrderConfirmations: cleanup.zeroConfirmations, watchdogDisarmed: cleanup.watchdogDisarmed, localOrderStateCleared: cleanup.localOrderStateCleared };
+        receipt.timestamps.cleanup = stamp();
+        if (!cleanup.cleanupConfirmed) {
+          receipt.sessionState = "ambiguous";
+          receipt.firstError ??= "order_cleanup_unconfirmed_after_two_zero_checks";
+          cleanupFailure = new Error("order_cleanup_unconfirmed_after_two_zero_checks");
+        }
+        persist(receipt);
+      } catch (error) {
+        receipt.sessionState = "ambiguous";
+        receipt.cancellationState = "cancellation_unconfirmed";
+        receipt.cleanupErrors = [...receipt.cleanupErrors, sanitizedError(error)];
+        receipt.cleanupEvidence = { zeroActiveOrderConfirmations: 0, watchdogDisarmed: false, localOrderStateCleared: false };
+        receipt.firstError ??= "order_cleanup_unconfirmed_after_two_zero_checks";
+        receipt.timestamps.cleanup = stamp();
+        persist(receipt);
+        cleanupFailure = error instanceof Error ? error : new Error(String(error));
+      }
+      if (cleanupFailure && !primary) throw cleanupFailure;
+    }
+    if (primary && ownedOrder === null) {
+      // A pre-order failure must leave a terminal, archivable receipt while
+      // preserving the exact task state and all provider evidence collected so
+      // far.  The supervisor performs a fresh active-order read before reuse.
+      receipt.cancellationState = "not_created";
+      receipt.cleanupEvidence = { zeroActiveOrderConfirmations: 0, watchdogDisarmed: true, localOrderStateCleared: true };
+      receipt.timestamps.cleanup = stamp();
+      persist(receipt);
+    }
   }
 }

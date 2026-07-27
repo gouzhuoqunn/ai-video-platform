@@ -6,11 +6,12 @@ import { resilientCreateOrder } from "./resilient-create";
 const rented = () => new CloreApiError({ httpStatus: 200, code: 6, error: "server-already-rented", message: "server-already-rented", details: null, field: null, requestId: "fixture", classification: "candidate_already_rented" });
 
 async function main() {
+  assert.equal(MAX_CANDIDATE_CREATE_ATTEMPTS, 5, "one logical start may try at most five unique candidates");
   assert.equal(classifyCloreFailure({ httpStatus: 200, code: 6, error: "server-already-rented" }), "candidate_already_rented");
   assert.equal(isCandidateAlreadyRented(rented()), true);
   assert.doesNotMatch(JSON.stringify(rented().failure), /unknown_code6/);
 
-  let clock = 0; let inFlight = 0; let maximumInFlight = 0; let reconciles = 0;
+  let clock = 0; let inFlight = 0; let maximumInFlight = 0; let reconciles = 0; let freshMarketplaceReads = 0;
   const logicalAttemptId = "one-durable-attempt"; const selected: string[] = []; const creates: string[] = [];
   const result = await resilientCreateOrder<{ id: string }, { logicalAttemptId: string }>({
     maximumCreateRequests: MAX_CANDIDATE_CREATE_ATTEMPTS,
@@ -18,6 +19,7 @@ async function main() {
     sleep: async (ms) => { clock += ms; },
     activeOrderCount: async () => 0,
     selectFreshCandidate: async (attempted) => {
+      freshMarketplaceReads += 1;
       const candidate = ["candidate-a", "candidate-b"].find((id) => !attempted.has(id)) ?? null;
       if (candidate) selected.push(candidate);
       return candidate ? { id: candidate } : null;
@@ -31,7 +33,7 @@ async function main() {
     shouldRetryOnNextCandidate: isCandidateAlreadyRented,
   });
   assert.deepEqual(selected, ["candidate-a", "candidate-b"]); assert.deepEqual(creates, selected); assert.equal(new Set(creates).size, creates.length);
-  assert.equal(result.order.value.logicalAttemptId, logicalAttemptId); assert.equal(maximumInFlight, 1); assert.equal(reconciles, 1);
+  assert.equal(result.order.value.logicalAttemptId, logicalAttemptId); assert.equal(maximumInFlight, 1); assert.equal(reconciles, 1); assert.equal(freshMarketplaceReads, 2);
 
   let exhausted: unknown = null; let exhaustedClock = 0;
   try {
@@ -48,7 +50,7 @@ async function main() {
   let rateLimitCreates = 0; let rateLimitReconciles = 0;
   await assert.rejects(() => resilientCreateOrder<{ id: string }, null>({ maximumCreateRequests: MAX_CANDIDATE_CREATE_ATTEMPTS, activeOrderCount: async () => 0, selectFreshCandidate: async () => ({ id: "candidate-a" }), create: async () => { rateLimitCreates += 1; throw new CloreRateLimitError({ httpStatus: 429, code: 5, message: null, retryAfterMs: null, attempt: 1 }); }, reconcile: async () => { rateLimitReconciles += 1; return null; }, shouldRetryOnNextCandidate: isCandidateAlreadyRented }), /clore_rate_limit/);
   assert.equal(rateLimitCreates, 1); assert.equal(rateLimitReconciles, 1);
-  console.log(JSON.stringify({ ok: true, code6CandidateRace: true, sameLogicalAttempt: true, maxUniqueCandidates: MAX_CANDIDATE_CREATE_ATTEMPTS, noConcurrentCreate: true, rateLimitDidNotSwitchCandidate: true, providerMutationCount: 0 }));
+  console.log(JSON.stringify({ ok: true, code6CandidateRace: true, freshRescanAfterCode6: true, sameLogicalAttempt: true, maxUniqueCandidates: MAX_CANDIDATE_CREATE_ATTEMPTS, noConcurrentCreate: true, rateLimitDidNotSwitchCandidate: true, providerMutationCount: 0 }));
 }
 
 void main();

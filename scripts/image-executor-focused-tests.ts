@@ -207,6 +207,7 @@ function depsFor(input: { healthFails?: boolean; restoreFails?: boolean; generat
       firstGpuSession: true,
       deploymentHold: false,
     }),
+    sourceManifestPath: path.join(process.cwd(), "comfy-runtime", "image-source-artifacts.json"),
     readMarketplace: async () => [candidate().raw],
     readOrders: async () => (created && !cancelCount ? [{ orderId: "2001", serverId: "99515", status: "running", currency: "USD", price: 0.5, fee: null, creationFee: null, spend: null, createdTimestamp: null, expired: false, active: true, controllerUrl: "https://runtime.invalid" }] : []),
     createOrder: async () => {
@@ -399,9 +400,10 @@ async function main() {
   assert.match(route, /executionReady: readiness\.rtx4090\.ready/);
   assert.match(route, /const blocker = readinessBlocker\(selectedGpuClass\)/);
   assert.match(route, /stdio: \["ignore", "pipe", "pipe"\]/);
-  assert.match(route, /child\.on\("exit"/);
+  assert.match(route, /child\.on\("close"/);
   assert.match(route, /child\.on\("error"/);
-  assert.match(route, /image_runner_exited_nonzero/);
+  assert.match(route, /image_session_worker_start_failed/);
+  assert.match(route, /image-session-supervisor\.ts/);
   assert.match(route, /reconcileStaleRunner/);
   assert.match(route, /projectRunnerStatus/);
   assert.match(studio, /task\??\.result/);

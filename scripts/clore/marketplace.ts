@@ -445,11 +445,13 @@ export function normalizeCloreServer(raw: RawCloreServer, config: CloreConfig): 
 
 function getRejectionReasons(candidate: Omit<CloreCandidate, "missingFields" | "rejectionReasons" | "riskTier" | "riskNotes">, config: CloreConfig) {
   const reasons: string[] = [];
+  if (!/^[1-9]\d*$/.test(candidate.serverId)) reasons.push("server ID is missing or invalid");
   if (candidate.gpuNormalizedName !== config.targetGpu) {
     reasons.push(`GPU is not exact ${config.targetGpu.replace("NVIDIA GeForce ", "")}`);
   }
   if (candidate.gpuCount !== 1) reasons.push("GPU count is not 1");
   if (!candidate.rentable) reasons.push("server is not currently rentable");
+  if (candidate.hostOnline === false) reasons.push("host is explicitly offline");
   if (candidate.orderType !== "on-demand") reasons.push("spot or non-on-demand order is not allowed");
   if ((candidate.ramGb ?? 0) < config.minRamGb) reasons.push("RAM below minimum");
   if ((candidate.cpuCores ?? 0) < config.minCpuCores) reasons.push("CPU cores below minimum");

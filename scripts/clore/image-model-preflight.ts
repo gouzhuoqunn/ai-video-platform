@@ -29,9 +29,15 @@ function localSecret(name: TokenName) {
   try { for (const line of readFileSync(secretFile, "utf8").split(/\r?\n/)) { const match = new RegExp(`^\\s*${name}\\s*=\\s*(.*)$`).exec(line); if (match?.[1]) return match[1].trim().replace(/^["']|["']$/g, ""); } } catch { /* missing local-only capability is reported by caller */ }
   return "";
 }
-function exactFiveArtifacts(filePath = sourceManifestPath()) {
+type VerifiedArtifact = SourceArtifact & { filename: string; sha256: string; size_bytes: number };
+function exactFiveArtifacts(filePath = sourceManifestPath()): VerifiedArtifact[] {
   const byId = new Map(readSourceAcquisitionManifest(filePath).artifacts.map((artifact) => [artifact.id, artifact]));
-  return REQUIRED_IDS.map((id) => { const artifact = byId.get(id) as SourceArtifact | undefined; if (!artifact || !artifact.filename || !artifact.sha256 || !artifact.size_bytes) throw new Error(`image_model_identity_missing:${id}`); return artifact; });
+  return REQUIRED_IDS.map((id) => {
+    const artifact = byId.get(id);
+    const size = artifact?.size_bytes;
+    if (!artifact || typeof artifact.filename !== "string" || !artifact.filename || typeof artifact.sha256 !== "string" || !artifact.sha256 || typeof size !== "number" || !Number.isSafeInteger(size) || size <= 0) throw new Error(`image_model_identity_missing:${id}`);
+    return { ...artifact, size_bytes: size } as VerifiedArtifact;
+  });
 }
 function initialUrl(artifact: SourceArtifact) { if (artifact.source === "civitai") return `https://civitai.com/api/download/models/${artifact.version_id}`; if (!artifact.repository || !artifact.revision) throw new Error(`image_model_source_missing:${artifact.id}`); return `https://huggingface.co/${artifact.repository}/resolve/${artifact.revision}/${artifact.filename}`; }
 function requireHttps(value: string, code: string) { const parsed = new URL(value); if (parsed.protocol !== "https:" || parsed.username || parsed.password) throw new Error(code); return parsed.toString(); }
@@ -47,7 +53,7 @@ async function nodeProbeOnce(fetchImpl: FetchLike, url: string, token: string): 
   } finally { clearTimeout(timer); }
 }
 
-function windowsProbeOnce(url: string, token: string): HeaderResult {
+async function windowsProbeOnce(url: string, token: string): Promise<HeaderResult> {
   const script = [
     "Add-Type -AssemblyName System.Net.Http", "$h=[System.Net.Http.HttpClientHandler]::new();$h.AllowAutoRedirect=$false", "$c=[System.Net.Http.HttpClient]::new($h);$c.Timeout=[TimeSpan]::FromSeconds(45)",
     "$q=[System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get,$env:AI_IMAGE_PREFLIGHT_URL)", `$q.Headers.UserAgent.ParseAdd('${PREFLIGHT_USER_AGENT}')`, "$q.Headers.Accept.ParseAdd('application/octet-stream')",
@@ -67,7 +73,7 @@ export async function probeGetHeaders(url: string, options: ProbeOptions = {}): 
   let current = initial; let redirects = 0;
   for (;;) {
     const token = options.authorizationToken && new URL(current).origin === initialOrigin ? options.authorizationToken : "";
-    const once = options.fetchImpl ? await nodeProbeOnce(options.fetchImpl, current, token) : os.platform() === "win32" ? windowsProbeOnce(current, token) : nodeProbeOnce(fetch, current, token);
+    const once = await (options.fetchImpl ? nodeProbeOnce(options.fetchImpl, current, token) : os.platform() === "win32" ? windowsProbeOnce(current, token) : nodeProbeOnce(fetch, current, token));
     const location = once.location ? requireHttps(new URL(once.location, current).toString(), "invalid_model_redirect_url") : null;
     if (redirect !== "follow" || ![301, 302, 303, 307, 308].includes(once.status)) return { ...once, finalUrl: current, finalHostname: new URL(current).hostname.toLowerCase(), redirectCount: redirects };
     if (!location) throw new Error("model_source_redirect_location_missing"); if (++redirects > 8) throw new Error("model_source_redirect_limit_exceeded"); current = location;
@@ -92,8 +98,9 @@ export async function verifyFiveImageModelSources(input: { fetchImpl?: FetchLike
   const tokenProvider = input.tokenProvider ?? localSecret; const models: RemoteImageModel[] = []; const checked: ImageModelPreflight["checked"] = [];
   for (const artifact of exactFiveArtifacts(input.manifestPath)) {
     const resolved = await resolveDownloadUrl({ artifact, fetchImpl: input.fetchImpl, tokenProvider }); const id = artifact.id as (typeof REQUIRED_IDS)[number];
+    if (resolved.probe.contentLength === null) throw new Error(`model_source_content_length_missing:${id}`);
     models.push({ role: ROLE_BY_ID[id], id, filename: artifact.filename, url: resolved.url, sha256: artifact.sha256, size_bytes: artifact.size_bytes });
-    checked.push({ id, status: resolved.probe.status, contentLength: resolved.probe.contentLength!, source: artifact.source, finalHostname: resolved.probe.finalHostname, redirectCount: resolved.probe.redirectCount, validatedMethod: "GET" });
+    checked.push({ id, status: resolved.probe.status, contentLength: resolved.probe.contentLength, source: artifact.source, finalHostname: resolved.probe.finalHostname, redirectCount: resolved.probe.redirectCount, validatedMethod: "GET" });
   }
   return { models, checked };
 }
@@ -106,7 +113,17 @@ export function toAgentModelManifest(resolvedModels: ReadonlyArray<RemoteImageMo
 export function validateAgentModelManifestContract(manifest: AgentModelManifest) {
   const agentPath = path.join(process.cwd(), "scripts", "clore", "diagnostic-agent.py"); const script = ["import importlib.util,json,sys", "s=importlib.util.spec_from_file_location('agent',sys.argv[1])", "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)", "m.validate_manifest(json.load(sys.stdin))"].join(";");
   const candidates: Array<[string, string[]]> = process.platform === "win32" ? [["py", ["-3", "-c", script, agentPath]], ["python", ["-c", script, agentPath]]] : [["python3", ["-c", script, agentPath]], ["python", ["-c", script, agentPath]]];
-  for (const [command, args] of candidates) { const result = spawnSync(command, args, { cwd: process.cwd(), input: JSON.stringify(manifest), encoding: "utf8", windowsHide: true }); if (result.status === 0) return; if (result.error?.code === "ENOENT") continue; throw new Error("agent_model_manifest_contract_rejected"); } throw new Error("agent_model_manifest_validator_unavailable");
+  for (const [command, args] of candidates) { const result = spawnSync(command, args, { cwd: process.cwd(), input: JSON.stringify(manifest), encoding: "utf8", windowsHide: true }); if (result.status === 0) return; const spawnError = result.error as NodeJS.ErrnoException | undefined; if (spawnError?.code === "ENOENT") continue; throw new Error("agent_model_manifest_contract_rejected"); } throw new Error("agent_model_manifest_validator_unavailable");
 }
 export function indexResolvedModelsById(resolvedModels: ReadonlyArray<RemoteImageModel>) { return new Map(resolvedModels.map((model) => [model.id, model] as const)); }
-export function sanitizeImageModelPreflight(value: ImageModelPreflight) { return { models: value.models.map(({ url: _url, ...model }) => model), checked: value.checked }; }
+export function sanitizeImageModelPreflight(value: ImageModelPreflight) {
+  return {
+    models: value.models.map((model) => ({
+      role: model.role,
+      filename: model.filename,
+      sha256: model.sha256,
+      size_bytes: model.size_bytes,
+    })),
+    checked: value.checked,
+  };
+}

@@ -31,6 +31,11 @@ async function main() {
   const sameIdsDifferentInputOrder = planImageSession(storedInUiOrder, { requestedTaskIds: [...uiOrderA].reverse(), gpuClass: "rtx4090", maxBatchSize: 5, activeOrderCount: 0 });
   assert.deepEqual(planned.selectedTaskIds, expectedCanonical, "planner owns the only canonical order");
   assert.deepEqual(sameIdsDifferentInputOrder.selectedTaskIds, expectedCanonical, "harmless UI input order changes normalize once");
+  assert.deepEqual(
+    planImageSession([task(1)], { requestedTaskIds: [id(1)], gpuClass: "rtx4090", maxBatchSize: 8 }).selectedTaskIds,
+    [id(1)],
+    "the paid acceptance plan is exactly one explicitly requested task",
+  );
 
   const rehydrated = hydrateFrozenImageSessionPlan([...storedInUiOrder].reverse(), planned.selectedTaskIds, { gpuClass: "rtx4090", activeOrderCount: 0 });
   assert.deepEqual(rehydrated.selectedTaskIds, expectedCanonical, "runner/session preflight preserve persisted order without sorting again");
@@ -78,7 +83,7 @@ async function main() {
   assert.equal(receiptHasAcceptedInference(acceptedReceipt), true);
   assert.equal(terminalizeReceipt(acceptedReceipt, { sessionId: "historical", state: "failed", error: "fixture", now: "2026-07-26T01:00:00.000Z" })?.sessionState, "ambiguous", "accepted historical evidence is preserved, not cleared");
 
-  console.log(JSON.stringify({ ok: true, canonicalTaskIds: expectedCanonical, membershipChangesFailBeforeProvider: true, stalePreOrderFreezeDoesNotContaminateNewPlan: true, acceptedHistoricalReceiptPreserved: true, providerMutationCount }));
+  console.log(JSON.stringify({ ok: true, canonicalTaskIds: expectedCanonical, canonicalSingleTask: true, membershipChangesFailBeforeProvider: true, stalePreOrderFreezeDoesNotContaminateNewPlan: true, acceptedHistoricalReceiptPreserved: true, providerMutationCount }));
 }
 
 void main();

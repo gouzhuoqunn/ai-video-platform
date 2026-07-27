@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { publishLocalImageArtifact } from "../../src/lib/image-generation/local-image-artifacts";
 import { mutateImageTasks, readImageTask, recoverCompletedImageTaskFromVerifiedArtifact } from "../../src/lib/image-generation/local-image-task-store";
 import { freshRunRequiresManualRecovery } from "./run-image-e2e";
-import { terminalizeReceipt, terminalizeWorkerSnapshot, workerTerminalState, type WorkerState } from "./image-session-supervision";
+import { hasUnfinishedLocalExecution, isSafePreOrderReceipt, isSafeTerminalReceipt, terminalizeReceipt, terminalizeWorkerSnapshot, workerTerminalState, type WorkerState } from "./image-session-supervision";
 
 const sessionId = "8520171f-1be2-4f8a-8e36-4d8a8c02d032";
 const taskA = "66d42c71-61e3-49f4-a867-2b2745bc0102";
@@ -28,6 +28,36 @@ assert.equal(failed?.sessionState, "failed");
 assert.equal(failed?.currentTaskId, null);
 assert.equal(freshRunRequiresManualRecovery({ taskId: taskA, inferenceState: "accepted" }, taskA, "waiting_for_gpu"), true);
 assert.equal(freshRunRequiresManualRecovery({ taskId: taskA, inferenceState: "not_started" }, taskA, "waiting_for_gpu"), false);
+assert.equal(isSafePreOrderReceipt({ orderId: null, currentTaskId: null, sessionState: "starting", tasks: { [taskA]: { terminal: "not_started", inferenceState: "not_started" } }}), true);
+assert.equal(isSafePreOrderReceipt({ orderId: null, currentTaskId: null, sessionState: "starting", tasks: {} }), false);
+assert.equal(isSafePreOrderReceipt({ orderId: null, currentTaskId: taskA, sessionState: "starting", tasks: { [taskA]: { terminal: "not_started", inferenceState: "not_started" } }}), false);
+assert.equal(isSafePreOrderReceipt({ orderId: null, currentTaskId: null, sessionState: "starting", tasks: { [taskA]: { terminal: "ambiguous", inferenceState: "accepted" } }}), false);
+assert.equal(isSafeTerminalReceipt({ orderId: "order", currentTaskId: null, sessionState: "completed", cancellationState: "cancelled", cleanupEvidence: { zeroActiveOrderConfirmations: 2, watchdogDisarmed: true, localOrderStateCleared: true }, tasks: {} }), true);
+assert.equal(isSafeTerminalReceipt({ orderId: "order", currentTaskId: null, sessionState: "completed", cancellationState: "cancelled", cleanupEvidence: { zeroActiveOrderConfirmations: 1, watchdogDisarmed: true, localOrderStateCleared: true }, tasks: {} }), false);
+const localStateRoot = mkdtempSync(path.join(os.tmpdir(), "image-session-local-state-"));
+const projectRoot = process.cwd();
+try {
+  process.chdir(localStateRoot);
+  assert.equal(hasUnfinishedLocalExecution(), false);
+  mkdirSync(path.join(".secrets", "image-studio"), { recursive: true });
+  writeFileSync(path.join(".secrets", "image-studio", "runner-session.json"), JSON.stringify({
+    state: "running",
+    pid: null,
+    createAttempt: { id: "current-attempt" },
+  }), "utf8");
+  writeFileSync(path.join(".secrets", "image-studio", "runner-start.lock"), JSON.stringify({
+    attemptId: "current-attempt",
+  }), "utf8");
+  assert.equal(hasUnfinishedLocalExecution(), true, "ordinary callers must treat the start handshake as unfinished");
+  assert.equal(hasUnfinishedLocalExecution({ allowedRunnerAttemptId: "current-attempt", allowedRunnerPid: process.pid }), false, "the exact current supervisor handoff may inspect the prior receipt");
+  assert.equal(hasUnfinishedLocalExecution({ allowedRunnerAttemptId: "wrong-attempt", allowedRunnerPid: process.pid }), true, "a different attempt cannot reuse the start-lock exception");
+} finally {
+  process.chdir(projectRoot);
+  rmSync(localStateRoot, { recursive: true, force: true });
+}
+const supervisorSource = readFileSync("scripts/clore/image-session-supervisor.ts", "utf8");
+assert.match(supervisorSource, /terminalizeDeadWorker\b/);
+assert.doesNotMatch(supervisorSource, /terminalizeDeadWorkerWithCleanup/);
 
 async function testVerifiedArtifactRecovery() {
 const temp = mkdtempSync(path.join(os.tmpdir(), "image-session-terminalization-"));
@@ -43,4 +73,4 @@ try {
 } finally { rmSync(temp, { recursive: true, force: true }); }
 }
 
-void testVerifiedArtifactRecovery().then(() => console.log("image-session-terminalization-tests: ok"));
+void testVerifiedArtifactRecovery().then(() => console.log(JSON.stringify({ ok: true, localOnlyStatus: true, exactSupervisorStartLockHandoff: true, staleWorkerGuard: true, verifiedArtifactRecovery: true, providerMutationCount: 0 })));

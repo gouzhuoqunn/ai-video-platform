@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { claimImageTask, readImageTask } from "../../src/lib/image-generation/local-image-task-store";
-import { createOrderWithRateLimit, freshRunRequiresManualRecovery, prepareFreshReceipt, persistAndFinalizeExactLocalTask, preflightExactLocalImageTask, requeueSafeFailedExactImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, type FreshReceipt } from "./run-image-e2e";
+import { createOrderWithRateLimit, freshRunRequiresManualRecovery, prepareFreshReceipt, persistAndFinalizeExactLocalTask, preflightExactLocalImageTask, requeueSafeFailedExactImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, type ActiveOrderSnapshot, type FreshReceipt } from "./run-image-e2e";
 import { CloreRateLimitError } from "./client";
 
 const taskId = "eefc2b5b-5f25-4d82-aeeb-3b8ff501a1a0";
@@ -21,7 +21,7 @@ async function main() {
   const root = mkdtempSync(path.join(os.tmpdir(), "image-e2e-"));
   try {
     const taskPath = path.join(root, "tasks.json"); const options = { taskPath, artifactRoot: path.join(root, "library") };
-    const task = { id: taskId, status: "waiting_for_gpu", mode: "text_generation", referenceImage: null, prompt: "fixture", width: 768, height: 768, steps: 25, cfg: 4, loraStrength: .8, seed: 1, sampler: "Euler", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 0 };
+    const task = { id: taskId, status: "waiting_for_gpu", mode: "text_generation", referenceImage: null, prompt: "fixture", width: 768, height: 768, steps: 25, cfg: 4, loraStrength: .8, seed: 1, sampler: "Euler", gpuClass: "rtx4090", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), attempts: 0 };
     writeFileSync(taskPath, JSON.stringify([task]), "utf8");
     // Runtime/model preflight reads eligibility without claiming it.
     const eligible = resolveExactEligibleImageTask(taskId, options);
@@ -71,7 +71,7 @@ async function main() {
     await createOrderWithRateLimit({ serverId: "98682", createOnce: async () => { createCalls += 1; if (createCalls === 1) throw rateLimit(null, 1); return { id: "created" }; }, reconcile: async () => emptySnapshot, sleepImpl: async (delay) => { fallbackDelays.push(delay); }, jitter: () => 0 });
     assert.deepEqual(fallbackDelays, [90_000]);
     createCalls = 0;
-    const adopted = await createOrderWithRateLimit({ serverId: "98682", createOnce: async () => { createCalls += 1; throw rateLimit(null, 1); }, reconcile: async () => ({ orders: [{ orderId: "adopted", serverId: "98682", active: true }] as any, checkedAt: 0 }), sleepImpl: async () => undefined, jitter: () => 0 });
+    const adopted = await createOrderWithRateLimit({ serverId: "98682", createOnce: async () => { createCalls += 1; throw rateLimit(null, 1); }, reconcile: async (): Promise<ActiveOrderSnapshot> => ({ orders: [{ orderId: "adopted", serverId: "98682", active: true }], checkedAt: 0 }), sleepImpl: async () => undefined, jitter: () => 0 });
     assert.equal(adopted.adoptedOrderId, "adopted"); assert.equal(createCalls, 1);
     createCalls = 0; const diagnostics: unknown[] = [];
     await assert.rejects(() => createOrderWithRateLimit({ serverId: "98682", createOnce: async () => { createCalls += 1; throw rateLimit(null, createCalls, "token=fixture-secret"); }, reconcile: async () => emptySnapshot, sleepImpl: async () => undefined, jitter: () => 0, onDiagnostic: (value) => diagnostics.push(value) }), /create_order_rate_limit_persisted/);

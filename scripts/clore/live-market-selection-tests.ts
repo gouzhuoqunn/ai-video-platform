@@ -20,6 +20,24 @@ function main() {
   assert.deepEqual(first.candidates.map((candidate) => candidate.serverId), ["9001", "9002", "9003"]);
   assert.equal(first.evidence.selectedServerId, "9001");
   assert.equal(first.evidence.compliantCandidateCount, 3);
+  assert.deepEqual(first.evidence.filterCounts && [
+    first.evidence.filterCounts.totalProviderListings,
+    first.evidence.filterCounts.exactRtx4090Listings,
+    first.evidence.filterCounts.rentableRtx4090Listings,
+    first.evidence.filterCounts.onDemandRtx4090Listings,
+    first.evidence.filterCounts.priceCompliantListings,
+    first.evidence.filterCounts.hardwareDeploymentCompliantListings,
+    first.evidence.filterCounts.fullyCompliantCandidates,
+  ], [3, 3, 3, 3, 3, 3, 3], "marketplace counts follow the required ordered funnel");
+
+  const deploymentRejected = rankFreshMarketplaceCandidates({
+    marketplace: [server(9010, 5), { ...server(9011, 5.1), supports_docker: false }],
+    config,
+    attemptedServerIds: new Set(),
+  });
+  assert.equal(deploymentRejected.evidence.filterCounts?.priceCompliantListings, 2);
+  assert.equal(deploymentRejected.evidence.filterCounts?.hardwareDeploymentCompliantListings, 1);
+  assert.equal(deploymentRejected.evidence.filterCounts?.fullyCompliantCandidates, 1);
 
   const refreshed = rankFreshMarketplaceCandidates({ marketplace: [server(9001, 8), server(9004, 10)], config, attemptedServerIds: new Set(["9001"]), now: () => "2026-07-27T00:00:04.000Z" });
   assert.deepEqual(refreshed.candidates.map((candidate) => candidate.serverId), ["9004"]);

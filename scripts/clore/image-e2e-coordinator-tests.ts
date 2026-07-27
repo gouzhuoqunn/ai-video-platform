@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { runImageE2e, type CoordinatorDeps, type SanitizedImageE2eSession } from "./image-e2e-coordinator";
+import type { EligibleImageTask } from "./run-image-e2e";
 
-const task = { id: "eefc2b5b-5f25-4d82-aeeb-3b8ff501a1a0", status: "waiting_for_gpu", mode: "text_generation", referenceImage: null, prompt: "fixture", width: 768, height: 768, steps: 30, cfg: 4, loraStrength: .8, seed: 1, sampler: "FlowMatch" } as any;
+const task: EligibleImageTask = { id: "eefc2b5b-5f25-4d82-aeeb-3b8ff501a1a0", status: "waiting_for_gpu", updatedAt: "2026-07-25T00:00:00.000Z", mode: "text_generation", referenceImage: null, prompt: "fixture", width: 768, height: 768, steps: 30, cfg: 4, loraStrength: .8, seed: 1, sampler: "FlowMatch" };
 
-function fake(input: { modelAuthFailure?: "once" | "twice"; modelIncomplete?: "once" | "twice"; artifactFailure?: boolean; submittingReceiptFailure?: boolean; acceptedReceiptFailure?: boolean; inferenceFailure?: boolean; resume?: SanitizedImageE2eSession | null } = {}) {
+function fake(input: { modelAuthFailure?: "once" | "twice"; modelIncomplete?: "once" | "twice"; artifactFailure?: boolean; submittingReceiptFailure?: boolean; acceptedReceiptFailure?: boolean; inferenceFailure?: boolean; uiFailure?: boolean; resume?: SanitizedImageE2eSession | null } = {}) {
   const events: string[] = []; let saved: SanitizedImageE2eSession | null = input.resume ?? null; let claimed = false; let inferenceCalls = 0;
   const deps: CoordinatorDeps = {
     now: () => "2026-07-25T00:00:00.000Z", persist: (value) => { saved = structuredClone(value); events.push(`persist:${value.phase}`); }, load: () => saved,
@@ -19,7 +20,7 @@ function fake(input: { modelAuthFailure?: "once" | "twice"; modelIncomplete?: "o
     claim: async () => { claimed = true; events.push("claim"); return { token: "plain-claim-token", tokenHash: "b".repeat(64) }; }, startHeartbeat: () => ({ stop: () => events.push("heartbeat_stop"), assertHealthy: () => undefined }),
     retrieveArtifact: async () => { events.push("retrieve"); if (input.artifactFailure && events.filter((value) => value === "retrieve").length === 1) throw new Error("transfer_failed"); return { png: Buffer.from("png"), byteSize: 3, sha256: "c".repeat(64), width: 768, height: 768, generationDurationSeconds: 1, controllerPromptId: "prompt" }; },
     publishAndFinalize: async () => { events.push("finalize"); return { relativeDir: "2026-07-25/eefc2b5b-5f25-4d82-aeeb-3b8ff501a1a0", pngSha256: "c".repeat(64), pngBytes: 3, width: 768, height: 768, completedAt: "2026-07-25T00:00:00.000Z" }; },
-    verifyUi: async () => { events.push("ui"); }, failClaim: async () => { events.push("fail_claim"); }, cancelExactOrder: async (id) => { events.push(`cancel:${id}`); }, confirmNoActiveOrders: async () => { events.push("zero"); },
+    verifyUi: async () => { events.push("ui"); if (input.uiFailure) throw new Error("fixture_ui_readback_failed?token=secret"); }, failClaim: async () => { events.push("fail_claim"); }, cancelExactOrder: async (id) => { events.push(`cancel:${id}`); }, confirmNoActiveOrders: async () => { events.push("zero"); },
   };
   return { deps, events, get saved() { return saved; }, get claimed() { return claimed; }, get inferenceCalls() { return inferenceCalls; } };
 }
@@ -49,6 +50,13 @@ async function main() {
   assert.equal(authorizationExhausted.inferenceCalls, 0); assert.equal(authorizationExhausted.claimed, false); assert.ok(authorizationExhausted.events.includes("cancel:1979999"));
   const transfer = fake({ artifactFailure: true }); await runImageE2e({ taskId: task.id, immutableCommit: "a".repeat(40), tokenFile: ".secrets/token", tokenSha256: "d".repeat(64), resume: false }, transfer.deps);
   assert.equal(transfer.inferenceCalls, 1); assert.equal(transfer.events.filter((value) => value === "retrieve").length, 2); assert.ok(transfer.events.includes("cancel:1979999"));
+  const postFinalizationUiFailure = fake({ uiFailure: true });
+  await runImageE2e({ taskId: task.id, immutableCommit: "a".repeat(40), tokenFile: ".secrets/token", tokenSha256: "d".repeat(64), resume: false }, postFinalizationUiFailure.deps);
+  assert.equal(postFinalizationUiFailure.inferenceCalls, 1);
+  assert.ok(postFinalizationUiFailure.events.includes("finalize"));
+  assert.equal(postFinalizationUiFailure.events.includes("fail_claim"), false);
+  assert.match(postFinalizationUiFailure.saved?.uiVerificationError ?? "", /fixture_ui_readback_failed/);
+  assert.equal(JSON.stringify(postFinalizationUiFailure.saved).includes("token=secret"), false);
   const submittingWriteFailure = fake({ submittingReceiptFailure: true });
   await assert.rejects(() => runImageE2e({ taskId: task.id, immutableCommit: "a".repeat(40), tokenFile: ".secrets/token", tokenSha256: "d".repeat(64), resume: false }, submittingWriteFailure.deps), /receipt_submitting_write_failed/);
   assert.equal(submittingWriteFailure.inferenceCalls, 0);
@@ -61,6 +69,6 @@ async function main() {
   const completed = fake(); completed.deps.prerental = async () => { throw new Error("image_task_not_eligible_for_restricted_4090_run"); };
   await assert.rejects(() => runImageE2e({ taskId: task.id, immutableCommit: "a".repeat(40), tokenFile: ".secrets/token", tokenSha256: "d".repeat(64), resume: false }, completed.deps));
   assert.equal(completed.events.includes("create"), false);
-  console.log(JSON.stringify({ ok: true, full_fake_sequence: true, prerental_before_order: true, claim_after_models: true, inference_receipt_order: true, submitting_write_prevents_post: true, post_202_before_poll: true, accepted_receipt_prompt_free: true, polling_prompt_metadata_recorded: true, dimension_failure_prompt_and_job_recorded: true, accepted_receipt_crash_stays_pre_poll: true, explicit_failure_single_post: true, artifact_retry_without_inference_rerun: true, legacy_inference_forbidden: true, finally_exact_cancel: true, secrets_sanitized: true }));
+  console.log(JSON.stringify({ ok: true, full_fake_sequence: true, prerental_before_order: true, claim_after_models: true, inference_receipt_order: true, submitting_write_prevents_post: true, post_202_before_poll: true, accepted_receipt_prompt_free: true, polling_prompt_metadata_recorded: true, dimension_failure_prompt_and_job_recorded: true, accepted_receipt_crash_stays_pre_poll: true, explicit_failure_single_post: true, artifact_retry_without_inference_rerun: true, postFinalizationUiFailureNonfatal: true, legacy_inference_forbidden: true, finally_exact_cancel: true, secrets_sanitized: true }));
 }
 void main();

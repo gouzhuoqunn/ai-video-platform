@@ -88,7 +88,7 @@ export type ImageRunnerSession = {
     lastCreateOrderTechnicalCause?: string | null;
     createOrderAttempts?: Record<string, unknown>[] | null;
     candidateRole?: "candidate" | "rented_host" | null;
-    market?: { phase: string; scannedAt: string | null; nextScanAt: string | null; totalServerCount: number | null; compliantCandidateCount: number | null; rejectedServerIds: string[]; selectedServerId: string | null; selectedHourlyUsd: number | null } | null;
+    market?: { phase: string; scannedAt: string | null; nextScanAt: string | null; totalServerCount: number | null; compliantCandidateCount: number | null; rejectedServerIds: string[]; attemptedServerIds: string[]; selectedServerId: string | null; selectedHourlyUsd: number | null; filterCounts?: Record<string, unknown> | null; marketplaceRead?: Record<string, unknown> | null } | null;
     marketplaceRefreshedAt?: string | null;
     candidateAttempts?: Array<{ serverId?: string; hourlyUsd?: number | null; event?: string; marketplaceRefreshedAt?: string | null }> | null;
   } | null;
@@ -275,6 +275,9 @@ function normalizeHost(value: unknown): ImageRunnerSession["host"] {
       rejectedServerIds: stringArrayOrNull((host.market as Record<string, unknown>).rejectedServerIds) ?? [],
       selectedServerId: stringOrNull((host.market as Record<string, unknown>).selectedServerId),
       selectedHourlyUsd: finiteNumber((host.market as Record<string, unknown>).selectedHourlyUsd),
+      attemptedServerIds: stringArrayOrNull((host.market as Record<string, unknown>).attemptedServerIds) ?? [],
+      filterCounts: (host.market as Record<string, unknown>).filterCounts && typeof (host.market as Record<string, unknown>).filterCounts === "object" && !Array.isArray((host.market as Record<string, unknown>).filterCounts) ? (host.market as Record<string, unknown>).filterCounts as Record<string, unknown> : null,
+      marketplaceRead: (host.market as Record<string, unknown>).marketplaceRead && typeof (host.market as Record<string, unknown>).marketplaceRead === "object" && !Array.isArray((host.market as Record<string, unknown>).marketplaceRead) ? (host.market as Record<string, unknown>).marketplaceRead as Record<string, unknown> : null,
     } : null,
   };
 }
@@ -478,6 +481,7 @@ async function reconcileStaleRunner(runner: ImageRunnerSession) {
         orderStatus: activeImageOrder.status,
         deploymentState: activeImageOrder.deploymentState ?? null,
         controllerUrl: activeImageOrder.controllerUrl ?? null,
+        candidateRole: "rented_host",
         message: `检测到真实活动订单：${activeImageOrder.orderId}`,
       }),
       error: null,
@@ -529,7 +533,10 @@ async function responsePayload(extra: Record<string, unknown> = {}) {
     rtx4090: readinessForGpuClass("rtx4090"),
     rtx5090: readinessForGpuClass("rtx5090"),
   };
-  const runner = await reconcileStaleRunner(readRunner());
+  // Status projection is deliberately read-only. Stale-process/provider
+  // reconciliation is performed only inside an explicit mutation such as a
+  // guarded start or cancel request, never by GET polling.
+  const runner = readRunner();
   const createLockPresent = existsSync(ORDER_CREATE_LOCK_PATH) || existsSync(LEGACY_ORDER_CREATE_LOCK_PATH) || existsSync(RUNNER_START_LOCK_PATH);
   const display = projectRunnerStatus(runner, {
     pidAlive: processExists(runner.pid),
@@ -671,7 +678,7 @@ function createGroupChildren(input: Record<string, unknown>, requestedCount: num
 
 function groupIdentity(task: ImageTask) { return task.groupId || task.id; }
 
-function assertUnconfirmIsSafe(groupId: string) {
+function assertUnconfirmIsSafe() {
   const runner = readRunner();
   if (runner.state === "running" || runner.state === "cancelling" || processExists(runner.pid) || runner.host?.orderId) {
     throw new Error("任务已开始生成，请使用停止并退租。");
@@ -866,7 +873,7 @@ export async function POST(request: NextRequest) {
       const groupId = String(body.groupId ?? "");
       if (!groupId) throw new Error("invalid_group_id");
       const updatedAt = new Date().toISOString();
-      const runner = action === "unconfirm_group" ? assertUnconfirmIsSafe(groupId) : null;
+      const runner = action === "unconfirm_group" ? assertUnconfirmIsSafe() : null;
       const outcome = mutateImageTasks<Record<string, unknown>>((current) => {
         const imageTasks = current as ImageTask[];
         if (action === "confirm_group") {
@@ -923,6 +930,7 @@ export async function POST(request: NextRequest) {
         const changedTaskId = ids.find((id) => !planned.selectedTaskIds.includes(id)) ?? "未知任务";
         throw new Error(`任务 ${changedTaskId} 在启动前发生变化，已取消本次启动，请刷新后重试。`);
       }
+      const profile = assertRtx4090GoldenDeploymentProfile();
       const startedAt = new Date().toISOString();
       writeJson(PREFERENCES_PATH, { maxHourlyPrice });
       saveRunner({
@@ -944,14 +952,57 @@ export async function POST(request: NextRequest) {
         createAttempt: { id: attemptId, startedAt, phase: "creating_order", requestAttempts: 0 },
         updatedAt: startedAt,
       });
-      const child = spawn(process.execPath, [path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs"), path.join(process.cwd(), "scripts", "image-4090-runner.ts")], {
+      const child = spawn(process.execPath, [
+        path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs"),
+        path.join(process.cwd(), "scripts", "clore", "image-session-supervisor.ts"),
+        "start",
+        "--execute",
+        "--session-id",
+        attemptId,
+        "--task-ids",
+        planned.selectedTaskIds.join(","),
+        "--immutable-commit",
+        profile.immutable.commit,
+        "--agent-sha256",
+        profile.immutable.agentSha256,
+        "--controller-sha256",
+        profile.immutable.controllerSha256,
+        "--workflow-sha256",
+        profile.immutable.workflowSha256,
+      ], {
         cwd: process.cwd(),
         detached: false,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
       saveRunner({ ...readRunner(), pid: child.pid ?? null, startedAt, logPath: RUNNER_LOG_PATH });
-      child.stdout?.on("data", (chunk) => appendRunnerLog("stdout", String(chunk)));
+      let supervisorStdoutBuffer = "";
+      const publishWorkerStart = (line: string) => {
+        if (!line.trim()) return;
+        try {
+          const started = JSON.parse(line) as { sessionId?: unknown; pid?: unknown };
+          const workerPid = Number(started.pid);
+          const current = readRunner();
+          if (started.sessionId === attemptId && Number.isSafeInteger(workerPid) && workerPid > 0 && current.createAttempt?.id === attemptId) {
+            saveRunner({
+              ...current,
+              pid: workerPid,
+              logPath: path.join(process.cwd(), ".secrets", "diagnostics", "image-sessions", attemptId, "worker.log"),
+            });
+          }
+        } catch {
+          // Only the supervisor's single JSON start receipt may publish the
+          // detached worker PID; other output remains diagnostic log text.
+        }
+      };
+      child.stdout?.on("data", (chunk) => {
+        const text = String(chunk);
+        appendRunnerLog("stdout", text);
+        supervisorStdoutBuffer += text;
+        const lines = supervisorStdoutBuffer.split(/\r?\n/);
+        supervisorStdoutBuffer = lines.pop() ?? "";
+        for (const line of lines) publishWorkerStart(line);
+      });
       child.stderr?.on("data", (chunk) => appendRunnerLog("stderr", String(chunk)));
       child.on("error", (error) => {
         appendRunnerLog("event", `child_error:${error.message}`);
@@ -962,13 +1013,15 @@ export async function POST(request: NextRequest) {
             state: "failed",
             stage: "runner_exited",
             host: null,
-            error: { stage: "runner_exited", message: `image runner failed to start: ${error.message}`, at: new Date().toISOString() },
-            blocker: "image_runner_start_failed",
+            error: { stage: "runner_exited", message: `image session supervisor failed to start: ${error.message}`, at: new Date().toISOString() },
+            blocker: "image_session_supervisor_start_failed",
           });
         }
       });
-      child.on("exit", (code, signal) => {
-        appendRunnerLog("event", `child_exit code=${code ?? "null"} signal=${signal ?? "null"}`);
+      child.on("close", (code, signal) => {
+        publishWorkerStart(supervisorStdoutBuffer);
+        supervisorStdoutBuffer = "";
+        appendRunnerLog("event", `supervisor_close code=${code ?? "null"} signal=${signal ?? "null"}`);
         const current = readRunner();
         if (!terminalRunnerState(current.state) && current.pid === child.pid) {
           const stderr = existsSync(RUNNER_LOG_PATH) ? finalSanitizedLogLines(readFileSync(RUNNER_LOG_PATH, "utf8"), 8).join("\n") : "";
@@ -979,10 +1032,10 @@ export async function POST(request: NextRequest) {
             host: null,
             error: {
               stage: "runner_exited",
-              message: `image runner exited before completion: code=${code ?? "null"} signal=${signal ?? "null"}${stderr ? `\n${stderr}` : ""}`,
+              message: `image session supervisor exited without publishing a worker: code=${code ?? "null"} signal=${signal ?? "null"}${stderr ? `\n${stderr}` : ""}`,
               at: new Date().toISOString(),
             },
-            blocker: "image_runner_exited_nonzero",
+            blocker: "image_session_worker_start_failed",
           });
         }
       });

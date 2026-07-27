@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { CloreApiResponse, CloreConfig } from "./types";
 
 const SECRET_PATTERNS = [
@@ -20,6 +21,12 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 export type CloreRequestOptions = {
   forceRefresh?: boolean;
+  /**
+   * Receives bounded metadata for every HTTP response before its body is
+   * parsed.  Callers may persist this in a session receipt, but must never
+   * persist the response body itself.
+   */
+  onResponse?: (evidence: CloreResponseEvidence) => void | Promise<void>;
   onCreateUncertain?: () => Promise<boolean>;
   beforeCreateRetry?: () => Promise<void>;
   /** Opt out of automatic retries for one-shot, operator-authorized calls. */
@@ -33,6 +40,31 @@ export type CloreRequestOptions = {
    */
   onCreateRetry?: (input: { reason: "rate_limited" | "network_error"; attempt: number; httpStatus: number | null; code: number | null }) => Promise<boolean>;
 };
+
+export type CloreResponseEvidence = {
+  endpoint: string;
+  method: string;
+  capturedAt: string;
+  httpStatus: number;
+  contentType: string | null;
+  responseByteLength: number;
+  bodySha256: string;
+  responseKind: "json" | "non_json";
+  topLevelType: "array" | "object" | "string" | "number" | "boolean" | "null" | "unknown";
+  topLevelKeys: string[];
+  sanitizedPrefix: string;
+};
+
+export class CloreResponseError extends Error {
+  readonly evidence: CloreResponseEvidence;
+  readonly classification: "invalid_json" | "schema_incompatible";
+  constructor(evidence: CloreResponseEvidence, classification: "invalid_json" | "schema_incompatible") {
+    super(`clore_response_${classification}`);
+    this.name = "CloreResponseError";
+    this.evidence = evidence;
+    this.classification = classification;
+  }
+}
 
 type FetchLike = typeof fetch;
 type SchedulerDependencies = {
@@ -192,6 +224,56 @@ function retryAfterMs(response: Response) {
   return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : null;
 }
 
+function topLevelType(value: unknown): CloreResponseEvidence["topLevelType"] {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "object") return "object";
+  if (typeof value === "string") return "string";
+  if (typeof value === "number") return "number";
+  if (typeof value === "boolean") return "boolean";
+  return "unknown";
+}
+
+function sanitizedResponsePrefix(value: string) {
+  return value
+    .replace(/Bearer\s+\S+/gi, "Bearer <redacted>")
+    .replace(/\b(?:hf_|sk-)[A-Za-z0-9_-]{16,}\b/g, "<redacted-secret>")
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "<redacted-url>")
+    .replace(/([?&](?:token|signature|credential|auth)[^=&]*=)[^&\s]+/gi, "$1<redacted>")
+    .replace(/(token|secret|password|authorization|api[_-]?key)\s*[:=]\s*[^\s,;]+/gi, "$1=<redacted>")
+    .replace(/(["']?(?:token|secret|password|authorization|api[_-]?key)["']?\s*:\s*)["'][^"']*["']/gi, "$1\"<redacted>\"")
+    .replace(/ssh-(?:ed25519|rsa)\s+[A-Za-z0-9+/=]+(?:\s+\S+)?/g, "<redacted-ssh-key>")
+    .replace(/\s+/g, " ")
+    .slice(0, 160);
+}
+
+async function captureResponseEvidence(endpoint: string, init: RequestInit, response: Response, body: Buffer): Promise<CloreResponseEvidence> {
+  const text = body.toString("utf8");
+  let parsed: unknown;
+  let responseKind: CloreResponseEvidence["responseKind"] = "json";
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    responseKind = "non_json";
+  }
+  const evidence: CloreResponseEvidence = {
+    endpoint,
+    method: String(init.method ?? "GET").toUpperCase(),
+    capturedAt: new Date().toISOString(),
+    httpStatus: response.status,
+    contentType: response.headers.get("content-type"),
+    responseByteLength: body.byteLength,
+    bodySha256: createHash("sha256").update(body).digest("hex"),
+    responseKind,
+    topLevelType: responseKind === "json" ? topLevelType(parsed) : "unknown",
+    topLevelKeys: responseKind === "json" && parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? Object.keys(parsed as Record<string, unknown>).slice(0, 32)
+      : [],
+    sanitizedPrefix: sanitizedResponsePrefix(text),
+  };
+  return evidence;
+}
+
 export class CloreRequestScheduler {
   private readonly fetchFn: FetchLike;
   private readonly now: () => number;
@@ -294,13 +376,29 @@ export class CloreRequestScheduler {
         }
 
         const retryAfter = retryAfterMs(response);
-        const raw = await response.json().catch(() => ({}));
-        const payload = raw as CloreApiResponse<T> & Record<string, unknown>;
-        const code = typeof payload.code === "number" ? payload.code : response.ok ? 0 : response.status;
+        const body = Buffer.from(await response.arrayBuffer());
+        const responseEvidence = await captureResponseEvidence(endpoint, init, response, body);
+        await options.onResponse?.(responseEvidence);
+        let raw: unknown;
+        try {
+          raw = JSON.parse(body.toString("utf8"));
+        } catch {
+          if (response.status === 429) {
+            throw new CloreRateLimitError({ httpStatus: 429, code: 5, message: null, retryAfterMs: retryAfter, attempt: rateLimitAttempts + 1 });
+          }
+          throw new CloreResponseError(responseEvidence, "invalid_json");
+        }
+        const payload = raw !== null && typeof raw === "object"
+          ? raw as CloreApiResponse<T> & Record<string, unknown>
+          : null;
+        const reportedCode = typeof payload?.code === "number" ? payload.code : response.ok ? 0 : response.status;
+        // HTTP failure is authoritative even when a proxy/provider envelope
+        // incorrectly says code=0. Such a response must never enter the cache.
+        const code = !response.ok && reportedCode === 0 ? response.status : reportedCode;
         this.log({ endpoint, at: new Date().toISOString(), status: response.status, retry: rateLimitAttempts });
         if (response.status === 429 || code === 5) {
           if (rateLimitAttempts >= (options.maxRateLimitRetries ?? 3)) {
-            const message = typeof payload.message === "string" ? String(sanitizeProviderValue(payload.message)) : null;
+            const message = typeof payload?.message === "string" ? String(sanitizeProviderValue(payload.message)) : null;
             throw new CloreRateLimitError({ httpStatus: 429, code, message, retryAfterMs: retryAfter, attempt: rateLimitAttempts + 1 });
           }
           rateLimitAttempts += 1;
@@ -313,22 +411,22 @@ export class CloreRequestScheduler {
         }
         if (code !== 0) {
           const requestId = response.headers.get("x-request-id") ?? response.headers.get("cf-ray") ??
-            (typeof payload.request_id === "string" ? payload.request_id : null);
-          const details = payload.details ?? payload.errors ?? null;
+            (typeof payload?.request_id === "string" ? payload.request_id : null);
+          const details = payload?.details ?? payload?.errors ?? null;
           const failure: SanitizedCloreFailure = {
             httpStatus: response.status,
             code,
-            error: sanitizeProviderValue(payload.error ?? null),
-            message: typeof payload.message === "string" ? String(sanitizeProviderValue(payload.message)) : null,
+            error: sanitizeProviderValue(payload?.error ?? null),
+            message: typeof payload?.message === "string" ? String(sanitizeProviderValue(payload.message)) : null,
             details: sanitizeProviderValue(details),
-            field: sanitizeProviderValue(payload.field ?? null),
+            field: sanitizeProviderValue(payload?.field ?? null),
             requestId: requestId ? String(sanitizeProviderValue(requestId)) : null,
-            classification: classifyCloreFailure({ httpStatus: response.status, code, error: payload.error, message: payload.message, details }),
+            classification: classifyCloreFailure({ httpStatus: response.status, code, error: payload?.error, message: payload?.message, details }),
           };
           this.log({ endpoint, at: new Date().toISOString(), status: response.status, retry: rateLimitAttempts, failure });
           throw new CloreApiError(failure);
         }
-        const value = ("data" in payload ? payload.data : payload) as T;
+        const value = (payload && "data" in payload ? payload.data : raw) as T;
         if (ttl > 0) this.cache.set(cacheKey, { value, expiresAt: this.now() + ttl });
         return value;
       }

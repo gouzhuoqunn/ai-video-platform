@@ -21,6 +21,7 @@ export type SanitizedImageE2eSession = {
   stages: Record<string, "pending" | "running" | "succeeded" | "failed">;
   timestamps: Partial<Record<ImageE2ePhase, string>>;
   lastError: string | null;
+  uiVerificationError?: string | null;
   transportDiagnostics?: AgentTransportDiagnostic[];
   createDiagnostics?: Array<{ httpStatus: 429; retryAfterMs: number | null; code: number; message: string | null; attempt: number }>;
   stageAcceptanceEvidence?: Array<{ route: string; stage: string; requestedStageRunId: string; capturedAt: string; httpStatus: number; contentType: string | null; responseByteLength: number; bodySha256: string; responseKind: string; body: { accepted: boolean | null; stage: string | null; stageRunId: string | null; state: string | null; status: string | null } | null; nonJsonPrefix: string | null; returnedStage: string | null; returnedStageRunId: string | null; acceptanceClassification: string }>;
@@ -145,20 +146,22 @@ export async function runImageE2e(input: { taskId: string; immutableCommit: stri
       await deps.armWatchdog(created.orderId);
     }
     if (!session.endpoint || !session.orderId) throw new Error("image_e2e_order_endpoint_missing");
-    const health = await deps.health(session.endpoint);
+    const endpoint = session.endpoint;
+    const orderId = session.orderId;
+    const health = await deps.health(endpoint);
     if (!health.alive || health.currentStage !== "idle" || health.lastError) throw new Error(`agent_not_ready:${clean(health.lastError ?? health.currentStage)}`);
     session = mark(deps, session, "AGENT");
-    for (const stage of ["environment", "gpu", "controller", "comfyui"] as const) await requiredStage(deps, session, session.endpoint, stage);
+    for (const stage of ["environment", "gpu", "controller", "comfyui"] as const) await requiredStage(deps, session, endpoint, stage);
     session = mark(deps, session, "RUNTIME");
     const isRefreshableModelFailure = (result: { status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> }) => result.status === "failed" && (result.data?.code === "model_download_incomplete_after_retries" || (result.data?.code === "model_download_http_error" && (result.data.http_status === 401 || result.data.http_status === 403)));
     let models = await deps.resolveModels();
-    let modelsResult = await deps.stage(session.endpoint, "models", { models });
+    let modelsResult = await deps.stage(endpoint, "models", { models });
     if (isRefreshableModelFailure(modelsResult)) {
       // This is still before claim/inference. Rebuilding all five exact entries lets
       // the Agent retain verified files and resume the failed .part safely.
       if (session.claimTokenHash !== null) throw new Error("model_refresh_after_claim_forbidden");
       models = await deps.resolveModels();
-      modelsResult = await deps.stage(session.endpoint, "models", { models });
+      modelsResult = await deps.stage(endpoint, "models", { models });
       if (isRefreshableModelFailure(modelsResult)) {
         const code = modelsResult.data?.code;
         throw new Error(`${code === "model_download_http_error" ? "model_download_authorization_failed_after_refresh" : "model_download_incomplete_after_refresh"}:${clean(JSON.stringify(modelsResult.data))}`);
@@ -175,9 +178,9 @@ export async function runImageE2e(input: { taskId: string; immutableCommit: stri
     // The pre-submit receipt is deliberately persisted before the sole remote POST.
     // If this fails, the POST is never allowed to occur.
     await deps.inferenceReceipt?.("submitting");
-    const accepted = await deps.submitInference(session.endpoint, inferencePayload(task));
+    const accepted = await deps.submitInference(endpoint, inferencePayload(task));
     await deps.inferenceReceipt?.("accepted", { acceptedHttpStatus: accepted.acceptedHttpStatus, stageRunId: accepted.stageRunId });
-    const inference = await deps.pollInference(session.endpoint, accepted.stageRunId);
+    const inference = await deps.pollInference(endpoint, accepted.stageRunId);
     session.stages.inference = inference.status; deps.persist(session);
     if (inference.status !== "succeeded") { await deps.inferenceReceipt?.("failed", { error: clean(inference.error ?? "unknown"), ...inferenceFailureReceiptDetail(inference.data) }); throw new Error(`inference_stage_failed:${clean(inference.error ?? "unknown")}`); }
     await deps.inferenceReceipt?.("succeeded", inferenceReceiptDetail(inference.data));
@@ -187,7 +190,7 @@ export async function runImageE2e(input: { taskId: string; immutableCommit: stri
     let remote: RemoteArtifact | null = null;
     let retrievalError: unknown;
     for (let attempt = 0; attempt < 3 && !remote; attempt += 1) {
-      try { remote = await deps.retrieveArtifact(session.endpoint, task.id); }
+      try { remote = await deps.retrieveArtifact(endpoint, task.id); }
       catch (error) { retrievalError = error; }
     }
     if (!remote) throw retrievalError instanceof Error ? retrievalError : new Error("remote_artifact_download_failed");
@@ -196,16 +199,24 @@ export async function runImageE2e(input: { taskId: string; immutableCommit: stri
     let artifact: LocalArtifactReference | null = null;
     let finalizationError: unknown;
     for (let attempt = 0; attempt < 3 && !artifact; attempt += 1) {
-      try { artifact = await deps.publishAndFinalize(task, claim.token, remote, session.orderId); }
+      try { artifact = await deps.publishAndFinalize(task, claim.token, remote, orderId); }
       catch (error) { finalizationError = error; }
     }
     if (!artifact) throw finalizationError instanceof Error ? finalizationError : new Error("local_artifact_finalization_failed");
     await deps.receiptEvent?.("task_finalized");
     heartbeat.stop(); heartbeat = null;
     session = mark(deps, session, "FINALIZE", { artifact });
-    await deps.verifyUi(task.id);
-    await deps.receiptEvent?.("ui_verified");
-    session = mark(deps, session, "UI_VERIFY");
+    let uiVerificationError: string | null = null;
+    try {
+      await deps.verifyUi(task.id);
+      await deps.receiptEvent?.("ui_verified");
+    } catch (error) {
+      // Local artifact publication and task finalization are the durable success
+      // boundary. A later UI/readback problem is diagnostic-only and must not
+      // downgrade the completed task or route it through failClaim.
+      uiVerificationError = clean(error);
+    }
+    session = mark(deps, session, "UI_VERIFY", { uiVerificationError });
     return session;
   } catch (error) {
     const failure = clean(error);
@@ -214,9 +225,10 @@ export async function runImageE2e(input: { taskId: string; immutableCommit: stri
     throw error;
   } finally {
     heartbeat?.stop();
-    if (session.orderId) {
+    const exactOrderId = session.orderId;
+    if (exactOrderId) {
       session = mark(deps, session, "CANCEL");
-      await deps.cancelExactOrder(session.orderId);
+      await deps.cancelExactOrder(exactOrderId);
       await deps.confirmNoActiveOrders();
       await deps.confirmNoActiveOrders();
       await deps.receiptEvent?.("order_cancelled");

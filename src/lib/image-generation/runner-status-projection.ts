@@ -14,7 +14,8 @@ function providerPayload(message: string) {
   return /(?:clore api failed:\s*\{|unknown_code6|server[-_\s]*already[-_\s]*rented)/i.test(message);
 }
 
-function rentedCandidateCode6(message: string) {
+function rentedCandidateCode6(message: string, classification?: string) {
+  if (/unknown_code6|candidate_already_rented|server[-_\s]*already[-_\s]*rented/i.test(classification ?? "")) return true;
   return /(?:["']code["']\s*:\s*6|clore\s*code\s*6|code\s*=\s*6)/i.test(message) && /server[-_\s]*already[-_\s]*rented/i.test(message);
 }
 
@@ -22,8 +23,23 @@ function agentStageAcceptanceFailure(message: string) {
   return /^agent_stage_acceptance_invalid:[a-z_]+$/i.test(message);
 }
 
+function historicalMarketMessage(classification?: string) {
+  if (classification === "rate_limited") return "上次市场读取受到限流，当前没有活动订单，可以重新尝试。";
+  if (classification === "authentication_failed") return "上次市场认证失败，当前没有活动订单，请检查本地凭据后重试。";
+  if (classification === "transport_failed") return "上次无法连接显卡市场，当前没有活动订单，可以重新尝试。";
+  if (classification === "invalid_json") return "上次市场响应无效，当前没有活动订单，可以重新尝试。";
+  if (classification === "schema_incompatible") return "上次市场响应结构不兼容，当前没有活动订单，可以重新尝试。";
+  return null;
+}
+
 function safeCurrentMessage(message: string) {
   return providerPayload(message) ? "启动请求遇到服务端错误，请先停止并检查运行状态。" : message;
+}
+
+function safeClassification(message: string, classification?: string) {
+  if (rentedCandidateCode6(message, classification)) return "candidate_already_rented";
+  if (["rate_limited", "authentication_failed", "transport_failed", "invalid_json", "schema_incompatible", "provider_error"].includes(classification ?? "")) return classification;
+  return undefined;
 }
 
 /**
@@ -36,15 +52,17 @@ export function projectRunnerStatus(runner: RunnerLike, state: { pidAlive: boole
   // Only live PID, reconciled active-order state, or a create lock makes it current.
   const historical = ["idle", "failed", "completed"].includes(runner.state) && !state.pidAlive && !state.activeOrder && !state.createLock;
   if (historical) {
-    const displayMessage = rentedCandidateCode6(runner.error.message) ? HISTORICAL_RENTED_CANDIDATE_MESSAGE : agentStageAcceptanceFailure(runner.error.message) ? HISTORICAL_AGENT_STAGE_MESSAGE : HISTORICAL_RUNNER_GENERIC_MESSAGE;
+    const rented = rentedCandidateCode6(runner.error.message, runner.error.classification);
+    const marketMessage = historicalMarketMessage(runner.error.classification);
+    const displayMessage = rented ? HISTORICAL_RENTED_CANDIDATE_MESSAGE : marketMessage ?? (agentStageAcceptanceFailure(runner.error.message) ? HISTORICAL_AGENT_STAGE_MESSAGE : HISTORICAL_RUNNER_GENERIC_MESSAGE);
     return {
-      error: { stage: runner.error.stage, at: runner.error.at, displayMessage, isBlocking: false, historical: true, classification: rentedCandidateCode6(runner.error.message) ? "candidate_already_rented" : undefined },
+      error: { stage: runner.error.stage, at: runner.error.at, displayMessage, isBlocking: false, historical: true, classification: rented ? "candidate_already_rented" : marketMessage ? runner.error.classification : undefined },
       blocker: null,
     };
   }
   const displayMessage = safeCurrentMessage(runner.error.message);
   return {
-    error: { stage: runner.error.stage, at: runner.error.at, displayMessage, isBlocking: true, historical: false, classification: runner.error.classification },
+    error: { stage: runner.error.stage, at: runner.error.at, displayMessage, isBlocking: true, historical: false, classification: safeClassification(runner.error.message, runner.error.classification) },
     blocker: runner.blocker && providerPayload(runner.blocker) ? displayMessage : runner.blocker ?? displayMessage,
   };
 }

@@ -3,31 +3,20 @@
  * invokes these exact-task primitives after runtime/model success.
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import path from "node:path";
-import { claimImageTask, failImageTask, finalizeImageTask, mutateImageTasks, readImageTask, renewImageTaskLease, type LocalImageTask, type LocalTaskStoreOptions } from "../../src/lib/image-generation/local-image-task-store";
+import { finalizeImageTask, mutateImageTasks, readImageTask, renewImageTaskLease, type LocalImageTask, type LocalTaskStoreOptions } from "../../src/lib/image-generation/local-image-task-store";
 import { classifyImageGpu } from "../../src/lib/image-generation/flux-stack";
 import { buildRtx4090GoldenBootstrap, RTX4090_GOLDEN_DEPLOYMENT_PROFILE } from "../image-executor/rtx4090-golden-deployment-profile";
 import { publishLocalImageArtifact, type LocalArtifactReference } from "../../src/lib/image-generation/local-image-artifacts";
 import { sanitizeImageModelPreflight, toAgentModelManifest, validateAgentModelManifestContract, verifyFiveImageModelSources } from "./image-model-preflight";
-import { runImageE2e, claimTokenHash, type ModelEntry, type SanitizedImageE2eSession } from "./image-e2e-coordinator";
-import { loadCloreConfig } from "./config";
-import { cloreRequest, CloreApiError, CloreRateLimitError } from "./client";
-import { readLiveMarketplace, readLiveOrdersSummary, readWalletSummary } from "./live";
-import { computeCloreProjectedCost, normalizeCloreServer } from "./marketplace";
-import { createSessionNonce, isLocalWatchdogTaskInstalled, writeLocalWatchdogArmState } from "./watchdog-io";
-import { sleep } from "./client";
-import { ensureLocalUi, verifyImageUi } from "./image-e2e-ui";
+import { CloreRateLimitError, sleep } from "./client";
+import { readLiveOrdersSummary } from "./live";
 import { agentArtifactMetadataResponse, agentGetJsonWithRetry, agentHealthResponse, agentStatusResponse, AgentGetTerminalError, type AgentTransportDiagnostic } from "./agent-get-transport";
 
 export type EligibleImageTask = LocalImageTask & { prompt: string; mode: "text_generation"; referenceImage: null; width: number; height: number; steps: number; cfg: number; loraStrength: number; seed: number; sampler: "Euler" | "FlowMatch" };
-const SESSION_PATH = path.join(process.cwd(), ".secrets", "clore-image-e2e-session.json");
-const TOKEN_PATH = path.join(process.cwd(), ".secrets", "clore-image-e2e-agent-token.txt");
-const CLAIM_TOKEN_PATH = path.join(process.cwd(), ".secrets", "clore-image-e2e-claim-token.txt");
 const RECEIPT_PATH = path.join(process.cwd(), ".secrets", "clore-image-e2e-fresh-receipt.json");
 const RECEIPT_ARCHIVE_DIR = path.join(process.cwd(), ".secrets", "diagnostics", "clore-image-e2e-receipts");
-const MAX_HOURS = 4; const MAX_HOURLY = .30; const MAX_TOTAL = 1.50;
-let ACTIVE_RECEIPT: FreshReceipt | null = null;
 
 export function buildPublicAgentBootstrap(input: { commit: string; agentSha256: string; controllerSha256: string; workflowSha256: string; tokenSha256: string }) {
   if (![input.commit, input.agentSha256, input.controllerSha256, input.workflowSha256, input.tokenSha256].every((value) => /^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(value))) throw new Error("immutable_agent_bootstrap_values_required");
@@ -43,11 +32,6 @@ function assertGoldenBootstrapIdentity(input: { commit: string; agentSha256: str
   return { tokenSha256: input.tokenSha256 };
 }
 
-function sessionRead() { try { return JSON.parse(readFileSync(SESSION_PATH, "utf8")) as SanitizedImageE2eSession; } catch { return null; } }
-function sessionWrite(value: SanitizedImageE2eSession) { mkdirSync(path.dirname(SESSION_PATH), { recursive: true }); writeFileSync(SESSION_PATH, `${JSON.stringify(value, null, 2)}\n`, "utf8"); }
-function tokenRead() { return existsSync(TOKEN_PATH) ? readFileSync(TOKEN_PATH, "utf8").trim() : ""; }
-function tokenCreate() { const token = randomBytes(32).toString("base64url"); mkdirSync(path.dirname(TOKEN_PATH), { recursive: true }); writeFileSync(TOKEN_PATH, `${token}\n`, { mode: 0o600 }); return token; }
-function claimTokenWrite(token: string) { writeFileSync(CLAIM_TOKEN_PATH, `${token}\n`, { mode: 0o600 }); }
 export type FreshReceipt={schema:1;runId:string;taskId:string;orderId:string|null;endpoint:string|null;currentStep:string;inferenceState:"not_started"|"submitting"|"accepted"|"succeeded"|"failed";inferenceSubmitted:boolean;inferenceSucceeded:boolean;inferenceSubmittingAt:string|null;inferenceAcceptedAt:string|null;acceptedHttpStatus:202|null;inferenceCompletedAt:string|null;remoteArtifactAvailable:boolean;controllerPromptId:string|null;inferenceFailure:Record<string,unknown>|null;remoteArtifact:{byteSize:number;sha256:string;width:number;height:number;generationDurationSeconds:number}|null;artifactDownloaded:boolean;localArtifactPublished:boolean;taskFinalized:boolean;uiVerified:boolean;orderCancelled:boolean;timestamps:Record<string,string>;firstError:string|null};
 function receiptRead(receiptPath=RECEIPT_PATH){try{return JSON.parse(readFileSync(receiptPath,"utf8")) as FreshReceipt}catch{return null}}
 function receiptWrite(value:FreshReceipt,receiptPath=RECEIPT_PATH){mkdirSync(path.dirname(receiptPath),{recursive:true});const tmp=`${receiptPath}.${process.pid}.tmp`;const descriptor=openSync(tmp,"w",0o600);try{writeSync(descriptor,`${JSON.stringify(value,null,2)}\n`);fsyncSync(descriptor)}finally{closeSync(descriptor)}renameSync(tmp,receiptPath)}
@@ -83,7 +67,13 @@ export function requeueSafeFailedExactImageTask(input:{taskId:string;receipt:Fre
 export type ActiveOrderSnapshot = { orders: Awaited<ReturnType<typeof readLiveOrdersSummary>>; checkedAt: number };
 export type CreateRateLimitDiagnostic = { httpStatus: 429; retryAfterMs: number | null; code: number; message: string | null; attempt: number };
 
-function matchingCreatedOrder(orders: ActiveOrderSnapshot["orders"], serverId: string) { return orders.find((order) => order.active && order.serverId === serverId && order.orderId) ?? null; }
+function matchingCreatedOrder(orders: ActiveOrderSnapshot["orders"], serverId: string) {
+  const active = orders.filter((order) => order.active && order.orderId);
+  if (active.length > 1) throw new Error("active_order_state_ambiguous_after_create");
+  const matching = active[0] ?? null;
+  if (matching && matching.serverId !== serverId) throw new Error("active_order_server_mismatch_after_create");
+  return matching;
+}
 function rateLimitFailure(error: unknown) { return error instanceof CloreRateLimitError ? error.failure : null; }
 
 /** Exactly one caller-owned 429 retry. The payload closure is intentionally reused unchanged. */
@@ -141,7 +131,12 @@ function safeStageAcceptanceBody(body: Record<string, unknown> | null) {
   };
 }
 function safeStageAcceptancePrefix(value: string) {
-  return value.replace(/(bearer\s+)[^\s]+/gi, "$1<redacted>").replace(/([?&](?:x-amz-|signature|token|credential)[^=&]*=)[^&\s]+/gi, "$1<redacted>").slice(0, 160);
+  return value
+    .replace(/(bearer\s+)[^\s]+/gi, "$1<redacted>")
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "<redacted-url>")
+    .replace(/([?&](?:x-amz-|signature|token|credential)[^=&]*=)[^&\s]+/gi, "$1<redacted>")
+    .replace(/(["']?(?:token|secret|password|authorization|api[_-]?key)["']?\s*:\s*)["'][^"']*["']/gi, "$1\"<redacted>\"")
+    .slice(0, 160);
 }
 function stageAcceptanceEvidence(input: { route: string; stage: string; requestedStageRunId: string; httpStatus: number; contentType: string | null; bytes: Buffer; text: string; body: Record<string, unknown> | null; responseKind: AgentStageAcceptanceEvidence["responseKind"]; acceptanceClassification: AgentStageAcceptanceEvidence["acceptanceClassification"] }): AgentStageAcceptanceEvidence {
   const body = safeStageAcceptanceBody(input.body);
@@ -329,81 +324,12 @@ export async function getArtifactMetadataWithRetry(input: { endpoint: string; to
   throw new Error("agent_artifact_metadata_transport_unavailable");
 }
 
-async function runLive(taskId: string, resume: boolean, commit: string, agentSha256: string, controllerSha256: string, workflowSha256: string, initialOrderSnapshot: ActiveOrderSnapshot) {
-  const token = resume ? tokenRead() : tokenCreate(); if (!token) throw new Error("image_e2e_agent_token_missing_for_resume");
-  const tokenSha256 = createHash("sha256").update(token).digest("hex");
-  const config = { ...loadCloreConfig(), targetGpu: "NVIDIA GeForce RTX 4090" as const, minGpuVramGb: 24, maxGpuPricePerHour: MAX_HOURLY, orderType: "on-demand" as const };
-  let selected: ReturnType<typeof normalizeCloreServer> | null = null; let startingBalance = 0; let activeOrderId: string | null = null; let orderSnapshot = initialOrderSnapshot;
-  let transportDiagnostics: AgentTransportDiagnostic[] = [];
-  let createDiagnostics: CreateRateLimitDiagnostic[] = [];
-  let stageAcceptanceEvidence: NonNullable<SanitizedImageE2eSession["stageAcceptanceEvidence"]> = [];
-  const appendTransportDiagnostic = (diagnostic: AgentTransportDiagnostic) => { transportDiagnostics = [...transportDiagnostics, diagnostic].slice(-60); const current = sessionRead(); if (current) sessionWrite({ ...current, transportDiagnostics }); };
-  const appendCreateDiagnostic = (diagnostic: CreateRateLimitDiagnostic) => { createDiagnostics = [...createDiagnostics, diagnostic].slice(-4); const current = sessionRead(); if (current) sessionWrite({ ...current, createDiagnostics }); };
-  const appendStageAcceptanceEvidence = (evidence: AgentStageAcceptanceEvidence) => { stageAcceptanceEvidence = [...stageAcceptanceEvidence, evidence].slice(-24); const current = sessionRead(); if (current) sessionWrite({ ...current, stageAcceptanceEvidence }); };
-  const refreshOrderSnapshot = async () => { orderSnapshot = { orders: await readLiveOrdersSummary(config, { forceRefresh: true }), checkedAt: Date.now() }; return orderSnapshot; };
-  const deps = {
-    now: () => new Date().toISOString(), persist: (session: SanitizedImageE2eSession) => sessionWrite({ ...session, transportDiagnostics, createDiagnostics, stageAcceptanceEvidence }), load: sessionRead,
-    readEligibleTask: async (id: string) => resolveExactEligibleImageTask(id),
-    prerental: async (id: string) => {
-      if (orderSnapshot.orders.some((item) => item.active)) throw new Error("active_clore_order_exists");
-      await sleep(1_200); const market = await readLiveMarketplace(config, { forceRefresh: true });
-      const candidates = market.map((raw) => normalizeCloreServer(raw, config)).filter((item) => item.gpuNormalizedName === "NVIDIA GeForce RTX 4090" && item.orderType === "on-demand" && item.hostOnline !== false && item.priceUsdPerHour !== null && item.priceUsdPerHour <= MAX_HOURLY && item.priceOriginalAmount !== null && item.priceOriginalUnit === "day");
-      selected = candidates.find((item) => item.serverId === "98682") ?? candidates.sort((a, b) => (a.priceUsdPerHour ?? Infinity) - (b.priceUsdPerHour ?? Infinity))[0] ?? null;
-      if (!selected) throw new Error("no_compliant_rtx4090_candidate"); const cost = computeCloreProjectedCost(selected.priceUsdPerHour, MAX_HOURS); if (!cost.projectedTotalUsd || cost.projectedTotalUsd > MAX_TOTAL) throw new Error("image_e2e_cost_guard_failed");
-      const wallet = await readWalletSummary(config, { forceRefresh: true }); if (wallet.availableUsdBalance === null || wallet.availableUsdBalance < cost.projectedTotalUsd) throw new Error("insufficient_clore_balance"); startingBalance = wallet.availableUsdBalance;
-      if (!isLocalWatchdogTaskInstalled()) throw new Error("local_watchdog_not_installed");
-      await preflightExactLocalImageTask(id);
-      if (Date.now() - orderSnapshot.checkedAt > 10_000) await refreshOrderSnapshot();
-      if (orderSnapshot.orders.some((item) => item.active)) throw new Error("active_clore_order_exists");
-      return resolveExactEligibleImageTask(id);
-    },
-    createOrder: async () => {
-      if (!selected?.priceOriginalAmount) throw new Error("image_e2e_candidate_missing");
-      const command = buildPublicAgentBootstrap({ commit, agentSha256, controllerSha256, workflowSha256, tokenSha256 }); if (Buffer.byteLength(command, "utf8") >= 700) throw new Error("image_e2e_bootstrap_too_long");
-      const payload = { currency: config.rentalCurrency, image: "cloreai/jupyter:ubuntu24.04-v2", renting_server: Number(selected.serverId), type: "on-demand", ports: { "8080": "http" }, required_price: selected.priceOriginalAmount, command };
-      if (Date.now() - orderSnapshot.checkedAt > 10_000) await refreshOrderSnapshot();
-      if (orderSnapshot.orders.some((item) => item.active)) throw new Error("active_clore_order_exists");
-      let created: unknown = null; let adoptedOrderId: string | null = null;
-      for (let attempt = 0; attempt < 2; attempt += 1) { try {
-        const outcome = await createOrderWithRateLimit({ serverId: selected.serverId, createOnce: () => cloreRequest(config, "/create_order", { method: "POST", body: JSON.stringify(payload) }, { maxNetworkRetries: 0, maxRateLimitRetries: 0 }), reconcile: refreshOrderSnapshot, onDiagnostic: appendCreateDiagnostic });
-        created = outcome.created; adoptedOrderId = outcome.adoptedOrderId; break;
-      } catch (error) { if (!(error instanceof CloreApiError) || error.failure.code !== 1 || attempt) throw error; await refreshOrderSnapshot(); if (orderSnapshot.orders.some((item) => item.active)) break; await sleep(60_000); } }
-      const direct = adoptedOrderId ?? (created && typeof created === "object" ? String((created as Record<string, unknown>).id ?? (created as Record<string, unknown>).order_id ?? "") : "");
-      const active = (await refreshOrderSnapshot()).orders; const order = direct ? active.find((item) => item.orderId === direct) : active.filter((item) => item.active && item.serverId === selected!.serverId)[0];
-      if (!order?.orderId) throw new Error("create_order_unreconciled");
-      const deadline = new Date(Date.now() + MAX_HOURS * 60 * 60 * 1000); writeLocalWatchdogArmState({ schemaVersion: 1, armed: true, sessionNonce: createSessionNonce(), serverId: selected.serverId, orderType: "on-demand", currency: config.rentalCurrency, startingBalanceUsd: startingBalance, armedAt: new Date().toISOString(), drainingAt: new Date(deadline.getTime() - 10 * 60 * 1000).toISOString(), hardDeadlineAt: deadline.toISOString(), hardBudgetUsd: MAX_TOTAL, budgetSafetyUsd: .05, emergencyStop: false });
-      let endpoint = order.controllerUrl; const endpointDeadline = Date.now() + 10 * 60 * 1000;
-      while (!endpoint && Date.now() < endpointDeadline) { await sleep(10_000); endpoint = (await readLiveOrdersSummary(config, { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.controllerUrl ?? null; }
-      if (!endpoint) throw new Error("order_endpoint_not_published_within_timeout"); activeOrderId = order.orderId; return { orderId: order.orderId, endpoint };
-    },
-    reconnect: async (orderId: string) => { activeOrderId = orderId; const order = (await readLiveOrdersSummary(config, { forceRefresh: true })).find((item) => item.orderId === orderId); return { active: Boolean(order?.active), endpoint: order?.controllerUrl ?? null }; },
-    armWatchdog: async () => undefined, disarmWatchdog: async () => { const current = sessionRead(); if (current) writeLocalWatchdogArmState({ schemaVersion: 1, armed: false, sessionNonce: createSessionNonce(), serverId: selected?.serverId ?? "98682", orderType: "on-demand", currency: config.rentalCurrency, startingBalanceUsd: startingBalance, armedAt: new Date().toISOString(), drainingAt: new Date().toISOString(), hardDeadlineAt: new Date().toISOString(), hardBudgetUsd: MAX_TOTAL, budgetSafetyUsd: .05, emergencyStop: false }); },
-    health: async (endpoint: string) => { const deadline = Date.now() + 5 * 60 * 1000; let last: { alive: boolean; currentStage: string; lastError: string | null } = { alive: false, currentStage: "", lastError: "health_not_reached" }; let attempt = 0; while (Date.now() < deadline) { attempt += 1; try { const result = await agentGetJsonWithRetry({ endpoint, token, route: "/healthz", validator: agentHealthResponse, stage: null, attempt }); if (!result.ok) { appendTransportDiagnostic(result.diagnostic); last.lastError = result.diagnostic.message; await sleep(5_000); continue; } last = { alive: result.body.alive === true, currentStage: String(result.body.current_stage ?? ""), lastError: result.body.last_error ? String(result.body.last_error) : null }; if (last.alive && last.currentStage === "idle" && !last.lastError) return last; } catch (error) { if (error instanceof AgentGetTerminalError) { appendTransportDiagnostic(error.diagnostic); last.lastError = error.message; break; } throw error; } await sleep(5_000); } return last; },
-    stage: async (endpoint: string, stage: "environment" | "gpu" | "controller" | "comfyui" | "models" | "inference", payload?: object) => { if(stage==="inference")throw new Error("legacy_combined_inference_forbidden"); const accepted=await agentPostJson(endpoint, token, `/stage/${stage}`, payload, { onEvidence: appendStageAcceptanceEvidence }); return await waitForStage({ endpoint, token, stage, expectedStageRunId:accepted.stageRunId, timeoutMs: stage === "models" ? 3 * 60 * 60 * 1000 : 45 * 60 * 1000, onDiagnostic: appendTransportDiagnostic, reconcileExactOrder: async () => { if (!activeOrderId) return null; return Boolean((await readLiveOrdersSummary(config, { forceRefresh: true })).find((order) => order.orderId === activeOrderId)?.active); } }); },
-    submitInference: (endpoint:string,payload:object)=>submitInferenceStage(endpoint,token,payload,{onEvidence:appendStageAcceptanceEvidence}),pollInference:(endpoint:string,stageRunId:string)=>pollInferenceStage(endpoint,token,stageRunId,{onDiagnostic:appendTransportDiagnostic,reconcileExactOrder:async()=>{if(!activeOrderId)return null;return Boolean((await readLiveOrdersSummary(config,{forceRefresh:true})).find((order)=>order.orderId===activeOrderId)?.active)}}),
-    inferenceReceipt:async(event,detail)=>{if(!ACTIVE_RECEIPT)throw new Error("fresh_receipt_missing");const now=new Date().toISOString();const base={...ACTIVE_RECEIPT,currentStep:`inference_${event}`,inferenceState:event,inferenceSubmitted:event!=="submitting",inferenceSucceeded:event==="succeeded",timestamps:{...ACTIVE_RECEIPT.timestamps,[`inference_${event}`]:now}};const next:FreshReceipt=event==="submitting"?{...base,inferenceSubmittingAt:now,inferenceAcceptedAt:null,acceptedHttpStatus:null,inferenceCompletedAt:null,remoteArtifactAvailable:false,controllerPromptId:null,inferenceFailure:null,remoteArtifact:null,firstError:null}:event==="accepted"?{...base,inferenceAcceptedAt:now,acceptedHttpStatus:detail?.acceptedHttpStatus===202?202:null}:event==="succeeded"?{...base,inferenceCompletedAt:now,remoteArtifactAvailable:Boolean(detail?.remoteArtifact),controllerPromptId:detail?.controllerPromptId??null,inferenceFailure:null,remoteArtifact:detail?.remoteArtifact??null}: {...base,inferenceCompletedAt:now,controllerPromptId:detail?.controllerPromptId??base.controllerPromptId,inferenceFailure:detail?.failure??null,firstError:detail?.error??"inference_failed"};receiptWrite(next);ACTIVE_RECEIPT=next},
-    receiptEvent:async(event,detail)=>{if(!ACTIVE_RECEIPT)throw new Error("fresh_receipt_missing");const now=new Date().toISOString();let next:FreshReceipt={...ACTIVE_RECEIPT,timestamps:{...ACTIVE_RECEIPT.timestamps,[event]:now}};if(event==="artifact_downloaded")next={...next,currentStep:event,artifactDownloaded:true,remoteArtifactAvailable:Boolean(detail?.remoteArtifact),controllerPromptId:detail?.controllerPromptId??next.controllerPromptId,remoteArtifact:detail?.remoteArtifact??next.remoteArtifact};else if(event==="task_finalized")next={...next,currentStep:event,taskFinalized:true};else if(event==="ui_verified")next={...next,currentStep:event,uiVerified:true};else next={...next,currentStep:event,orderCancelled:true};receiptWrite(next);ACTIVE_RECEIPT=next},
-    resolveModels: async () => toAgentModelManifest((await verifyFiveImageModelSources()).models).models as ModelEntry[],
-    claim: async (task: EligibleImageTask) => { const value = claimImageTask(task.id, `clore-image-e2e-${process.pid}`, 10 * 60 * 1000); claimTokenWrite(value.claimToken); return { token: value.claimToken, tokenHash: claimTokenHash(value.claimToken) }; },
-    startHeartbeat: (id: string, claimToken: string) => startImageTaskLeaseHeartbeat({ taskId: id, claimToken, leaseMs: 10 * 60 * 1000 }),
-    retrieveArtifact: async (endpoint: string, id: string) => { const metadata = await getArtifactMetadataWithRetry({ endpoint, token, taskId: id, onDiagnostic: appendTransportDiagnostic }); const response = await fetch(url(endpoint, `/artifacts/${id}/image`), { headers: { Authorization: `Bearer ${token}` } }); const png = Buffer.from(await response.arrayBuffer()); if (!response.ok || createHash("sha256").update(png).digest("hex") !== metadata.sha256) throw new Error("remote_png_verification_failed"); return { png, byteSize: Number(metadata.byte_size), sha256: String(metadata.sha256), width: Number(metadata.width), height: Number(metadata.height), generationDurationSeconds: Number(metadata.generation_duration_seconds), controllerPromptId: typeof metadata.controller_prompt_id === "string" ? metadata.controller_prompt_id : null }; },
-    publishAndFinalize: async (task: EligibleImageTask, token: string, artifact: { png: Buffer; generationDurationSeconds: number; controllerPromptId: string | null }, orderId: string) => persistAndFinalizeExactLocalTask({ task, claimToken: token, png: artifact.png, remote: { generationDurationSeconds: artifact.generationDurationSeconds, orderId, gpuModel: "RTX 4090", controllerPromptId: artifact.controllerPromptId }, onArtifactPublished: async () => { if(!ACTIVE_RECEIPT)throw new Error("fresh_receipt_missing");const now=new Date().toISOString();const next:FreshReceipt={...ACTIVE_RECEIPT,currentStep:"local_artifact_published",localArtifactPublished:true,timestamps:{...ACTIVE_RECEIPT.timestamps,local_artifact_published:now}};receiptWrite(next);ACTIVE_RECEIPT=next; } }).then((value) => { rmSync(CLAIM_TOKEN_PATH, { force: true }); return value.artifact; }),
-    verifyUi: async (id: string) => { const ui = await ensureLocalUi({}); try { await verifyImageUi({ taskId: id, screenshotPath: path.join("D:\\AI-Video-Library", "diagnostics", `image-e2e-${id}.png`) }); } finally { if (ui.started) ui.stop(); } }, failClaim: async (id: string, token: string, error: string) => { failImageTask(id, token, error); rmSync(CLAIM_TOKEN_PATH, { force: true }); },
-    cancelExactOrder: async (id: string) => { await cloreRequest(config, "/cancel_order", { method: "POST", body: JSON.stringify({ id, issue: "image_e2e_complete_or_failed" }) }); },
-    confirmNoActiveOrders: async () => { if ((await readLiveOrdersSummary(config, { forceRefresh: true })).some((item) => item.active)) throw new Error("active_order_remains_after_cancel"); },
-  };
-  return await runImageE2e({ taskId, immutableCommit: commit, tokenFile: TOKEN_PATH, tokenSha256, resume }, deps);
-}
-
 async function main() {
   const taskId = argument("--task-id");
   if (!taskId) throw new Error("--task-id is required; the coordinator never selects another task");
   if (process.argv.includes("--resume")) throw new Error("resume_not_enabled_for_live_executor");
   if (process.argv.includes("--execute-fresh")) {
-    const commit = argument("--immutable-commit"); const agent = argument("--agent-sha256"); const controller = argument("--controller-sha256"); const workflow = argument("--workflow-sha256");
-    if (!commit || !agent || !controller || !workflow) throw new Error("immutable_commit_and_agent_hashes_required");
-    let task=readImageTask(taskId);const config={...loadCloreConfig(),targetGpu:"NVIDIA GeForce RTX 4090" as const,minGpuVramGb:24,maxGpuPricePerHour:MAX_HOURLY,orderType:"on-demand" as const};const initialOrderSnapshot:ActiveOrderSnapshot={orders:await readLiveOrdersSummary(config,{forceRefresh:true}),checkedAt:Date.now()};if(task?.status==="failed"){requeueSafeFailedExactImageTask({taskId,receipt:receiptRead(),activeOrderCount:initialOrderSnapshot.orders.filter((item)=>item.active).length});task=readImageTask(taskId)}const receipt=await prepareFreshReceipt({taskId,taskStatus:task?.status,activeOrderCount:async()=>initialOrderSnapshot.orders.filter((item)=>item.active).length});ACTIVE_RECEIPT=receipt;
-    try{console.log(JSON.stringify(await runLive(taskId,false,commit,agent,controller,workflow,initialOrderSnapshot),null,2));receiptWrite({...ACTIVE_RECEIPT!,currentStep:"done",timestamps:{...ACTIVE_RECEIPT!.timestamps,done:new Date().toISOString()}})}catch(error){receiptWrite({...ACTIVE_RECEIPT!,currentStep:"failed",firstError:error instanceof Error?error.message.slice(0,800):"fresh_run_failed",timestamps:{...ACTIVE_RECEIPT!.timestamps,failed:new Date().toISOString()}});throw error}finally{ACTIVE_RECEIPT=null} return;
+    throw new Error("legacy_live_executor_disabled_use_image_session_supervisor");
   }
   const preflight = await preflightExactLocalImageTask(taskId);
   console.log(JSON.stringify({ ready_for_remote_preflight: true, creates_order: false, claims_task: false, task: { id: preflight.task.id, status: preflight.task.status, width: preflight.task.width, height: preflight.task.height }, model_preflight: preflight.modelPreflight, next: "immutable_agent_and_provider_cost_preflight" }, null, 2));

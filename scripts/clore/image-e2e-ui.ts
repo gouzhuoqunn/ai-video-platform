@@ -1,5 +1,5 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
 
@@ -51,9 +51,10 @@ export async function ensureLocalUi(input: { baseUrl?: string; spawnImpl?: typeo
 export async function verifyImageUi(input: { taskId: string; baseUrl?: string; screenshotPath?: string; fetchImpl?: typeof fetch }) : Promise<LocalUiVerificationResult> {
   const base = input.baseUrl ?? "http://127.0.0.1:3000";
   const fetchImpl = input.fetchImpl ?? fetch;
-  const task = await fetchImpl(`${base}/api/local-lab/image-tasks`).then(async (r) => ({ ok: r.ok, body: await r.json() as { tasks?: Array<{ id: string; status: string; width?: number; height?: number }> } })); const item = task.body.tasks?.find((v) => v.id === input.taskId); if (!task.ok || item?.status !== "completed" || !Number.isSafeInteger(item.width) || !Number.isSafeInteger(item.height)) throw new Error("local_ui_exact_task_not_completed");
-  const thumbnail = await validateImageResponse("thumbnail", await fetchImpl(`${base}/api/local-images/${input.taskId}/thumbnail`), item.width, item.height);
-  const output = await validateImageResponse("output", await fetchImpl(`${base}/api/local-images/${input.taskId}/output`), item.width, item.height);
+  const task = await fetchImpl(`${base}/api/local-lab/image-tasks`).then(async (r) => ({ ok: r.ok, body: await r.json() as { tasks?: Array<{ id: string; status: string; width?: number; height?: number }> } })); const item = task.body.tasks?.find((v) => v.id === input.taskId); if (!task.ok || !item || item.status !== "completed" || typeof item.width !== "number" || typeof item.height !== "number" || !Number.isSafeInteger(item.width) || !Number.isSafeInteger(item.height)) throw new Error("local_ui_exact_task_not_completed");
+  const expectedWidth = item.width; const expectedHeight = item.height;
+  const thumbnail = await validateImageResponse("thumbnail", await fetchImpl(`${base}/api/local-images/${input.taskId}/thumbnail`), expectedWidth, expectedHeight);
+  const output = await validateImageResponse("output", await fetchImpl(`${base}/api/local-images/${input.taskId}/output`), expectedWidth, expectedHeight);
   const { chromium } = await import("playwright"); const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH; const browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
   try {
     const page = await browser.newPage(); await page.goto(base, { waitUntil: "networkidle" }); const image = page.locator(`img[src*="/api/local-images/${input.taskId}/thumbnail"]`);
