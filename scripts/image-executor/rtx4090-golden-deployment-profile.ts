@@ -13,6 +13,7 @@ export type Rtx4090GoldenDeploymentProfile = {
   controllerBind: "0.0.0.0:8080";
   immutable: { commit: string; agentSha256: string; controllerSha256: string; workflowSha256: string };
   agentContract: "stage-acceptance-v2";
+  acceptedStageResponseFields: readonly ["accepted", "state", "status", "stage", "stage_run_id"];
   bootstrapTemplateSha256: string;
 };
 
@@ -40,6 +41,7 @@ export const RTX4090_GOLDEN_DEPLOYMENT_PROFILE: Rtx4090GoldenDeploymentProfile =
   controllerBind: "0.0.0.0:8080",
   immutable,
   agentContract: "stage-acceptance-v2",
+  acceptedStageResponseFields: ["accepted", "state", "status", "stage", "stage_run_id"],
   bootstrapTemplateSha256: createHash("sha256").update(buildBootstrap({ ...immutable, tokenSha256: templateTokenSha256 })).digest("hex"),
 };
 
@@ -51,7 +53,7 @@ export function buildRtx4090GoldenBootstrap(tokenSha256: string) {
 }
 
 export function assertRtx4090GoldenDeploymentProfile(profile = RTX4090_GOLDEN_DEPLOYMENT_PROFILE) {
-  if (profile.image !== "cloreai/jupyter:ubuntu24.04-v2" || profile.ports["8080"] !== "http" || profile.healthPath !== "/healthz" || profile.controllerBind !== "0.0.0.0:8080" || profile.agentContract !== "stage-acceptance-v2") {
+  if (profile.image !== "cloreai/jupyter:ubuntu24.04-v2" || profile.ports["8080"] !== "http" || profile.healthPath !== "/healthz" || profile.controllerBind !== "0.0.0.0:8080" || profile.agentContract !== "stage-acceptance-v2" || profile.acceptedStageResponseFields.join(",") !== "accepted,state,status,stage,stage_run_id") {
     throw new Error("rtx4090_golden_deployment_profile_drift");
   }
   const expected = createHash("sha256").update(buildBootstrap({ ...profile.immutable, tokenSha256: templateTokenSha256 })).digest("hex");

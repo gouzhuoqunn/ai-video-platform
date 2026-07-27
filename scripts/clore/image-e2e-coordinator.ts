@@ -23,6 +23,7 @@ export type SanitizedImageE2eSession = {
   lastError: string | null;
   transportDiagnostics?: AgentTransportDiagnostic[];
   createDiagnostics?: Array<{ httpStatus: 429; retryAfterMs: number | null; code: number; message: string | null; attempt: number }>;
+  stageAcceptanceEvidence?: Array<{ route: string; stage: string; requestedStageRunId: string; capturedAt: string; httpStatus: number; contentType: string | null; responseByteLength: number; bodySha256: string; responseKind: string; body: { accepted: boolean | null; stage: string | null; stageRunId: string | null; state: string | null; status: string | null } | null; nonJsonPrefix: string | null; returnedStage: string | null; returnedStageRunId: string | null; acceptanceClassification: string }>;
 };
 
 export type RemoteArtifact = NonNullable<SanitizedImageE2eSession["remoteArtifact"]> & { png: Buffer };
@@ -73,7 +74,7 @@ function clean(value: unknown) {
 }
 
 function initial(input: { taskId: string; immutableCommit: string; tokenFile: string; tokenSha256: string }): SanitizedImageE2eSession {
-  return { schemaVersion: 1, taskId: input.taskId, phase: "PRERENTAL", orderId: null, endpoint: null, immutableCommit: input.immutableCommit, tokenFile: input.tokenFile, tokenSha256: input.tokenSha256, claimTokenHash: null, artifact: null, remoteArtifact: null, stages: {}, timestamps: { PRERENTAL: new Date().toISOString() }, lastError: null, transportDiagnostics: [], createDiagnostics: [] };
+  return { schemaVersion: 1, taskId: input.taskId, phase: "PRERENTAL", orderId: null, endpoint: null, immutableCommit: input.immutableCommit, tokenFile: input.tokenFile, tokenSha256: input.tokenSha256, claimTokenHash: null, artifact: null, remoteArtifact: null, stages: {}, timestamps: { PRERENTAL: new Date().toISOString() }, lastError: null, transportDiagnostics: [], createDiagnostics: [], stageAcceptanceEvidence: [] };
 }
 
 function mark(deps: CoordinatorDeps, session: SanitizedImageE2eSession, phase: ImageE2ePhase, patch: Partial<SanitizedImageE2eSession> = {}) {

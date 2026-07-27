@@ -123,7 +123,10 @@ export async function createOrderWithRateLimit(input: {
 }
 function url(endpoint: string, part: string) { return `${endpoint.replace(/\/$/, "")}${part}`; }
 export type AcceptedStage = { acceptedHttpStatus: 202; stage: string; stageRunId: string };
-export type AgentStageAcceptanceEvidence = { route: string; stage: string; requestedStageRunId: string; httpStatus: number; contentType: string | null; responseKind: "json" | "html" | "invalid_json" | "wrong_schema"; body: { accepted: boolean | null; stage: string | null; stageRunId: string | null; state: string | null; status: string | null } | null };
+export const AGENT_STAGE_ACCEPTANCE_CONTRACT = "stage-acceptance-v2" as const;
+export const AGENT_STAGE_ACCEPTANCE_RESPONSE_FIELDS = ["accepted", "state", "status", "stage", "stage_run_id"] as const;
+type SanitizedStageAcceptanceBody = { accepted: boolean | null; stage: string | null; stageRunId: string | null; state: string | null; status: string | null };
+export type AgentStageAcceptanceEvidence = { route: string; stage: string; requestedStageRunId: string; capturedAt: string; httpStatus: number; contentType: string | null; responseByteLength: number; bodySha256: string; responseKind: "json" | "html" | "invalid_json" | "wrong_schema"; body: SanitizedStageAcceptanceBody | null; nonJsonPrefix: string | null; returnedStage: string | null; returnedStageRunId: string | null; acceptanceClassification: "response_received" | "accepted" | "http_error" | "html" | "invalid_json" | "wrong_schema" };
 export class AgentStageAcceptanceError extends Error {
   constructor(readonly evidence: AgentStageAcceptanceEvidence) { super(`agent_stage_acceptance_invalid:${evidence.stage}`); }
 }
@@ -137,26 +140,46 @@ function safeStageAcceptanceBody(body: Record<string, unknown> | null) {
     status: typeof body.status === "string" ? body.status : null,
   };
 }
+function safeStageAcceptancePrefix(value: string) {
+  return value.replace(/(bearer\s+)[^\s]+/gi, "$1<redacted>").replace(/([?&](?:x-amz-|signature|token|credential)[^=&]*=)[^&\s]+/gi, "$1<redacted>").slice(0, 160);
+}
+function stageAcceptanceEvidence(input: { route: string; stage: string; requestedStageRunId: string; httpStatus: number; contentType: string | null; bytes: Buffer; text: string; body: Record<string, unknown> | null; responseKind: AgentStageAcceptanceEvidence["responseKind"]; acceptanceClassification: AgentStageAcceptanceEvidence["acceptanceClassification"] }): AgentStageAcceptanceEvidence {
+  const body = safeStageAcceptanceBody(input.body);
+  return { route: input.route, stage: input.stage, requestedStageRunId: input.requestedStageRunId, capturedAt: new Date().toISOString(), httpStatus: input.httpStatus, contentType: input.contentType?.slice(0, 200) ?? null, responseByteLength: input.bytes.byteLength, bodySha256: createHash("sha256").update(input.bytes).digest("hex"), responseKind: input.responseKind, body, nonJsonPrefix: body || input.acceptanceClassification === "response_received" ? null : safeStageAcceptancePrefix(input.text), returnedStage: body?.stage ?? null, returnedStageRunId: body?.stageRunId ?? null, acceptanceClassification: input.acceptanceClassification };
+}
 export function sanitizeAgentStageAcceptanceEvidence(error: unknown) {
   if (!(error instanceof AgentStageAcceptanceError)) return null;
   const { route, stage, requestedStageRunId, httpStatus, contentType, responseKind, body } = error.evidence;
   return { route, stage, requestedStageRunId, httpStatus, contentType, responseKind, body };
 }
-function acceptedStage(route: string, status: number, body: Record<string, unknown>, requestedStageRunId: string, contentType: string | null): AcceptedStage {
+export function assertCallerAgentStageAcceptanceContract(profile: { agentContract: string; acceptedStageResponseFields: readonly string[] }) {
+  if (profile.agentContract !== AGENT_STAGE_ACCEPTANCE_CONTRACT || profile.acceptedStageResponseFields.join(",") !== AGENT_STAGE_ACCEPTANCE_RESPONSE_FIELDS.join(",")) throw new Error("rtx4090_stage_acceptance_contract_mismatch");
+  return { callerContract: AGENT_STAGE_ACCEPTANCE_CONTRACT, requiredResponseFields: [...AGENT_STAGE_ACCEPTANCE_RESPONSE_FIELDS] };
+}
+function acceptedStage(route: string, status: number, body: Record<string, unknown>, requestedStageRunId: string): AcceptedStage {
   const stage = route.replace(/^\/stage\//, ""); const stageRunId = body.stage_run_id;
   const valid = status === 202 && (body.accepted === true || body.state === "accepted") && (body.state === "accepted" || body.status === "running") && body.stage === stage && stageRunId === requestedStageRunId;
-  if (!valid) throw new AgentStageAcceptanceError({ route, stage, requestedStageRunId, httpStatus: status, contentType, responseKind: "wrong_schema", body: safeStageAcceptanceBody(body) });
+  if (!valid) throw new Error(`agent_stage_acceptance_invalid:${stage}`);
   return { acceptedHttpStatus: 202, stage, stageRunId: requestedStageRunId };
 }
-export async function agentPostJson(endpoint: string, token: string, route: string, payload?: object, options: { stageRunId?: string; onRequested?: (stageRunId: string) => void; fetchImpl?: typeof fetch } = {}): Promise<AcceptedStage> {
+export type AgentPostOptions = { stageRunId?: string; onRequested?: (stageRunId: string) => void; onEvidence?: (evidence: AgentStageAcceptanceEvidence) => void; fetchImpl?: typeof fetch };
+export async function agentPostJson(endpoint: string, token: string, route: string, payload?: object, options: AgentPostOptions = {}): Promise<AcceptedStage> {
   const stage = route.replace(/^\/stage\//, ""); const stageRunId = options.stageRunId ?? randomUUID(); options.onRequested?.(stageRunId);
   const response = await (options.fetchImpl ?? fetch)(url(endpoint, route), { method: "POST", headers: { Authorization: `Bearer ${token}`, "content-type": "application/json", Accept: "application/json" }, body: JSON.stringify({ ...(payload ?? {}), stage_run_id: stageRunId }) });
-  const contentType = response.headers.get("content-type"); const text = await response.text(); let body: Record<string, unknown> | null = null;
+  const contentType = response.headers.get("content-type"); const bytes = Buffer.from(await response.arrayBuffer()); const text = bytes.toString("utf8");
+  // Persist response metadata before JSON parsing or acceptance validation.
+  options.onEvidence?.(stageAcceptanceEvidence({ route, stage, requestedStageRunId: stageRunId, httpStatus: response.status, contentType, bytes, text, body: null, responseKind: /text\/html/i.test(contentType ?? "") ? "html" : "invalid_json", acceptanceClassification: "response_received" }));
+  let body: Record<string, unknown> | null = null;
   try { const parsed: unknown = JSON.parse(text); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Record<string, unknown>; } catch { /* classified below */ }
-  if (!response.ok || !body) throw new AgentStageAcceptanceError({ route, stage, requestedStageRunId: stageRunId, httpStatus: response.status, contentType, responseKind: /text\/html/i.test(contentType ?? "") ? "html" : body ? "wrong_schema" : "invalid_json", body: safeStageAcceptanceBody(body) });
-  return acceptedStage(route, response.status, body, stageRunId, contentType);
+  const valid = body !== null && response.status === 202 && (body.accepted === true || body.state === "accepted") && (body.state === "accepted" || body.status === "running") && body.stage === stage && body.stage_run_id === stageRunId;
+  const responseKind = /text\/html/i.test(contentType ?? "") ? "html" : body ? valid ? "json" : "wrong_schema" : "invalid_json";
+  const acceptanceClassification = !response.ok ? "http_error" : responseKind === "html" ? "html" : responseKind === "invalid_json" ? "invalid_json" : valid ? "accepted" : "wrong_schema";
+  const evidence = stageAcceptanceEvidence({ route, stage, requestedStageRunId: stageRunId, httpStatus: response.status, contentType, bytes, text, body, responseKind, acceptanceClassification });
+  options.onEvidence?.(evidence);
+  if (!response.ok || !body || !valid) throw new AgentStageAcceptanceError(evidence);
+  return acceptedStage(route, response.status, body, stageRunId);
 }
-export async function submitInferenceStage(endpoint:string,token:string,payload:object){return await agentPostJson(endpoint,token,"/stage/inference",payload)}
+export async function submitInferenceStage(endpoint:string,token:string,payload:object,options: Pick<AgentPostOptions, "onEvidence" | "onRequested"> = {}) { return await agentPostJson(endpoint, token, "/stage/inference", payload, options); }
 
 export function resolveExactEligibleImageTask(taskId: string, options: LocalTaskStoreOptions = {}): EligibleImageTask {
   const task = readImageTask(taskId, options);
@@ -313,11 +336,13 @@ async function runLive(taskId: string, resume: boolean, commit: string, agentSha
   let selected: ReturnType<typeof normalizeCloreServer> | null = null; let startingBalance = 0; let activeOrderId: string | null = null; let orderSnapshot = initialOrderSnapshot;
   let transportDiagnostics: AgentTransportDiagnostic[] = [];
   let createDiagnostics: CreateRateLimitDiagnostic[] = [];
+  let stageAcceptanceEvidence: NonNullable<SanitizedImageE2eSession["stageAcceptanceEvidence"]> = [];
   const appendTransportDiagnostic = (diagnostic: AgentTransportDiagnostic) => { transportDiagnostics = [...transportDiagnostics, diagnostic].slice(-60); const current = sessionRead(); if (current) sessionWrite({ ...current, transportDiagnostics }); };
   const appendCreateDiagnostic = (diagnostic: CreateRateLimitDiagnostic) => { createDiagnostics = [...createDiagnostics, diagnostic].slice(-4); const current = sessionRead(); if (current) sessionWrite({ ...current, createDiagnostics }); };
+  const appendStageAcceptanceEvidence = (evidence: AgentStageAcceptanceEvidence) => { stageAcceptanceEvidence = [...stageAcceptanceEvidence, evidence].slice(-24); const current = sessionRead(); if (current) sessionWrite({ ...current, stageAcceptanceEvidence }); };
   const refreshOrderSnapshot = async () => { orderSnapshot = { orders: await readLiveOrdersSummary(config, { forceRefresh: true }), checkedAt: Date.now() }; return orderSnapshot; };
   const deps = {
-    now: () => new Date().toISOString(), persist: (session: SanitizedImageE2eSession) => sessionWrite({ ...session, transportDiagnostics, createDiagnostics }), load: sessionRead,
+    now: () => new Date().toISOString(), persist: (session: SanitizedImageE2eSession) => sessionWrite({ ...session, transportDiagnostics, createDiagnostics, stageAcceptanceEvidence }), load: sessionRead,
     readEligibleTask: async (id: string) => resolveExactEligibleImageTask(id),
     prerental: async (id: string) => {
       if (orderSnapshot.orders.some((item) => item.active)) throw new Error("active_clore_order_exists");
@@ -354,8 +379,8 @@ async function runLive(taskId: string, resume: boolean, commit: string, agentSha
     reconnect: async (orderId: string) => { activeOrderId = orderId; const order = (await readLiveOrdersSummary(config, { forceRefresh: true })).find((item) => item.orderId === orderId); return { active: Boolean(order?.active), endpoint: order?.controllerUrl ?? null }; },
     armWatchdog: async () => undefined, disarmWatchdog: async () => { const current = sessionRead(); if (current) writeLocalWatchdogArmState({ schemaVersion: 1, armed: false, sessionNonce: createSessionNonce(), serverId: selected?.serverId ?? "98682", orderType: "on-demand", currency: config.rentalCurrency, startingBalanceUsd: startingBalance, armedAt: new Date().toISOString(), drainingAt: new Date().toISOString(), hardDeadlineAt: new Date().toISOString(), hardBudgetUsd: MAX_TOTAL, budgetSafetyUsd: .05, emergencyStop: false }); },
     health: async (endpoint: string) => { const deadline = Date.now() + 5 * 60 * 1000; let last: { alive: boolean; currentStage: string; lastError: string | null } = { alive: false, currentStage: "", lastError: "health_not_reached" }; let attempt = 0; while (Date.now() < deadline) { attempt += 1; try { const result = await agentGetJsonWithRetry({ endpoint, token, route: "/healthz", validator: agentHealthResponse, stage: null, attempt }); if (!result.ok) { appendTransportDiagnostic(result.diagnostic); last.lastError = result.diagnostic.message; await sleep(5_000); continue; } last = { alive: result.body.alive === true, currentStage: String(result.body.current_stage ?? ""), lastError: result.body.last_error ? String(result.body.last_error) : null }; if (last.alive && last.currentStage === "idle" && !last.lastError) return last; } catch (error) { if (error instanceof AgentGetTerminalError) { appendTransportDiagnostic(error.diagnostic); last.lastError = error.message; break; } throw error; } await sleep(5_000); } return last; },
-    stage: async (endpoint: string, stage: "environment" | "gpu" | "controller" | "comfyui" | "models" | "inference", payload?: object) => { if(stage==="inference")throw new Error("legacy_combined_inference_forbidden"); const accepted=await agentPostJson(endpoint, token, `/stage/${stage}`, payload); return await waitForStage({ endpoint, token, stage, expectedStageRunId:accepted.stageRunId, timeoutMs: stage === "models" ? 3 * 60 * 60 * 1000 : 45 * 60 * 1000, onDiagnostic: appendTransportDiagnostic, reconcileExactOrder: async () => { if (!activeOrderId) return null; return Boolean((await readLiveOrdersSummary(config, { forceRefresh: true })).find((order) => order.orderId === activeOrderId)?.active); } }); },
-    submitInference: (endpoint:string,payload:object)=>submitInferenceStage(endpoint,token,payload),pollInference:(endpoint:string,stageRunId:string)=>pollInferenceStage(endpoint,token,stageRunId,{onDiagnostic:appendTransportDiagnostic,reconcileExactOrder:async()=>{if(!activeOrderId)return null;return Boolean((await readLiveOrdersSummary(config,{forceRefresh:true})).find((order)=>order.orderId===activeOrderId)?.active)}}),
+    stage: async (endpoint: string, stage: "environment" | "gpu" | "controller" | "comfyui" | "models" | "inference", payload?: object) => { if(stage==="inference")throw new Error("legacy_combined_inference_forbidden"); const accepted=await agentPostJson(endpoint, token, `/stage/${stage}`, payload, { onEvidence: appendStageAcceptanceEvidence }); return await waitForStage({ endpoint, token, stage, expectedStageRunId:accepted.stageRunId, timeoutMs: stage === "models" ? 3 * 60 * 60 * 1000 : 45 * 60 * 1000, onDiagnostic: appendTransportDiagnostic, reconcileExactOrder: async () => { if (!activeOrderId) return null; return Boolean((await readLiveOrdersSummary(config, { forceRefresh: true })).find((order) => order.orderId === activeOrderId)?.active); } }); },
+    submitInference: (endpoint:string,payload:object)=>submitInferenceStage(endpoint,token,payload,{onEvidence:appendStageAcceptanceEvidence}),pollInference:(endpoint:string,stageRunId:string)=>pollInferenceStage(endpoint,token,stageRunId,{onDiagnostic:appendTransportDiagnostic,reconcileExactOrder:async()=>{if(!activeOrderId)return null;return Boolean((await readLiveOrdersSummary(config,{forceRefresh:true})).find((order)=>order.orderId===activeOrderId)?.active)}}),
     inferenceReceipt:async(event,detail)=>{if(!ACTIVE_RECEIPT)throw new Error("fresh_receipt_missing");const now=new Date().toISOString();const base={...ACTIVE_RECEIPT,currentStep:`inference_${event}`,inferenceState:event,inferenceSubmitted:event!=="submitting",inferenceSucceeded:event==="succeeded",timestamps:{...ACTIVE_RECEIPT.timestamps,[`inference_${event}`]:now}};const next:FreshReceipt=event==="submitting"?{...base,inferenceSubmittingAt:now,inferenceAcceptedAt:null,acceptedHttpStatus:null,inferenceCompletedAt:null,remoteArtifactAvailable:false,controllerPromptId:null,inferenceFailure:null,remoteArtifact:null,firstError:null}:event==="accepted"?{...base,inferenceAcceptedAt:now,acceptedHttpStatus:detail?.acceptedHttpStatus===202?202:null}:event==="succeeded"?{...base,inferenceCompletedAt:now,remoteArtifactAvailable:Boolean(detail?.remoteArtifact),controllerPromptId:detail?.controllerPromptId??null,inferenceFailure:null,remoteArtifact:detail?.remoteArtifact??null}: {...base,inferenceCompletedAt:now,controllerPromptId:detail?.controllerPromptId??base.controllerPromptId,inferenceFailure:detail?.failure??null,firstError:detail?.error??"inference_failed"};receiptWrite(next);ACTIVE_RECEIPT=next},
     receiptEvent:async(event,detail)=>{if(!ACTIVE_RECEIPT)throw new Error("fresh_receipt_missing");const now=new Date().toISOString();let next:FreshReceipt={...ACTIVE_RECEIPT,timestamps:{...ACTIVE_RECEIPT.timestamps,[event]:now}};if(event==="artifact_downloaded")next={...next,currentStep:event,artifactDownloaded:true,remoteArtifactAvailable:Boolean(detail?.remoteArtifact),controllerPromptId:detail?.controllerPromptId??next.controllerPromptId,remoteArtifact:detail?.remoteArtifact??next.remoteArtifact};else if(event==="task_finalized")next={...next,currentStep:event,taskFinalized:true};else if(event==="ui_verified")next={...next,currentStep:event,uiVerified:true};else next={...next,currentStep:event,orderCancelled:true};receiptWrite(next);ACTIVE_RECEIPT=next},
     resolveModels: async () => toAgentModelManifest((await verifyFiveImageModelSources()).models).models as ModelEntry[],

@@ -11,7 +11,7 @@ import { normalizeCloreServer } from "./marketplace";
 import { rankFreshMarketplaceCandidates, type MarketScanEvidence } from "./live-market-selection";
 import { createSessionNonce, isLocalWatchdogTaskInstalled, writeLocalWatchdogArmState } from "./watchdog-io";
 import { agentGetJsonWithRetry, agentHealthResponse } from "./agent-get-transport";
-import { agentPostJson, buildPublicAgentBootstrap, createOrderWithRateLimit, getArtifactMetadataWithRetry, persistAndFinalizeExactLocalTask, pollInferenceStage, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, waitForStage, type AcceptedStage, type EligibleImageTask } from "./run-image-e2e";
+import { agentPostJson, assertCallerAgentStageAcceptanceContract, buildPublicAgentBootstrap, createOrderWithRateLimit, getArtifactMetadataWithRetry, persistAndFinalizeExactLocalTask, pollInferenceStage, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, waitForStage, type AcceptedStage, type AgentStageAcceptanceEvidence, type EligibleImageTask } from "./run-image-e2e";
 import { toAgentModelManifest, verifyFiveImageModelSources } from "./image-model-preflight";
 import { ensureLocalUi, verifyImageUi } from "./image-e2e-ui";
 import { IMAGE_SESSION_LIMITS, planImageSession, type ImageSessionPlan } from "./image-session";
@@ -83,6 +83,8 @@ export async function createOrderWithCandidateFallback<Candidate extends Resilie
 export async function createLiveSessionOrder(input: { sessionId: string; taskIds: string[]; immutable: ImmutableRuntime; execute: boolean; onCandidateAttempt?: (event: CandidateAttemptEvent) => Promise<void> | void; onMarketWait?: (event: MarketWaitEvent) => Promise<void> | void }): Promise<LiveSessionOrder> {
   if (!input.execute) throw new Error("image_session_execute_flag_required");
   const tasks = exactTaskIds(input.taskIds);
+  const profile = assertRtx4090GoldenDeploymentProfile();
+  assertCallerAgentStageAcceptanceContract(profile);
   const gpuClass = tasks[0].gpuClass as ImageGpuClass;
   const config = fixedConfig(gpuClass);
   const before = await readLiveOrdersSummary(config, { forceRefresh: true });
@@ -90,7 +92,6 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
   for (const task of tasks) await preflightExactLocalImageTask(task.id);
   if (!isLocalWatchdogTaskInstalled()) throw new Error("local_watchdog_not_installed");
   const token = newSessionToken(input.sessionId); const command = buildPublicAgentBootstrap({ ...input.immutable, tokenSha256: token.sha256 });
-  const profile = assertRtx4090GoldenDeploymentProfile();
   if (input.immutable.commit !== profile.immutable.commit || input.immutable.agentSha256 !== profile.immutable.agentSha256 || input.immutable.controllerSha256 !== profile.immutable.controllerSha256 || input.immutable.workflowSha256 !== profile.immutable.workflowSha256) throw new Error("rtx4090_golden_profile_identity_mismatch");
   if (command !== buildRtx4090GoldenBootstrap(token.sha256)) throw new Error("rtx4090_golden_profile_bootstrap_mismatch");
   type CandidateContext = { candidate: ReturnType<typeof normalizeCloreServer>; wallet: Awaited<ReturnType<typeof readWalletSummary>>; plan: ImageSessionPlan; marketplaceRefreshedAt: string };
@@ -186,14 +187,14 @@ export async function waitForAgentIdle(order: LiveSessionOrder) {
   }
   throw new RuntimeDeploymentFailure({ order, elapsedMs: Date.now() - started, lastHttpStatus, lastStartupDiagnostic });
 }
-export async function invokeStage(order: LiveSessionOrder, stage: "environment" | "gpu" | "controller" | "comfyui" | "models", payload?: object, receipt?: { requested: (stageRunId: string) => void; accepted: (value: { stageRunId: string }) => void }): Promise<StageTerminal> { const accepted = await agentPostJson(order.endpoint, order.token, `/stage/${stage}`, payload, { onRequested: receipt?.requested }); receipt?.accepted(accepted); const terminal = await waitForStage({ endpoint: order.endpoint, token: order.token, stage, expectedStageRunId: accepted.stageRunId, timeoutMs: stage === "models" ? 3 * 60 * 60_000 : 45 * 60_000, reconcileExactOrder: async () => Boolean((await readLiveOrdersSummary(fixedConfig(order.plan.selectedGpuClass === "RTX 5090" ? "rtx5090" : "rtx4090"), { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.active) }); return { stageRunId: accepted.stageRunId, ...terminal }; }
-export async function installModelsOnce(order: LiveSessionOrder, receipt?: { requested: (stageRunId: string) => void; accepted: (value: { stageRunId: string }) => void }) { const models = toAgentModelManifest((await verifyFiveImageModelSources()).models); return await invokeStage(order, "models", models, receipt); }
-export async function submitTaskInference(order: LiveSessionOrder, task: EligibleImageTask, receipt?: { requested: (stageRunId: string) => void; submitting: () => void; accepted: (value: AcceptedStage) => void }): Promise<{ accepted: AcceptedStage; terminal: StageTerminal; artifact: LocalArtifactReference; controllerJobId: string | null; controllerPromptId: string | null; uiVerified: boolean; uiVerificationError: string | null }> {
+export async function invokeStage(order: LiveSessionOrder, stage: "environment" | "gpu" | "controller" | "comfyui" | "models", payload?: object, receipt?: { requested: (stageRunId: string) => void; accepted: (value: { stageRunId: string }) => void; evidence: (value: AgentStageAcceptanceEvidence) => void }): Promise<StageTerminal> { const accepted = await agentPostJson(order.endpoint, order.token, `/stage/${stage}`, payload, { onRequested: receipt?.requested, onEvidence: receipt?.evidence }); receipt?.accepted(accepted); const terminal = await waitForStage({ endpoint: order.endpoint, token: order.token, stage, expectedStageRunId: accepted.stageRunId, timeoutMs: stage === "models" ? 3 * 60 * 60_000 : 45 * 60_000, reconcileExactOrder: async () => Boolean((await readLiveOrdersSummary(fixedConfig(order.plan.selectedGpuClass === "RTX 5090" ? "rtx5090" : "rtx4090"), { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.active) }); return { stageRunId: accepted.stageRunId, ...terminal }; }
+export async function installModelsOnce(order: LiveSessionOrder, receipt?: { requested: (stageRunId: string) => void; accepted: (value: { stageRunId: string }) => void; evidence: (value: AgentStageAcceptanceEvidence) => void }) { const models = toAgentModelManifest((await verifyFiveImageModelSources()).models); return await invokeStage(order, "models", models, receipt); }
+export async function submitTaskInference(order: LiveSessionOrder, task: EligibleImageTask, receipt?: { requested: (stageRunId: string) => void; submitting: () => void; accepted: (value: AcceptedStage) => void; evidence: (value: AgentStageAcceptanceEvidence) => void }): Promise<{ accepted: AcceptedStage; terminal: StageTerminal; artifact: LocalArtifactReference; controllerJobId: string | null; controllerPromptId: string | null; uiVerified: boolean; uiVerificationError: string | null }> {
   const claim = claimImageTask(task.id, `clore-image-session-${process.pid}`, 10 * 60_000); const heartbeat = startImageTaskLeaseHeartbeat({ taskId: task.id, claimToken: claim.claimToken, leaseMs: 10 * 60_000 });
   let finalized = false;
   try {
     heartbeat.assertHealthy(); const payload = { task_id: task.id, mode: "text_generation", prompt: task.prompt, width: task.width, height: task.height, steps: task.steps, cfg: task.cfg, lora_strength: task.loraStrength, seed: task.seed, sampler: task.sampler };
-    receipt?.submitting(); const accepted = await agentPostJson(order.endpoint, order.token, "/stage/inference", payload, { onRequested: receipt?.requested }); receipt?.accepted(accepted);
+    receipt?.submitting(); const accepted = await agentPostJson(order.endpoint, order.token, "/stage/inference", payload, { onRequested: receipt?.requested, onEvidence: receipt?.evidence }); receipt?.accepted(accepted);
     const terminal = await pollInferenceStage(order.endpoint, order.token, accepted.stageRunId, { reconcileExactOrder: async () => Boolean((await readLiveOrdersSummary(fixedConfig(order.plan.selectedGpuClass === "RTX 5090" ? "rtx5090" : "rtx4090"), { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.active) });
     if (terminal.status !== "succeeded") throw new Error(`inference_stage_failed:${compact(terminal.error)}`);
     const metadata = await getArtifactMetadataWithRetry({ endpoint: order.endpoint, token: order.token, taskId: task.id }); const image = await fetch(`${order.endpoint.replace(/\/$/, "")}/artifacts/${task.id}/image`, { headers: { Authorization: `Bearer ${order.token}` } }); const png = Buffer.from(await image.arrayBuffer());
