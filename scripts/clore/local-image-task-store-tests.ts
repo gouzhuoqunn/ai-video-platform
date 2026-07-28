@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { localArtifactFile, publishLocalImageArtifact } from "../../src/lib/image-generation/local-image-artifacts";
-import { claimImageTask, failImageTask, finalizeImageTask, listImageTasks, mutateImageTasks, readImageTask, releaseOrRecoverExpiredClaim, renewImageTaskLease } from "../../src/lib/image-generation/local-image-task-store";
+import { claimImageTask, failImageTask, finalizeImageTask, listImageTasks, markImageTaskInferenceRetryBlocked, mutateImageTasks, readImageTask, reconcileStoppedImageTasksWithAmbiguousInference, releaseOrRecoverExpiredClaim, renewImageTaskLease } from "../../src/lib/image-generation/local-image-task-store";
 import { persistAndFinalizeExactLocalTask, resolveExactEligibleImageTask } from "./run-image-e2e";
 
 const id = "123e4567-e89b-42d3-a456-426614174000";
@@ -42,7 +42,96 @@ async function main() {
     // Model/runtime preflight failure occurs before claim and leaves the task untouched.
     assert.equal(resolveExactEligibleImageTask(id, options).status, "waiting_for_gpu");
     const failedClaim = claimImageTask(failedId, "worker-failed", 60_000, options);
-    assert.equal(failImageTask(failedId, failedClaim.claimToken, "controller_fixture_failure", options).status, "failed");
+    const ordinaryFailure = failImageTask(failedId, failedClaim.claimToken, "controller_fixture_failure", options);
+    assert.equal(ordinaryFailure.status, "failed");
+    assert.equal(ordinaryFailure.error?.retryable, true);
+
+    const guardedId = "423e4567-e89b-42d3-a456-426614174000";
+    const expiredGuardedId = "623e4567-e89b-42d3-a456-426614174000";
+    const legacyGuardedId = "723e4567-e89b-42d3-a456-426614174000";
+    const partialGuardedId = "823e4567-e89b-42d3-a456-426614174000";
+    const claimedGuardedId = "b23e4567-e89b-42d3-a456-426614174000";
+    const guardSessionId = "923e4567-e89b-42d3-a456-426614174000";
+    const guardStageRunId = "a23e4567-e89b-42d3-a456-426614174000";
+    mutateImageTasks((tasks) => ({
+      tasks: [...tasks, task(guardedId), task(expiredGuardedId), task(legacyGuardedId), task(partialGuardedId), task(claimedGuardedId)],
+      value: null,
+    }), options);
+    const guardedClaim = claimImageTask(guardedId, "worker-guarded", 60_000, options);
+    markImageTaskInferenceRetryBlocked(guardedId, guardedClaim.claimToken, {
+      sessionId: guardSessionId,
+      stageRunId: guardStageRunId,
+      inferenceState: "submitting",
+    }, options);
+    assert.equal(readImageTask(guardedId, options)?.inferenceRetryBlock?.inferenceState, "submitting");
+    markImageTaskInferenceRetryBlocked(guardedId, guardedClaim.claimToken, {
+      sessionId: guardSessionId,
+      stageRunId: guardStageRunId,
+      inferenceState: "accepted",
+    }, options);
+    assert.equal(readImageTask(guardedId, options)?.inferenceRetryBlock?.inferenceState, "accepted");
+    assert.throws(() => markImageTaskInferenceRetryBlocked(guardedId, guardedClaim.claimToken, {
+      sessionId: guardSessionId,
+      stageRunId: "b23e4567-e89b-42d3-a456-426614174000",
+      inferenceState: "accepted",
+    }, options), /stage_conflict/);
+    const guardedFailure = failImageTask(guardedId, guardedClaim.claimToken, "transport_reset_after_post", options);
+    assert.equal(guardedFailure.status, "failed");
+    assert.equal(guardedFailure.error?.retryable, false);
+    assert.equal(guardedFailure.error?.classification, "inference_acceptance_ambiguous");
+    mutateImageTasks((tasks) => {
+      const guarded = tasks.find((candidate) => candidate.id === guardedId)!;
+      guarded.status = "waiting_for_gpu";
+      return { tasks, value: null };
+    }, options);
+    assert.throws(() => claimImageTask(guardedId, "worker-second-post", 60_000, options), /requires_manual_recovery/);
+
+    const expiredGuardedClaim = claimImageTask(expiredGuardedId, "worker-expired-guard", 60_000, options);
+    markImageTaskInferenceRetryBlocked(expiredGuardedId, expiredGuardedClaim.claimToken, {
+      sessionId: guardSessionId,
+      stageRunId: guardStageRunId,
+      inferenceState: "submitting",
+    }, options);
+    mutateImageTasks((tasks) => {
+      const current = tasks.find((candidate) => candidate.id === expiredGuardedId)!;
+      current.localClaim!.leaseExpiresAt = new Date(Date.now() - 1).toISOString();
+      return { tasks, value: null };
+    }, options);
+    const expiredGuarded = releaseOrRecoverExpiredClaim(expiredGuardedId, options);
+    assert.equal(expiredGuarded.status, "failed");
+    assert.equal(expiredGuarded.error?.retryable, false);
+
+    mutateImageTasks((tasks) => {
+      const legacy = tasks.find((candidate) => candidate.id === legacyGuardedId)!;
+      legacy.status = "failed";
+      legacy.error = { message: "terminated", at: legacy.updatedAt, retryable: true };
+      return { tasks, value: null };
+    }, options);
+    reconcileStoppedImageTasksWithAmbiguousInference([{
+      taskId: legacyGuardedId,
+      sessionId: guardSessionId,
+      stageRunId: guardStageRunId,
+      inferenceState: "ambiguous",
+    }], options);
+    assert.equal(readImageTask(legacyGuardedId, options)?.error?.retryable, false);
+    assert.equal(readImageTask(legacyGuardedId, options)?.inferenceRetryBlock?.sessionId, guardSessionId);
+
+    const partialBefore = readImageTask(partialGuardedId, options);
+    assert.throws(() => reconcileStoppedImageTasksWithAmbiguousInference([
+      { taskId: partialGuardedId, sessionId: guardSessionId, stageRunId: guardStageRunId, inferenceState: "accepted" },
+      { taskId: "c23e4567-e89b-42d3-a456-426614174000", sessionId: guardSessionId, stageRunId: guardStageRunId, inferenceState: "accepted" },
+    ], options), /task_missing/);
+    assert.deepEqual(readImageTask(partialGuardedId, options), partialBefore, "invalid reconciliation must not partially quarantine tasks");
+
+    claimImageTask(claimedGuardedId, "worker-still-running", 60_000, options);
+    const claimedBefore = readImageTask(claimedGuardedId, options);
+    assert.throws(() => reconcileStoppedImageTasksWithAmbiguousInference([{
+      taskId: claimedGuardedId,
+      sessionId: guardSessionId,
+      stageRunId: guardStageRunId,
+      inferenceState: "accepted",
+    }], options), /task_still_claimed/);
+    assert.deepEqual(readImageTask(claimedGuardedId, options), claimedBefore, "receipt recovery never revokes a live task claim");
 
     const png = await sharp({ create: { width: 768, height: 768, channels: 3, background: "#2e6" } }).png().toBuffer();
     const completing = resolveExactEligibleImageTask(completionId, options);
@@ -62,7 +151,7 @@ async function main() {
     const persisted = await persistAndFinalizeExactLocalTask({ task: retryTask, claimToken: retryClaim.claimToken, png, remote: { generationDurationSeconds: 1, orderId: "fixture", gpuModel: "RTX 4090", controllerPromptId: null }, options });
     assert.equal(persisted.completed.status, "completed");
     assert.equal(readImageTask(retryId, options)?.result?.pngSha256, persisted.artifact.pngSha256);
-    console.log(JSON.stringify({ ok: true, atomic_single_claim: true, token_checks: true, expired_claim_recovery: true, atomic_json: true, artifact_finalization: true, no_second_order_for_completed_task: true }));
+    console.log(JSON.stringify({ ok: true, atomic_single_claim: true, token_checks: true, expired_claim_recovery: true, accepted_inference_retry_guard: true, legacy_ambiguous_reconciliation: true, live_claim_not_revoked_by_receipt_recovery: true, atomic_json: true, artifact_finalization: true, no_second_order_for_completed_task: true, providerMutationCount: 0 }));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 

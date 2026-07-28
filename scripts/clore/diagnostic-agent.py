@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Restricted, authenticated Clore image diagnostic agent.
 
-The only externally reachable service is this agent.  It deliberately exposes
-fixed diagnostics, a fixed five-file model manifest, and one fixed image path;
-it is not a shell, file browser, workflow runner, or general proxy.
+The only externally reachable service is this agent. It deliberately exposes
+fixed diagnostics, five fixed base models, a bounded verified LoRA extension,
+and one fixed image path; it is not a shell, file browser, workflow runner, or
+general proxy.
 """
 from __future__ import annotations
 
 import argparse
+import base64
 from collections import deque
 import http.client
 import hashlib
@@ -26,6 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -47,9 +50,19 @@ IMMUTABLE_SOURCE_ROOTS = (
     ("github_raw_commit", "https://raw.githubusercontent.com/gouzhuoqunn/ai-video-platform"),
 )
 MAX_TEXT = 6000
-MAX_MODEL_BODY = 64 * 1024
+# Five signed base entries plus up to eight task LoRA entries can legitimately
+# exceed the old 64 KiB request cap. Keep the manifest bounded while leaving
+# room for validated immutable source URLs and hashes.
+MAX_MODEL_BODY = 256 * 1024
 MAX_INFERENCE_BODY = 16 * 1024
+MAX_ADDITIONAL_LORAS = 16
+MAX_TASK_LORAS = 8
+MAX_ADDITIONAL_LORA_BYTES = 8 * 1024 * 1024 * 1024
+MAX_SINGLE_LORA_BYTES = 4 * 1024 * 1024 * 1024
+MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
+LORA_ID_RE = re.compile(r"^(?:builtin-[a-z0-9-]{1,80}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$", re.I)
+LORA_FILENAME_RE = re.compile(r"^[^/\\\x00-\x1f]{1,180}\.safetensors$", re.I)
 SHA_RE = re.compile(r"^[a-f0-9]{64}$", re.I)
 COMMIT_RE = re.compile(r"^[a-f0-9]{40}$", re.I)
 APPROVED_MODELS = {
@@ -61,7 +74,7 @@ APPROVED_MODELS = {
 }
 STATE_LOCK = threading.Lock()
 STAGE_GATE = threading.Lock()
-STATE: dict[str, Any] = {"alive": True, "started_at": None, "current_stage": "idle", "current_stage_run_id": None, "last_error": None, "stages": {}, "models": {}}
+STATE: dict[str, Any] = {"alive": True, "started_at": None, "current_stage": "idle", "current_stage_run_id": None, "last_error": None, "stages": {}, "models": {}, "lora_files": {}}
 CHILDREN: dict[str, subprocess.Popen[str]] = {}
 CONFIG: dict[str, str] = {}
 
@@ -249,7 +262,40 @@ def immutable_file_urls(path: str) -> list[tuple[str, str]]:
     ]
 
 
-def fetch_small_verified(sources: list[tuple[str, str]], destination: Path, expected: str) -> dict[str, Any]:
+def apply_fixed_source_patches(content: bytes, encoded_patches: str) -> bytes:
+    if not encoded_patches or len(encoded_patches) > 24_000:
+        raise RuntimeError("immutable_source_patch_invalid")
+    try:
+        patches = json.loads(zlib.decompress(base64.b64decode(encoded_patches), -15))
+        text = content.decode("utf-8")
+    except Exception as error:
+        raise RuntimeError("immutable_source_patch_invalid") from error
+    if not isinstance(patches, list) or len(patches) > 16:
+        raise RuntimeError("immutable_source_patch_invalid")
+    for patch in patches:
+        if (
+            not isinstance(patch, list)
+            or len(patch) != 2
+            or not all(isinstance(value, str) for value in patch)
+            or not patch[0]
+            or len(patch[0]) > 100_000
+            or len(patch[1]) > 100_000
+        ):
+            raise RuntimeError("immutable_source_patch_invalid")
+        first = text.find(patch[0])
+        if first < 0 or text.find(patch[0], first + len(patch[0])) >= 0:
+            raise RuntimeError("immutable_source_patch_context_mismatch")
+        text = text[:first] + patch[1] + text[first + len(patch[0]):]
+    return text.encode("utf-8")
+
+
+def fetch_small_verified(
+    sources: list[tuple[str, str]],
+    destination: Path,
+    source_expected: str,
+    materialized_expected: str | None = None,
+    encoded_patches: str | None = None,
+) -> dict[str, Any]:
     failures: list[str] = []
     for source_id, url in sources:
         try:
@@ -266,7 +312,7 @@ def fetch_small_verified(sources: list[tuple[str, str]], destination: Path, expe
             failures.append(f"{source_id}:size_invalid")
             continue
         actual = hashlib.sha256(content).hexdigest()
-        if actual != expected:
+        if actual != source_expected:
             raise RuntimeError(f"immutable_source_sha256_mismatch:{source_id}:{destination.name}")
         try:
             text = content.decode("utf-8")
@@ -277,9 +323,13 @@ def fetch_small_verified(sources: list[tuple[str, str]], destination: Path, expe
         if content_type not in {"application/octet-stream", "application/x-python", "text/plain", "text/x-python"} and not safe_text:
             failures.append(f"{source_id}:content_incompatible")
             continue
+        materialized = apply_fixed_source_patches(content, encoded_patches) if encoded_patches else content
+        materialized_sha256 = hashlib.sha256(materialized).hexdigest()
+        if materialized_sha256 != (materialized_expected or source_expected):
+            raise RuntimeError(f"immutable_source_materialized_sha256_mismatch:{source_id}:{destination.name}")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(content)
-        return {"endpoint_id": source_id, "bytes": len(content), "sha256": actual}
+        destination.write_bytes(materialized)
+        return {"endpoint_id": source_id, "source_bytes": len(content), "source_sha256": actual, "bytes": len(materialized), "sha256": materialized_sha256, "patched": bool(encoded_patches)}
     raise RuntimeError("immutable_source_unavailable:" + ",".join(failures))
 
 
@@ -288,8 +338,20 @@ def project_runtime() -> tuple[Path, dict[str, str]]:
     runtime.mkdir(parents=True, exist_ok=True)
     controller = runtime / "controller.py"
     workflow = runtime / "image_workflow.py"
-    controller_source = fetch_small_verified(immutable_file_urls("comfy-runtime/controller.py"), controller, CONFIG["controller_sha256"])
-    workflow_source = fetch_small_verified(immutable_file_urls("comfy-runtime/image_workflow.py"), workflow, CONFIG["workflow_sha256"])
+    controller_source = fetch_small_verified(
+        immutable_file_urls("comfy-runtime/controller.py"),
+        controller,
+        CONFIG["controller_source_sha256"],
+        CONFIG["controller_sha256"],
+        CONFIG["controller_patch"],
+    )
+    workflow_source = fetch_small_verified(
+        immutable_file_urls("comfy-runtime/image_workflow.py"),
+        workflow,
+        CONFIG["workflow_source_sha256"],
+        CONFIG["workflow_sha256"],
+        CONFIG["workflow_patch"],
+    )
     check = exec_fixed([sys.executable, "-c", "import sys;sys.path.insert(0,sys.argv[1]);import image_workflow,controller;print('runtime_import_ok')", str(runtime)], 45)
     if check["exit_code"]:
         raise RuntimeError("runtime_import_failed:" + check["output"])
@@ -471,7 +533,12 @@ def safe_download_url(value: object) -> str:
 
 def validate_manifest(payload: object) -> list[dict[str, Any]]:
     entries = payload.get("models") if isinstance(payload, dict) else None
-    if not isinstance(entries, list) or len(entries) != len(APPROVED_MODELS):
+    if (
+        not isinstance(payload, dict)
+        or not set(payload).issubset({"models", "loras"})
+        or not isinstance(entries, list)
+        or len(entries) != len(APPROVED_MODELS)
+    ):
         raise ValueError("exactly_five_models_required")
     result: list[dict[str, Any]] = []
     seen_roles: set[str] = set(); seen_names: set[str] = set()
@@ -487,10 +554,40 @@ def validate_manifest(payload: object) -> list[dict[str, Any]]:
         size = entry["size_bytes"]
         if not isinstance(digest, str) or not SHA_RE.fullmatch(digest) or not isinstance(size, int) or size <= 0:
             raise ValueError("invalid_model_hash_or_size")
-        result.append({"role": role, "filename": filename, "url": safe_download_url(entry["url"]), "sha256": digest.lower(), "size_bytes": size, "destination": str(COMFY_DIR / "models" / expected[1] / filename)})
+        result.append({"kind": "base", "role": role, "state_bucket": "models", "state_key": role, "filename": filename, "url": safe_download_url(entry["url"]), "sha256": digest.lower(), "size_bytes": size, "destination": str(COMFY_DIR / "models" / expected[1] / filename)})
         seen_roles.add(role); seen_names.add(filename)
     if seen_roles != set(APPROVED_MODELS):
         raise ValueError("missing_approved_model_role")
+    loras = payload.get("loras", [])
+    if not isinstance(loras, list) or len(loras) > MAX_ADDITIONAL_LORAS:
+        raise ValueError("too_many_additional_loras")
+    seen_lora_ids: set[str] = set(); additional_bytes = 0
+    for entry in loras:
+        if not isinstance(entry, dict) or set(entry) != {"id", "filename", "url", "sha256", "size_bytes"}:
+            raise ValueError("invalid_additional_lora_fields")
+        lora_id = entry["id"]; filename = entry["filename"]; digest = entry["sha256"]; size = entry["size_bytes"]
+        if not isinstance(lora_id, str) or not LORA_ID_RE.fullmatch(lora_id) or lora_id in seen_lora_ids:
+            raise ValueError("invalid_or_duplicate_lora_id")
+        if not isinstance(filename, str) or not LORA_FILENAME_RE.fullmatch(filename) or filename.lower() in {name.lower() for name in seen_names}:
+            raise ValueError("invalid_or_duplicate_lora_filename")
+        if not isinstance(digest, str) or not SHA_RE.fullmatch(digest) or not isinstance(size, int) or size < 1024 or size > MAX_SINGLE_LORA_BYTES:
+            raise ValueError("invalid_lora_hash_or_size")
+        additional_bytes += size
+        if additional_bytes > MAX_ADDITIONAL_LORA_BYTES:
+            raise ValueError("additional_loras_too_large")
+        result.append({
+            "kind": "additional_lora",
+            "role": f"lora:{lora_id}",
+            "state_bucket": "lora_files",
+            "state_key": filename,
+            "lora_id": lora_id,
+            "filename": filename,
+            "url": safe_download_url(entry["url"]),
+            "sha256": digest.lower(),
+            "size_bytes": size,
+            "destination": str(COMFY_DIR / "models" / "loras" / filename),
+        })
+        seen_lora_ids.add(lora_id); seen_names.add(filename)
     return result
 
 
@@ -498,7 +595,16 @@ def stream_model(entry: dict[str, Any]) -> dict[str, Any]:
     destination = Path(entry["destination"]); part = destination.with_name(destination.name + ".part")
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_file() and destination.stat().st_size == entry["size_bytes"] and sha256(destination) == entry["sha256"]:
-        return {"filename": entry["filename"], "status": "verified_existing", "downloaded_bytes": entry["size_bytes"], "size_bytes": entry["size_bytes"], "sha256": entry["sha256"]}
+        if entry["kind"] == "additional_lora":
+            try:
+                validate_safetensors_file(destination)
+            except StageFailure:
+                # A corrupt destination must not poison every later retry.
+                destination.unlink(missing_ok=True)
+            else:
+                return {"filename": entry["filename"], "status": "verified_existing", "downloaded_bytes": entry["size_bytes"], "size_bytes": entry["size_bytes"], "sha256": entry["sha256"]}
+        else:
+            return {"filename": entry["filename"], "status": "verified_existing", "downloaded_bytes": entry["size_bytes"], "size_bytes": entry["size_bytes"], "sha256": entry["sha256"]}
     expected = entry["size_bytes"]; attempts = 0; restarted = False; last: dict[str, Any] = {"http_status": None, "content_length": None, "content_range": None, "hostname": urllib.parse.urlsplit(entry["url"]).hostname or "", "error": None}
     last_progress = -64 * 1024 * 1024; last_write = 0.0
     def state(status: str, offset: int, force: bool = False) -> None:
@@ -506,7 +612,8 @@ def stream_model(entry: dict[str, Any]) -> dict[str, Any]:
         moment = time.monotonic()
         if not force and offset - last_progress < 64 * 1024 * 1024 and moment - last_write < 5: return
         with STATE_LOCK:
-            STATE["models"][entry["role"]] = {"filename": entry["filename"], "status": status, "downloaded_bytes": offset, "size_bytes": expected, "attempt": attempts, "url": redacted_url(entry["url"])}; save_locked()
+            bucket = STATE.setdefault(entry["state_bucket"], {})
+            bucket[entry["state_key"]] = {"filename": entry["filename"], "status": status, "downloaded_bytes": offset, "size_bytes": expected, "attempt": attempts, "url": redacted_url(entry["url"])}; save_locked()
         last_progress, last_write = offset, moment
     def download_request(resume_offset: int) -> urllib.request.Request:
         request = urllib.request.Request(entry["url"], headers={"User-Agent": "ai-video-platform-model-fetch/1", "Accept": "application/octet-stream", "Accept-Encoding": "identity"})
@@ -530,7 +637,19 @@ def stream_model(entry: dict[str, Any]) -> dict[str, Any]:
         if offset == expected:
             state("verifying", offset, True)
             actual = sha256(part)
-            if actual != entry["sha256"]: raise StageFailure(f"model_sha256_mismatch:{entry['filename']}", {"code": "model_sha256_mismatch", "role": entry["role"], "filename": entry["filename"], "expected_sha256": entry["sha256"], "actual_sha256": actual, "byte_size": offset})
+            if actual != entry["sha256"]:
+                part.unlink(missing_ok=True)
+                state("corrupt_discarded", 0, True)
+                raise StageFailure(f"model_sha256_mismatch:{entry['filename']}", {"code": "model_sha256_mismatch", "role": entry["role"], "filename": entry["filename"], "expected_sha256": entry["sha256"], "actual_sha256": actual, "byte_size": offset, "discarded_partial": True})
+            if entry["kind"] == "additional_lora":
+                try:
+                    validate_safetensors_file(part)
+                except StageFailure as error:
+                    part.unlink(missing_ok=True)
+                    state("corrupt_discarded", 0, True)
+                    if isinstance(error, StageFailure):
+                        error.data["discarded_partial"] = True
+                    raise
             os.replace(part, destination); state("verified", offset, True)
             return {"filename": entry["filename"], "status": "verified", "downloaded_bytes": expected, "size_bytes": expected, "sha256": entry["sha256"]}
         if offset > expected:
@@ -566,19 +685,71 @@ def stream_model(entry: dict[str, Any]) -> dict[str, Any]:
     raise StageFailure(f"model_download_incomplete_after_retries:{entry['filename']}", data)
 
 
+def validate_safetensors_file(path: Path) -> dict[str, int]:
+    """Validate the bounded structural header before a dynamic LoRA is installed."""
+    size = path.stat().st_size
+    if size < 10:
+        raise StageFailure("invalid_lora_safetensors", {"code": "invalid_lora_safetensors", "filename": path.name, "reason": "file_too_small", "byte_size": size})
+    with path.open("rb") as handle:
+        raw_length = handle.read(8)
+        header_length = int.from_bytes(raw_length, "little")
+        if header_length < 2 or header_length > MAX_SAFETENSORS_HEADER_BYTES or header_length + 8 > size:
+            raise StageFailure("invalid_lora_safetensors", {"code": "invalid_lora_safetensors", "filename": path.name, "reason": "invalid_header_length", "byte_size": size, "header_bytes": header_length})
+        raw_header = handle.read(header_length)
+    try:
+        header = json.loads(raw_header.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise StageFailure("invalid_lora_safetensors", {"code": "invalid_lora_safetensors", "filename": path.name, "reason": "invalid_header_json", "byte_size": size}) from error
+    if not isinstance(header, dict):
+        raise StageFailure("invalid_lora_safetensors", {"code": "invalid_lora_safetensors", "filename": path.name, "reason": "invalid_header_shape", "byte_size": size})
+    tensor_count = 0
+    data_bytes = size - 8 - header_length
+    for name, descriptor in header.items():
+        if name == "__metadata__":
+            if not isinstance(descriptor, dict):
+                raise StageFailure("invalid_lora_safetensors", {"code": "invalid_lora_safetensors", "filename": path.name, "reason": "invalid_metadata"})
+            continue
+        if (
+            not isinstance(name, str)
+            or not isinstance(descriptor, dict)
+            or not isinstance(descriptor.get("dtype"), str)
+            or not isinstance(descriptor.get("shape"), list)
+            or any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in descriptor["shape"])
+            or not isinstance(descriptor.get("data_offsets"), list)
+            or len(descriptor["data_offsets"]) != 2
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in descriptor["data_offsets"])
+            or descriptor["data_offsets"][0] < 0
+            or descriptor["data_offsets"][0] > descriptor["data_offsets"][1]
+            or descriptor["data_offsets"][1] > data_bytes
+        ):
+            raise StageFailure("invalid_lora_safetensors", {"code": "invalid_lora_safetensors", "filename": path.name, "reason": "invalid_tensor_descriptor"})
+        tensor_count += 1
+    if tensor_count == 0:
+        raise StageFailure("invalid_lora_safetensors", {"code": "invalid_lora_safetensors", "filename": path.name, "reason": "no_tensors"})
+    return {"header_bytes": header_length, "tensor_count": tensor_count}
+
+
 def stage_models(payload: dict[str, Any]) -> dict[str, Any]:
     manifest = validate_manifest(payload)
-    results: dict[str, Any] = {}
+    model_results: dict[str, Any] = {}
+    lora_results: dict[str, Any] = {}
+    with STATE_LOCK:
+        STATE["lora_files"] = {}
+        save_locked()
     for entry in manifest:
         with STATE_LOCK:
-            STATE["models"][entry["role"]] = {"filename": entry["filename"], "status": "queued", "downloaded_bytes": 0, "size_bytes": entry["size_bytes"], "url": redacted_url(entry["url"])}
+            bucket = STATE.setdefault(entry["state_bucket"], {})
+            bucket[entry["state_key"]] = {"filename": entry["filename"], "status": "queued", "downloaded_bytes": 0, "size_bytes": entry["size_bytes"], "url": redacted_url(entry["url"])}
             save_locked()
         result = stream_model(entry)
-        results[entry["role"]] = result
         with STATE_LOCK:
-            STATE["models"][entry["role"]] = result
+            STATE[entry["state_bucket"]][entry["state_key"]] = result
             save_locked()
-    return {"models": results}
+        if entry["kind"] == "base":
+            model_results[entry["role"]] = result
+        else:
+            lora_results[entry["lora_id"]] = result
+    return {"models": model_results, "loras": lora_results}
 
 
 def png_dimensions(data: bytes) -> tuple[int, int]:
@@ -590,9 +761,19 @@ def png_dimensions(data: bytes) -> tuple[int, int]:
 def stage_inference(payload: dict[str, Any]) -> dict[str, Any]:
     task_id = validate_inference_shape(payload)
     with STATE_LOCK:
-        verified_roles = {role for role, value in STATE["models"].items() if value.get("status") in {"verified", "verified_existing"}}
+        verified_roles = {role for role, value in STATE.get("models", {}).items() if value.get("status") in {"verified", "verified_existing"}}
+        verified_lora_files = {filename for filename, value in STATE.get("lora_files", {}).items() if value.get("status") in {"verified", "verified_existing"}}
     if verified_roles != set(APPROVED_MODELS):
         raise RuntimeError("models_not_verified")
+    requested_loras = payload.get("loras")
+    if requested_loras is None:
+        requested_lora_filenames = {APPROVED_MODELS["lora"][0]}
+    else:
+        requested_lora_filenames = {entry["filename"] for entry in requested_loras}
+    builtin_lora = APPROVED_MODELS["lora"][0]
+    missing_loras = sorted(filename for filename in requested_lora_filenames if filename != builtin_lora and filename not in verified_lora_files)
+    if missing_loras:
+        raise StageFailure("requested_loras_not_verified", {"code": "requested_loras_not_verified", "filenames": missing_loras})
     controller_status, controller_health = request_json("http://127.0.0.1:18080/healthz")
     comfy_status, _ = request_json("http://127.0.0.1:8188/system_stats")
     if controller_status != 200 or not isinstance(controller_health, dict) or controller_health.get("controller") != "alive" or comfy_status != 200:
@@ -631,19 +812,42 @@ def stage_inference(payload: dict[str, Any]) -> dict[str, Any]:
     artifact = ARTIFACT_DIR / task_id
     artifact.mkdir(parents=True, exist_ok=True)
     image_path = artifact / "image.png"; image_path.write_bytes(image)
-    metadata = {"task_id": task_id, "width": width, "height": height, "byte_size": len(image), "sha256": sha256(image_path), "generation_duration_seconds": round(time.monotonic() - started, 3), "controller_job_id": job_id, "controller_prompt_id": job.get("prompt_id")}
+    metadata = {"task_id": task_id, "width": width, "height": height, "byte_size": len(image), "sha256": sha256(image_path), "generation_duration_seconds": round(time.monotonic() - started, 3), "controller_job_id": job_id, "controller_prompt_id": job.get("prompt_id"), "negative_prompt_present": bool(payload.get("negative_prompt")), "loras": [{"filename": entry["filename"], "strength": entry["strength"]} for entry in payload.get("loras", [{"filename": builtin_lora, "strength": payload["lora_strength"]}])]}
     (artifact / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return metadata
 
 
 def validate_inference_shape(payload: object) -> str:
-    if not isinstance(payload, dict) or set(payload) != {"task_id", "mode", "prompt", "width", "height", "steps", "cfg", "lora_strength", "seed", "sampler"}:
+    required = {"task_id", "mode", "prompt", "width", "height", "steps", "cfg", "lora_strength", "seed", "sampler"}
+    if not isinstance(payload, dict) or not required.issubset(payload) or not set(payload).issubset(required | {"negative_prompt", "loras"}):
         raise ValueError("invalid_inference_fields")
     task_id = payload.get("task_id")
     if not isinstance(task_id, str) or not UUID_RE.fullmatch(task_id):
         raise ValueError("invalid_task_id")
     if payload.get("mode") != "text_generation" or not isinstance(payload.get("prompt"), str) or len(payload["prompt"]) > 4000:
         raise ValueError("invalid_inference_request")
+    negative_prompt = payload.get("negative_prompt", "")
+    if not isinstance(negative_prompt, str) or len(negative_prompt) > 4000:
+        raise ValueError("invalid_negative_prompt")
+    loras = payload.get("loras")
+    if loras is not None:
+        if not isinstance(loras, list) or len(loras) > MAX_TASK_LORAS:
+            raise ValueError("invalid_inference_loras")
+        seen: set[str] = set()
+        for entry in loras:
+            if not isinstance(entry, dict) or set(entry) != {"filename", "strength"}:
+                raise ValueError("invalid_inference_lora_fields")
+            filename = entry.get("filename"); strength = entry.get("strength")
+            if (
+                not isinstance(filename, str)
+                or not LORA_FILENAME_RE.fullmatch(filename)
+                or filename.lower() in seen
+                or not isinstance(strength, (int, float))
+                or isinstance(strength, bool)
+                or not 0 <= float(strength) <= 1.5
+            ):
+                raise ValueError("invalid_inference_lora")
+            seen.add(filename.lower())
     return task_id
 
 
@@ -743,7 +947,11 @@ def main() -> None:
     parser.add_argument("--token-sha256", required=True)
     parser.add_argument("--project-commit")
     parser.add_argument("--controller-sha256")
+    parser.add_argument("--controller-source-sha256")
+    parser.add_argument("--controller-patch")
     parser.add_argument("--workflow-sha256")
+    parser.add_argument("--workflow-source-sha256")
+    parser.add_argument("--workflow-patch")
     parser.add_argument("--immutable", help="commit:controller_sha256:workflow_sha256")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
@@ -752,9 +960,9 @@ def main() -> None:
         if len(parts) != 3:
             raise SystemExit("immutable_sha256_and_project_commit_required")
         args.project_commit, args.controller_sha256, args.workflow_sha256 = parts
-    if not args.project_commit or not args.controller_sha256 or not args.workflow_sha256 or not COMMIT_RE.fullmatch(args.project_commit) or not SHA_RE.fullmatch(args.controller_sha256) or not SHA_RE.fullmatch(args.workflow_sha256) or not SHA_RE.fullmatch(args.token_sha256):
+    if not args.project_commit or not args.controller_sha256 or not args.controller_source_sha256 or not args.controller_patch or not args.workflow_sha256 or not args.workflow_source_sha256 or not args.workflow_patch or not COMMIT_RE.fullmatch(args.project_commit) or not SHA_RE.fullmatch(args.controller_sha256) or not SHA_RE.fullmatch(args.controller_source_sha256) or not SHA_RE.fullmatch(args.workflow_sha256) or not SHA_RE.fullmatch(args.workflow_source_sha256) or not SHA_RE.fullmatch(args.token_sha256):
         raise SystemExit("immutable_sha256_and_project_commit_required")
-    CONFIG.update({"project_commit": args.project_commit.lower(), "controller_sha256": args.controller_sha256.lower(), "workflow_sha256": args.workflow_sha256.lower()})
+    CONFIG.update({"project_commit": args.project_commit.lower(), "controller_source_sha256": args.controller_source_sha256.lower(), "controller_sha256": args.controller_sha256.lower(), "controller_patch": args.controller_patch, "workflow_source_sha256": args.workflow_source_sha256.lower(), "workflow_sha256": args.workflow_sha256.lower(), "workflow_patch": args.workflow_patch})
     ROOT.mkdir(parents=True, exist_ok=True); LOG_DIR.mkdir(parents=True, exist_ok=True)
     with STATE_LOCK:
         STATE["started_at"] = now(); save_locked()

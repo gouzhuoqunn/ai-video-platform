@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeSync } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
+import { effectiveImageTaskLoras, type ImageTaskLora } from "./image-loras";
 
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256 = /^[a-f0-9]{64}$/i;
@@ -18,6 +19,8 @@ export type LocalArtifactReference = {
 export type ImageArtifactTask = {
   id: string;
   prompt: string;
+  negativePrompt?: string;
+  loras?: ImageTaskLora[];
   mode: string;
   width: number;
   height: number;
@@ -137,13 +140,29 @@ export async function publishLocalImageArtifact(input: {
   const metadata = {
     task_id: taskId,
     prompt: input.task.prompt,
+    negative_prompt: input.task.negativePrompt ?? "",
     mode: input.task.mode,
-    model_filenames: { transformer: "fluxedUpFluxNSFW_102BF16.safetensors", lora: "aidmaNSFWunlock-FLUX-V0.2.safetensors", vae: "ae.safetensors", clip_l: "clip_l.safetensors", t5: "t5xxl_fp8_e4m3fn_scaled.safetensors" },
+    model_filenames: {
+      transformer: "fluxedUpFluxNSFW_102BF16.safetensors",
+      // Keep the legacy singular key for readers of older metadata while the
+      // ordered `loras` list carries the complete multi-LoRA contract.
+      lora: effectiveImageTaskLoras(input.task)[0]?.filename ?? null,
+      loras: effectiveImageTaskLoras(input.task).map((lora) => lora.filename),
+      vae: "ae.safetensors",
+      clip_l: "clip_l.safetensors",
+      t5: "t5xxl_fp8_e4m3fn_scaled.safetensors",
+    },
     width: image.width,
     height: image.height,
     steps: input.task.steps,
     cfg: input.task.cfg,
     lora_strength: input.task.loraStrength,
+    loras: input.task.loras?.filter((lora) => lora.enabled).map((lora) => ({
+      id: lora.id,
+      name: lora.name,
+      filename: lora.filename,
+      strength: lora.strength,
+    })),
     seed: input.task.seed,
     sampler: input.task.sampler,
     png_byte_size: input.png.length,

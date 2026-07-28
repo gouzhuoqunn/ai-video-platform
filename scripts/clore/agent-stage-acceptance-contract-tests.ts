@@ -18,6 +18,21 @@ async function main() {
   assert.equal(evidence.length, 2); assert.equal(evidence[0]?.acceptanceClassification, "response_received"); assert.equal(evidence[0]?.body, null);
   const acceptedEvidence = evidence.at(-1);
   assert.equal(acceptedEvidence?.acceptanceClassification, "accepted"); assert.ok((acceptedEvidence?.responseByteLength ?? 0) > 0); assert.match(String(acceptedEvidence?.bodySha256), /^[a-f0-9]{64}$/); assert.equal(acceptedEvidence?.returnedStageRunId, runId);
+  let asynchronousTombstonePersisted = false;
+  let inferenceFetchObserved = false;
+  await agentPostJson("https://agent.invalid", "token", "/stage/inference", undefined, {
+    stageRunId: runId,
+    onRequested: async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      asynchronousTombstonePersisted = true;
+    },
+    fetchImpl: async () => {
+      assert.equal(asynchronousTombstonePersisted, true, "the durable request tombstone must settle before fetch");
+      inferenceFetchObserved = true;
+      return response(202, JSON.stringify({ accepted: true, state: "accepted", status: "running", stage: "inference", stage_run_id: runId }));
+    },
+  });
+  assert.equal(inferenceFetchObserved, true);
   await rejects(response(202, JSON.stringify({ accepted: true, state: "accepted", stage: "environment" })), "wrong_schema");
   await rejects(response(202, JSON.stringify({ accepted: true, state: "accepted", status: "running", stage: "environment", stage_run_id: "22222222-2222-4222-8222-222222222222" })), "wrong_schema");
   await rejects(response(200, "<html>proxy</html>", "text/html"), "html");
@@ -28,6 +43,6 @@ async function main() {
   });
   assert.deepEqual(assertCallerAgentStageAcceptanceContract({ agentContract: "stage-acceptance-v2", acceptedStageResponseFields: ["accepted", "state", "status", "stage", "stage_run_id"] }), { callerContract: "stage-acceptance-v2", requiredResponseFields: ["accepted", "state", "status", "stage", "stage_run_id"] });
   assert.throws(() => assertCallerAgentStageAcceptanceContract({ agentContract: "v1", acceptedStageResponseFields: [] }), /contract_mismatch/);
-  console.log(JSON.stringify({ ok: true, callerOwnedStageRunId: true, matchingIdRequired: true, htmlProxyRejected: true, providerMutationCount: 0 }));
+  console.log(JSON.stringify({ ok: true, callerOwnedStageRunId: true, matchingIdRequired: true, requestTombstoneSettlesBeforeFetch: true, htmlProxyRejected: true, providerMutationCount: 0 }));
 }
 void main();

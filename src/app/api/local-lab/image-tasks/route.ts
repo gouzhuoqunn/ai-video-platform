@@ -1,23 +1,28 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { NextResponse, type NextRequest } from "next/server";
 import { FLUX_IMAGE_STACK, IMAGE_RESOLUTION_5090_MAX, IMAGE_RESOLUTION_MIN, IMAGE_RESOLUTION_STEP, classifyImageGpu, type ImageGpuClass, type ImageTaskSettings } from "@/lib/image-generation/flux-stack";
 import { finiteNumber } from "@/lib/image-generation/formatters";
+import { normalizeNegativePrompt } from "@/lib/image-generation/image-loras";
 import { confirmImageTaskGroup, deletePendingImageTaskGroup, retryFailedImageTaskGroup, unconfirmImageTaskGroup } from "@/lib/image-generation/image-task-groups";
+import { AMBIGUOUS_INFERENCE_RETRY_CLASSIFICATION, AMBIGUOUS_INFERENCE_RETRY_MESSAGE, requiresManualInferenceRecovery } from "@/lib/image-generation/image-task-retry-policy";
+import { activeOrderMatchesRunner, projectLiveReceiptStage, projectRentalTiming } from "@/lib/image-generation/live-runner-display";
 import { imageLibraryRoot } from "@/lib/image-generation/local-image-artifacts";
 import { listImageTasks, mutateImageTasks, type LocalImageTask } from "@/lib/image-generation/local-image-task-store";
+import { snapshotTaskLoras } from "@/lib/image-generation/local-lora-registry";
 import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/route-guard";
 import { COMFY_RUNTIME_IMAGE, loadCloreConfig } from "../../../../../scripts/clore/config";
 import { cloreRequest } from "../../../../../scripts/clore/client";
 import { loadCloreExecutionConfig } from "../../../../../scripts/clore/execution-config";
 import { readLiveOrdersSummary, type CloreOrderSummary } from "../../../../../scripts/clore/live";
 import { ACTIVE_ORDER_PATH, LEGACY_ORDER_CREATE_LOCK_PATH, ORDER_CREATE_LOCK_PATH, clearActiveOrder, clearOrderCreateLocks, readActiveOrder } from "../../../../../scripts/clore/order-state";
-import { finalSanitizedLogLines, imageExecutorReadinessForGpuClass, processExists, STALE_RUNNER_NO_ORDER_MESSAGE } from "../../../../../scripts/image-executor/readiness";
+import { finalSanitizedLogLines, imageExecutorReadinessForGpuClass, processExists, sanitizeRunnerLog, STALE_RUNNER_NO_ORDER_MESSAGE } from "../../../../../scripts/image-executor/readiness";
 import { assertRtx4090GoldenDeploymentProfile, rtx4090GoldenDeploymentFingerprint } from "../../../../../scripts/image-executor/rtx4090-golden-deployment-profile";
 import { planExecutableImageBatch, planImageSession } from "../../../../../scripts/clore/image-session";
+import { readLocalWatchdogArmState } from "../../../../../scripts/clore/watchdog-io";
 import { projectRunnerStatus } from "@/lib/image-generation/runner-status-projection";
 
 export const dynamic = "force-dynamic";
@@ -116,6 +121,14 @@ const DATA_DIR = path.join(process.cwd(), ".secrets", "image-studio");
 const RUNNER_PATH = path.join(DATA_DIR, "runner-session.json");
 const RUNNER_LOG_PATH = path.join(DATA_DIR, "image-runner.log");
 const RUNNER_START_LOCK_PATH = path.join(DATA_DIR, "runner-start.lock");
+const LIVE_SESSION_RECEIPT_PATH = path.join(process.cwd(), ".secrets", "clore-image-session-receipt.json");
+const IMAGE_SESSION_DIAGNOSTICS_ROOT = path.join(process.cwd(), ".secrets", "diagnostics", "image-sessions");
+const CURRENT_LOG_SOURCE_MAX_BYTES = 192 * 1024;
+const CURRENT_LOG_EXPORT_MAX_BYTES = 512 * 1024;
+const CURRENT_LOG_EXPORT_MAX_LINES = 2_000;
+const CURRENT_RECEIPT_MAX_BYTES = 1024 * 1024;
+const RUNNER_LOG_MAX_BYTES = 2 * 1024 * 1024;
+const RUNNER_LOG_RETAIN_BYTES = 512 * 1024;
 const PREFERENCES_PATH = path.join(DATA_DIR, "preferences.json");
 const RESTORE_MANIFEST_PATH = path.join(DATA_DIR, "fluxed-up-10.2-rtx4090-text.restore.json");
 const SOURCE_MANIFEST_PATH = path.join(process.cwd(), "comfy-runtime", "image-source-artifacts.json");
@@ -364,7 +377,26 @@ function appendRunnerLog(kind: "stdout" | "stderr" | "event", text: string) {
   mkdirSync(DATA_DIR, { recursive: true });
   const lines = finalSanitizedLogLines(text, 50);
   if (!lines.length) return;
-  appendFileSync(RUNNER_LOG_PATH, lines.map((line) => JSON.stringify({ at: new Date().toISOString(), stream: kind, line })).join("\n") + "\n", "utf8");
+  const entry = lines.map((line) => JSON.stringify({ at: new Date().toISOString(), stream: kind, line })).join("\n") + "\n";
+  try {
+    const size = existsSync(RUNNER_LOG_PATH) ? statSync(RUNNER_LOG_PATH).size : 0;
+    if (size + Buffer.byteLength(entry, "utf8") > RUNNER_LOG_MAX_BYTES) {
+      const start = Math.max(0, size - RUNNER_LOG_RETAIN_BYTES);
+      const buffer = Buffer.alloc(size - start);
+      const descriptor = openSync(RUNNER_LOG_PATH, "r");
+      try {
+        if (buffer.length) readSync(descriptor, buffer, 0, buffer.length, start);
+      } finally {
+        closeSync(descriptor);
+      }
+      const tail = buffer.toString("utf8");
+      const firstNewline = start > 0 ? tail.indexOf("\n") : -1;
+      writeFileSync(RUNNER_LOG_PATH, firstNewline >= 0 ? tail.slice(firstNewline + 1) : tail, "utf8");
+    }
+  } catch {
+    // A rotation failure must not hide the current bounded diagnostic entry.
+  }
+  appendFileSync(RUNNER_LOG_PATH, entry, "utf8");
 }
 
 async function activeCloreOrders() {
@@ -422,7 +454,23 @@ function returnFrozenTasksToWaiting(runner: ImageRunnerSession) {
   const ids = new Set(runner.frozenTaskIds);
   if (!ids.size) return;
   const now = new Date().toISOString();
-  updateTasks((tasks) => tasks.map((task) => (ids.has(task.id) && task.status === "generating" ? { ...task, status: "waiting_for_gpu", updatedAt: now } : task)));
+  updateTasks((tasks) => tasks.map((task) => {
+    if (!ids.has(task.id) || task.status !== "generating") return task;
+    if (requiresManualInferenceRecovery(task)) {
+      return {
+        ...task,
+        status: "failed",
+        updatedAt: now,
+        error: {
+          message: AMBIGUOUS_INFERENCE_RETRY_MESSAGE,
+          at: now,
+          retryable: false,
+          classification: AMBIGUOUS_INFERENCE_RETRY_CLASSIFICATION,
+        },
+      };
+    }
+    return { ...task, status: "waiting_for_gpu", updatedAt: now };
+  }));
 }
 
 function clearLocalActiveImageState() {
@@ -544,6 +592,311 @@ async function reconcileStaleRunner(runner: ImageRunnerSession) {
   return readRunner();
 }
 
+function runnerDisplayIdentity(runner: ImageRunnerSession) {
+  return {
+    state: runner.state,
+    attemptId: runner.createAttempt?.id ?? null,
+    orderId: runner.host?.orderId ?? null,
+    serverId: runner.host?.serverId ?? null,
+    candidateRole: runner.host?.candidateRole ?? null,
+    frozenTaskIds: runner.frozenTaskIds,
+  };
+}
+
+function activeOrderDisplayIdentity(activeOrder: NonNullable<ReturnType<typeof activeStateLooksImageOrder>>) {
+  return {
+    orderId: activeOrder.order_id,
+    serverId: activeOrder.server_id,
+    createdAt: activeOrder.created_at,
+    createAttemptId: activeOrder.create_attempt_id ?? null,
+  };
+}
+
+function projectConfirmedActiveOrder(
+  runner: ImageRunnerSession,
+  activeOrder: ReturnType<typeof activeStateLooksImageOrder>,
+) {
+  if (!activeOrder || !runner.host) return runner;
+  if (!activeOrderMatchesRunner(runnerDisplayIdentity(runner), activeOrderDisplayIdentity(activeOrder))) return runner;
+  return {
+    ...runner,
+    host: {
+      ...runner.host,
+      orderId: activeOrder.order_id,
+      serverId: activeOrder.server_id,
+      orderStatus: activeOrder.status,
+      candidateRole: "rented_host" as const,
+    },
+  };
+}
+
+function projectLiveReceiptRunner(runner: ImageRunnerSession) {
+  const projection = projectLiveReceiptStage(
+    runnerDisplayIdentity(runner),
+    readJson<unknown>(LIVE_SESSION_RECEIPT_PATH, null),
+  );
+  if (!projection || !runner.host) return runner;
+  return {
+    ...runner,
+    stage: projection.stage,
+    currentTaskIndex: projection.currentTaskIndex,
+    host: { ...runner.host, message: projection.stage },
+  };
+}
+
+function projectedRentalTiming(
+  runner: ImageRunnerSession,
+  activeOrder: ReturnType<typeof activeStateLooksImageOrder>,
+) {
+  if (!activeOrder) return null;
+  let watchdog: ReturnType<typeof readLocalWatchdogArmState> = null;
+  try {
+    watchdog = readLocalWatchdogArmState();
+  } catch {
+    // Billing time remains visible from the exact active order, but an invalid
+    // watchdog must never be presented as a trustworthy cancellation deadline.
+  }
+  return projectRentalTiming({
+    runner: runnerDisplayIdentity(runner),
+    activeOrder: activeOrderDisplayIdentity(activeOrder),
+    watchdog: watchdog
+      ? {
+          armed: watchdog.armed,
+          serverId: watchdog.serverId,
+          drainingAt: watchdog.drainingAt,
+          hardDeadlineAt: watchdog.hardDeadlineAt,
+        }
+      : null,
+  });
+}
+
+type CurrentLogSource = {
+  label: string;
+  text: string;
+  truncated: boolean;
+};
+
+function readBoundedSanitizedLog(filePath: string, label: string): CurrentLogSource | null {
+  if (!existsSync(filePath)) return null;
+  try {
+    const metadata = lstatSync(filePath);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) return null;
+    const size = statSync(filePath).size;
+    const start = Math.max(0, size - CURRENT_LOG_SOURCE_MAX_BYTES);
+    const length = size - start;
+    const buffer = Buffer.alloc(length);
+    const descriptor = openSync(filePath, "r");
+    try {
+      if (length) readSync(descriptor, buffer, 0, length, start);
+    } finally {
+      closeSync(descriptor);
+    }
+    let text = buffer.toString("utf8");
+    if (start > 0) {
+      const firstNewline = text.indexOf("\n");
+      text = firstNewline >= 0 ? text.slice(firstNewline + 1) : "";
+    }
+    return { label, text: sanitizeRunnerLog(text).trim(), truncated: start > 0 };
+  } catch {
+    return null;
+  }
+}
+
+function currentSessionLauncherLog(source: CurrentLogSource, startedAt: string | null) {
+  const startedAtMs = startedAt ? Date.parse(startedAt) : Number.NaN;
+  if (!Number.isFinite(startedAtMs)) return null;
+  const lines = source.text.split(/\r?\n/).filter((line) => {
+    try {
+      const entry = JSON.parse(line) as { at?: unknown };
+      const atMs = typeof entry.at === "string" ? Date.parse(entry.at) : Number.NaN;
+      return Number.isFinite(atMs) && atMs >= startedAtMs;
+    } catch {
+      return false;
+    }
+  });
+  return { ...source, text: lines.join("\n") };
+}
+
+function logRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function boundedReceiptEvidence(value: unknown, maxLength: number) {
+  if (value === null || value === undefined) return null;
+  let text: string;
+  try {
+    text = typeof value === "string" ? value : JSON.stringify(value);
+  } catch {
+    return "<unserializable>";
+  }
+  const sanitized = sanitizeRunnerLog(text);
+  return sanitized.length > maxLength ? `${sanitized.slice(0, maxLength)}…<truncated>` : sanitized;
+}
+
+function currentReceiptLogSummary(runner: ImageRunnerSession, attemptId: string | null) {
+  if (!attemptId) return null;
+  if (!existsSync(LIVE_SESSION_RECEIPT_PATH)) return null;
+  let receipt: Record<string, unknown> | null = null;
+  try {
+    const metadata = lstatSync(LIVE_SESSION_RECEIPT_PATH);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) return { classification: "receipt_not_regular_file" };
+    if (metadata.size > CURRENT_RECEIPT_MAX_BYTES) {
+      return { classification: "receipt_oversized", byteLength: metadata.size, maximumBytes: CURRENT_RECEIPT_MAX_BYTES };
+    }
+    receipt = JSON.parse(readFileSync(LIVE_SESSION_RECEIPT_PATH, "utf8")) as Record<string, unknown>;
+  } catch {
+    return { classification: "receipt_unreadable" };
+  }
+  if (!receipt || receipt.sessionId !== attemptId) return null;
+  if (runner.host?.orderId && receipt.orderId !== runner.host.orderId) return null;
+  if (runner.host?.serverId && receipt.serverId !== runner.host.serverId) return null;
+  const selectedTaskIds = Array.isArray(receipt.selectedTaskIds) ? receipt.selectedTaskIds : [];
+  if (
+    selectedTaskIds.length !== runner.frozenTaskIds.length
+    || selectedTaskIds.some((taskId, index) => taskId !== runner.frozenTaskIds[index])
+  ) return null;
+  const receiptTasks = logRecord(receipt.tasks);
+  const projectedTaskIds = runner.frozenTaskIds.slice(0, 16);
+  const tasks = receiptTasks
+    ? Object.fromEntries(projectedTaskIds.map((taskId) => {
+        const value = receiptTasks[taskId];
+        const task = logRecord(value);
+        return [taskId, task
+          ? {
+              terminal: boundedReceiptEvidence(task.terminal, 128),
+              inferenceState: boundedReceiptEvidence(task.inferenceState, 128),
+              stageRunId: boundedReceiptEvidence(task.stageRunId, 128),
+              acceptedHttpStatus: boundedReceiptEvidence(task.acceptedHttpStatus, 32),
+              controllerPromptId: boundedReceiptEvidence(task.controllerPromptId, 128),
+              terminalError: boundedReceiptEvidence(task.terminalError, 2_000),
+            }
+          : null];
+      }))
+    : null;
+  const timestampRecord = logRecord(receipt.timestamps);
+  const timestamps = timestampRecord
+    ? Object.fromEntries(Object.entries(timestampRecord)
+        .filter(([key, value]) => /^[A-Za-z0-9_.:-]{1,80}$/.test(key) && typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value)))
+        .slice(0, 100))
+    : null;
+  return {
+    sessionId: boundedReceiptEvidence(receipt.sessionId, 128),
+    sessionState: boundedReceiptEvidence(receipt.sessionState, 128),
+    orderId: boundedReceiptEvidence(receipt.orderId, 128),
+    serverId: boundedReceiptEvidence(receipt.serverId, 128),
+    currentRemoteStage: boundedReceiptEvidence(receipt.currentRemoteStage, 128),
+    currentStageRunId: boundedReceiptEvidence(receipt.currentStageRunId, 128),
+    currentTaskId: boundedReceiptEvidence(receipt.currentTaskId, 128),
+    modelStage: boundedReceiptEvidence(receipt.modelStage, 4_000),
+    completedCount: boundedReceiptEvidence(receipt.completedCount, 32),
+    failedCount: boundedReceiptEvidence(receipt.failedCount, 32),
+    cancellationState: boundedReceiptEvidence(receipt.cancellationState, 1_000),
+    cleanupEvidence: boundedReceiptEvidence(receipt.cleanupEvidence, 6_000),
+    firstError: boundedReceiptEvidence(receipt.firstError, 3_000),
+    agentAcceptanceFailure: boundedReceiptEvidence(receipt.agentAcceptanceFailure, 5_000),
+    timestamps,
+    receiptProjectionTruncated: runner.frozenTaskIds.length > projectedTaskIds.length,
+    tasks,
+  };
+}
+
+function capCurrentLogExport(value: string) {
+  let truncated = false;
+  let lines = value.split(/\r?\n/);
+  if (lines.length > CURRENT_LOG_EXPORT_MAX_LINES) {
+    lines = [
+      ...lines.slice(0, 120),
+      "[...中间日志已截断...]",
+      ...lines.slice(-(CURRENT_LOG_EXPORT_MAX_LINES - 121)),
+    ];
+    truncated = true;
+  }
+  let text = lines.join("\n");
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length > CURRENT_LOG_EXPORT_MAX_BYTES) {
+    const marker = Buffer.from("\n[...中间日志已截断...]\n", "utf8");
+    const headBytes = 64 * 1024;
+    const tailBytes = CURRENT_LOG_EXPORT_MAX_BYTES - headBytes - marker.length;
+    let head = bytes.subarray(0, headBytes).toString("utf8");
+    let tail = bytes.subarray(bytes.length - tailBytes).toString("utf8");
+    const headLastNewline = head.lastIndexOf("\n");
+    const tailFirstNewline = tail.indexOf("\n");
+    if (headLastNewline >= 0) head = head.slice(0, headLastNewline);
+    if (tailFirstNewline >= 0) tail = tail.slice(tailFirstNewline + 1);
+    text = `${head}${marker.toString("utf8")}${tail}`;
+    truncated = true;
+  }
+  return { text, truncated };
+}
+
+function currentStudioLogExport() {
+  const runner = readRunner();
+  const attemptId = runner.createAttempt?.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(runner.createAttempt.id)
+    ? runner.createAttempt.id
+    : null;
+  const sources: CurrentLogSource[] = [];
+  const workerLog = attemptId
+    ? readBoundedSanitizedLog(path.join(IMAGE_SESSION_DIAGNOSTICS_ROOT, attemptId, "worker.log"), "当前会话 Worker 日志")
+    : null;
+  if (workerLog) sources.push(workerLog);
+  const launcherLog = readBoundedSanitizedLog(RUNNER_LOG_PATH, "Studio 启动器日志");
+  const sessionLauncherLog = launcherLog ? currentSessionLauncherLog(launcherLog, runner.startedAt) : null;
+  if (sessionLauncherLog) sources.push(sessionLauncherLog);
+  const receipt = currentReceiptLogSummary(runner, attemptId);
+  const statusProjection = projectRunnerStatus(runner, {
+    pidAlive: processExists(runner.pid),
+    activeOrder: Boolean(activeStateLooksImageOrder()),
+    createLock: existsSync(ORDER_CREATE_LOCK_PATH) || existsSync(LEGACY_ORDER_CREATE_LOCK_PATH) || existsSync(RUNNER_START_LOCK_PATH),
+  });
+  const header = {
+    generatedAt: new Date().toISOString(),
+    sanitized: true,
+    runner: {
+      state: runner.state,
+      stage: runner.stage,
+      startedAt: runner.startedAt,
+      updatedAt: runner.updatedAt,
+      attemptId,
+      pid: runner.pid ?? null,
+      pidAlive: processExists(runner.pid),
+      orderId: runner.host?.orderId ?? null,
+      serverId: runner.host?.serverId ?? null,
+      error: runner.error
+        ? {
+            stage: runner.error.stage,
+            classification: statusProjection.error?.classification ?? runner.error.classification ?? null,
+            message: statusProjection.error?.displayMessage ?? "运行失败，详细内部响应已脱敏。",
+            at: runner.error.at,
+          }
+        : null,
+    },
+    receipt,
+  };
+  const sections = [
+    "# Image Studio 当前会话诊断日志",
+    "",
+    "## 状态摘要",
+    JSON.stringify(header, null, 2),
+    ...sources.flatMap((source) => [
+      "",
+      `## ${source.label}${source.truncated ? "（已截取最后 192 KiB）" : ""}`,
+      source.text || "(暂无日志内容)",
+    ]),
+  ];
+  const capped = capCurrentLogExport(sanitizeRunnerLog(sections.join("\n")).trim());
+  return {
+    filename: `image-studio-${attemptId ?? "current"}.log`,
+    generatedAt: header.generatedAt,
+    text: capped.text,
+    lineCount: capped.text ? capped.text.split(/\r?\n/).length : 0,
+    truncated: capped.truncated || sources.some((source) => source.truncated),
+    sanitized: true,
+    sourceLabels: sources.map((source) => source.label),
+  };
+}
+
 async function responsePayload(extra: Record<string, unknown> = {}) {
   const readiness = {
     rtx4090: readinessForGpuClass("rtx4090"),
@@ -552,16 +905,24 @@ async function responsePayload(extra: Record<string, unknown> = {}) {
   // Status projection is deliberately read-only. Stale-process/provider
   // reconciliation is performed only inside an explicit mutation such as a
   // guarded start or cancel request, never by GET polling.
-  const runner = readRunner();
+  const activeOrder = activeStateLooksImageOrder();
+  const runner = projectLiveReceiptRunner(projectConfirmedActiveOrder(readRunner(), activeOrder));
   const createLockPresent = existsSync(ORDER_CREATE_LOCK_PATH) || existsSync(LEGACY_ORDER_CREATE_LOCK_PATH) || existsSync(RUNNER_START_LOCK_PATH);
   const display = projectRunnerStatus(runner, {
     pidAlive: processExists(runner.pid),
     // A terminal host/order field is retained as historical evidence.  Billing
     // state comes only from the active-order record reconciled against Clore.
-    activeOrder: Boolean(activeStateLooksImageOrder()),
+    activeOrder: Boolean(activeOrder),
     createLock: createLockPresent,
   });
   const tasks = readTasks();
+  const progressRunner = display.error?.historical
+    ? { ...runner, host: null, stage: display.error.displayMessage }
+    : runner;
+  const blocker = terminalRunnerState(runner.state)
+    ? (readiness.rtx4090.ready ? display.blocker : readiness.rtx4090.blocker)
+    : display.blocker;
+  const progress = projectRunnerProgress(progressRunner);
   return {
     tasks,
     executableBatches: {
@@ -574,8 +935,11 @@ async function responsePayload(extra: Record<string, unknown> = {}) {
       // a current rented host or a reusable marketplace selection.
       host: display.error?.historical ? null : runner.host,
       error: display.error,
-      progress: projectRunnerProgress(display.error?.historical ? { ...runner, host: null } : runner),
-      blocker: terminalRunnerState(runner.state) ? (readiness.rtx4090.ready ? display.blocker : readiness.rtx4090.blocker) : display.blocker,
+      progress: blocker
+        ? { ...progress, displayMessage: display.error?.displayMessage ?? blocker, isBlocking: true }
+        : progress,
+      rentalTiming: projectedRentalTiming(runner, activeOrder),
+      blocker,
     },
     executionReady: readiness.rtx4090.ready,
     executionReadiness: {
@@ -612,6 +976,8 @@ function imageDimension(value: unknown) {
 
 function taskFrom(input: Record<string, unknown>): ImageTask {
   const prompt = String(input.prompt ?? "").trim();
+  const negativePrompt = normalizeNegativePrompt(input.negativePrompt);
+  const loras = snapshotTaskLoras(input.loras);
   const width = imageDimension(input.width);
   const height = imageDimension(input.height);
   const steps = Number(input.steps);
@@ -648,6 +1014,8 @@ function taskFrom(input: Record<string, unknown>): ImageTask {
     seed,
     mode: referenceImage ? "kontext_edit" : "text_generation",
     prompt,
+    negativePrompt,
+    ...(loras === undefined ? {} : { loras }),
     referenceImage,
     steps,
     loraStrength,
@@ -720,6 +1088,7 @@ function regenerateGroupedTasks(input: Record<string, unknown>) {
   const requestedCount = positiveSafeInteger(input.requestedCount);
   const requestedGroupId = String(input.groupId ?? "");
   if (!requestedGroupId) throw new Error("invalid_group_id");
+  if (typeof input.prompt !== "string") throw new Error("invalid_image_task");
   return mutateImageTasks<{ groupId: string; createdTaskIds: string[]; tasks: ImageTask[] }>((current) => {
     const tasks = current as ImageTask[];
     const source = tasks.filter((task) => groupIdentity(task) === requestedGroupId);
@@ -727,10 +1096,10 @@ function regenerateGroupedTasks(input: Record<string, unknown>) {
     const origin = source[0];
     const existingTotal = Math.max(source.length, ...source.map((task) => Math.max(Number.isSafeInteger(task.groupIndex) ? task.groupIndex! : 0, Number.isSafeInteger(task.groupRequestedCount) ? task.groupRequestedCount! : 0)));
     const total = existingTotal + requestedCount;
-    const explicit = source.filter((task) => task.groupId === requestedGroupId).map((task) => ({ ...task, groupRequestedCount: total }));
-    const retained = tasks.map((task) => explicit.find((updated) => updated.id === task.id) ?? task);
     const childInput: Record<string, unknown> = {
-      prompt: origin.prompt,
+      prompt: input.prompt,
+      negativePrompt: origin.negativePrompt ?? "",
+      ...(origin.loras === undefined ? {} : { loras: structuredClone(origin.loras) }),
       referenceImage: origin.referenceImage,
       width: origin.width,
       height: origin.height,
@@ -740,7 +1109,7 @@ function regenerateGroupedTasks(input: Record<string, unknown>) {
       sampler: origin.sampler,
     };
     const children = createGroupChildren(childInput, requestedCount, requestedGroupId, existingTotal);
-    const next = [...children.map((task) => ({ ...task, groupRequestedCount: total })), ...retained];
+    const next = [...children.map((task) => ({ ...task, groupRequestedCount: total })), ...tasks];
     return { tasks: next, value: { groupId: requestedGroupId, createdTaskIds: children.map((task) => task.id), tasks: next } };
   });
 }
@@ -843,7 +1212,11 @@ async function cancelCurrentImageBatch() {
 
 export async function GET(request: NextRequest) {
   const guard = guardLocalLabRequest(request);
-  return guard ?? NextResponse.json(await responsePayload(), { headers: { "cache-control": "no-store" } });
+  if (guard) return guard;
+  const payload = request.nextUrl.searchParams.get("view") === "logs"
+    ? { logs: currentStudioLogExport() }
+    : await responsePayload();
+  return NextResponse.json(payload, { headers: { "cache-control": "no-store" } });
 }
 
 export async function POST(request: NextRequest) {
@@ -1046,7 +1419,8 @@ export async function POST(request: NextRequest) {
           current.createAttempt?.id === attemptId &&
           (current.pid === null || current.pid === child.pid);
         if (!terminalRunnerState(current.state) && supervisorDidNotPublishWorker) {
-          const stderr = existsSync(RUNNER_LOG_PATH) ? finalSanitizedLogLines(readFileSync(RUNNER_LOG_PATH, "utf8"), 8).join("\n") : "";
+          const boundedRunnerLog = readBoundedSanitizedLog(RUNNER_LOG_PATH, "Studio 启动器日志");
+          const stderr = boundedRunnerLog ? finalSanitizedLogLines(boundedRunnerLog.text, 8).join("\n") : "";
           saveRunner({
             ...current,
             state: "failed",
@@ -1069,16 +1443,41 @@ export async function POST(request: NextRequest) {
 
     const id = String(body.id ?? "");
     if (!tasks.some((task) => task.id === id)) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
+    if (!["delete", "confirm", "retry"].includes(action)) return NextResponse.json({ error: "invalid_action" }, { status: 400 });
     const updatedAt = new Date().toISOString();
-    if (action === "delete") tasks = tasks.filter((task) => task.id !== id);
-    else if (action === "confirm") tasks = tasks.map((task) => (task.id === id ? { ...task, status: "waiting_for_gpu", updatedAt } : task));
-    else if (action === "retry") tasks = tasks.map((task) => (task.id === id ? { ...task, status: "pending_confirmation", attempts: task.attempts + 1, updatedAt } : task));
-    else return NextResponse.json({ error: "invalid_action" }, { status: 400 });
-    tasks = updateTasks(() => tasks);
+    tasks = mutateImageTasks<ImageTask[]>((current) => {
+      const imageTasks = current as ImageTask[];
+      const selectedTask = imageTasks.find((task) => task.id === id);
+      if (!selectedTask) throw new Error("task_not_found");
+      if (requiresManualInferenceRecovery(selectedTask)) {
+        throw new Error("图片生成请求可能已经提交但结果未确认，为避免重复生成，已禁止确认、重试或删除该任务。");
+      }
+      if (action === "delete") {
+        if (selectedTask.status !== "pending_confirmation" || selectedTask.localClaim || selectedTask.result) {
+          throw new Error("任务状态已变化，只能删除尚未确认的任务。");
+        }
+        const next = imageTasks.filter((task) => task.id !== id);
+        return { tasks: next, value: next };
+      }
+      if (action === "confirm") {
+        if (selectedTask.status !== "pending_confirmation" || selectedTask.localClaim || selectedTask.result) {
+          throw new Error("任务状态已变化，只能确认尚未确认的任务。");
+        }
+        const next = imageTasks.map((task) => task.id === id ? { ...task, status: "waiting_for_gpu" as const, updatedAt } : task);
+        return { tasks: next, value: next };
+      }
+      if (selectedTask.status !== "failed" || selectedTask.localClaim || selectedTask.result || selectedTask.error?.retryable !== true) {
+        throw new Error("任务状态已变化，只能重试明确标记为可重试的失败任务。");
+      }
+      const next = imageTasks.map((task) => task.id === id
+        ? { ...task, status: "pending_confirmation" as const, attempts: Number(task.attempts ?? 0) + 1, updatedAt, error: undefined }
+        : task);
+      return { tasks: next, value: next };
+    });
     return NextResponse.json(await responsePayload());
   } catch (error) {
     const message = error instanceof Error ? error.message : "image_task_failed";
-    if (["create", "create_group", "confirm_group", "cancel_group", "retry_failed_group", "unconfirm_group", "regenerate_group"].includes(action)) {
+    if (["create", "create_group", "confirm_group", "cancel_group", "retry_failed_group", "unconfirm_group", "regenerate_group", "confirm", "retry", "delete"].includes(action)) {
       return NextResponse.json({ error: message, ...(await responsePayload()) }, { status: 400 });
     }
     const runner = readRunner();

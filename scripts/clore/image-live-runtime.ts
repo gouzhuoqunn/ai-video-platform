@@ -2,8 +2,9 @@
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
-import { claimImageTask, failImageTask } from "../../src/lib/image-generation/local-image-task-store";
+import { claimImageTask, failImageTask, markImageTaskInferenceRetryBlocked } from "../../src/lib/image-generation/local-image-task-store";
 import { type LocalArtifactReference } from "../../src/lib/image-generation/local-image-artifacts";
+import { effectiveImageTaskLoras } from "../../src/lib/image-generation/image-loras";
 import { loadCloreConfig } from "./config";
 import { cloreRequest, CloreApiError, sleep } from "./client";
 import { MarketplaceReadError, readLiveMarketplaceOutcome, readLiveOrdersSummary, readWalletSummary, type CloreOrderSummary, type MarketplaceReadEvidence } from "./live";
@@ -13,7 +14,7 @@ import { createSessionNonce, isLocalWatchdogTaskInstalled, writeLocalWatchdogArm
 import { agentGetJsonWithRetry, agentHealthResponse } from "./agent-get-transport";
 import { clearTemporaryDeploymentDeny, recordDeploymentFailure, recordDeploymentSuccess, recordTemporaryDeploymentDeny } from "./deployment-host-blacklist";
 import { agentPostJson, assertCallerAgentStageAcceptanceContract, buildPublicAgentBootstrap, createOrderWithRateLimit, getArtifactMetadataWithRetry, persistAndFinalizeExactLocalTask, pollInferenceStage, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, waitForStage, type AcceptedStage, type AgentStageAcceptanceEvidence, type EligibleImageTask } from "./run-image-e2e";
-import { toAgentModelManifest, verifyFiveImageModelSources } from "./image-model-preflight";
+import { toAgentModelManifest, verifyAdditionalTaskLoraSources, verifyFiveImageModelSources, type AgentAdditionalLoraEntry, type AgentModelManifest } from "./image-model-preflight";
 import { ensureLocalUi, verifyImageUi } from "./image-e2e-ui";
 import { IMAGE_SESSION_LIMITS, planImageSession, type ImageSessionPlan } from "./image-session";
 import type { ImageGpuClass } from "../../src/lib/image-generation/flux-stack";
@@ -27,7 +28,7 @@ import { resilientCreateOrder, type ResilientCreateAttempt, type ResilientCreate
 import { acquireOrderCreateLock, clearActiveOrder, readActiveOrder, writeActiveOrder, type ActiveCloreOrder } from "./order-state";
 
 export type ImmutableRuntime = { commit: string; agentSourceSha256: string; agentSha256: string; controllerSha256: string; workflowSha256: string };
-export type LiveSessionOrder = { orderId: string; endpoint: string; hostname: string; serverId: string; hourlyUsd: number; startingBalanceUsd: number; plan: ImageSessionPlan; token: string; tokenSha256: string; hardDeadlineAt: string; deploymentProfileFingerprint: string };
+export type LiveSessionOrder = { orderId: string; endpoint: string; hostname: string; serverId: string; hourlyUsd: number; startingBalanceUsd: number; plan: ImageSessionPlan; token: string; tokenSha256: string; hardDeadlineAt: string; deploymentProfileFingerprint: string; modelManifest?: AgentModelManifest };
 export type OwnedSessionOrder = Pick<LiveSessionOrder, "orderId" | "serverId" | "hourlyUsd" | "startingBalanceUsd" | "hardDeadlineAt" | "deploymentProfileFingerprint">;
 export type StageTerminal = { stageRunId: string; status: "succeeded" | "failed"; error?: string; data?: Record<string, unknown> };
 export type CandidateAttemptEvent = { attempt: number; serverId: string; hourlyUsd: number | null; event: "selected" | "candidate_already_rented" | "candidate_failed" | "order_created"; classification: string | null; marketplaceRefreshedAt: string; logicalAttemptId?: string; requestAttempts?: number };
@@ -42,6 +43,31 @@ export const MARKET_REFRESH_INTERVAL_MS = 20_000;
 export const MARKET_WAIT_TIMEOUT_MS = 30 * 60_000;
 export const NO_COMPLIANT_RTX4090_CANDIDATE_MESSAGE = "当前符合价格和配置要求的 RTX 4090 已被租用，请稍后重试。";
 const SESSION_SECRET_ROOT = path.join(process.cwd(), ".secrets", "diagnostics", "image-sessions");
+
+async function fetchArtifactWithTimeout(url: string, token: string, timeoutMs = 120_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const withDeadline = async <T>(operation: Promise<T>) => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error("remote_artifact_timeout")), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  };
+  try {
+    const response = await withDeadline(fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal }));
+    const bytes = await withDeadline(response.arrayBuffer());
+    return { response, bytes: Buffer.from(bytes) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 const fixedConfig = (gpuClass: ImageGpuClass = "rtx4090") => ({
   ...loadCloreConfig(gpuClass === "rtx4090"
     ? { deploymentProfileFingerprint: rtx4090GoldenDeploymentFingerprint() }
@@ -174,6 +200,10 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
   const before = await readLiveOrdersSummary(config, { forceRefresh: true });
   if (before.some((order) => order.active)) throw new Error("active_clore_order_exists");
   for (const task of tasks) await preflightExactLocalImageTask(task.id);
+  // Resolve and validate the union before create_order. Per-task preflight
+  // cannot detect two different IDs claiming one filename or conflicting
+  // immutable bytes across a batch; neither must reach a paid host.
+  const modelManifest = await buildLiveAgentModelManifest(tasks);
   if (!isLocalWatchdogTaskInstalled()) throw new Error("local_watchdog_not_installed");
   const token = newSessionToken(input.sessionId); const command = buildPublicAgentBootstrap({ ...input.immutable, tokenSha256: token.sha256 });
   if (input.immutable.commit !== profile.immutable.commit || input.immutable.agentSourceSha256 !== profile.immutable.agentSourceSha256 || input.immutable.agentSha256 !== profile.immutable.agentSha256 || input.immutable.controllerSha256 !== profile.immutable.controllerSha256 || input.immutable.workflowSha256 !== profile.immutable.workflowSha256) throw new Error("rtx4090_golden_profile_identity_mismatch");
@@ -417,7 +447,7 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
     });
     throw new Error("order_endpoint_not_published_within_timeout");
   }
-  return { orderId: order.orderId, endpoint, hostname: new URL(endpoint).hostname, serverId: persisted.serverId, hourlyUsd: persisted.hourlyUsd, startingBalanceUsd: persisted.startingBalanceUsd, plan, token: token.token, tokenSha256: token.sha256, hardDeadlineAt: persisted.hardDeadlineAt, deploymentProfileFingerprint: persisted.deploymentProfileFingerprint };
+  return { orderId: order.orderId, endpoint, hostname: new URL(endpoint).hostname, serverId: persisted.serverId, hourlyUsd: persisted.hourlyUsd, startingBalanceUsd: persisted.startingBalanceUsd, plan, token: token.token, tokenSha256: token.sha256, hardDeadlineAt: persisted.hardDeadlineAt, deploymentProfileFingerprint: persisted.deploymentProfileFingerprint, modelManifest };
 }
 
 export class RuntimeDeploymentFailure extends Error {
@@ -474,7 +504,27 @@ export async function waitForAgentIdle(order: LiveSessionOrder) {
   throw new RuntimeDeploymentFailure({ order, elapsedMs: Date.now() - started, lastHttpStatus, lastStartupDiagnostic });
 }
 export async function invokeStage(order: LiveSessionOrder, stage: "environment" | "gpu" | "controller" | "comfyui" | "models", payload?: object, receipt?: { requested: (stageRunId: string) => void; accepted: (value: { stageRunId: string }) => void; evidence: (value: AgentStageAcceptanceEvidence) => void }): Promise<StageTerminal> { const accepted = await agentPostJson(order.endpoint, order.token, `/stage/${stage}`, payload, { onRequested: receipt?.requested, onEvidence: receipt?.evidence }); receipt?.accepted(accepted); const terminal = await waitForStage({ endpoint: order.endpoint, token: order.token, stage, expectedStageRunId: accepted.stageRunId, timeoutMs: stage === "models" ? 3 * 60 * 60_000 : 45 * 60_000, reconcileExactOrder: async () => Boolean((await readLiveOrdersSummary(fixedConfig(order.plan.selectedGpuClass === "RTX 5090" ? "rtx5090" : "rtx4090"), { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.active) }); return { stageRunId: accepted.stageRunId, ...terminal }; }
-export async function installModelsOnce(order: LiveSessionOrder, receipt?: { requested: (stageRunId: string) => void; accepted: (value: { stageRunId: string }) => void; evidence: (value: AgentStageAcceptanceEvidence) => void }) { const models = toAgentModelManifest((await verifyFiveImageModelSources()).models); return await invokeStage(order, "models", models, receipt); }
+export async function buildLiveAgentModelManifest(tasks: readonly EligibleImageTask[]) {
+  const core = await verifyFiveImageModelSources();
+  const byId = new Map<string, AgentAdditionalLoraEntry>();
+  for (const task of tasks) {
+    const additional = await verifyAdditionalTaskLoraSources(task.loras);
+    for (const lora of additional.loras) {
+      const existing = byId.get(lora.id);
+      if (existing && (
+        existing.filename !== lora.filename
+        || existing.sha256 !== lora.sha256
+        || existing.size_bytes !== lora.size_bytes
+      )) throw new Error(`session_lora_identity_conflict:${lora.id}`);
+      byId.set(lora.id, lora);
+    }
+  }
+  return toAgentModelManifest(core.models, [...byId.values()]);
+}
+
+export async function installModelsOnce(order: LiveSessionOrder, tasks: readonly EligibleImageTask[], receipt?: { requested: (stageRunId: string) => void; accepted: (value: { stageRunId: string }) => void; evidence: (value: AgentStageAcceptanceEvidence) => void }, manifest?: AgentModelManifest) {
+  return await invokeStage(order, "models", manifest ?? await buildLiveAgentModelManifest(tasks), receipt);
+}
 export async function capturePostFinalizationUiVerification(verify: () => Promise<void>) {
   try {
     await verify();
@@ -483,16 +533,49 @@ export async function capturePostFinalizationUiVerification(verify: () => Promis
     return { uiVerified: false, uiVerificationError: compact(error) };
   }
 }
-export async function submitTaskInference(order: LiveSessionOrder, task: EligibleImageTask, receipt?: { requested: (stageRunId: string) => void; submitting: () => void; accepted: (value: AcceptedStage) => void; evidence: (value: AgentStageAcceptanceEvidence) => void }): Promise<{ accepted: AcceptedStage; terminal: StageTerminal; artifact: LocalArtifactReference; controllerJobId: string | null; controllerPromptId: string | null; uiVerified: boolean; uiVerificationError: string | null }> {
+export async function submitTaskInference(order: LiveSessionOrder, task: EligibleImageTask, receipt: { sessionId: string; requested: (stageRunId: string) => void; submitting: () => void; accepted: (value: AcceptedStage) => void; evidence: (value: AgentStageAcceptanceEvidence) => void }): Promise<{ accepted: AcceptedStage; terminal: StageTerminal; artifact: LocalArtifactReference; controllerJobId: string | null; controllerPromptId: string | null; uiVerified: boolean; uiVerificationError: string | null }> {
   const claim = claimImageTask(task.id, `clore-image-session-${process.pid}`, 10 * 60_000); const heartbeat = startImageTaskLeaseHeartbeat({ taskId: task.id, claimToken: claim.claimToken, leaseMs: 10 * 60_000 });
   let finalized = false;
   try {
-    heartbeat.assertHealthy(); const payload = { task_id: task.id, mode: "text_generation", prompt: task.prompt, width: task.width, height: task.height, steps: task.steps, cfg: task.cfg, lora_strength: task.loraStrength, seed: task.seed, sampler: task.sampler };
-    receipt?.submitting(); const accepted = await agentPostJson(order.endpoint, order.token, "/stage/inference", payload, { onRequested: receipt?.requested, onEvidence: receipt?.evidence }); receipt?.accepted(accepted);
+    heartbeat.assertHealthy(); const payload = {
+      task_id: task.id,
+      mode: "text_generation",
+      prompt: task.prompt,
+      negative_prompt: task.negativePrompt ?? "",
+      loras: effectiveImageTaskLoras(task),
+      width: task.width,
+      height: task.height,
+      steps: task.steps,
+      cfg: task.cfg,
+      lora_strength: task.loraStrength,
+      seed: task.seed,
+      sampler: task.sampler,
+    };
+    receipt.submitting();
+    const accepted = await agentPostJson(order.endpoint, order.token, "/stage/inference", payload, {
+      onRequested: (stageRunId) => {
+        // This durable task tombstone is written synchronously before fetch().
+        // If the process dies after the POST begins, neither group retry nor a
+        // later session may submit the same task again.
+        markImageTaskInferenceRetryBlocked(task.id, claim.claimToken, {
+          sessionId: receipt.sessionId,
+          stageRunId,
+          inferenceState: "submitting",
+        });
+        receipt.requested(stageRunId);
+      },
+      onEvidence: receipt.evidence,
+    });
+    markImageTaskInferenceRetryBlocked(task.id, claim.claimToken, {
+      sessionId: receipt.sessionId,
+      stageRunId: accepted.stageRunId,
+      inferenceState: "accepted",
+    });
+    receipt.accepted(accepted);
     const terminal = await pollInferenceStage(order.endpoint, order.token, accepted.stageRunId, { reconcileExactOrder: async () => Boolean((await readLiveOrdersSummary(fixedConfig(order.plan.selectedGpuClass === "RTX 5090" ? "rtx5090" : "rtx4090"), { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.active) });
     if (terminal.status !== "succeeded") throw new Error(`inference_stage_failed:${compact(terminal.error)}`);
-    const metadata = await getArtifactMetadataWithRetry({ endpoint: order.endpoint, token: order.token, taskId: task.id }); const image = await fetch(`${order.endpoint.replace(/\/$/, "")}/artifacts/${task.id}/image`, { headers: { Authorization: `Bearer ${order.token}` } }); const png = Buffer.from(await image.arrayBuffer());
-    if (!image.ok) throw new Error("remote_png_verification_failed");
+    const metadata = await getArtifactMetadataWithRetry({ endpoint: order.endpoint, token: order.token, taskId: task.id }); const image = await fetchArtifactWithTimeout(`${order.endpoint.replace(/\/$/, "")}/artifacts/${task.id}/image`, order.token); const png = image.bytes;
+    if (!image.response.ok) throw new Error("remote_png_verification_failed");
     assertDownloadedPngMatchesMetadata(png, metadata);
     const artifact = (await persistAndFinalizeExactLocalTask({ task, claimToken: claim.claimToken, png, remote: { generationDurationSeconds: Number(metadata.generation_duration_seconds), orderId: order.orderId, gpuModel: order.plan.selectedGpuClass, controllerPromptId: typeof metadata.controller_prompt_id === "string" ? metadata.controller_prompt_id : null } })).artifact;
     finalized = true;

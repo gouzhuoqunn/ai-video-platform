@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -10,7 +11,6 @@ import {
   type ImmutableSourceEndpoint,
 } from "./immutable-source-resolver";
 import {
-  RTX4090_GOLDEN_AGENT_SOURCE_PATCHES,
   RTX4090_GOLDEN_DEPLOYMENT_PROFILE,
   applyPublishedAgentSourcePatch,
 } from "./rtx4090-golden-deployment-profile";
@@ -30,23 +30,18 @@ const response = (bytes: Buffer, contentType = "text/plain; charset=utf-8") =>
 const reset = () => Object.assign(new Error("socket reset"), { cause: { code: "ECONNRESET" } });
 
 function predecessorFromPinnedAgent() {
-  let source = readFileSync(path.join(process.cwd(), "scripts", "clore", "diagnostic-agent.py"), "utf8");
-  for (const [search, replacement] of [...RTX4090_GOLDEN_AGENT_SOURCE_PATCHES].reverse()) {
-    if (!replacement) continue;
-    const first = source.indexOf(replacement);
-    assert.ok(first >= 0, `missing reverse patch context: ${replacement.slice(0, 40)}`);
-    assert.equal(source.indexOf(replacement, first + replacement.length), -1, "reverse patch context must be unique");
-    source = `${source.slice(0, first)}${search}${source.slice(first + replacement.length)}`;
-  }
-  for (const [deleted] of RTX4090_GOLDEN_AGENT_SOURCE_PATCHES.filter((patch) => patch[1] === "")) {
-    const marker = deleted.includes("stage_run_id = str")
-      ? "    if not STAGE_GATE.acquire(blocking=False):\n        return None\n"
-      : "        raw = self.rfile.read(length) if length else b\"\"\n";
-    const markerIndex = source.indexOf(marker);
-    assert.ok(markerIndex >= 0);
-    source = `${source.slice(0, markerIndex + marker.length)}${deleted}${source.slice(markerIndex + marker.length)}`;
-  }
-  return Buffer.from(source, "utf8");
+  // Read the exact immutable commit bytes directly.  Reversing a sequence of
+  // forward patches is not a valid source-of-truth operation: replacement
+  // contexts can overlap after earlier edits, even when forward application
+  // is deterministic and strictly verified.
+  return execFileSync(
+    "git",
+    [
+      "show",
+      `${RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.commit}:scripts/clore/diagnostic-agent.py`,
+    ],
+    { cwd: process.cwd(), timeout: 5_000, maxBuffer: 2 * 1024 * 1024 },
+  );
 }
 
 async function main() {

@@ -7,6 +7,10 @@ import {
   HISTORICAL_CREATE_RATE_LIMIT_MESSAGE,
   HISTORICAL_RENTED_CANDIDATE_MESSAGE,
   HISTORICAL_RUNNER_GENERIC_MESSAGE,
+  PRIOR_SESSION_AUTO_RECOVERY_MESSAGE,
+  PRIOR_SESSION_MANUAL_RECOVERY_CLASSIFICATION,
+  PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE,
+  PRIOR_SESSION_RECOVERY_CLASSIFICATION,
   projectRunnerStatus,
 } from "../src/lib/image-generation/runner-status-projection";
 
@@ -115,15 +119,79 @@ function main() {
   assert.equal(blockerOnly.blocker, CURRENT_CREATE_RATE_LIMIT_MESSAGE);
   assert.doesNotMatch(JSON.stringify(blockerOnly), RAW_RATE_LIMIT_TOKENS);
 
+  const legacyAmbiguous = projectRunnerStatus(
+    {
+      state: "failed",
+      pid: null,
+      host: null,
+      blocker: "image_session_worker_start_failed",
+      error: {
+        stage: "runner_exited",
+        at: "2026-07-28T09:09:15.777Z",
+        message: "image session supervisor exited\nprior_session_receipt_unsafe",
+      },
+    },
+    { pidAlive: false, activeOrder: false, createLock: false },
+  );
+  assert.equal(legacyAmbiguous.error?.displayMessage, PRIOR_SESSION_AUTO_RECOVERY_MESSAGE);
+  assert.equal(legacyAmbiguous.error?.classification, PRIOR_SESSION_RECOVERY_CLASSIFICATION);
+  assert.equal(legacyAmbiguous.error?.isBlocking, false);
+  assert.equal(legacyAmbiguous.blocker, null);
+  assert.doesNotMatch(JSON.stringify(legacyAmbiguous), /prior_session_receipt_unsafe/);
+
+  const manualRecovery = projectRunnerStatus(
+    {
+      state: "failed",
+      pid: null,
+      host: null,
+      blocker: "image_session_worker_start_failed",
+      error: {
+        stage: "runner_exited",
+        at: "2026-07-28T09:10:00.000Z",
+        message: "supervisor failed: prior_session_manual_recovery_required",
+      },
+    },
+    { pidAlive: false, activeOrder: false, createLock: false },
+  );
+  assert.equal(manualRecovery.error?.displayMessage, PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE);
+  assert.equal(manualRecovery.error?.classification, PRIOR_SESSION_MANUAL_RECOVERY_CLASSIFICATION);
+  assert.equal(manualRecovery.error?.isBlocking, true);
+  assert.equal(manualRecovery.blocker, PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE);
+  assert.doesNotMatch(JSON.stringify(manualRecovery), /prior_session_manual_recovery_required/);
+  for (const token of [
+    "prior_session_receipt_unreadable",
+    "prior_session_local_execution_state_present",
+    "prior_session_local_active_order_exists",
+    "prior_session_active_order_exists",
+    "prior_session_target_task_changed",
+    "prior_session_id_invalid",
+    "prior_session_archive_conflict",
+    "prior_session_archive_verification_failed",
+  ]) {
+    const projected = projectRunnerStatus(
+      { state: "failed", pid: null, host: null, blocker: "image_session_worker_start_failed", error: { stage: "runner_exited", at: "2026-07-28T09:10:00.000Z", message: `supervisor failed: ${token}` } },
+      { pidAlive: false, activeOrder: false, createLock: false },
+    );
+    assert.equal(projected.error?.displayMessage, PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE);
+    assert.equal(projected.error?.isBlocking, true);
+    assert.equal(projected.blocker, PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE);
+    assert.doesNotMatch(JSON.stringify(projected), new RegExp(token));
+  }
+
   const route = readFileSync("src/app/api/local-lab/image-tasks/route.ts", "utf8");
   assert.match(route, /host: display\.error\?\.historical \? null : runner\.host/);
+  assert.match(route, /progress: blocker[\s\S]*?isBlocking: true/);
   const studio = readFileSync("src/components/ImageCreationStudio.tsx", "utf8");
   assert.match(studio, /candidateRole/);
   assert.match(studio, /candidateRole === "rented_host"/);
   assert.match(studio, /当前候选显卡/);
   assert.match(studio, /已租用主机/);
+  assert.match(studio, /const safetyBlocked = runner\?\.error\?\.isBlocking === true \|\| Boolean\(runner\?\.blocker\)/);
+  assert.match(studio, /running \|\| safetyBlocked \|\| busy/);
+  assert.match(studio, /fetchJsonWithTimeout/);
+  assert.match(studio, /await refresh\(\)\.catch/);
   assert.doesNotMatch(studio, /ImageCreationStudioLegacy|ActiveImageTaskRail|function GpuPanel/);
-  console.log(JSON.stringify({ ok: true, historicalCode6Mapped: true, currentErrorBlocking: true, createRateLimitCurrentAndHistoricalMapped: true, providerMutationCount: 0 }));
+  console.log(JSON.stringify({ ok: true, historicalCode6Mapped: true, currentErrorBlocking: true, priorAcceptedInferenceRecoveryMapped: true, createRateLimitCurrentAndHistoricalMapped: true, providerMutationCount: 0 }));
 }
 
 main();

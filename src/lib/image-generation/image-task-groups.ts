@@ -1,3 +1,5 @@
+import { requiresManualInferenceRecovery } from "./image-task-retry-policy";
+
 export type GroupableImageTask = {
   id: string;
   status?: string;
@@ -38,6 +40,7 @@ export type MutableGroupableImageTask = GroupableImageTask & {
   attempts?: number;
   localClaim?: unknown;
   error?: unknown;
+  inferenceRetryBlock?: unknown;
 };
 
 export function groupIdentity(task: GroupableImageTask) { return task.groupId || task.id; }
@@ -49,13 +52,19 @@ export function groupStatusLabel(status: ImageTaskGroup["status"]) {
 
 export function confirmImageTaskGroup<T extends MutableGroupableImageTask>(tasks: T[], groupId: string, updatedAt: string) {
   let confirmed = 0;
+  let blocked = 0;
   const next = tasks.map((task) => {
     if (groupIdentity(task) !== groupId || task.status !== "pending_confirmation") return task;
+    if (requiresManualInferenceRecovery(task)) {
+      blocked += 1;
+      return task;
+    }
     confirmed += 1;
     return { ...task, status: "waiting_for_gpu", updatedAt } as T;
   });
+  if (!confirmed && blocked) throw new Error("该任务组有图片请求已经提交但结果未确认，为避免重复生成，不能再次确认。");
   if (!confirmed) throw new Error("该任务组没有可确认的任务。");
-  return { tasks: next, confirmed };
+  return { tasks: next, confirmed, blocked };
 }
 
 export function cancelImageTaskGroup<T extends MutableGroupableImageTask>(tasks: T[], groupId: string) {
@@ -108,15 +117,21 @@ export function unconfirmImageTaskGroup<T extends MutableGroupableImageTask>(tas
 
 export function retryFailedImageTaskGroup<T extends MutableGroupableImageTask>(tasks: T[], groupId: string, updatedAt: string) {
   let retried = 0;
+  let blocked = 0;
   const next = tasks.map((task) => {
     if (groupIdentity(task) !== groupId || task.status !== "failed" || task.localClaim) return task;
+    if (requiresManualInferenceRecovery(task)) {
+      blocked += 1;
+      return task;
+    }
     retried += 1;
     const replacement = { ...task, status: "pending_confirmation", attempts: Number(task.attempts ?? 0) + 1, updatedAt } as T;
     delete replacement.error;
     return replacement;
   });
+  if (!retried && blocked) throw new Error("该任务组有图片请求已经提交但结果未确认，为避免重复生成，已禁止自动重试。");
   if (!retried) throw new Error("该任务组没有可重试的失败任务。");
-  return { tasks: next, retried };
+  return { tasks: next, retried, blocked };
 }
 
 export function groupImageTasks<T extends GroupableImageTask>(tasks: T[]): ImageTaskGroup<T>[] {

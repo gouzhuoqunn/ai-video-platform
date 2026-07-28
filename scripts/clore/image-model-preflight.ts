@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { readSourceAcquisitionManifest, type SourceArtifact } from "../image-executor/manifests";
+import type { ImageTaskLora } from "../../src/lib/image-generation/image-loras";
+import { resolveTaskLoraDownloads } from "../../src/lib/image-generation/local-lora-registry";
 
 const REQUIRED_IDS = ["fluxed-up-10.2", "aidma-lora", "flux-vae", "flux-clip-l", "flux-t5xxl-fp8"] as const;
 const ROLE_BY_ID: Record<(typeof REQUIRED_IDS)[number], string> = { "fluxed-up-10.2": "transformer", "aidma-lora": "lora", "flux-vae": "vae", "flux-clip-l": "clip_l", "flux-t5xxl-fp8": "t5" };
@@ -10,13 +12,18 @@ const PREFLIGHT_USER_AGENT = "ai-video-platform-model-preflight/1";
 
 export type RemoteImageModel = { role: string; id: (typeof REQUIRED_IDS)[number]; filename: string; url: string; sha256: string; size_bytes: number };
 export type AgentModelEntry = { role: string; filename: string; url: string; sha256: string; size_bytes: number };
-export type AgentModelManifest = { models: AgentModelEntry[] };
+export type AgentAdditionalLoraEntry = { id: string; filename: string; url: string; sha256: string; size_bytes: number };
+export type AgentModelManifest = { models: AgentModelEntry[]; loras?: AgentAdditionalLoraEntry[] };
 export type ImageModelPreflight = {
   models: RemoteImageModel[];
   checked: Array<{ id: string; status: number; contentLength: number; source: "civitai" | "huggingface"; finalHostname: string; redirectCount: number; validatedMethod: "GET" }>;
 };
+export type AdditionalLoraPreflight = {
+  loras: AgentAdditionalLoraEntry[];
+  checked: Array<{ id: string; status: number; contentLength: number; source: "civitai" | "huggingface"; finalHostname: string; redirectCount: number; validatedMethod: "GET" }>;
+};
 
-type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+type FetchLike = typeof fetch;
 type TokenName = "CIVITAI_API_TOKEN" | "HF_TOKEN";
 type TokenProvider = (name: TokenName) => string;
 type HeaderResult = { status: number; location: string | null; contentLength: number | null; finalUrl: string; finalHostname: string; redirectCount: number };
@@ -60,7 +67,15 @@ async function windowsProbeOnce(url: string, token: string): Promise<HeaderResul
     "if($env:AI_IMAGE_PREFLIGHT_TOKEN){$q.Headers.Authorization=[System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$env:AI_IMAGE_PREFLIGHT_TOKEN)}", "$r=$c.SendAsync($q,[System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()",
     "$p=@{status=[int]$r.StatusCode;location=if($r.Headers.Location){$r.Headers.Location.OriginalString}else{$null};contentLength=if($r.Content.Headers.ContentRange -and $r.Content.Headers.ContentRange.Length){[int64]$r.Content.Headers.ContentRange.Length}else{$r.Content.Headers.ContentLength};finalUrl=$q.RequestUri.AbsoluteUri}|ConvertTo-Json -Compress", "$r.Dispose();$q.Dispose();$c.Dispose();$h.Dispose();Write-Output $p",
   ].join(";");
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { cwd: process.cwd(), encoding: "utf8", windowsHide: true, env: { ...process.env, AI_IMAGE_PREFLIGHT_URL: url, AI_IMAGE_PREFLIGHT_TOKEN: token } });
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 60_000,
+    killSignal: "SIGTERM",
+    env: { ...process.env, AI_IMAGE_PREFLIGHT_URL: url, AI_IMAGE_PREFLIGHT_TOKEN: token },
+  });
+  if (result.signal || (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") throw new Error("model_source_child_timeout");
   if (result.status !== 0) throw new Error(`model_source_transport_failed:${String(result.stderr || result.stdout).trim().slice(0, 300)}`);
   const json = /\{[^{}]*\}/.exec(String(result.stdout))?.[0]; if (!json) throw new Error("model_source_transport_invalid_response");
   const parsed = JSON.parse(json) as { status: number; location?: string | null; contentLength?: number | null; finalUrl: string };
@@ -105,15 +120,76 @@ export async function verifyFiveImageModelSources(input: { fetchImpl?: FetchLike
   return { models, checked };
 }
 
-export function toAgentModelManifest(resolvedModels: ReadonlyArray<RemoteImageModel>): AgentModelManifest {
+export async function verifyAdditionalTaskLoraSources(
+  taskLoras: ImageTaskLora[] | undefined,
+  input: { fetchImpl?: FetchLike; tokenProvider?: TokenProvider; registryPath?: string } = {},
+): Promise<AdditionalLoraPreflight> {
+  if (taskLoras === undefined) return { loras: [], checked: [] };
+  const resolved = await resolveTaskLoraDownloads(taskLoras, {
+    fetchImpl: input.fetchImpl,
+    tokenProvider: input.tokenProvider,
+    registryPath: input.registryPath,
+  });
+  return {
+    loras: resolved.map((lora) => ({
+      id: lora.id,
+      filename: lora.filename,
+      url: lora.url,
+      sha256: lora.sha256,
+      size_bytes: lora.sizeBytes,
+    })),
+    checked: resolved.map((lora) => ({
+      id: lora.id,
+      status: lora.evidence.status,
+      contentLength: lora.evidence.contentLength,
+      source: lora.provider,
+      finalHostname: lora.evidence.finalHostname,
+      redirectCount: lora.evidence.redirectCount,
+      validatedMethod: lora.evidence.validatedMethod,
+    })),
+  };
+}
+
+export function toAgentModelManifest(
+  resolvedModels: ReadonlyArray<RemoteImageModel>,
+  additionalLoras: ReadonlyArray<AgentAdditionalLoraEntry> = [],
+): AgentModelManifest {
   if (resolvedModels.length !== REQUIRED_IDS.length) throw new Error("exactly_five_models_required"); const expectedRoles = new Set(Object.values(ROLE_BY_ID)); const seenRoles = new Set<string>();
   const models = resolvedModels.map((model) => { if (!expectedRoles.has(model.role) || seenRoles.has(model.role)) throw new Error("invalid_or_duplicate_model_role"); if (!model.filename || /[\\/]|\.\./.test(model.filename)) throw new Error("invalid_model_filename"); if (!/^[a-f0-9]{64}$/i.test(model.sha256) || !Number.isSafeInteger(model.size_bytes) || model.size_bytes <= 0) throw new Error("invalid_model_hash_or_size"); requireHttps(model.url, "invalid_model_url"); seenRoles.add(model.role); return { role: model.role, filename: model.filename, url: model.url, sha256: model.sha256, size_bytes: model.size_bytes }; });
-  if (seenRoles.size !== expectedRoles.size) throw new Error("missing_approved_model_role"); return { models };
+  if (seenRoles.size !== expectedRoles.size) throw new Error("missing_approved_model_role");
+  if (additionalLoras.length > 16) throw new Error("too_many_additional_loras");
+  const loraIds = new Set<string>(); const loraFilenames = new Set<string>(); let totalLoraBytes = 0;
+  const loras = additionalLoras.map((lora) => {
+    if (!/^(?:builtin-[a-z0-9-]{1,80}|[0-9a-f-]{36})$/i.test(lora.id) || loraIds.has(lora.id)) throw new Error("invalid_or_duplicate_lora_id");
+    if (!/^[^/\\\u0000-\u001f]{1,180}\.safetensors$/i.test(lora.filename) || loraFilenames.has(lora.filename.toLowerCase())) throw new Error("invalid_or_duplicate_lora_filename");
+    if (!/^[a-f0-9]{64}$/i.test(lora.sha256) || !Number.isSafeInteger(lora.size_bytes) || lora.size_bytes <= 0 || lora.size_bytes > 4 * 1024 * 1024 * 1024) throw new Error("invalid_lora_hash_or_size");
+    totalLoraBytes += lora.size_bytes;
+    if (totalLoraBytes > 8 * 1024 * 1024 * 1024) throw new Error("additional_loras_too_large");
+    requireHttps(lora.url, "invalid_lora_url");
+    loraIds.add(lora.id); loraFilenames.add(lora.filename.toLowerCase());
+    return { id: lora.id, filename: lora.filename, url: lora.url, sha256: lora.sha256.toLowerCase(), size_bytes: lora.size_bytes };
+  });
+  return loras.length ? { models, loras } : { models };
 }
 export function validateAgentModelManifestContract(manifest: AgentModelManifest) {
   const agentPath = path.join(process.cwd(), "scripts", "clore", "diagnostic-agent.py"); const script = ["import importlib.util,json,sys", "s=importlib.util.spec_from_file_location('agent',sys.argv[1])", "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)", "m.validate_manifest(json.load(sys.stdin))"].join(";");
   const candidates: Array<[string, string[]]> = process.platform === "win32" ? [["py", ["-3", "-c", script, agentPath]], ["python", ["-c", script, agentPath]]] : [["python3", ["-c", script, agentPath]], ["python", ["-c", script, agentPath]]];
-  for (const [command, args] of candidates) { const result = spawnSync(command, args, { cwd: process.cwd(), input: JSON.stringify(manifest), encoding: "utf8", windowsHide: true }); if (result.status === 0) return; const spawnError = result.error as NodeJS.ErrnoException | undefined; if (spawnError?.code === "ENOENT") continue; throw new Error("agent_model_manifest_contract_rejected"); } throw new Error("agent_model_manifest_validator_unavailable");
+  for (const [command, args] of candidates) {
+    const result = spawnSync(command, args, {
+      cwd: process.cwd(),
+      input: JSON.stringify(manifest),
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 30_000,
+      killSignal: "SIGTERM",
+    });
+    if (result.signal || (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") throw new Error("agent_model_manifest_child_timeout");
+    if (result.status === 0) return;
+    const spawnError = result.error as NodeJS.ErrnoException | undefined;
+    if (spawnError?.code === "ENOENT") continue;
+    throw new Error("agent_model_manifest_contract_rejected");
+  }
+  throw new Error("agent_model_manifest_validator_unavailable");
 }
 export function indexResolvedModelsById(resolvedModels: ReadonlyArray<RemoteImageModel>) { return new Map(resolvedModels.map((model) => [model.id, model] as const)); }
 export function sanitizeImageModelPreflight(value: ImageModelPreflight) {

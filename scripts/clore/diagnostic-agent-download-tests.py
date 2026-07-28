@@ -17,7 +17,17 @@ class Response:
     def __exit__(self,*_): self.close()
     def geturl(self): return "https://models.example/download?token=secret"
 def entry(agent, root, data):
-    return {"role":"transformer","filename":"fixture.bin","url":"https://models.example/download?token=secret","sha256":hashlib.sha256(data).hexdigest(),"size_bytes":len(data),"destination":str(root/"fixture.bin")}
+    return {
+        "kind": "base",
+        "role": "transformer",
+        "state_bucket": "models",
+        "state_key": "transformer",
+        "filename": "fixture.bin",
+        "url": "https://models.example/download?token=secret",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size_bytes": len(data),
+        "destination": str(root / "fixture.bin"),
+    }
 def main():
     agent=load(); agent.time.sleep=lambda *_:None
     with tempfile.TemporaryDirectory() as temp:

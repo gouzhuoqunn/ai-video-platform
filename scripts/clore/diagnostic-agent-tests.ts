@@ -18,12 +18,20 @@ for (const route of ["/healthz", "/status", "/logs", "/stage/environment", "/sta
 assert.match(source, /Authorization/);
 assert.match(source, /hmac\.compare_digest/);
 assert.match(source, /stage_parameters_forbidden/);
-assert.doesNotMatch(source, /base64/);
+// The immutable runtime overlay is transported as a bounded raw-deflate
+// payload.  Keep the safety contract focused on the fixed decoder and patch
+// guards rather than banning the legitimate `base64` module entirely.
+assert.match(source, /base64\.b64decode\(encoded_patches\)/);
+assert.match(source, /zlib\.decompress\(base64\.b64decode\(encoded_patches\), -15\)/);
+assert.match(source, /len\(encoded_patches\) > 24_000/);
+assert.match(source, /len\(patches\) > 16/);
+assert.match(source, /immutable_source_patch_context_mismatch/);
+assert.doesNotMatch(source, /(?:os\.system|subprocess\.run\([^)]*shell\s*=\s*True)/);
 assert.match(source, /IMMUTABLE_SOURCE_ROOTS/);
 assert.match(source, /cdn\.jsdelivr\.net\/gh\/gouzhuoqunn\/ai-video-platform/);
 assert.match(source, /raw\.githubusercontent\.com\/gouzhuoqunn\/ai-video-platform/);
 assert.match(source, /def immutable_file_urls\(path: str\)/);
-assert.match(source, /def fetch_small_verified\(sources: list\[tuple\[str, str\]\]/);
+assert.match(source, /def fetch_small_verified\(\s*sources: list\[tuple\[str, str\]\]/);
 assert.match(source, /immutable_source_sha256_mismatch/);
 assert.match(source, /first_output_lines/);
 assert.match(source, /final_output_lines/);

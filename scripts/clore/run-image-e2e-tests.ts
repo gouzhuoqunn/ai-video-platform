@@ -32,6 +32,26 @@ async function main() {
     const preflight = await preflightExactLocalImageTask(taskId, options, async () => exactModelFixture());
     assert.equal(preflight.claimsTask, false);
     assert.equal(readImageTask(taskId, options)?.status, "waiting_for_gpu");
+    writeFileSync(taskPath, JSON.stringify([{
+      ...task,
+      inferenceRetryBlock: {
+        schemaVersion: 1,
+        reason: "inference_submission_may_have_been_accepted",
+        sessionId: "123e4567-e89b-42d3-a456-426614174000",
+        stageRunId: "223e4567-e89b-42d3-a456-426614174000",
+        inferenceState: "accepted",
+        recordedAt: "2026-07-28T10:00:00.000Z",
+      },
+      error: { message: "accepted ambiguity", retryable: false },
+    }]), "utf8");
+    let blockedModelChecks = 0;
+    assert.throws(() => resolveExactEligibleImageTask(taskId, options), /not_eligible/);
+    await assert.rejects(
+      () => preflightExactLocalImageTask(taskId, options, async () => { blockedModelChecks += 1; return exactModelFixture(); }),
+      /not_eligible/,
+    );
+    assert.equal(blockedModelChecks, 0, "retry-blocked tasks stop before model or provider preflight");
+    writeFileSync(taskPath, JSON.stringify([task]), "utf8");
     assert.equal(freshRunRequiresManualRecovery({ taskId, inferenceState: "submitting" }, taskId, "waiting_for_gpu"), true);
     assert.equal(freshRunRequiresManualRecovery({ taskId, inferenceState: "accepted" }, taskId, "waiting_for_gpu"), true);
     assert.equal(freshRunRequiresManualRecovery({ taskId, inferenceState: "succeeded" }, taskId, "waiting_for_gpu"), true);
@@ -92,7 +112,7 @@ async function main() {
     heartbeat.assertHealthy(); heartbeat.stop();
     assert.equal(result.completed.status, "completed");
     assert.equal(readImageTask(taskId, options)?.result?.pngSha256, result.artifact.pngSha256);
-    console.log(JSON.stringify({ ok: true, preflight_does_not_claim: true, prior_submitting_blocks_fresh_provider_mutation: true, safe_failed_receipt_archived_and_rotated: true, safe_preorder_receipt_archived_and_rotated: true, exact_safe_dimension_failure_requeued_and_archived: true, ambiguous_dimension_failure_stays_blocked: true, active_order_blocks_preorder_rotation: true, single_snapshot_before_first_create: true, exact_429_retry_after_and_fallback: true, reconciled_order_adopted_without_second_create: true, second_429_stops_without_alternate: true, model_failure_leaves_task_unchanged: true, local_lease_heartbeat: true, persistence_and_exact_finalization: true }));
+    console.log(JSON.stringify({ ok: true, preflight_does_not_claim: true, retry_blocked_task_stops_before_model_or_provider: true, prior_submitting_blocks_fresh_provider_mutation: true, safe_failed_receipt_archived_and_rotated: true, safe_preorder_receipt_archived_and_rotated: true, exact_safe_dimension_failure_requeued_and_archived: true, ambiguous_dimension_failure_stays_blocked: true, active_order_blocks_preorder_rotation: true, single_snapshot_before_first_create: true, exact_429_retry_after_and_fallback: true, reconciled_order_adopted_without_second_create: true, second_429_stops_without_alternate: true, model_failure_leaves_task_unchanged: true, local_lease_heartbeat: true, persistence_and_exact_finalization: true, providerMutationCount: 0 }));
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 void main();

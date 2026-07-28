@@ -7,14 +7,16 @@ import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, wr
 import path from "node:path";
 import { finalizeImageTask, mutateImageTasks, readImageTask, renewImageTaskLease, type LocalImageTask, type LocalTaskStoreOptions } from "../../src/lib/image-generation/local-image-task-store";
 import { classifyImageGpu } from "../../src/lib/image-generation/flux-stack";
+import { assertImageTaskLoras, normalizeNegativePrompt, type ImageTaskLora } from "../../src/lib/image-generation/image-loras";
+import { requiresManualInferenceRecovery } from "../../src/lib/image-generation/image-task-retry-policy";
 import { buildRtx4090GoldenBootstrap, RTX4090_GOLDEN_DEPLOYMENT_PROFILE } from "../image-executor/rtx4090-golden-deployment-profile";
 import { publishLocalImageArtifact, type LocalArtifactReference } from "../../src/lib/image-generation/local-image-artifacts";
-import { sanitizeImageModelPreflight, toAgentModelManifest, validateAgentModelManifestContract, verifyFiveImageModelSources } from "./image-model-preflight";
+import { sanitizeImageModelPreflight, toAgentModelManifest, validateAgentModelManifestContract, verifyAdditionalTaskLoraSources, verifyFiveImageModelSources } from "./image-model-preflight";
 import { CloreRateLimitError, sleep } from "./client";
 import { readLiveOrdersSummary } from "./live";
 import { agentArtifactMetadataResponse, agentGetJsonWithRetry, agentHealthResponse, agentStatusResponse, AgentGetTerminalError, type AgentTransportDiagnostic } from "./agent-get-transport";
 
-export type EligibleImageTask = LocalImageTask & { prompt: string; mode: "text_generation"; referenceImage: null; width: number; height: number; steps: number; cfg: number; loraStrength: number; seed: number; sampler: "Euler" | "FlowMatch" };
+export type EligibleImageTask = LocalImageTask & { prompt: string; negativePrompt?: string; loras?: ImageTaskLora[]; mode: "text_generation"; referenceImage: null; width: number; height: number; steps: number; cfg: number; loraStrength: number; seed: number; sampler: "Euler" | "FlowMatch" };
 const RECEIPT_PATH = path.join(process.cwd(), ".secrets", "clore-image-e2e-fresh-receipt.json");
 const RECEIPT_ARCHIVE_DIR = path.join(process.cwd(), ".secrets", "diagnostics", "clore-image-e2e-receipts");
 
@@ -165,9 +167,9 @@ function acceptedStage(route: string, status: number, body: Record<string, unkno
   if (!valid) throw new Error(`agent_stage_acceptance_invalid:${stage}`);
   return { acceptedHttpStatus: 202, stage, stageRunId: requestedStageRunId };
 }
-export type AgentPostOptions = { stageRunId?: string; onRequested?: (stageRunId: string) => void; onEvidence?: (evidence: AgentStageAcceptanceEvidence) => void; fetchImpl?: typeof fetch };
+export type AgentPostOptions = { stageRunId?: string; onRequested?: (stageRunId: string) => void | Promise<void>; onEvidence?: (evidence: AgentStageAcceptanceEvidence) => void; fetchImpl?: typeof fetch };
 export async function agentPostJson(endpoint: string, token: string, route: string, payload?: object, options: AgentPostOptions = {}): Promise<AcceptedStage> {
-  const stage = route.replace(/^\/stage\//, ""); const stageRunId = options.stageRunId ?? randomUUID(); options.onRequested?.(stageRunId);
+  const stage = route.replace(/^\/stage\//, ""); const stageRunId = options.stageRunId ?? randomUUID(); await options.onRequested?.(stageRunId);
   const response = await (options.fetchImpl ?? fetch)(url(endpoint, route), { method: "POST", headers: { Authorization: `Bearer ${token}`, "content-type": "application/json", Accept: "application/json" }, body: JSON.stringify({ ...(payload ?? {}), stage_run_id: stageRunId }) });
   const contentType = response.headers.get("content-type"); const bytes = Buffer.from(await response.arrayBuffer()); const text = bytes.toString("utf8");
   // Persist response metadata before JSON parsing or acceptance validation.
@@ -182,26 +184,52 @@ export async function agentPostJson(endpoint: string, token: string, route: stri
   if (!response.ok || !body || !valid) throw new AgentStageAcceptanceError(evidence);
   return acceptedStage(route, response.status, body, stageRunId);
 }
-export async function submitInferenceStage(endpoint:string,token:string,payload:object,options: Pick<AgentPostOptions, "onEvidence" | "onRequested"> = {}) { return await agentPostJson(endpoint, token, "/stage/inference", payload, options); }
 
 export function resolveExactEligibleImageTask(taskId: string, options: LocalTaskStoreOptions = {}): EligibleImageTask {
   const task = readImageTask(taskId, options);
-  if (!task || task.status !== "waiting_for_gpu" || task.mode !== "text_generation" || task.referenceImage || classifyImageGpu(Number(task.width), Number(task.height)) !== task.gpuClass) {
+  let extendedSettingsValid = true;
+  try {
+    normalizeNegativePrompt(task?.negativePrompt);
+    if (task?.loras !== undefined) assertImageTaskLoras(task.loras);
+  } catch {
+    extendedSettingsValid = false;
+  }
+  if (!task || !extendedSettingsValid || requiresManualInferenceRecovery(task) || task.status !== "waiting_for_gpu" || task.mode !== "text_generation" || task.referenceImage || classifyImageGpu(Number(task.width), Number(task.height)) !== task.gpuClass) {
     throw new Error("image_task_not_eligible_for_restricted_text_run");
   }
   return task as EligibleImageTask;
 }
 
 /** Pre-rental only: it deliberately does not claim a task or call Clore. */
-export async function preflightExactLocalImageTask(taskId: string, options: LocalTaskStoreOptions = {}, verifyModels = verifyFiveImageModelSources) {
+export async function preflightExactLocalImageTask(
+  taskId: string,
+  options: LocalTaskStoreOptions = {},
+  verifyModels = verifyFiveImageModelSources,
+  verifyLoras = verifyAdditionalTaskLoraSources,
+) {
   const task = resolveExactEligibleImageTask(taskId, options);
   const modelPreflight = await verifyModels();
+  const loraPreflight = await verifyLoras(task.loras);
   // Exercise the identical explicit projection used by the live coordinator
   // before a provider mutation. The returned preflight remains sanitized.
-  validateAgentModelManifestContract(toAgentModelManifest(modelPreflight.models));
+  validateAgentModelManifestContract(toAgentModelManifest(modelPreflight.models, loraPreflight.loras));
   const reread = readImageTask(taskId, options);
-  if (!reread || reread.status !== "waiting_for_gpu") throw new Error("image_task_changed_during_prerental_preflight");
-  return { task, modelPreflight: sanitizeImageModelPreflight(modelPreflight), createsOrder: false, claimsTask: false };
+  if (!reread || requiresManualInferenceRecovery(reread) || reread.status !== "waiting_for_gpu") throw new Error("image_task_changed_during_prerental_preflight");
+  return {
+    task,
+    modelPreflight: {
+      ...sanitizeImageModelPreflight(modelPreflight),
+      additionalLoras: loraPreflight.loras.map(({ id, filename, sha256, size_bytes }) => ({
+        id,
+        filename,
+        sha256,
+        size_bytes,
+      })),
+      additionalLoraChecks: loraPreflight.checked,
+    },
+    createsOrder: false,
+    claimsTask: false,
+  };
 }
 
 export function startImageTaskLeaseHeartbeat(input: { taskId: string; claimToken: string; leaseMs: number; options?: LocalTaskStoreOptions }) {

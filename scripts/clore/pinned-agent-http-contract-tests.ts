@@ -4,8 +4,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { deflateRawSync } from "node:zlib";
 import { AgentStageAcceptanceError, agentPostJson, waitForStage } from "./run-image-e2e";
-import { assertRtx4090GoldenDeploymentProfile, buildRtx4090GoldenBootstrap } from "../image-executor/rtx4090-golden-deployment-profile";
+import { assertRtx4090GoldenDeploymentProfile, buildRtx4090GoldenBootstrap, RTX4090_GOLDEN_CONTROLLER_SOURCE_PATCHES, RTX4090_GOLDEN_WORKFLOW_SOURCE_PATCHES } from "../image-executor/rtx4090-golden-deployment-profile";
 
 const token = "local-pinned-agent-contract-token";
 const tokenSha256 = createHash("sha256").update(token).digest("hex");
@@ -21,7 +22,18 @@ async function freePort() {
 }
 
 async function start(root: string, port: number, immutable: ReturnType<typeof assertRtx4090GoldenDeploymentProfile>["immutable"]) {
-  const agentArgs = [agentPath, "--token-sha256", tokenSha256, "--immutable", `${immutable.commit}:${immutable.controllerSha256}:${immutable.workflowSha256}`, "--port", String(port)];
+  const controllerPatch = deflateRawSync(Buffer.from(JSON.stringify(RTX4090_GOLDEN_CONTROLLER_SOURCE_PATCHES), "utf8")).toString("base64");
+  const workflowPatch = deflateRawSync(Buffer.from(JSON.stringify(RTX4090_GOLDEN_WORKFLOW_SOURCE_PATCHES), "utf8")).toString("base64");
+  const agentArgs = [
+    agentPath,
+    "--token-sha256", tokenSha256,
+    "--immutable", `${immutable.commit}:${immutable.controllerSha256}:${immutable.workflowSha256}`,
+    "--controller-source-sha256", immutable.controllerSourceSha256,
+    "--controller-patch", controllerPatch,
+    "--workflow-source-sha256", immutable.workflowSourceSha256,
+    "--workflow-patch", workflowPatch,
+    "--port", String(port),
+  ];
   const executable = process.platform === "win32" ? (process.env.ComSpec ?? process.env.COMSPEC ?? "C:\\Windows\\System32\\cmd.exe") : "python3";
   const args = process.platform === "win32" ? ["/d", "/c", "py", "-3", ...agentArgs] : agentArgs;
   const child = spawn(executable, args, { cwd: process.cwd(), env: { ...process.env, DIAG_ROOT: root, DIAG_TEST_STAGE_DELAY_SECONDS: "5" }, stdio: "ignore", windowsHide: true });

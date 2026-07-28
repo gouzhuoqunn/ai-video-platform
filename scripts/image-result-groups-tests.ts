@@ -42,32 +42,118 @@ async function main() {
   assert.equal(listImageTasks().filter((task) => task.groupId === cancelable.groupId).length, 0);
 
   const retryable = await createGroup(2);
-  mutateImageTasks((tasks) => ({ tasks: tasks.map((task) => task.groupId === retryable.groupId ? { ...task, status: "failed", attempts: 2, error: { message: "fixture" } } : task), value: null }));
+  const retrySessionId = "123e4567-e89b-42d3-a456-426614174000";
+  const retryStageRunId = "223e4567-e89b-42d3-a456-426614174000";
+  const retryMembers = listImageTasks().filter((task) => task.groupId === retryable.groupId);
+  const blockedRetryId = retryMembers[0].id;
+  mutateImageTasks((tasks) => ({ tasks: tasks.map((task) => {
+    if (task.groupId !== retryable.groupId) return task;
+    if (task.id !== blockedRetryId) return { ...task, status: "failed", attempts: 2, error: { message: "fixture", retryable: true } };
+    return {
+      ...task,
+      status: "failed",
+      attempts: 2,
+      error: { message: "accepted ambiguity", retryable: false },
+      inferenceRetryBlock: {
+        schemaVersion: 1,
+        reason: "inference_submission_may_have_been_accepted",
+        sessionId: retrySessionId,
+        stageRunId: retryStageRunId,
+        inferenceState: "accepted",
+        recordedAt: "2026-07-28T10:00:00.000Z",
+      },
+    };
+  }), value: null }));
+  const blockedRetryBefore = structuredClone(listImageTasks().find((task) => task.id === blockedRetryId));
   assert.equal((await request({ action: "retry_failed_group", groupId: retryable.groupId })).status, 200);
-  assert.ok(listImageTasks().filter((task) => task.groupId === retryable.groupId).every((task) => task.status === "pending_confirmation" && Number(task.attempts) === 3));
+  const retryAfter = listImageTasks().filter((task) => task.groupId === retryable.groupId);
+  assert.deepEqual(retryAfter.find((task) => task.id === blockedRetryId), blockedRetryBefore);
+  assert.ok(retryAfter.filter((task) => task.id !== blockedRetryId).every((task) => task.status === "pending_confirmation" && Number(task.attempts) === 3));
+  const allBlockedRetry = await createGroup(1);
+  mutateImageTasks((tasks) => ({ tasks: tasks.map((task) => task.groupId === allBlockedRetry.groupId ? {
+    ...task,
+    status: "failed",
+    error: { message: "accepted ambiguity", retryable: false },
+    inferenceRetryBlock: {
+      schemaVersion: 1,
+      reason: "inference_submission_may_have_been_accepted",
+      sessionId: retrySessionId,
+      stageRunId: retryStageRunId,
+      inferenceState: "accepted",
+      recordedAt: "2026-07-28T10:00:00.000Z",
+    },
+  } : task), value: null }));
+  const allBlockedBefore = structuredClone(listImageTasks().find((task) => task.groupId === allBlockedRetry.groupId));
+  const allBlockedResponse = await request({ action: "retry_failed_group", groupId: allBlockedRetry.groupId });
+  assert.equal(allBlockedResponse.status, 400);
+  assert.match(String((await allBlockedResponse.json() as { error?: unknown }).error), /禁止自动重试/);
+  assert.deepEqual(listImageTasks().find((task) => task.groupId === allBlockedRetry.groupId), allBlockedBefore);
+
+  const unrelatedSingleAction = await createGroup(1);
+  const unrelatedSingleTaskId = unrelatedSingleAction.createdTaskIds[0];
+  const guardedTaskBeforeUnrelatedAction = structuredClone(listImageTasks().find((task) => task.id === blockedRetryId));
+  assert.equal((await request({ action: "confirm", id: unrelatedSingleTaskId })).status, 200);
+  assert.equal(listImageTasks().find((task) => task.id === unrelatedSingleTaskId)?.status, "waiting_for_gpu");
+  assert.deepEqual(
+    listImageTasks().find((task) => task.id === blockedRetryId),
+    guardedTaskBeforeUnrelatedAction,
+    "an unrelated legacy action cannot erase a concurrently persisted inference tombstone",
+  );
+  assert.equal((await request({ action: "delete", id: blockedRetryId })).status, 400);
+  assert.deepEqual(listImageTasks().find((task) => task.id === blockedRetryId), guardedTaskBeforeUnrelatedAction);
 
   let sourceMemberIndex = 0;
   mutateImageTasks((tasks) => ({ tasks: tasks.map((task) => {
     if (task.groupId !== created.groupId) return task;
     const index = sourceMemberIndex++;
-    return index === 0 ? { ...task, status: "completed", result: { relativeDir: "fixture", pngSha256: "a".repeat(64), pngBytes: 1, width: 768, height: 768, completedAt: new Date().toISOString() } } : index === 1 ? { ...task, status: "generating", localClaim: { workerId: "fixture" } } : { ...task, status: "failed" };
+    return index === 0 ? { ...task, status: "completed", result: { relativeDir: "fixture", pngSha256: "a".repeat(64), pngBytes: 1, width: 768, height: 768, completedAt: new Date().toISOString() } } : index === 1 ? { ...task, status: "generating", localClaim: { workerId: "fixture" } } : { ...task, status: "pending_confirmation" };
   }), value: null }));
   const cancellation = await request({ action: "cancel_group", groupId: created.groupId });
   assert.equal(cancellation.status, 200);
-  const cancellationPayload = await cancellation.json() as { groupAction?: { blocker?: string } };
-  assert.match(cancellationPayload.groupAction?.blocker ?? "", /正在生成/);
+  await cancellation.json();
   const protectedTasks = listImageTasks().filter((task) => task.groupId === created.groupId);
   assert.deepEqual(protectedTasks.map((task) => task.status).sort(), ["completed", "generating"]);
   assert.equal((await request({ action: "cancel_group", groupId: created.groupId })).status, 400);
 
-  const regenerated = await request({ action: "regenerate_group", groupId: created.groupId, requestedCount: 3 });
+  const completedBeforeRegeneration = structuredClone(protectedTasks.find((task) => task.status === "completed"));
+  assert.ok(completedBeforeRegeneration);
+  for (const action of ["confirm", "retry", "delete"] as const) {
+    assert.equal((await request({ action, id: completedBeforeRegeneration.id })).status, 400);
+    assert.deepEqual(
+      listImageTasks().find((task) => task.id === completedBeforeRegeneration.id),
+      completedBeforeRegeneration,
+      `legacy ${action} cannot downgrade or delete a completed artifact`,
+    );
+  }
+  const editedPrompt = "  雨后庭院增加一盏暖色纸灯笼  ";
+  const regenerated = await request({ action: "regenerate_group", groupId: created.groupId, requestedCount: 3, prompt: editedPrompt });
   assert.equal(regenerated.status, 200);
+  const regeneratedPayload = await regenerated.json() as { createdTaskIds: string[] };
   const regeneratedTasks = listImageTasks().filter((task) => task.groupId === created.groupId);
-  assert.equal(regeneratedTasks.filter((task) => task.status === "pending_confirmation").length, 3);
+  const regeneratedChildren = regeneratedTasks.filter((task) => regeneratedPayload.createdTaskIds.includes(task.id));
+  assert.equal(regeneratedChildren.length, 3);
+  assert.ok(regeneratedChildren.every((task) =>
+    task.status === "pending_confirmation"
+    && task.prompt === editedPrompt.trim()
+    && task.width === completedBeforeRegeneration.width
+    && task.height === completedBeforeRegeneration.height
+    && task.steps === completedBeforeRegeneration.steps
+    && task.cfg === completedBeforeRegeneration.cfg
+    && task.loraStrength === completedBeforeRegeneration.loraStrength
+    && task.sampler === completedBeforeRegeneration.sampler
+  ));
   assert.equal(regeneratedTasks.filter((task) => task.status === "completed").length, 1);
+  assert.deepEqual(regeneratedTasks.find((task) => task.id === completedBeforeRegeneration.id), completedBeforeRegeneration);
   groups = groupImageTasks(regeneratedTasks);
   assert.equal(groups[0].requestedCount, 8);
   assert.equal(groups[0].isActive, true);
+  const storeBeforeInvalidRegeneration = structuredClone(listImageTasks());
+  assert.equal((await request({ action: "regenerate_group", groupId: created.groupId, requestedCount: 1, prompt: "   " })).status, 400);
+  assert.deepEqual(listImageTasks(), storeBeforeInvalidRegeneration);
+  assert.equal((await request({ action: "regenerate_group", groupId: created.groupId, requestedCount: 1, prompt: "x".repeat(4_001) })).status, 400);
+  assert.deepEqual(listImageTasks(), storeBeforeInvalidRegeneration);
+  assert.equal((await request({ action: "regenerate_group", groupId: created.groupId, requestedCount: 1 })).status, 400);
+  assert.deepEqual(listImageTasks(), storeBeforeInvalidRegeneration);
 
   const legacy = (await createGroup(1)).createdTaskIds[0];
   mutateImageTasks((tasks) => ({ tasks: tasks.map((task) => task.id === legacy ? { ...task, groupId: undefined, groupIndex: undefined, groupRequestedCount: undefined, groupTitle: undefined } : task), value: null }));

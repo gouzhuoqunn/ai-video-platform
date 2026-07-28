@@ -207,6 +207,23 @@ async function main() {
   const firstPostCreateRead = liveRuntimeSource.indexOf("const active = await readAttemptOrders();", directOrderPersistence);
   assert.ok(receiptPersistence >= 0 && activeOrderPersistence > receiptPersistence, "the caller receipt is persisted before local active-order state");
   assert.ok(directOrderPersistence >= 0 && firstPostCreateRead > directOrderPersistence, "a direct create result is persisted before any reconciliation read");
+  const inferenceBoundary = liveRuntimeSource.indexOf("export async function submitTaskInference");
+  const submittingRetryBlock = liveRuntimeSource.indexOf("markImageTaskInferenceRetryBlocked(task.id", inferenceBoundary);
+  const soleInferencePost = liveRuntimeSource.indexOf("agentPostJson(order.endpoint, order.token, \"/stage/inference\"", inferenceBoundary);
+  const acceptedRetryBlock = liveRuntimeSource.indexOf("inferenceState: \"accepted\"", soleInferencePost);
+  assert.ok(
+    inferenceBoundary >= 0
+    && soleInferencePost > inferenceBoundary
+    && submittingRetryBlock > soleInferencePost
+    && acceptedRetryBlock > submittingRetryBlock,
+    "the inference call wires both the submitting tombstone and its accepted upgrade",
+  );
+  const inferenceFunctionSource = liveRuntimeSource.slice(inferenceBoundary, liveRuntimeSource.indexOf("export type CleanupLiveSessionResult", inferenceBoundary));
+  assert.match(inferenceFunctionSource, /onRequested:\s*\(stageRunId\)\s*=>\s*\{[\s\S]*?markImageTaskInferenceRetryBlocked[\s\S]*?inferenceState:\s*"submitting"[\s\S]*?receipt\.requested\(stageRunId\)/);
+  const agentPostSource = readFileSync(new URL("./run-image-e2e.ts", import.meta.url), "utf8");
+  const agentPostBoundary = agentPostSource.slice(agentPostSource.indexOf("export async function agentPostJson"), agentPostSource.indexOf("export function resolveExactEligibleImageTask"));
+  assert.ok(agentPostBoundary.indexOf("await options.onRequested?.(stageRunId)") < agentPostBoundary.indexOf("const response = await"), "onRequested persistence settles before fetch");
+  assert.doesNotMatch(agentPostSource, /submitInferenceStage/, "no unguarded inference-specific POST helper remains");
 
   const supervisorSource = readFileSync(new URL("./image-session-supervisor.ts", import.meta.url), "utf8");
   const statusStart = supervisorSource.indexOf("async function status()");
@@ -222,7 +239,7 @@ async function main() {
   assert.match(supervisorSource, /immutableSourcePreflight: \(\) => verifyRtx4090GoldenPublishedSources\(\)/, "source preflight is wired before prior-session reconciliation");
   const supervisionSource = readFileSync(new URL("./image-session-supervision.ts", import.meta.url), "utf8");
   const sourcePreflightCall = supervisionSource.indexOf("await options.immutableSourcePreflight?.();");
-  const priorOrderRead = supervisionSource.indexOf("const active = await readLiveOrdersSummary", sourcePreflightCall);
+  const priorOrderRead = supervisionSource.indexOf("const active = await (options.readActiveOrders", sourcePreflightCall);
   assert.ok(sourcePreflightCall >= 0 && priorOrderRead > sourcePreflightCall, "a failed immutable-source preflight performs no Clore read");
   const workerSource = readFileSync(new URL("./image-session-worker.ts", import.meta.url), "utf8");
   assert.match(workerSource, /--deployment-profile-fingerprint/, "worker receives the complete deployment profile identity");
@@ -246,7 +263,7 @@ async function main() {
   const sha256 = createHash("sha256").update(png).digest("hex");
   assert.doesNotThrow(() => assertDownloadedPngMatchesMetadata(png, { byte_size: png.length, sha256 }));
   assert.throws(() => assertDownloadedPngMatchesMetadata(png, { byte_size: png.length + 1, sha256 }), /remote_png_verification_failed/);
-  console.log(JSON.stringify({ ok: true, singleOrderInvariant: true, selectedCandidatePlanPersisted: true, immediateOwnedOrderPersistence: true, sessionReceiptEndpointRedacted: true, detachedSupervisorProductionWiring: true, twoZeroCleanupRequired: true, watchdogRetainedOnUncertainty: true, deadWorkerReceiptCleanupProjection: true, statusPollingProviderMutationCount: 0, postFinalizationUiFailureNonfatal: true, pngByteSizeVerified: true, providerMutationCount: 0 }));
+  console.log(JSON.stringify({ ok: true, singleOrderInvariant: true, selectedCandidatePlanPersisted: true, immediateOwnedOrderPersistence: true, inferenceRetryBlockBeforeSolePost: true, sessionReceiptEndpointRedacted: true, detachedSupervisorProductionWiring: true, twoZeroCleanupRequired: true, watchdogRetainedOnUncertainty: true, deadWorkerReceiptCleanupProjection: true, statusPollingProviderMutationCount: 0, postFinalizationUiFailureNonfatal: true, pngByteSizeVerified: true, providerMutationCount: 0 }));
 }
 
 void main().catch((error) => {

@@ -33,9 +33,32 @@ def wait_for(port, predicate, timeout=12):
 
 def main():
     token = "local-regression-token"; token_sha = hashlib.sha256(token.encode()).hexdigest()
+    # The Agent CLI now requires immutable predecessor identities and bounded
+    # patch payloads for both runtime files.  The empty fixed patch is a valid
+    # deterministic payload; zero hashes deliberately keep this process-level
+    # lock fixture offline and make any unexpected source fetch fail closed.
+    empty_patch = "i44FAA=="
     listener = socket.socket(); listener.bind(("127.0.0.1", 0)); port = listener.getsockname()[1]; listener.close()
     with tempfile.TemporaryDirectory(prefix="diagnostic-agent-lock-") as temp:
-        process = subprocess.Popen([sys.executable, str(AGENT), "--token-sha256", token_sha, "--project-commit", "0" * 40, "--controller-sha256", "0" * 64, "--workflow-sha256", "0" * 64, "--port", str(port)], env={**os.environ, "DIAG_ROOT": temp, "DIAG_TEST_STAGE_DELAY_SECONDS": "0.5"}, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(AGENT),
+                "--token-sha256", token_sha,
+                "--project-commit", "0" * 40,
+                "--controller-source-sha256", "0" * 64,
+                "--controller-sha256", "0" * 64,
+                "--controller-patch", empty_patch,
+                "--workflow-source-sha256", "0" * 64,
+                "--workflow-sha256", "0" * 64,
+                "--workflow-patch", empty_patch,
+                "--port", str(port),
+            ],
+            env={**os.environ, "DIAG_ROOT": temp, "DIAG_TEST_STAGE_DELAY_SECONDS": "0.5"},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         try:
             end = time.monotonic() + 8
             while True:

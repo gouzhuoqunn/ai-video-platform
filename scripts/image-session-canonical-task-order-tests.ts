@@ -78,12 +78,32 @@ async function main() {
   assert.throws(() => hydrateFrozenImageSessionPlan(storedInUiOrder.filter((value) => value.id !== id(4)), expectedCanonical, { gpuClass: "rtx4090" }), FrozenImageSessionMembershipChangedError);
   assert.throws(() => hydrateFrozenImageSessionPlan(storedInUiOrder.map((value) => value.id === id(2) ? { ...value, result: { pngSha256: "x" } } : value), expectedCanonical, { gpuClass: "rtx4090" }), FrozenImageSessionMembershipChangedError);
   assert.deepEqual(planImageSession(storedInUiOrder, { requestedTaskIds: [id(5), id(4)], gpuClass: "rtx4090", maxBatchSize: 2 }).selectedTaskIds, [id(4), id(5)], "a new start does not reuse stale frozen IDs");
+  const retryBlocked = task(6, {
+    inferenceRetryBlock: {
+      schemaVersion: 1,
+      reason: "inference_submission_may_have_been_accepted",
+      sessionId: id(90),
+      stageRunId: id(91),
+      inferenceState: "accepted",
+      recordedAt: "2026-07-26T01:00:00.000Z",
+    },
+    error: { message: "accepted ambiguity", at: "2026-07-26T01:00:00.000Z", retryable: false },
+  });
+  assert.deepEqual(
+    planImageSession([retryBlocked, task(7)], { requestedTaskIds: [id(6), id(7)], gpuClass: "rtx4090", maxBatchSize: 2 }).selectedTaskIds,
+    [id(7)],
+    "a retry-blocked accepted inference never enters a new paid plan",
+  );
+  assert.throws(
+    () => hydrateFrozenImageSessionPlan([retryBlocked], [id(6)], { gpuClass: "rtx4090" }),
+    FrozenImageSessionMembershipChangedError,
+  );
 
   const acceptedReceipt = { sessionId: "historical", sessionState: "ambiguous", currentTaskId: id(1), tasks: { [id(1)]: { inferenceState: "accepted", terminal: "ambiguous" } }, timestamps: {} };
   assert.equal(receiptHasAcceptedInference(acceptedReceipt), true);
   assert.equal(terminalizeReceipt(acceptedReceipt, { sessionId: "historical", state: "failed", error: "fixture", now: "2026-07-26T01:00:00.000Z" })?.sessionState, "ambiguous", "accepted historical evidence is preserved, not cleared");
 
-  console.log(JSON.stringify({ ok: true, canonicalTaskIds: expectedCanonical, canonicalSingleTask: true, membershipChangesFailBeforeProvider: true, stalePreOrderFreezeDoesNotContaminateNewPlan: true, acceptedHistoricalReceiptPreserved: true, providerMutationCount }));
+  console.log(JSON.stringify({ ok: true, canonicalTaskIds: expectedCanonical, canonicalSingleTask: true, membershipChangesFailBeforeProvider: true, retryBlockedTaskExcludedBeforeProvider: true, stalePreOrderFreezeDoesNotContaminateNewPlan: true, acceptedHistoricalReceiptPreserved: true, providerMutationCount }));
 }
 
 void main();

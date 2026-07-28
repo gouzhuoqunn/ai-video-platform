@@ -2,6 +2,8 @@ import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, wr
 import path from "node:path";
 import type { LocalImageTask } from "../../src/lib/image-generation/local-image-task-store";
 import { classifyImageGpu, type ImageGpuClass } from "../../src/lib/image-generation/flux-stack";
+import { assertImageTaskLoras, normalizeNegativePrompt } from "../../src/lib/image-generation/image-loras";
+import { requiresManualInferenceRecovery } from "../../src/lib/image-generation/image-task-retry-policy";
 import type { EligibleImageTask } from "./run-image-e2e";
 
 export const IMAGE_SESSION_LIMITS = { maxBatchSize: 8, maxHours: 4, maxHourlyUsd: .30, maxCostUsd: 1.50, creationFeeUsd: .10, minimumWalletReserveUsd: 1.00, idleMinutes: 15, normalGenerationMinutes: 12, cleanupMinutes: 5 } as const;
@@ -18,9 +20,18 @@ export class FrozenImageSessionMembershipChangedError extends Error {
 
 function positiveInteger(value: unknown) { return Number.isInteger(value) && Number(value) > 0; }
 function taskPriority(task: LocalImageTask) { const value = String(task.priority ?? "").toLowerCase(); return value === "urgent" || value === "immediate" ? 0 : 1; }
+function validExtendedTaskSettings(task: LocalImageTask) {
+  try {
+    normalizeNegativePrompt(task.negativePrompt);
+    if (task.loras !== undefined) assertImageTaskLoras(task.loras);
+    return true;
+  } catch {
+    return false;
+  }
+}
 export function isSessionEligibleTask(task: LocalImageTask): task is EligibleImageTask {
   const gpuClass = classifyImageGpu(Number(task.width), Number(task.height));
-  return task.status === "waiting_for_gpu" && task.mode === "text_generation" && task.referenceImage === null && !task.result && !task.localClaim && typeof task.prompt === "string" && task.prompt.trim().length > 0 &&
+  return task.status === "waiting_for_gpu" && validExtendedTaskSettings(task) && !requiresManualInferenceRecovery(task) && task.mode === "text_generation" && task.referenceImage === null && !task.result && !task.localClaim && typeof task.prompt === "string" && task.prompt.trim().length > 0 &&
     positiveInteger(task.width) && positiveInteger(task.height) && gpuClass !== null && task.gpuClass === gpuClass &&
     positiveInteger(task.steps) && Number(task.steps) >= 25 && Number(task.steps) <= 40 && Number.isFinite(task.cfg) && Number(task.cfg) >= 3.5 && Number(task.cfg) <= 5 && Number.isFinite(task.loraStrength) && Number(task.loraStrength) >= .6 && Number(task.loraStrength) <= 1.1 && Number.isInteger(task.seed) && Number(task.seed) >= 0 && Number(task.seed) <= 2_147_483_647 && (task.sampler === "Euler" || task.sampler === "FlowMatch") && !Number.isNaN(Date.parse(String(task.createdAt)));
 }

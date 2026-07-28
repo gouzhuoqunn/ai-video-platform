@@ -31,6 +31,31 @@ def model_entries(agent, url="https://models.example.invalid/download"):
     return [{"role": role, "filename": filename, "url": url, "sha256": digest, "size_bytes": len(content)} for role, (filename, _directory) in agent.APPROVED_MODELS.items()]
 
 
+def safetensors_fixture():
+    data = b"\0" * 1024
+    header = json.dumps(
+        {"weight": {"dtype": "F32", "shape": [256], "data_offsets": [0, len(data)]}},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return len(header).to_bytes(8, "little") + header + data
+
+
+def additional_lora_entry(
+    content,
+    *,
+    lora_id="123e4567-e89b-42d3-a456-426614174001",
+    filename="fixture-extra-lora.safetensors",
+    url="https://models.example.invalid/fixture-extra-lora.safetensors",
+):
+    return {
+        "id": lora_id,
+        "filename": filename,
+        "url": url,
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "size_bytes": len(content),
+    }
+
+
 class FakeResponse:
     status = 200
     def __init__(self, data): self.data = data; self.offset = 0; self.headers = {"Content-Type": "text/plain", "Content-Length": str(len(data))}
@@ -53,6 +78,15 @@ def test_manifest_and_download(agent, temp):
     agent.COMFY_DIR = Path(temp) / "ComfyUI"
     valid = {"models": model_entries(agent)}
     accepted = agent.validate_manifest(valid); assert len(accepted) == 5
+    extra_content = safetensors_fixture()
+    extra = additional_lora_entry(extra_content)
+    extended = agent.validate_manifest({"models": model_entries(agent), "loras": [extra]})
+    assert len(extended) == 6
+    dynamic = extended[-1]
+    assert dynamic["kind"] == "additional_lora"
+    assert dynamic["state_bucket"] == "lora_files" and dynamic["state_key"] == extra["filename"]
+    assert Path(dynamic["destination"]) == agent.COMFY_DIR / "models" / "loras" / extra["filename"]
+    assert dynamic["destination"].startswith(str(agent.COMFY_DIR / "models" / "loras"))
     for mutate, expected in [
         (lambda body: body["models"][0].update(role="other"), "invalid_or_duplicate_model_role"),
         (lambda body: body["models"][0].update(filename="../bad"), "invalid_or_duplicate_model_filename"),
@@ -63,6 +97,25 @@ def test_manifest_and_download(agent, temp):
     ]:
         body = json.loads(json.dumps(valid)); mutate(body)
         if expected: assert_raises(lambda: agent.validate_manifest(body), expected)
+    for body, expected in [
+        (
+            {"models": model_entries(agent), "loras": [{**extra, "filename": "../escape.safetensors"}]},
+            "invalid_or_duplicate_lora_filename",
+        ),
+        (
+            {"models": model_entries(agent), "loras": [{**extra, "destination": "/tmp/escape"}]},
+            "invalid_additional_lora_fields",
+        ),
+        (
+            {"models": model_entries(agent), "loras": [extra, {**extra, "filename": "other.safetensors"}]},
+            "invalid_or_duplicate_lora_id",
+        ),
+        (
+            {"models": model_entries(agent), "loras": [{**extra, "filename": agent.APPROVED_MODELS["lora"][0]}]},
+            "invalid_or_duplicate_lora_filename",
+        ),
+    ]:
+        assert_raises(lambda body=body: agent.validate_manifest(body), expected)
     fixture = b"fixture-model"
     entry = accepted[0]
     original = agent.urllib.request.urlopen
@@ -79,6 +132,54 @@ def test_manifest_and_download(agent, temp):
         assert_raises(lambda: agent.stream_model(wrong), "model_sha256_mismatch")
     finally:
         agent.urllib.request.urlopen = original
+
+
+def test_additional_lora_download_validation_and_state(agent, temp):
+    agent.COMFY_DIR = Path(temp) / "ComfyUI-additional-lora"
+    base_manifest = {"models": model_entries(agent)}
+    for entry in agent.validate_manifest(base_manifest):
+        destination = Path(entry["destination"])
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"fixture-model")
+    content = safetensors_fixture()
+    extra = additional_lora_entry(content)
+    manifest = {"models": model_entries(agent), "loras": [extra]}
+    original = agent.urllib.request.urlopen
+    requests = []
+
+    def downloaded(request, *_args, **_kwargs):
+        requests.append(request)
+        return FakeResponse(content)
+
+    agent.STATE["models"] = {}
+    agent.STATE["lora_files"] = {}
+    agent.urllib.request.urlopen = downloaded
+    try:
+        agent.stage_models(manifest)
+    finally:
+        agent.urllib.request.urlopen = original
+    assert len(requests) == 1
+    assert set(agent.STATE["models"]) == set(agent.APPROVED_MODELS)
+    assert set(agent.STATE["lora_files"]) == {extra["filename"]}
+    assert agent.STATE["lora_files"][extra["filename"]]["status"] in {"verified", "verified_existing"}
+    assert (agent.COMFY_DIR / "models" / "loras" / extra["filename"]).read_bytes() == content
+
+    corrupt = b"x" * len(content)
+    corrupt_entry = additional_lora_entry(
+        corrupt,
+        lora_id="123e4567-e89b-42d3-a456-426614174002",
+        filename="corrupt-extra-lora.safetensors",
+    )
+    original = agent.urllib.request.urlopen
+    agent.urllib.request.urlopen = lambda *_args, **_kwargs: FakeResponse(corrupt)
+    try:
+        assert_raises(
+            lambda: agent.stage_models({"models": model_entries(agent), "loras": [corrupt_entry]}),
+            "invalid_lora_safetensors",
+        )
+    finally:
+        agent.urllib.request.urlopen = original
+    assert not (agent.COMFY_DIR / "models" / "loras" / corrupt_entry["filename"]).exists()
 
 
 def test_model_http_error_is_structured_and_sanitized(agent, temp):
@@ -111,7 +212,20 @@ def test_raw_fetch_and_controller_failure(agent, temp):
         assert_raises(lambda: agent.fetch_small_verified([("fixture", "https://raw.githubusercontent.com/example/file")], destination, "0" * 64), "immutable_source_sha256_mismatch")
     finally:
         agent.urllib.request.urlopen = original
-    agent.CONFIG.update({"project_commit": "f" * 40, "controller_sha256": "0" * 64, "workflow_sha256": "0" * 64})
+    # The runtime resolver now requires both the immutable predecessor
+    # identities and the bounded, fixed patch payloads used to materialize the
+    # deployed controller/workflow.  This fixture intentionally keeps the
+    # values invalid/unreachable so the source-unavailable classification is
+    # still the first failure.
+    agent.CONFIG.update({
+        "project_commit": "f" * 40,
+        "controller_source_sha256": "0" * 64,
+        "controller_sha256": "0" * 64,
+        "controller_patch": "fixture-controller-patch",
+        "workflow_source_sha256": "0" * 64,
+        "workflow_sha256": "0" * 64,
+        "workflow_patch": "fixture-workflow-patch",
+    })
     def missing(*_args, **_kwargs): raise urllib.error.HTTPError("https://raw.githubusercontent.com/x", 404, "not found", {}, None)
     agent.urllib.request.urlopen = missing
     try: assert_raises(agent.project_runtime, "immutable_source_unavailable")
@@ -148,6 +262,71 @@ def test_inference(agent, temp):
         assert_raises(lambda: agent.stage_inference(payload), "controller_generate_failed")
     finally:
         agent.request_json, agent.urllib.request.urlopen = original_json, original_open
+
+
+def test_extended_inference_contract(agent, temp):
+    task_id = "123e4567-e89b-42d3-a456-426614174003"
+    filename = "fixture-extra-lora.safetensors"
+    legacy = {"task_id": task_id, "mode": "text_generation", "prompt": "legacy fixture", "width": 768, "height": 768, "steps": 25, "cfg": 4.0, "lora_strength": 0.8, "seed": 1, "sampler": "Euler"}
+    assert agent.validate_inference_shape(legacy) == task_id
+    payload = {
+        **legacy,
+        "prompt": "extended fixture",
+        "negative_prompt": "female anatomy",
+        "loras": [{"filename": filename, "strength": 0.85}],
+    }
+    assert agent.validate_inference_shape(payload) == task_id
+    for invalid, expected in [
+        ({**payload, "negative_prompt": "x" * 4001}, "invalid_negative_prompt"),
+        ({**payload, "loras": [{"filename": "../escape.safetensors", "strength": 0.8}]}, "invalid_inference_lora"),
+        ({**payload, "loras": [{"filename": filename, "strength": True}]}, "invalid_inference_lora"),
+        ({**payload, "loras": [{"filename": filename, "strength": 0.8}, {"filename": filename, "strength": 0.7}]}, "invalid_inference_lora"),
+        ({**payload, "loras": [{"filename": f"extra-{index}.safetensors", "strength": 0.8} for index in range(9)]}, "invalid_inference_loras"),
+        ({**payload, "loras": [{"filename": filename, "strength": 0.8, "url": "https://example.invalid"}]}, "invalid_inference_lora_fields"),
+    ]:
+        assert_raises(lambda invalid=invalid: agent.validate_inference_shape(invalid), expected)
+
+    agent.ARTIFACT_DIR = Path(temp) / "extended-artifacts"
+    agent.STATE["models"] = {role: {"status": "verified"} for role in agent.APPROVED_MODELS}
+    agent.STATE["lora_files"] = {}
+    original_json, original_open = agent.request_json, agent.urllib.request.urlopen
+    agent.request_json = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unverified LoRA reached Controller"))
+    try:
+        assert_raises(lambda: agent.stage_inference(payload), "requested_loras_not_verified")
+    finally:
+        agent.request_json = original_json
+
+    calls = []
+    agent.STATE["lora_files"] = {
+        filename: {
+            "filename": filename,
+            "status": "verified",
+            "sha256": "1" * 64,
+            "size_bytes": len(safetensors_fixture()),
+        },
+    }
+
+    def request(url, method="GET", body=None, timeout=30):
+        if url.endswith("/healthz"): return 200, {"controller": "alive"}
+        if url.endswith("/system_stats"): return 200, {}
+        if url.endswith("/image/generate"):
+            calls.append(body)
+            return 202, {"job_id": "extended-job", "prompt_id": "extended-prompt"}
+        if "/jobs/" in url:
+            return 200, {"status": "completed", "history": {"status": {"status_str": "success"}}}
+        raise AssertionError(url)
+
+    png = b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR" + (768).to_bytes(4, "big") + (768).to_bytes(4, "big") + b"\x08\x06\x00\x00\x00" + b"extended"
+    agent.request_json = request
+    agent.urllib.request.urlopen = lambda *_args, **_kwargs: FakeResponse(png)
+    try:
+        result = agent.stage_inference(payload)
+    finally:
+        agent.request_json, agent.urllib.request.urlopen = original_json, original_open
+    assert result["width"] == 768 and result["height"] == 768
+    assert calls == [payload]
+    rendered = json.dumps(agent.STATE)
+    assert payload["prompt"] not in rendered and payload["negative_prompt"] not in rendered
 
 
 def test_comfy_missing_torch_is_bounded(agent, temp):
@@ -280,15 +459,40 @@ def test_http_artifacts():
         artifact = Path(temp) / "artifacts" / task_id; artifact.mkdir(parents=True)
         artifact.joinpath("image.png").write_bytes(b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR" + (768).to_bytes(4, "big") + (768).to_bytes(4, "big") + b"\x08\x06\x00\x00\x00")
         artifact.joinpath("metadata.json").write_text(json.dumps({"task_id": task_id, "width": 768, "height": 768}), encoding="utf-8")
-        args = [sys.executable, str(AGENT_PATH), "--token-sha256", token_sha, "--project-commit", "0" * 40, "--controller-sha256", "0" * 64, "--workflow-sha256", "0" * 64, "--port", str(port)]
+        args = [
+            sys.executable,
+            str(AGENT_PATH),
+            "--token-sha256",
+            token_sha,
+            "--project-commit",
+            "0" * 40,
+            "--controller-source-sha256",
+            "0" * 64,
+            "--controller-sha256",
+            "0" * 64,
+            "--controller-patch",
+            "eJyrVkrLz1eyUkpKLFKqBQA0XwV2",
+            "--workflow-source-sha256",
+            "0" * 64,
+            "--workflow-sha256",
+            "0" * 64,
+            "--workflow-patch",
+            "eJyrVkrLz1eyUkpKLFKqBQA0XwV2",
+            "--port",
+            str(port),
+        ]
         process = subprocess.Popen(args, env={**__import__("os").environ, "DIAG_ROOT": temp}, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         try:
+            status = None
             for _ in range(40):
                 try:
                     status, _ = request(port, "GET", "/healthz")
                     if status == 200: break
                 except OSError: time.sleep(.05)
-            assert status == 200
+            if status != 200:
+                exit_code = process.poll()
+                stderr = process.stderr.read() if exit_code is not None and process.stderr else ""
+                raise AssertionError(f"Agent HTTP fixture did not start: exit={exit_code}, stderr={stderr[-1000:]}")
             assert request(port, "GET", f"/artifacts/{task_id}/image")[0] == 401
             assert request(port, "GET", f"/artifacts/{task_id}/image", token)[0] == 200
             assert request(port, "GET", "/artifacts/not-a-uuid/image", token)[0] == 404
@@ -298,16 +502,28 @@ def test_http_artifacts():
 
 
 def main():
+    def check(name, action):
+        print(f"CHECK {name}", flush=True)
+        started = time.monotonic()
+        try:
+            action()
+        except Exception:
+            print(f"FAIL {name} ({time.monotonic() - started:.2f}s)", flush=True)
+            raise
+        print(f"PASS {name} ({time.monotonic() - started:.2f}s)", flush=True)
+
     with tempfile.TemporaryDirectory(prefix="diagnostic-agent-restricted-") as temp:
         agent = load_agent(); agent.ROOT = Path(temp); agent.STATE_FILE = agent.ROOT / "state.json"; agent.RUNTIME_DIR = agent.ROOT / "runtime"; agent.ARTIFACT_DIR = agent.ROOT / "artifacts"
-        test_manifest_and_download(agent, temp)
-        test_model_http_error_is_structured_and_sanitized(agent, temp)
-        test_raw_fetch_and_controller_failure(agent, temp)
-        test_inference(agent, temp)
-        test_comfy_missing_torch_is_bounded(agent, temp)
-        test_ensure_venv(agent, temp)
-        test_comfy_torch_requirements_and_logging(agent, temp)
-    test_http_artifacts()
+        check("manifest_and_download", lambda: test_manifest_and_download(agent, temp))
+        check("additional_lora_download_validation_and_state", lambda: test_additional_lora_download_validation_and_state(agent, temp))
+        check("model_http_error_is_structured_and_sanitized", lambda: test_model_http_error_is_structured_and_sanitized(agent, temp))
+        check("raw_fetch_and_controller_failure", lambda: test_raw_fetch_and_controller_failure(agent, temp))
+        check("inference", lambda: test_inference(agent, temp))
+        check("extended_inference_contract", lambda: test_extended_inference_contract(agent, temp))
+        check("comfy_missing_torch_is_bounded", lambda: test_comfy_missing_torch_is_bounded(agent, temp))
+        check("ensure_venv", lambda: test_ensure_venv(agent, temp))
+        check("comfy_torch_requirements_and_logging", lambda: test_comfy_torch_requirements_and_logging(agent, temp))
+    check("http_artifacts", test_http_artifacts)
     print(json.dumps({"ok": True, "venv": "fixed_reuse_and_bounded_package_repair", "torch": "cu128_2_8_pinned", "requirements": "torch_filtered_and_constrained", "pip_logs": "full_local_with_bounded_status_summary", "raw_runtime": "verified", "models": "restricted_and_resumable", "inference": "fixed_controller_round_trip", "artifacts": "authenticated"}))
 
 

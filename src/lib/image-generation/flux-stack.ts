@@ -1,3 +1,5 @@
+import type { ImageTaskLora } from "./image-loras";
+
 export const FLUX_IMAGE_STACK = {
   textTransformer: "Fluxed Up 10.2 BF16",
   textTransformerRole: "complete FLUX.1-D transformer replacement (never load FLUX.1-dev FP8 alongside it)",
@@ -13,6 +15,8 @@ export const IMAGE_RESOLUTION_STEP = 256;
 
 export type ImageTaskSettings = {
   prompt: string;
+  negativePrompt?: string;
+  loras?: ImageTaskLora[];
   steps: number;
   loraStrength: number;
   cfg: number;
@@ -34,6 +38,8 @@ export function createFluxExecutionConfig(task: ImageTaskSettings & { referenceI
     stack: FLUX_IMAGE_STACK,
     mode,
     prompt: task.prompt,
+    negativePrompt: task.negativePrompt ?? "",
+    loras: task.loras,
     referenceImage: task.referenceImage,
     referenceMode: task.referenceImage ? "flux_kontext_reference_aware" : "fluxed_up_text_to_image",
     steps: task.steps,

@@ -4,6 +4,10 @@ export const HISTORICAL_AGENT_STAGE_MESSAGE = "运行环境控制服务响应不
 export const CURRENT_CREATE_RATE_LIMIT_MESSAGE = "创建订单请求受到限流，正在核对订单状态，请稍候重试。";
 export const HISTORICAL_CREATE_RATE_LIMIT_MESSAGE = "上次创建订单请求受到限流，当前没有活动订单，可以重新尝试。";
 export const CREATE_RATE_LIMIT_CLASSIFICATION = "create_rate_limited";
+export const PRIOR_SESSION_AUTO_RECOVERY_MESSAGE = "检测到上次有图片生成请求已提交但结果未确认。系统会在再次启动前隔离该任务，避免重复生成；其他任务可以继续。";
+export const PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE = "上次有图片生成请求已提交，但本地状态无法安全核对。为避免重复生成，已阻止再次启动；请打开“当下日志”处理。";
+export const PRIOR_SESSION_RECOVERY_CLASSIFICATION = "prior_session_recovery_pending";
+export const PRIOR_SESSION_MANUAL_RECOVERY_CLASSIFICATION = "inference_recovery_requires_attention";
 
 type RunnerError = { stage: string; message: string; at: string; classification?: string; operation?: string };
 type RunnerLike = { state: string; pid?: number | null; host?: { orderId?: string | null } | null; blocker?: string | null; error?: RunnerError | null };
@@ -26,6 +30,14 @@ function agentStageAcceptanceFailure(message: string) {
   return /^agent_stage_acceptance_invalid:[a-z_]+$/i.test(message);
 }
 
+function priorSessionAutoRecovery(message: string) {
+  return /prior_session_receipt_unsafe/i.test(message);
+}
+
+function priorSessionManualRecovery(message: string) {
+  return /prior_session_(?:manual_recovery_required|receipt_unreadable|local_execution_state_present|local_active_order_exists|active_order_exists|target_task_changed|id_invalid|archive_conflict|archive_verification_failed)/i.test(message);
+}
+
 function createRateLimitFailure(input: Pick<RunnerError, "stage" | "message" | "classification" | "operation">) {
   const context = `${input.stage} ${input.operation ?? ""} ${input.classification ?? ""} ${input.message}`;
   const createOrderContext = /create[_\s-]?order|creating[_\s-]?order|reconcil(?:e|ing)|clore\.create_order/i.test(context);
@@ -46,11 +58,15 @@ function historicalMarketMessage(classification?: string) {
 }
 
 function safeCurrentMessage(error: RunnerError) {
+  if (priorSessionManualRecovery(error.message)) return PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE;
+  if (priorSessionAutoRecovery(error.message)) return PRIOR_SESSION_AUTO_RECOVERY_MESSAGE;
   if (createRateLimitFailure(error)) return CURRENT_CREATE_RATE_LIMIT_MESSAGE;
   return providerPayload(error.message) ? "启动请求遇到服务端错误，请先停止并检查运行状态。" : error.message;
 }
 
 function safeClassification(error: RunnerError) {
+  if (priorSessionManualRecovery(error.message)) return PRIOR_SESSION_MANUAL_RECOVERY_CLASSIFICATION;
+  if (priorSessionAutoRecovery(error.message)) return PRIOR_SESSION_RECOVERY_CLASSIFICATION;
   if (createRateLimitFailure(error)) return CREATE_RATE_LIMIT_CLASSIFICATION;
   if (rentedCandidateCode6(error.message, error.classification)) return "candidate_already_rented";
   if (["rate_limited", "authentication_failed", "transport_failed", "invalid_json", "schema_incompatible", "provider_error"].includes(error.classification ?? "")) return error.classification;
@@ -72,10 +88,26 @@ export function projectRunnerStatus(runner: RunnerLike, state: { pidAlive: boole
   // Only live PID, reconciled active-order state, or a create lock makes it current.
   const historical = ["idle", "failed", "completed"].includes(runner.state) && !state.pidAlive && !state.activeOrder && !state.createLock;
   if (historical) {
+    if (priorSessionManualRecovery(runner.error.message)) {
+      return {
+        error: {
+          stage: runner.error.stage,
+          at: runner.error.at,
+          displayMessage: PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE,
+          isBlocking: true,
+          historical: true,
+          classification: PRIOR_SESSION_MANUAL_RECOVERY_CLASSIFICATION,
+        },
+        blocker: PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE,
+      };
+    }
     const rented = rentedCandidateCode6(runner.error.message, runner.error.classification);
     const createRateLimited = createRateLimitFailure(runner.error);
     const marketMessage = historicalMarketMessage(runner.error.classification);
-    const displayMessage = createRateLimited
+    const autoRecovery = priorSessionAutoRecovery(runner.error.message);
+    const displayMessage = autoRecovery
+      ? PRIOR_SESSION_AUTO_RECOVERY_MESSAGE
+      : createRateLimited
       ? HISTORICAL_CREATE_RATE_LIMIT_MESSAGE
       : rented
         ? HISTORICAL_RENTED_CANDIDATE_MESSAGE
@@ -87,7 +119,9 @@ export function projectRunnerStatus(runner: RunnerLike, state: { pidAlive: boole
         displayMessage,
         isBlocking: false,
         historical: true,
-        classification: createRateLimited
+        classification: autoRecovery
+          ? PRIOR_SESSION_RECOVERY_CLASSIFICATION
+          : createRateLimited
           ? CREATE_RATE_LIMIT_CLASSIFICATION
           : rented
             ? "candidate_already_rented"

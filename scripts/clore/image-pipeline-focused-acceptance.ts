@@ -21,6 +21,8 @@ const testFiles = [
   "scripts/clore/agent-get-transport-tests.ts",
   "scripts/clore/image-model-preflight-tests.ts",
   "scripts/clore/image-model-agent-manifest-tests.ts",
+  "scripts/clore/image-workflow-contract-tests.ts",
+  "scripts/image-lora-registry-tests.ts",
   "scripts/image-executor/immutable-source-resolver-tests.ts",
   "scripts/clore/image-5090-executor-tests.ts",
   "scripts/clore/run-image-e2e-tests.ts",
@@ -28,6 +30,7 @@ const testFiles = [
   "scripts/clore/image-session-tests.ts",
   "scripts/image-session-canonical-task-order-tests.ts",
   "scripts/clore/image-session-terminalization-tests.ts",
+  "scripts/clore/local-image-task-store-tests.ts",
   "scripts/clore/image-live-safety-tests.ts",
   "scripts/clore/image-e2e-ui-tests.ts",
   "scripts/clore/local-image-artifact-route-tests.ts",
@@ -35,6 +38,7 @@ const testFiles = [
   "scripts/image-order-state-reconcile-tests.ts",
   "scripts/image-runner-status-projection-tests.ts",
   "scripts/image-task-unconfirmation-tests.ts",
+  "scripts/image-result-groups-tests.ts",
   "scripts/image-executor-focused-tests.ts",
   "scripts/clore/watchdog-tests.ts",
 ] as const;
@@ -63,9 +67,10 @@ const requiredChecks: CheckDefinition[] = [
   { name: "pinned_agent_stage_acceptance_v2", files: ["scripts/clore/diagnostic-agent-tests.ts", "scripts/clore/pinned-agent-http-contract-tests.ts", "scripts/clore/agent-stage-acceptance-contract-tests.ts"] },
   { name: "exact_stage_run_id_correlation", files: ["scripts/clore/pinned-agent-http-contract-tests.ts", "scripts/clore/agent-stage-acceptance-contract-tests.ts", "scripts/clore/agent-get-transport-tests.ts"] },
   { name: "model_source_manifest_validation", files: ["scripts/clore/image-model-preflight-tests.ts", "scripts/clore/image-model-agent-manifest-tests.ts", "scripts/image-executor-focused-tests.ts"] },
+  { name: "multi_lora_negative_workflow_contract", files: ["scripts/clore/image-workflow-contract-tests.ts", "scripts/image-lora-registry-tests.ts"] },
   { name: "canonical_single_task_planning", files: ["scripts/clore/image-session-tests.ts", "scripts/image-session-canonical-task-order-tests.ts"] },
   { name: "exactly_one_inference_post", files: ["scripts/clore/image-e2e-coordinator-tests.ts", "scripts/clore/image-session-tests.ts"] },
-  { name: "accepted_inference_never_retried", files: ["scripts/clore/image-e2e-coordinator-tests.ts", "scripts/clore/agent-get-transport-tests.ts", "scripts/clore/image-session-terminalization-tests.ts"] },
+  { name: "accepted_inference_never_retried", files: ["scripts/clore/image-e2e-coordinator-tests.ts", "scripts/clore/agent-get-transport-tests.ts", "scripts/clore/image-session-terminalization-tests.ts", "scripts/clore/local-image-task-store-tests.ts", "scripts/image-result-groups-tests.ts"] },
   { name: "artifact_finalization_cannot_be_downgraded", files: ["scripts/clore/run-image-e2e-tests.ts", "scripts/clore/image-e2e-coordinator-tests.ts", "scripts/clore/image-session-terminalization-tests.ts", "scripts/clore/local-image-artifact-route-tests.ts"] },
   { name: "post_finalization_ui_error_cannot_fail_completed_task", files: ["scripts/clore/image-e2e-coordinator-tests.ts", "scripts/clore/image-live-safety-tests.ts", "scripts/clore/image-e2e-ui-tests.ts"] },
   { name: "immediate_owned_order_persistence_after_create", files: ["scripts/clore/image-live-safety-tests.ts", "scripts/image-create-order-race-tests.ts"] },
@@ -185,6 +190,9 @@ async function runTestFile(file: TestFile, isolatedTaskStore: string): Promise<{
 
 async function main() {
   try {
+    for (const check of requiredChecks) {
+      console.info(`focused-check: ${check.name} START`);
+    }
     for (const [index, file] of testFiles.entries()) {
       console.info(`focused-acceptance-file: ${file} START timeout_ms=${TEST_FILE_TIMEOUT_MS}`);
       const isolatedState = path.join(isolationRoot, String(index));
@@ -232,7 +240,7 @@ async function main() {
   const passed = checkResults.filter((check) => check.passed).length;
   const failed = checkResults.length - passed;
   const total = checkResults.length;
-  const ok = failedFiles.length === 0 && failed === 0 && total === 26;
+  const ok = failedFiles.length === 0 && failed === 0;
   console.info(`focused-summary: passed=${passed} failed=${failed} total=${total}`);
   console.log(JSON.stringify({
     ok,

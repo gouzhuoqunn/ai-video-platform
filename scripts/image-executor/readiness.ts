@@ -107,10 +107,20 @@ export function processExists(pid: number | null | undefined) {
 
 export function sanitizeRunnerLog(text: string) {
   return text
+    .replace(/\u001B(?:[@-_][0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001B\\))/g, "")
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/gi, "<redacted-private-key>")
+    .replace(/(?:^[A-Za-z0-9+/=]{48,}\r?\n)+-----END [^-]*PRIVATE KEY-----/gim, "<redacted-private-key-fragment>")
+    .replace(/(?:<!doctype\s+html[^>]*>|<html\b[^>]*>)[\s\S]*?(?:<\/html>|$)/gi, "<redacted-html-response>")
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "<redacted-url>")
+    .replace(/ssh-(?:ed25519|rsa)\s+[A-Za-z0-9+/=]+(?:\s+\S+)?/g, "<redacted-ssh-key>")
+    .replace(/\b(?:hf_|sk-)[A-Za-z0-9_-]{16,}\b/g, "<redacted-secret>")
     .replace(/X-Amz-[A-Za-z0-9_-]+=[^&\s"]+/g, "X-Amz-REDACTED=REDACTED")
     .replace(/([?&](?:token|api_key|key|signature|password|access_token)=)[^&\s"]+/gi, "$1REDACTED")
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1REDACTED")
-    .replace(/((?:CIVITAI_API_TOKEN|HF_TOKEN|SECRET|PASSWORD|PRIVATE_KEY)\s*[:=]\s*)[^\s"]+/gi, "$1REDACTED");
+    .replace(/(\bAuthorization\s*[:=]\s*)(?:Basic|Bearer)\s+[^\r\n]+/gi, "$1REDACTED")
+    .replace(/(["']?(?:[A-Z0-9_]*SECRET_ACCESS_KEY|[A-Z0-9_]*ACCESS_KEY_ID|token|authorization|api[_-]?key|credential|secret|password|private[_-]?key|prompt)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)/gi, "$1REDACTED")
+    .replace(/\bunknown_code6\b|server-already-rented/gi, "candidate_already_rented")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
 }
 
 export function finalSanitizedLogLines(text: string, count = 8) {
