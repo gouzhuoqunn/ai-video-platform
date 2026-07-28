@@ -34,7 +34,49 @@ async function main() {
     const get403: typeof fetch = async (_url, init) => { assert.equal(init?.method, "GET", "HEAD-only access is not accepted"); return response(403, {}, { count: 0 }); };
     await assert.rejects(() => verifyFiveImageModelSources({ manifestPath, fetchImpl: get403, tokenProvider: () => "local" }), /civitai_source_http_403/);
     await assert.rejects(() => verifyFiveImageModelSources({ manifestPath, fetchImpl, tokenProvider: () => "" }), /missing_local_civitai_download_capability/);
-    console.log(JSON.stringify({ ok: true, method: "GET", redirected_credentials_local_only: true, response_bodies_cancelled: true, exact_content_length_or_range_checked: true, head_success_cannot_pass: true }));
+
+    const tokenBoundHuggingFace: typeof fetch = async (url, init) => {
+      const value = String(url);
+      const headers = new Headers(init?.headers);
+      if (value.includes("civitai.com")) return response(302, { location: `https://signed.example/civitai-${value.split("/").at(-1)}` }, { count: 0 });
+      if (value.includes("signed.example")) {
+        const size = value.endsWith("10") ? 101 : 102;
+        return response(206, { "content-range": `bytes 0-0/${size}` }, { count: 0 });
+      }
+      if (value.includes("ae.safetensors") && !headers.has("authorization")) {
+        return response(401, {}, { count: 0 });
+      }
+      const size = value.includes("ae.") ? 103 : value.includes("clip") ? 104 : 105;
+      return response(206, { "content-range": `bytes 0-0/${size}` }, { count: 0 });
+    };
+    await assert.rejects(
+      () => verifyFiveImageModelSources({ manifestPath, fetchImpl: tokenBoundHuggingFace, tokenProvider: (name) => `${name}-local-only` }),
+      /huggingface_remote_delivery_requires_local_token:flux-vae/,
+      "the remote Agent must never depend on a local HuggingFace bearer token",
+    );
+
+    let stalledSignal: AbortSignal | null = null;
+    let firstRequest = true;
+    const stalledCancelFetch: typeof fetch = async (url, init) => {
+      if (firstRequest) {
+        firstRequest = false;
+        stalledSignal = init?.signal ?? null;
+        return {
+          status: 302,
+          headers: new Headers({ location: `https://signed.example/civitai-${String(url).split("/").at(-1)}` }),
+          url: "",
+          body: { cancel: () => new Promise<void>(() => undefined) },
+        } as unknown as Response;
+      }
+      return await fetchImpl(url, init);
+    };
+    const stalledStarted = Date.now();
+    await verifyFiveImageModelSources({ manifestPath, fetchImpl: stalledCancelFetch, tokenProvider: (name) => `${name}-local-only` });
+    assert.ok(stalledSignal);
+    assert.equal(stalledSignal.aborted, true, "a body cancel that never settles must abort its request");
+    assert.ok(Date.now() - stalledStarted < 2_000, "a stalled response-body cancel must remain bounded");
+
+    console.log(JSON.stringify({ ok: true, method: "GET", redirected_credentials_local_only: true, tokenless_remote_delivery_required: true, response_bodies_cancelled: true, stalled_cancel_bounded: true, exact_content_length_or_range_checked: true, head_success_cannot_pass: true }));
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 void main();

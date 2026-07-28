@@ -34,6 +34,7 @@ const MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024;
 const MIN_LORA_BYTES = 1_024;
 const MAX_LORA_BYTES = 4 * 1024 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 20_000;
+const BODY_CANCEL_TIMEOUT_MS = 250;
 const LOCK_WAIT_MS = 5_000;
 const STALE_LOCK_MS = 30_000;
 const SAFE_SHA256 = /^[a-f0-9]{64}$/i;
@@ -236,6 +237,35 @@ async function readWithDeadline<T>(operation: Promise<T>, deadline: number) {
   }
 }
 
+async function cancelWithBoundedWait(cancel: () => Promise<unknown>) {
+  let operation: Promise<unknown>;
+  try {
+    operation = cancel();
+  } catch {
+    return;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      operation.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, BODY_CANCEL_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function cancelReaderBounded(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  await cancelWithBoundedWait(() => reader.cancel());
+}
+
+async function cancelResponseBodyBounded(response: Response) {
+  if (!response.body || response.body.locked) return;
+  await cancelWithBoundedWait(() => response.body!.cancel());
+}
+
 async function readBoundedBody(response: Response, maximumBytes: number, deadline: number) {
   if (!response.body) return Buffer.alloc(0);
   const reader = response.body.getReader();
@@ -250,7 +280,7 @@ async function readBoundedBody(response: Response, maximumBytes: number, deadlin
       chunks.push(Buffer.from(part.value));
     }
   } finally {
-    await reader.cancel().catch(() => undefined);
+    await cancelReaderBounded(reader);
   }
   return Buffer.concat(chunks, total);
 }
@@ -280,12 +310,12 @@ async function boundedJson<T>(
       signal: controller.signal,
     }), deadline);
     if ([301, 302, 303, 307, 308].includes(response.status)) {
-      await response.body?.cancel().catch(() => undefined);
+      await cancelResponseBodyBounded(response);
       throw new Error("lora_metadata_redirect_forbidden");
     }
     const declared = Number(response.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > MAX_METADATA_BYTES) {
-      await response.body?.cancel().catch(() => undefined);
+      await cancelResponseBodyBounded(response);
       throw new Error("lora_metadata_response_too_large");
     }
     const bytes = await readBoundedBody(response, MAX_METADATA_BYTES, deadline);
@@ -333,7 +363,7 @@ async function validateSafetensorsHeader(response: Response, deadline: number) {
       }
     }
   } finally {
-    await reader.cancel().catch(() => undefined);
+    await cancelReaderBounded(reader);
   }
   if (bytes.length < required) throw new Error("lora_safetensors_header_incomplete");
   let header: unknown;
@@ -365,7 +395,7 @@ async function probeBinary(
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw new Error("lora_source_timeout");
     const timer = setTimeout(() => controller.abort(), remainingMs);
-    let response: Response;
+    let response: Response | undefined;
     try {
       const origin = new URL(current).origin;
       response = await readWithDeadline(input.fetchImpl(current, {
@@ -380,15 +410,14 @@ async function probeBinary(
         },
         signal: controller.signal,
       }), deadline);
-    } finally {
-      clearTimeout(timer);
-    }
-    try {
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get("location");
         if (!location) throw new Error("lora_source_redirect_missing");
         if (++redirects > 5) throw new Error("lora_source_redirect_limit");
-        current = (await assertPublicUrl(new URL(location, current).toString(), input.registryOptions)).toString();
+        current = (await readWithDeadline(
+          assertPublicUrl(new URL(location, current).toString(), input.registryOptions),
+          deadline,
+        )).toString();
         continue;
       }
       const contentLength = declaredLength(response.headers);
@@ -406,7 +435,9 @@ async function probeBinary(
         redirectCount: redirects,
       };
     } finally {
-      await response.body?.cancel().catch(() => undefined);
+      controller.abort();
+      clearTimeout(timer);
+      if (response) await cancelResponseBodyBounded(response);
     }
   }
 }
@@ -448,12 +479,10 @@ function civitaiFile(version: CivitaiVersion, requestedFileId?: number) {
     && String(file.type ?? "").toLowerCase() === "model"
     && String(file.pickleScanResult ?? "").toLowerCase() === "success"
     && String(file.virusScanResult ?? "").toLowerCase() === "success");
-  const exact = requestedFileId
+  const selected = requestedFileId !== undefined
     ? candidates.find((file) => file.id === requestedFileId)
-    : undefined;
-  const selected = exact
-    ?? candidates.find((file) => file.primary === true)
-    ?? (candidates.length === 1 ? candidates[0] : undefined);
+    : candidates.find((file) => file.primary === true)
+      ?? (candidates.length === 1 ? candidates[0] : undefined);
   if (!selected) throw new Error("civitai_lora_file_ambiguous_or_missing");
   const digest = selected.hashes?.SHA256?.toLowerCase();
   if (
@@ -622,13 +651,28 @@ async function resolveSourceUrl(sourceUrl: string, options: LoraRegistryOptions)
   if (parsed.hostname.toLowerCase() === "huggingface.co") {
     const token = tokenProvider("HF_TOKEN");
     const resolved = await resolveHuggingFaceSource(parsed, { fetchImpl, timeoutMs, token, registryOptions: options });
-    const probe = await probeBinary(resolved.downloadUrl, {
+    let probe = await probeBinary(resolved.downloadUrl, {
       fetchImpl,
       token,
       tokenOrigin: "https://huggingface.co",
       timeoutMs,
       registryOptions: options,
     });
+    if (token && new URL(probe.url).origin === "https://huggingface.co") {
+      try {
+        probe = await probeBinary(probe.url, {
+          fetchImpl,
+          token: "",
+          tokenOrigin: "",
+          timeoutMs,
+          registryOptions: options,
+        });
+      } catch {
+        // The paid Agent intentionally never receives the user's HF token.
+        // Registration must therefore prove a tokenless immutable delivery URL.
+        throw new Error("huggingface_lora_remote_delivery_requires_local_token");
+      }
+    }
     if (probe.contentLength !== resolved.declaredSize) throw new Error("huggingface_lora_size_mismatch");
     return { ...resolved, sizeBytes: probe.contentLength, probe, provider: "huggingface" as const };
   }

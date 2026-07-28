@@ -12,6 +12,7 @@ import {
 } from "./immutable-source-resolver";
 import {
   RTX4090_GOLDEN_DEPLOYMENT_PROFILE,
+  applyPublishedAgentOffsetPatch,
   applyPublishedAgentSourcePatch,
 } from "./rtx4090-golden-deployment-profile";
 
@@ -158,7 +159,9 @@ async function main() {
   const predecessor = predecessorFromPinnedAgent();
   assert.equal(sha256(predecessor), RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.agentSourceSha256);
   const reconstructed = applyPublishedAgentSourcePatch(predecessor);
+  const compactReconstructed = applyPublishedAgentOffsetPatch(predecessor);
   assert.equal(sha256(reconstructed), RTX4090_GOLDEN_DEPLOYMENT_PROFILE.immutable.agentSha256);
+  assert.deepEqual(compactReconstructed, reconstructed, "the compact remote offset patch must reproduce the locally context-verified Agent");
   assert.deepEqual(reconstructed, readFileSync(path.join(process.cwd(), "scripts", "clore", "diagnostic-agent.py")));
 
   console.log(JSON.stringify({

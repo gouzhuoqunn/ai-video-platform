@@ -14,7 +14,7 @@ import { createSessionNonce, isLocalWatchdogTaskInstalled, writeLocalWatchdogArm
 import { agentGetJsonWithRetry, agentHealthResponse } from "./agent-get-transport";
 import { clearTemporaryDeploymentDeny, recordDeploymentFailure, recordDeploymentSuccess, recordTemporaryDeploymentDeny } from "./deployment-host-blacklist";
 import { agentPostJson, assertCallerAgentStageAcceptanceContract, buildPublicAgentBootstrap, createOrderWithRateLimit, getArtifactMetadataWithRetry, persistAndFinalizeExactLocalTask, pollInferenceStage, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, waitForStage, type AcceptedStage, type AgentStageAcceptanceEvidence, type EligibleImageTask } from "./run-image-e2e";
-import { toAgentModelManifest, verifyAdditionalTaskLoraSources, verifyFiveImageModelSources, type AgentAdditionalLoraEntry, type AgentModelManifest } from "./image-model-preflight";
+import { assertAgentModelManifestIdentityUnchanged, toAgentModelManifest, verifyAdditionalTaskLoraSources, verifyFiveImageModelSources, type AgentAdditionalLoraEntry, type AgentModelManifest } from "./image-model-preflight";
 import { ensureLocalUi, verifyImageUi } from "./image-e2e-ui";
 import { IMAGE_SESSION_LIMITS, planImageSession, type ImageSessionPlan } from "./image-session";
 import type { ImageGpuClass } from "../../src/lib/image-generation/flux-stack";
@@ -523,7 +523,14 @@ export async function buildLiveAgentModelManifest(tasks: readonly EligibleImageT
 }
 
 export async function installModelsOnce(order: LiveSessionOrder, tasks: readonly EligibleImageTask[], receipt?: { requested: (stageRunId: string) => void; accepted: (value: { stageRunId: string }) => void; evidence: (value: AgentStageAcceptanceEvidence) => void }, manifest?: AgentModelManifest) {
-  return await invokeStage(order, "models", manifest ?? await buildLiveAgentModelManifest(tasks), receipt);
+  // Pre-order source validation closes the billing gate. Refresh again right
+  // before the model stage because Civitai/HuggingFace delivery URLs can be
+  // short-lived; only URLs may change, never the pinned identity.
+  const refreshed = await buildLiveAgentModelManifest(tasks);
+  const installManifest = manifest
+    ? assertAgentModelManifestIdentityUnchanged(manifest, refreshed)
+    : refreshed;
+  return await invokeStage(order, "models", installManifest, receipt);
 }
 export async function capturePostFinalizationUiVerification(verify: () => Promise<void>) {
   try {

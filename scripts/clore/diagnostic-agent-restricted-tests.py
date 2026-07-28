@@ -74,6 +74,123 @@ def assert_raises(action, expected):
     else: raise AssertionError(f"expected {expected}")
 
 
+def test_model_download_redirect_and_dns_guards(agent):
+    class HopResponse:
+        def __init__(self, url, status, location=None):
+            self.url = url
+            self.status = status
+            self.headers = {"Location": location} if location else {}
+        def close(self): pass
+        def geturl(self): return self.url
+
+    def address(value):
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (value, 443))]
+
+    public_hosts = []
+    def public_resolver(host, _port, **_kwargs):
+        public_hosts.append(host)
+        return address("8.8.8.8")
+
+    calls = []
+    def legal_redirect(request, **_kwargs):
+        calls.append(request)
+        if request.full_url == "https://origin.example/model":
+            return HopResponse(request.full_url, 302, "https://cdn.example/model")
+        return HopResponse(request.full_url, 206)
+
+    request = agent.urllib.request.Request(
+        "https://origin.example/model",
+        headers={"Accept": "application/octet-stream", "Range": "bytes=4-"},
+    )
+    response = agent.open_model_download(
+        request,
+        timeout=1,
+        resolver=public_resolver,
+        open_once=legal_redirect,
+    )
+    assert response.status == 206
+    assert [item.full_url for item in calls] == [
+        "https://origin.example/model",
+        "https://cdn.example/model",
+    ]
+    assert public_hosts == ["origin.example", "cdn.example"]
+    assert calls[1].get_header("Range") == "bytes=4-"
+    assert all(item.get_header("Authorization") is None for item in calls)
+
+    private_calls = []
+    def private_redirect(request, **_kwargs):
+        private_calls.append(request.full_url)
+        return HopResponse(request.full_url, 302, "https://127.0.0.1/model")
+    assert_raises(
+        lambda: agent.open_model_download(
+            agent.urllib.request.Request("https://origin.example/model"),
+            timeout=1,
+            resolver=public_resolver,
+            open_once=private_redirect,
+        ),
+        "model_url_nonpublic_ip_forbidden",
+    )
+    assert private_calls == ["https://origin.example/model"]
+
+    network_calls = []
+    assert_raises(
+        lambda: agent.open_model_download(
+            agent.urllib.request.Request("https://private-dns.example/model"),
+            timeout=1,
+            resolver=lambda *_args, **_kwargs: address("10.0.0.7"),
+            open_once=lambda *_args, **_kwargs: network_calls.append(True),
+        ),
+        "model_url_dns_nonpublic_forbidden",
+    )
+    assert network_calls == []
+    assert_raises(
+        lambda: agent.open_model_download(
+            agent.urllib.request.Request("https://mixed-dns.example/model"),
+            timeout=1,
+            resolver=lambda *_args, **_kwargs: address("8.8.8.8") + address("169.254.169.254"),
+            open_once=lambda *_args, **_kwargs: network_calls.append(True),
+        ),
+        "model_url_dns_nonpublic_forbidden",
+    )
+    assert network_calls == []
+
+    def downgrade(request, **_kwargs):
+        return HopResponse(request.full_url, 302, "http://cdn.example/model")
+    assert_raises(
+        lambda: agent.open_model_download(
+            agent.urllib.request.Request("https://origin.example/model"),
+            timeout=1,
+            resolver=public_resolver,
+            open_once=downgrade,
+        ),
+        "model_download_https_redirect_required",
+    )
+    assert_raises(
+        lambda: agent.open_model_download(
+            agent.urllib.request.Request(
+                "https://origin.example/model",
+                headers={"Authorization": "Bearer local-token-must-not-leave"},
+            ),
+            timeout=1,
+            resolver=public_resolver,
+            open_once=legal_redirect,
+        ),
+        "model_download_credentials_forbidden",
+    )
+    def endless_redirect(request, **_kwargs):
+        return HopResponse(request.full_url, 302, "https://next.example/model")
+    assert_raises(
+        lambda: agent.open_model_download(
+            agent.urllib.request.Request("https://origin.example/model"),
+            timeout=1,
+            resolver=public_resolver,
+            open_once=endless_redirect,
+            max_redirects=1,
+        ),
+        "model_download_redirect_limit_exceeded",
+    )
+
+
 def test_manifest_and_download(agent, temp):
     agent.COMFY_DIR = Path(temp) / "ComfyUI"
     valid = {"models": model_entries(agent)}
@@ -118,11 +235,11 @@ def test_manifest_and_download(agent, temp):
         assert_raises(lambda body=body: agent.validate_manifest(body), expected)
     fixture = b"fixture-model"
     entry = accepted[0]
-    original = agent.urllib.request.urlopen
+    original = agent.open_model_download
     requests = []
     def downloaded(request, *_args, **_kwargs):
         requests.append(request); return FakeResponse(fixture)
-    agent.urllib.request.urlopen = downloaded
+    agent.open_model_download = downloaded
     try:
         first = agent.stream_model(entry); assert first["status"] == "verified"
         second = agent.stream_model(entry); assert second["status"] == "verified_existing" and len(requests) == 1
@@ -131,7 +248,7 @@ def test_manifest_and_download(agent, temp):
         wrong = dict(entry); wrong["sha256"] = "0" * 64
         assert_raises(lambda: agent.stream_model(wrong), "model_sha256_mismatch")
     finally:
-        agent.urllib.request.urlopen = original
+        agent.open_model_download = original
 
 
 def test_additional_lora_download_validation_and_state(agent, temp):
@@ -144,21 +261,30 @@ def test_additional_lora_download_validation_and_state(agent, temp):
     content = safetensors_fixture()
     extra = additional_lora_entry(content)
     manifest = {"models": model_entries(agent), "loras": [extra]}
-    original = agent.urllib.request.urlopen
+    original = agent.open_model_download
+    original_stream_model = agent.stream_model
     requests = []
+    install_order = []
 
     def downloaded(request, *_args, **_kwargs):
         requests.append(request)
         return FakeResponse(content)
 
+    def recorded_stream_model(item):
+        install_order.append(item["kind"])
+        return original_stream_model(item)
+
     agent.STATE["models"] = {}
     agent.STATE["lora_files"] = {}
-    agent.urllib.request.urlopen = downloaded
+    agent.open_model_download = downloaded
+    agent.stream_model = recorded_stream_model
     try:
         agent.stage_models(manifest)
     finally:
-        agent.urllib.request.urlopen = original
+        agent.open_model_download = original
+        agent.stream_model = original_stream_model
     assert len(requests) == 1
+    assert install_order[0] == "additional_lora" and install_order[1:] == ["base"] * len(agent.APPROVED_MODELS)
     assert set(agent.STATE["models"]) == set(agent.APPROVED_MODELS)
     assert set(agent.STATE["lora_files"]) == {extra["filename"]}
     assert agent.STATE["lora_files"][extra["filename"]]["status"] in {"verified", "verified_existing"}
@@ -170,25 +296,25 @@ def test_additional_lora_download_validation_and_state(agent, temp):
         lora_id="123e4567-e89b-42d3-a456-426614174002",
         filename="corrupt-extra-lora.safetensors",
     )
-    original = agent.urllib.request.urlopen
-    agent.urllib.request.urlopen = lambda *_args, **_kwargs: FakeResponse(corrupt)
+    original = agent.open_model_download
+    agent.open_model_download = lambda *_args, **_kwargs: FakeResponse(corrupt)
     try:
         assert_raises(
             lambda: agent.stage_models({"models": model_entries(agent), "loras": [corrupt_entry]}),
             "invalid_lora_safetensors",
         )
     finally:
-        agent.urllib.request.urlopen = original
+        agent.open_model_download = original
     assert not (agent.COMFY_DIR / "models" / "loras" / corrupt_entry["filename"]).exists()
 
 
 def test_model_http_error_is_structured_and_sanitized(agent, temp):
     agent.COMFY_DIR = Path(temp) / "ComfyUI-http-error"
     entry = agent.validate_manifest({"models": model_entries(agent, "https://signed.example/model?X-Amz-Signature=secret")})[0]
-    original = agent.urllib.request.urlopen
+    original = agent.open_model_download
     def denied(*_args, **_kwargs):
         raise urllib.error.HTTPError("https://signed.example/model?X-Amz-Signature=secret", 403, "Forbidden", {"Content-Type": "application/xml", "Content-Length": "99", "Retry-After": "3"}, io.BytesIO(b"<Error><Code>AccessDenied</Code><Message>SignatureDoesNotMatch https://signed.example/model?X-Amz-Signature=secret</Message></Error>"))
-    agent.urllib.request.urlopen = denied
+    agent.open_model_download = denied
     try:
         try: agent.stream_model(entry)
         except agent.StageFailure as error:
@@ -198,7 +324,7 @@ def test_model_http_error_is_structured_and_sanitized(agent, temp):
             assert "AccessDenied" in data["body_excerpt"] and "SignatureDoesNotMatch" in data["body_excerpt"]
             assert "secret" not in json.dumps(data) and "X-Amz-Signature" not in json.dumps(data)
         else: raise AssertionError("expected structured HTTP error")
-    finally: agent.urllib.request.urlopen = original
+    finally: agent.open_model_download = original
 
 
 def test_raw_fetch_and_controller_failure(agent, temp):
@@ -514,6 +640,7 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="diagnostic-agent-restricted-") as temp:
         agent = load_agent(); agent.ROOT = Path(temp); agent.STATE_FILE = agent.ROOT / "state.json"; agent.RUNTIME_DIR = agent.ROOT / "runtime"; agent.ARTIFACT_DIR = agent.ROOT / "artifacts"
+        check("model_download_redirect_and_dns_guards", lambda: test_model_download_redirect_and_dns_guards(agent))
         check("manifest_and_download", lambda: test_manifest_and_download(agent, temp))
         check("additional_lora_download_validation_and_state", lambda: test_additional_lora_download_validation_and_state(agent, temp))
         check("model_http_error_is_structured_and_sanitized", lambda: test_model_http_error_is_structured_and_sanitized(agent, temp))

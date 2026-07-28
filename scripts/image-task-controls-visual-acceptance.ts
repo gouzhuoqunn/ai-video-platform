@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { chromium } from "playwright";
+import type { RegisteredLora } from "../src/lib/image-generation/image-loras";
 import type { LocalImageTask } from "../src/lib/image-generation/local-image-task-store";
 
 const browserPath = process.env.SYSTEM_CHROMIUM_PATH ?? "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
@@ -54,8 +55,54 @@ async function waitFor(url: string) {
 async function main() {
   const firstId = randomUUID();
   const secondId = randomUUID();
+  const addedLoraId = randomUUID();
   const longPrompt = "完整提示词标题会按活动任务卡片的可用宽度换行显示，而不会被旧的短标题规则截断";
   let tasks = [fixture(firstId, "rtx4090", longPrompt), fixture(secondId, "rtx5090", "第二个完整提示词标题")];
+  const loraTimestamp = "2026-07-29T00:00:00.000Z";
+  let registeredLoras: RegisteredLora[] = [
+    {
+      id: "builtin-aidma-nsfw-unlock",
+      name: "画裸体LoRA",
+      filename: "aidmaNSFWunlock-FLUX-V0.2.safetensors",
+      defaultStrength: .8,
+      defaultEnabled: true,
+      availability: "ready",
+      sha256: "1".repeat(64),
+      sizeBytes: 19_268_648,
+      source: { provider: "civitai", modelId: 1, versionId: 11, fileId: 111 },
+      builtIn: true,
+      createdAt: loraTimestamp,
+      updatedAt: loraTimestamp,
+    },
+    {
+      id: "builtin-male-anatomy-correction",
+      name: "解决男人女器官LoRA",
+      filename: "male-anatomy-correction.safetensors",
+      defaultStrength: .85,
+      defaultEnabled: false,
+      availability: "ready",
+      sha256: "2".repeat(64),
+      sizeBytes: 20_000_000,
+      source: { provider: "civitai", modelId: 2, versionId: 22, fileId: 222 },
+      builtIn: true,
+      createdAt: loraTimestamp,
+      updatedAt: loraTimestamp,
+    },
+    {
+      id: "builtin-masculine-muscle",
+      name: "大肌肉阳刚LoRA",
+      filename: "masculine-muscle.safetensors",
+      defaultStrength: .75,
+      defaultEnabled: false,
+      availability: "ready",
+      sha256: "3".repeat(64),
+      sizeBytes: 21_000_000,
+      source: { provider: "huggingface", repository: "fixture/loras", revision: "a".repeat(40), path: "masculine-muscle.safetensors" },
+      builtIn: true,
+      createdAt: loraTimestamp,
+      updatedAt: loraTimestamp,
+    },
+  ];
   let next: ChildProcess | null = null;
   let baseUrl = process.env.IMAGE_STUDIO_TEST_URL ?? "http://127.0.0.1:3000";
   if (!(await isReady(baseUrl))) {
@@ -85,12 +132,45 @@ async function main() {
   };
 
   let createPosts = 0;
+  const createPayloads: Record<string, unknown>[] = [];
   let createGate: Promise<void> | null = null;
   let releaseCreate: (() => void) | null = null;
   const browser = await chromium.launch({ executablePath: browserPath, headless: true });
   try {
     const context = await browser.newContext({ viewport: { width: 1920, height: 1080 }, permissions: ["clipboard-read", "clipboard-write"] });
     const page = await context.newPage();
+    await page.route("**/api/local-lab/image-loras*", async (route) => {
+      const request = route.request();
+      if (request.method() === "GET") {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: registeredLoras }) });
+        return;
+      }
+      const body = request.postDataJSON() as Record<string, unknown>;
+      if (body.action !== "add") {
+        await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "unexpected_lora_fixture_mutation" }) });
+        return;
+      }
+      if (String(body.sourceUrl).includes("invalid")) {
+        await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "测试 LoRA 链接无效，没有保存任何文件。", code: "unsupported_lora_source_url" }) });
+        return;
+      }
+      const item: RegisteredLora = {
+        id: addedLoraId,
+        name: String(body.name),
+        filename: "newly-added.safetensors",
+        defaultStrength: Number(body.defaultStrength),
+        defaultEnabled: false,
+        availability: "ready",
+        sha256: "4".repeat(64),
+        sizeBytes: 22_000_000,
+        source: { provider: "huggingface", repository: "fixture/loras", revision: "b".repeat(40), path: "newly-added.safetensors" },
+        builtIn: false,
+        createdAt: loraTimestamp,
+        updatedAt: loraTimestamp,
+      };
+      registeredLoras = [...registeredLoras, item];
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ item, items: registeredLoras, message: "fixture_registered" }) });
+    });
     await page.route("**/api/local-lab/image-tasks*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
@@ -111,6 +191,7 @@ async function main() {
       }
       if (body.action === "create_group") {
         createPosts += 1;
+        createPayloads.push(body);
         if (createGate) await createGate;
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...responsePayload(), groupId: "fixture-created-group" }) });
         return;
@@ -119,6 +200,23 @@ async function main() {
     });
 
     await page.goto(baseUrl, { waitUntil: "networkidle" });
+    const loraPanel = page.locator('section[aria-label="LoRA 管理"]');
+    await loraPanel.getByText("画裸体LoRA", { exact: true }).waitFor();
+    await loraPanel.getByRole("button", { name: "添加新的LoRA", exact: true }).click();
+    const addLoraDialog = page.getByRole("dialog", { name: "添加新的 LoRA" });
+    await addLoraDialog.getByLabel("显示名称").fill("测试新增LoRA");
+    await addLoraDialog.getByLabel("Civitai 或 HuggingFace 链接").fill("https://civitai.com/models/invalid");
+    await addLoraDialog.getByRole("button", { name: "校验并注册" }).click();
+    const modalError = addLoraDialog.getByRole("alert");
+    await modalError.waitFor({ state: "visible" });
+    assert.match(await modalError.innerText(), /测试 LoRA 链接无效/);
+    assert.equal(await loraPanel.locator(':scope > [role="alert"]').count(), 0, "open modal must not duplicate its error beneath the overlay");
+    await addLoraDialog.getByLabel("Civitai 或 HuggingFace 链接").fill("https://huggingface.co/fixture/loras/blob/main/newly-added.safetensors");
+    await addLoraDialog.getByRole("button", { name: "校验并注册" }).click();
+    await addLoraDialog.waitFor({ state: "detached" });
+    await loraPanel.getByText("测试新增LoRA", { exact: true }).waitFor({ state: "visible" });
+    await loraPanel.getByLabel("启用 解决男人女器官LoRA").check();
+
     const promptTab = page.getByRole("button", { name: /^提示词/ });
     const restingStyle = await promptTab.evaluate((node) => ({ filter: getComputedStyle(node).filter, shadow: getComputedStyle(node).boxShadow }));
     await promptTab.hover();
@@ -188,11 +286,27 @@ async function main() {
 
     createGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
     const promptInput = page.getByRole("textbox", { name: "提示词", exact: true });
+    const negativePromptInput = page.getByRole("textbox", { name: "负面提示词", exact: true });
     await promptInput.fill("第一次提交的提示词");
+    await negativePromptInput.fill("测试负面提示词");
     const createButton = promptInput.locator("xpath=ancestor::section[1]").locator("button").last();
     await createButton.evaluate((node) => { node.click(); node.click(); });
     await page.waitForTimeout(100);
     assert.equal(createPosts, 1);
+    assert.equal(createPayloads.length, 1);
+    assert.equal(createPayloads[0].negativePrompt, "测试负面提示词");
+    const submittedLoras = createPayloads[0].loras as Array<{ id: string; enabled: boolean }>;
+    assert.deepEqual(submittedLoras.map((item) => item.id), [
+      "builtin-aidma-nsfw-unlock",
+      "builtin-male-anatomy-correction",
+      "builtin-masculine-muscle",
+      addedLoraId,
+    ]);
+    assert.deepEqual(
+      submittedLoras.map((item) => item.enabled),
+      [true, true, false, false],
+      "the task snapshot must preserve disabled LoRAs while runtime filtering remains downstream",
+    );
     assert.equal(await createButton.getAttribute("aria-busy"), "true");
     assert.equal(await createButton.isDisabled(), true);
     assert.equal(await page.getByText("正在处理，请勿重复点击…").count(), 1);

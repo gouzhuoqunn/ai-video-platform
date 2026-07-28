@@ -39,11 +39,11 @@ const immutable = {
   // materializes the locally pinned Agent byte-for-byte before it can execute.
   commit: "5c9364c291ea6a10b36024832a8d1e14200889c2",
   agentSourceSha256: "678083c89a96579f7e1bf9f7b9d2783f950d83aba43a57e42d841be4a333af51",
-  agentSha256: "52d94b073ee2212bdcc47c8c71b608523e6aa7278383ac83b45a3a2d7bfe8e2c",
+  agentSha256: "eab5c6caf060ac093d1ed6537520ac5dcc718f99fd9e6ca35aaa0d9348446097",
   controllerSourceSha256: "96569eb5eee895f974d7b8304bb15f3b38e8f806115aae90f06bf0f8b927563e",
   controllerSha256: "11e1126eed3848f5220da7ad0fd4e14c2e8229a9b7c724a0862f6ddae4a8fc67",
   workflowSourceSha256: "e5b3e4cc7f347888f3231a82068d746740d5cb575905351ac4c7949d4b1cdd0d",
-  workflowSha256: "02fdedec5812f82c96f8396f19ed7c0f3600f8ac3c620ff5473d299c3d2c1e80",
+  workflowSha256: "9fe731c073a0b669d062b98365697b66dc9ffec4f3688374a3e86648cb01b271",
 } as const;
 
 export const RTX4090_GOLDEN_AGENT_SOURCE_PATCHES = [
@@ -62,6 +62,161 @@ export const RTX4090_GOLDEN_AGENT_SOURCE_PATCHES = [
   ["\n\ndef run_stage(route: str, payload: dict[str, Any]) -> str | None:\n    name, action, _ = STAGES[route]\n    if not STAGE_GATE.acquire(blocking=False):\n        return None\n    stage_run_id = str(uuid.uuid4())\n    try:\n        # Persist the accepted invocation before exposing HTTP 202.  This is a\n", "\n\ndef run_stage(route: str, payload: dict[str, Any], stage_run_id: str) -> str | None:\n    name, action, _ = STAGES[route]\n    if not STAGE_GATE.acquire(blocking=False):\n        return None\n    try:\n        # Persist the accepted invocation before exposing HTTP 202.  This is a\n"],
   ["        route = urllib.parse.urlsplit(self.path).path\n        if route == \"/healthz\":\n            with STATE_LOCK: value = {\"alive\": True, \"agent\": \"restricted-clore-diagnostic\", \"current_stage\": STATE[\"current_stage\"], \"current_stage_run_id\": STATE.get(\"current_stage_run_id\"), \"last_error\": STATE[\"last_error\"]}\n            self.send_json(200, value); return\n        if route in {\"/status\", \"/logs\"}:\n", "        route = urllib.parse.urlsplit(self.path).path\n        if route == \"/healthz\":\n            with STATE_LOCK: value = {\"alive\": True, \"agent\": \"restricted-clore-diagnostic\", \"agent_contract\": \"stage-acceptance-v2\", \"agent_sha256\": sha256(Path(__file__)), \"current_stage\": STATE[\"current_stage\"], \"current_stage_run_id\": STATE.get(\"current_stage_run_id\"), \"last_error\": STATE[\"last_error\"]}\n            self.send_json(200, value); return\n        if route in {\"/status\", \"/logs\"}:\n"],
   ["        try: length = int(self.headers.get(\"Content-Length\", \"0\"))\n        except ValueError: self.send_json(400, {\"error\": \"invalid_content_length\"}); return\n        if length < 0 or length > limit: self.send_json(413, {\"error\": \"stage_body_too_large\"}); return\n        raw = self.rfile.read(length) if length else b\"\"\n        if limit == 0 and raw: self.send_json(400, {\"error\": \"stage_parameters_forbidden\"}); return\n        try: payload = json.loads(raw.decode(\"utf-8\")) if raw else {}\n        except Exception: self.send_json(400, {\"error\": \"invalid_json\"}); return\n        if not isinstance(payload, dict): self.send_json(400, {\"error\": \"invalid_stage_payload\"}); return\n        try:\n            if route == \"/stage/models\": validate_manifest(payload)\n            if route == \"/stage/inference\": validate_inference_shape(payload)\n        except ValueError as error:\n            self.send_json(400, {\"error\": str(error)}); return\n        stage_run_id = run_stage(route, payload)\n        if not stage_run_id: self.send_json(409, {\"error\": \"stage_already_running\"}); return\n        self.send_json(202, {\"accepted\": True, \"stage\": item[0], \"stage_run_id\": stage_run_id})\n\n\ndef main() -> None:\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--token-sha256\", required=True)\n    parser.add_argument(\"--project-commit\")\n    parser.add_argument(\"--controller-sha256\")\n    parser.add_argument(\"--workflow-sha256\")\n    parser.add_argument(\"--immutable\", help=\"commit:controller_sha256:workflow_sha256\")\n    parser.add_argument(\"--port\", type=int, default=8080)\n    args = parser.parse_args()\n    if args.immutable:\n        parts = args.immutable.split(\":\")\n        if len(parts) != 3:\n            raise SystemExit(\"immutable_sha256_and_project_commit_required\")\n        args.project_commit, args.controller_sha256, args.workflow_sha256 = parts\n    if not args.project_commit or not args.controller_sha256 or not args.workflow_sha256 or not COMMIT_RE.fullmatch(args.project_commit) or not SHA_RE.fullmatch(args.controller_sha256) or not SHA_RE.fullmatch(args.workflow_sha256) or not SHA_RE.fullmatch(args.token_sha256):\n        raise SystemExit(\"immutable_sha256_and_project_commit_required\")\n    CONFIG.update({\"project_commit\": args.project_commit.lower(), \"controller_sha256\": args.controller_sha256.lower(), \"workflow_sha256\": args.workflow_sha256.lower()})\n    ROOT.mkdir(parents=True, exist_ok=True); LOG_DIR.mkdir(parents=True, exist_ok=True)\n    with STATE_LOCK:\n", "        try: length = int(self.headers.get(\"Content-Length\", \"0\"))\n        except ValueError: self.send_json(400, {\"error\": \"invalid_content_length\"}); return\n        if length < 0 or (limit > 0 and length > limit) or (limit == 0 and length > 128): self.send_json(413, {\"error\": \"stage_body_too_large\"}); return\n        raw = self.rfile.read(length) if length else b\"\"\n        try: payload = json.loads(raw.decode(\"utf-8\")) if raw else {}\n        except Exception: self.send_json(400, {\"error\": \"invalid_json\"}); return\n        if not isinstance(payload, dict): self.send_json(400, {\"error\": \"invalid_stage_payload\"}); return\n        stage_run_id = payload.pop(\"stage_run_id\", None)\n        if not isinstance(stage_run_id, str) or not UUID_RE.fullmatch(stage_run_id): self.send_json(400, {\"error\": \"stage_run_id_required\"}); return\n        if limit == 0 and payload: self.send_json(400, {\"error\": \"stage_parameters_forbidden\"}); return\n        try:\n            if route == \"/stage/models\": validate_manifest(payload)\n            if route == \"/stage/inference\": validate_inference_shape(payload)\n        except ValueError as error:\n            self.send_json(400, {\"error\": str(error)}); return\n        stage_run_id = run_stage(route, payload, stage_run_id)\n        if not stage_run_id: self.send_json(409, {\"error\": \"stage_already_running\"}); return\n        self.send_json(202, {\"accepted\": True, \"state\": \"accepted\", \"status\": \"running\", \"stage\": item[0], \"stage_run_id\": stage_run_id})\n\n\ndef main() -> None:\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--token-sha256\", required=True)\n    parser.add_argument(\"--project-commit\")\n    parser.add_argument(\"--controller-sha256\")\n    parser.add_argument(\"--controller-source-sha256\")\n    parser.add_argument(\"--controller-patch\")\n    parser.add_argument(\"--workflow-sha256\")\n    parser.add_argument(\"--workflow-source-sha256\")\n    parser.add_argument(\"--workflow-patch\")\n    parser.add_argument(\"--immutable\", help=\"commit:controller_sha256:workflow_sha256\")\n    parser.add_argument(\"--port\", type=int, default=8080)\n    args = parser.parse_args()\n    if args.immutable:\n        parts = args.immutable.split(\":\")\n        if len(parts) != 3:\n            raise SystemExit(\"immutable_sha256_and_project_commit_required\")\n        args.project_commit, args.controller_sha256, args.workflow_sha256 = parts\n    if not args.project_commit or not args.controller_sha256 or not args.controller_source_sha256 or not args.controller_patch or not args.workflow_sha256 or not args.workflow_source_sha256 or not args.workflow_patch or not COMMIT_RE.fullmatch(args.project_commit) or not SHA_RE.fullmatch(args.controller_sha256) or not SHA_RE.fullmatch(args.controller_source_sha256) or not SHA_RE.fullmatch(args.workflow_sha256) or not SHA_RE.fullmatch(args.workflow_source_sha256) or not SHA_RE.fullmatch(args.token_sha256):\n        raise SystemExit(\"immutable_sha256_and_project_commit_required\")\n    CONFIG.update({\"project_commit\": args.project_commit.lower(), \"controller_source_sha256\": args.controller_source_sha256.lower(), \"controller_sha256\": args.controller_sha256.lower(), \"controller_patch\": args.controller_patch, \"workflow_source_sha256\": args.workflow_source_sha256.lower(), \"workflow_sha256\": args.workflow_sha256.lower(), \"workflow_patch\": args.workflow_patch})\n    ROOT.mkdir(parents=True, exist_ok=True); LOG_DIR.mkdir(parents=True, exist_ok=True)\n    with STATE_LOCK:\n"],
+  [
+    String.raw`import os
+import re`,
+    String.raw`import os
+import queue
+import re`,
+  ],
+  [
+    String.raw`MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024
+UUID_RE =`,
+    String.raw`MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024
+MAX_MODEL_DOWNLOAD_REDIRECTS = 5
+MODEL_DOWNLOAD_DNS_TIMEOUT_SECONDS = 10
+UUID_RE =`,
+  ],
+  [
+    String.raw`if address.is_private or address.is_loopback or address.is_link_local or address.is_unspecified:`,
+    String.raw`if not address.is_global:`,
+  ],
+  [
+    String.raw`    return value
+
+
+def validate_manifest`,
+    String.raw`    return value
+
+
+class NoModelDownloadRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, _request: Any, _file_pointer: Any, _code: int, _message: str, _headers: Any, _new_url: str) -> None:
+        return None
+
+
+MODEL_DOWNLOAD_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    NoModelDownloadRedirect(),
+)
+
+
+def resolve_public_download_host(
+    value: str,
+    *,
+    resolver: Any = None,
+    timeout: float = MODEL_DOWNLOAD_DNS_TIMEOUT_SECONDS,
+) -> tuple[str, ...]:
+    parsed = urllib.parse.urlsplit(safe_download_url(value))
+    host = parsed.hostname or ""
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        lookup = resolver or socket.getaddrinfo
+        result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def run_lookup() -> None:
+            try:
+                result_queue.put((True, lookup(host, parsed.port or 443, type=socket.SOCK_STREAM)))
+            except BaseException as error:
+                result_queue.put((False, error))
+
+        threading.Thread(target=run_lookup, name="model-download-dns", daemon=True).start()
+        try:
+            succeeded, result = result_queue.get(timeout=max(0.001, timeout))
+        except queue.Empty as error:
+            raise ValueError("model_url_dns_timeout") from error
+        if not succeeded:
+            raise ValueError("model_url_dns_resolution_failed") from result
+        addresses: set[str] = set()
+        for item in result:
+            try:
+                address_text = str(item[4][0]).split("%", 1)[0]
+                address = ipaddress.ip_address(address_text)
+            except (IndexError, TypeError, ValueError):
+                raise ValueError("model_url_dns_invalid_response") from None
+            if not address.is_global:
+                raise ValueError("model_url_dns_nonpublic_forbidden")
+            addresses.add(address.compressed)
+        if not addresses:
+            raise ValueError("model_url_dns_empty")
+        return tuple(sorted(addresses))
+    if not literal.is_global:
+        raise ValueError("model_url_nonpublic_ip_forbidden")
+    return (literal.compressed,)
+
+
+def open_model_download(
+    request: urllib.request.Request,
+    *,
+    timeout: float = 60,
+    resolver: Any = None,
+    open_once: Any = None,
+    max_redirects: int = MAX_MODEL_DOWNLOAD_REDIRECTS,
+) -> Any:
+    if request.get_method() != "GET" or request.data is not None:
+        raise ValueError("model_download_get_required")
+    allowed_headers = {"accept", "accept-encoding", "range", "user-agent"}
+    forbidden_headers = {"authorization", "cookie", "proxy-authorization"}
+    headers: dict[str, str] = {}
+    for name, header_value in request.header_items():
+        lowered = name.lower()
+        if lowered in forbidden_headers:
+            raise ValueError("model_download_credentials_forbidden")
+        if lowered in allowed_headers:
+            headers[name] = header_value
+    opener = open_once or MODEL_DOWNLOAD_OPENER.open
+    current = safe_download_url(request.full_url)
+    redirects = 0
+    while True:
+        resolve_public_download_host(current, resolver=resolver)
+        current_request = urllib.request.Request(current, headers=headers, method="GET")
+        try:
+            response = opener(current_request, timeout=timeout)
+        except urllib.error.HTTPError as error:
+            if error.code not in {301, 302, 303, 307, 308}:
+                raise
+            response = error
+        status = int(getattr(response, "status", getattr(response, "code", 0)))
+        if status not in {301, 302, 303, 307, 308}:
+            return response
+        try:
+            location = response.headers.get("Location") if response.headers else None
+        finally:
+            response.close()
+        if not location:
+            raise ValueError("model_download_redirect_location_missing")
+        if redirects >= max_redirects:
+            raise ValueError("model_download_redirect_limit_exceeded")
+        target = urllib.parse.urljoin(current, location)
+        if urllib.parse.urlsplit(target).scheme.lower() != "https":
+            raise ValueError("model_download_https_redirect_required")
+        current = safe_download_url(target)
+        redirects += 1
+
+
+def validate_manifest`,
+  ],
+  [
+    String.raw`response = urllib.request.urlopen(download_request(offset), timeout=60)`,
+    String.raw`response = open_model_download(download_request(offset), timeout=60)`,
+  ],
+  [
+    String.raw`    for entry in manifest:
+        with STATE_LOCK:
+            bucket = STATE.setdefault(entry["state_bucket"], {})`,
+    String.raw`    for entry in sorted(manifest, key=lambda item: item["kind"] != "additional_lora"):
+        with STATE_LOCK:
+            bucket = STATE.setdefault(entry["state_bucket"], {})`,
+  ],
+] as const;
+
+// Offsets are applied sequentially to the exact immutable predecessor. They
+// avoid shipping each large search context to the remote bootstrap while the
+// local source-patch path still verifies every context and final SHA-256.
+const RTX4090_GOLDEN_AGENT_SOURCE_PATCH_OFFSETS = [
+  23, 653, 1230, 2805, 5762, 11459, 27566, 28792, 34823, 40111,
+  44320, 48283, 51251, 52776, 55042, 507, 2030, 27373, 27562, 40721,
+  47576,
 ] as const;
 
 export const RTX4090_GOLDEN_CONTROLLER_SOURCE_PATCHES = [
@@ -112,7 +267,12 @@ VAE = "ae.safetensors"
 CLIP_L = "clip_l.safetensors"
 T5 = "t5xxl_fp8_e4m3fn_scaled.safetensors"
 SAFE_LORA_FILENAME = re.compile(r"^[^/\\\x00-\x1f]{1,180}\.safetensors$", re.I)
-MAX_LORAS = 8`,
+MAX_LORAS = 8
+# ComfyUI deliberately skips the unconditional/negative branch when the
+# sampler CFG is exactly 1.0. Keep the proven FLUX cfg=1 path for an empty
+# negative prompt, but use one conservative classifier-free scale when the
+# user explicitly supplies negative conditioning.
+NEGATIVE_PROMPT_CFG = 1.5`,
   ],
   [
     String.raw`def validate_request(payload: object) -> dict[str, Any]:
@@ -237,17 +397,29 @@ MAX_LORAS = 8`,
     graph["4"] = {"class_type": "CLIPTextEncode", "inputs": {"text": options["prompt"], "clip": clip_input}}
     graph["5"] = {"class_type": "FluxGuidance", "inputs": {"conditioning": ["4", 0], "guidance": options["cfg"]}}
     graph["11"] = {"class_type": "CLIPTextEncode", "inputs": {"text": options["negative_prompt"], "clip": clip_input}}
+    negative_input: list[Any] = ["11", 0]
+    sampler_cfg = 1.0
+    if options["negative_prompt"]:
+        # FluxGuidance controls the distilled FLUX guidance input. KSampler
+        # CFG independently controls whether ComfyUI evaluates and combines
+        # the positive and negative conditioning branches.
+        graph["12"] = {
+            "class_type": "FluxGuidance",
+            "inputs": {"conditioning": negative_input, "guidance": options["cfg"]},
+        }
+        negative_input = ["12", 0]
+        sampler_cfg = NEGATIVE_PROMPT_CFG
     graph["7"] = {
         "class_type": "KSampler",
         "inputs": {
             "model": model_input,
             "seed": options["seed"],
             "steps": options["steps"],
-            "cfg": 1.0,
+            "cfg": sampler_cfg,
             "sampler_name": sampler_name,
             "scheduler": "simple",
             "positive": ["5", 0],
-            "negative": ["11", 0],
+            "negative": negative_input,
             "latent_image": ["6", 0],
             "denoise": 1.0,
         },
@@ -263,6 +435,7 @@ MAX_LORAS = 8`,
         "transformer": FLUXED_UP,
         "loras": [{"filename": item["filename"], "strength": item["strength"]} for item in options["loras"]],
         "negative_prompt_present": bool(options["negative_prompt"]),
+        "negative_prompt_cfg": NEGATIVE_PROMPT_CFG if options["negative_prompt"] else 1.0,
         "vae": VAE,
         "clip_l": CLIP_L,
         "t5": T5,
@@ -299,6 +472,21 @@ export function applyPublishedAgentSourcePatch(source: Buffer) {
   return Buffer.from(materialized, "utf8");
 }
 
+export function applyPublishedAgentOffsetPatch(source: Buffer) {
+  let materialized = source.toString("utf8");
+  if (RTX4090_GOLDEN_AGENT_SOURCE_PATCH_OFFSETS.length !== RTX4090_GOLDEN_AGENT_SOURCE_PATCHES.length) {
+    throw new Error("golden_agent_offset_patch_count_mismatch");
+  }
+  RTX4090_GOLDEN_AGENT_SOURCE_PATCHES.forEach(([search, replacement], index) => {
+    const offset = RTX4090_GOLDEN_AGENT_SOURCE_PATCH_OFFSETS[index];
+    if (materialized.slice(offset, offset + search.length) !== search) {
+      throw new Error("golden_agent_offset_patch_context_mismatch");
+    }
+    materialized = `${materialized.slice(0, offset)}${replacement}${materialized.slice(offset + search.length)}`;
+  });
+  return Buffer.from(materialized, "utf8");
+}
+
 export function applyPublishedWorkflowSourcePatch(source: Buffer) {
   let materialized = source.toString("utf8");
   for (const [search, replacement] of RTX4090_GOLDEN_WORKFLOW_SOURCE_PATCHES) {
@@ -326,12 +514,20 @@ export function applyPublishedControllerSourcePatch(source: Buffer) {
 function buildBootstrap(input: Rtx4090GoldenDeploymentProfile["immutable"] & { tokenSha256: string }) {
   const urls = immutablePublicSourceEndpoints(input.commit, "scripts/clore/diagnostic-agent.py").map((endpoint) => endpoint.url);
   const compression = { level: 9 } as const;
-  const patch = deflateRawSync(Buffer.from(JSON.stringify(RTX4090_GOLDEN_AGENT_SOURCE_PATCHES), "utf8"), compression).toString("base64");
-  const controllerPatch = deflateRawSync(Buffer.from(JSON.stringify(RTX4090_GOLDEN_CONTROLLER_SOURCE_PATCHES), "utf8"), compression).toString("base64");
-  const workflowPatch = deflateRawSync(Buffer.from(JSON.stringify(RTX4090_GOLDEN_WORKFLOW_SOURCE_PATCHES), "utf8"), compression).toString("base64");
+  const compactAgentPatches = RTX4090_GOLDEN_AGENT_SOURCE_PATCHES.map(
+    ([search, replacement], index) => [
+      RTX4090_GOLDEN_AGENT_SOURCE_PATCH_OFFSETS[index],
+      search.length,
+      replacement,
+    ],
+  );
   const program = [
-    "import urllib.request as u,hashlib as h,os,json,base64,zlib,functools as f",
+    "import urllib.request as u,hashlib as h,os,json,base64,zlib",
     `urls=${JSON.stringify(urls)}`,
+    `q=${JSON.stringify(compactAgentPatches)}`,
+    `C=${JSON.stringify(RTX4090_GOLDEN_CONTROLLER_SOURCE_PATCHES)}`,
+    `W=${JSON.stringify(RTX4090_GOLDEN_WORKFLOW_SOURCE_PATCHES)}`,
+    "def e(x):return base64.b64encode(zlib.compress(json.dumps(x,separators=(',',':')).encode(),9,-15)).decode()",
     "d=None",
     "for x in urls:",
     " try:",
@@ -350,11 +546,12 @@ function buildBootstrap(input: Rtx4090GoldenDeploymentProfile["immutable"] & { t
     " except RuntimeError: raise",
     " except Exception: pass",
     "if d is None: raise RuntimeError('immutable_source_unavailable')",
-    `q=json.loads(zlib.decompress(base64.b64decode('${patch}'),-15))`,
-    "d=f.reduce(lambda x,y:x.replace(y[0],y[1]),q,d.decode()).encode()",
+    "d=d.decode()",
+    "for o,n,r in q:d=d[:o]+r+d[o+n:]",
+    "d=d.encode()",
     `assert h.sha256(d).hexdigest()=='${input.agentSha256}'`,
     "p='/tmp/a.py';open(p,'wb').write(d)",
-    `os.execvp('python3',['python3',p,'--token-sha256','${input.tokenSha256}','--immutable','${input.commit}:${input.controllerSha256}:${input.workflowSha256}','--controller-source-sha256','${input.controllerSourceSha256}','--controller-patch','${controllerPatch}','--workflow-source-sha256','${input.workflowSourceSha256}','--workflow-patch','${workflowPatch}'])`,
+    `os.execvp('python3',['python3',p,'--token-sha256','${input.tokenSha256}','--immutable','${input.commit}:${input.controllerSha256}:${input.workflowSha256}','--controller-source-sha256','${input.controllerSourceSha256}','--controller-patch',e(C),'--workflow-source-sha256','${input.workflowSourceSha256}','--workflow-patch',e(W)])`,
   ].join("\n");
   const encoded = deflateRawSync(Buffer.from(program, "utf8"), compression).toString("base64");
   return `python3 -c "import base64,zlib;exec(zlib.decompress(base64.b64decode('${encoded}'),-15))"`;

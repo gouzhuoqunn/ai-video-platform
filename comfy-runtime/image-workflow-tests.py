@@ -56,6 +56,8 @@ assert graph["20"]["inputs"] == {
     "strength_clip": 0.8,
 }
 assert graph["7"]["inputs"]["model"] == ["20", 0]
+assert graph["7"]["inputs"]["cfg"] == 1.0
+assert "12" not in graph
 
 # An explicit empty list is intentionally different from a legacy task: no
 # LoraLoader may be emitted and the base model/CLIP feed the graph directly.
@@ -70,6 +72,14 @@ assert all(node["class_type"] != "LoraLoader" for node in no_lora_graph.values()
 assert no_lora_graph["4"]["inputs"]["clip"] == ["2", 0]
 assert no_lora_graph["11"]["inputs"]["clip"] == ["2", 0]
 assert no_lora_graph["7"]["inputs"]["model"] == ["1", 0]
+assert no_lora_graph["12"]["class_type"] == "FluxGuidance"
+assert no_lora_graph["12"]["inputs"] == {
+    "conditioning": ["11", 0],
+    "guidance": no_lora_options["cfg"],
+}
+assert no_lora_graph["7"]["inputs"]["negative"] == ["12", 0]
+assert no_lora_graph["7"]["inputs"]["cfg"] == workflow.NEGATIVE_PROMPT_CFG
+assert no_lora_graph["7"]["inputs"]["cfg"] > 1.0
 base_nodes = {
     "CLIPTextEncode": {},
     "DualCLIPLoader": {},
@@ -119,7 +129,12 @@ assert two_graph["11"]["inputs"] == {"text": "negative fixture", "clip": ["21", 
 assert two_graph["5"]["inputs"]["conditioning"] == ["4", 0]
 assert two_graph["7"]["inputs"]["model"] == ["21", 0]
 assert two_graph["7"]["inputs"]["positive"] == ["5", 0]
-assert two_graph["7"]["inputs"]["negative"] == ["11", 0]
+assert two_graph["12"]["inputs"] == {
+    "conditioning": ["11", 0],
+    "guidance": two_options["cfg"],
+}
+assert two_graph["7"]["inputs"]["negative"] == ["12", 0]
+assert two_graph["7"]["inputs"]["cfg"] == workflow.NEGATIVE_PROMPT_CFG
 assert two_graph["7"]["inputs"]["positive"] != two_graph["7"]["inputs"]["negative"]
 
 # Three LoRAs prove the chain keeps extending in order and preserves the full
@@ -147,6 +162,8 @@ for node_id, expected_strength in (("20", 0.0), ("21", 0.75), ("22", 1.5)):
     assert three_graph[node_id]["inputs"]["strength_clip"] == expected_strength
 assert three_graph["7"]["inputs"]["model"] == ["22", 0]
 assert workflow.workflow_metadata(three_options)["loras"] == three_loras
+assert workflow.workflow_metadata(three_options)["negative_prompt_cfg"] == 1.0
+assert workflow.workflow_metadata(two_options)["negative_prompt_cfg"] == workflow.NEGATIVE_PROMPT_CFG
 
 # Malformed lists, extra fields, unsafe paths, duplicate filenames, invalid
 # strengths and the loader cap must fail before workflow construction.
@@ -203,6 +220,6 @@ print(
     '"legacy_aidma":true,'
     '"explicit_zero_lora":true,'
     '"multi_lora_chaining":true,'
-    '"independent_negative_conditioning":true,'
+    '"effective_negative_conditioning":true,'
     '"invalid_loras_rejected":true}'
 )

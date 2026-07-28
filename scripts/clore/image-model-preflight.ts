@@ -9,6 +9,7 @@ import { resolveTaskLoraDownloads } from "../../src/lib/image-generation/local-l
 const REQUIRED_IDS = ["fluxed-up-10.2", "aidma-lora", "flux-vae", "flux-clip-l", "flux-t5xxl-fp8"] as const;
 const ROLE_BY_ID: Record<(typeof REQUIRED_IDS)[number], string> = { "fluxed-up-10.2": "transformer", "aidma-lora": "lora", "flux-vae": "vae", "flux-clip-l": "clip_l", "flux-t5xxl-fp8": "t5" };
 const PREFLIGHT_USER_AGENT = "ai-video-platform-model-preflight/1";
+const RESPONSE_CANCEL_TIMEOUT_MS = 250;
 
 export type RemoteImageModel = { role: string; id: (typeof REQUIRED_IDS)[number]; filename: string; url: string; sha256: string; size_bytes: number };
 export type AgentModelEntry = { role: string; filename: string; url: string; sha256: string; size_bytes: number };
@@ -50,13 +51,23 @@ function initialUrl(artifact: SourceArtifact) { if (artifact.source === "civitai
 function requireHttps(value: string, code: string) { const parsed = new URL(value); if (parsed.protocol !== "https:" || parsed.username || parsed.password) throw new Error(code); return parsed.toString(); }
 function declaredLength(headers: Headers) { const range = /\/(\d+)$/.exec(headers.get("content-range") ?? ""); if (range) return Number(range[1]); const length = Number(headers.get("content-length")); return Number.isSafeInteger(length) && length > 0 ? length : null; }
 function resultFromHeaders(input: { status: number; location: string | null; contentLength: number | null; finalUrl: string; redirectCount: number }): HeaderResult { const parsed = new URL(input.finalUrl); return { ...input, finalHostname: parsed.hostname.toLowerCase() }; }
+async function cancelResponseBody(response: Response, controller: AbortController) {
+  if (!response.body) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cancelled = await Promise.race([
+    response.body.cancel().then(() => true, () => true),
+    new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), RESPONSE_CANCEL_TIMEOUT_MS); }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (!cancelled) controller.abort();
+}
 
 async function nodeProbeOnce(fetchImpl: FetchLike, url: string, token: string): Promise<HeaderResult> {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 45_000);
   try {
     const response = await fetchImpl(url, { method: "GET", redirect: "manual", headers: { "User-Agent": PREFLIGHT_USER_AGENT, Accept: "application/octet-stream", ...(token ? { Authorization: `Bearer ${token}` } : {}) }, signal: controller.signal });
     try { return resultFromHeaders({ status: response.status, location: response.headers.get("location"), contentLength: declaredLength(response.headers), finalUrl: response.url || url, redirectCount: 0 }); }
-    finally { await response.body?.cancel().catch(() => undefined); }
+    finally { await cancelResponseBody(response, controller); }
   } finally { clearTimeout(timer); }
 }
 
@@ -106,7 +117,18 @@ async function resolveDownloadUrl(input: { artifact: SourceArtifact; fetchImpl?:
     const signed = requireHttps(new URL(redirect.location, initial).toString(), "invalid_civitai_signed_download_url");
     const probe = await probeGetHeaders(signed, { fetchImpl: input.fetchImpl, redirect: "follow" }); requireDownloadable(input.artifact, probe); return { url: probe.finalUrl, probe };
   }
-  const probe = await probeGetHeaders(initial, { fetchImpl: input.fetchImpl, authorizationToken: token, redirect: "follow" }); requireDownloadable(input.artifact, probe); return { url: requireHttps(probe.finalUrl, "invalid_huggingface_source_url"), probe };
+  let probe = await probeGetHeaders(initial, { fetchImpl: input.fetchImpl, authorizationToken: token, redirect: "follow" });
+  requireDownloadable(input.artifact, probe);
+  if (token && new URL(probe.finalUrl).origin === new URL(initial).origin) {
+    try {
+      const tokenless = await probeGetHeaders(probe.finalUrl, { fetchImpl: input.fetchImpl, redirect: "follow" });
+      requireDownloadable(input.artifact, tokenless);
+      probe = tokenless;
+    } catch {
+      throw new Error(`huggingface_remote_delivery_requires_local_token:${input.artifact.id}`);
+    }
+  }
+  return { url: requireHttps(probe.finalUrl, "invalid_huggingface_source_url"), probe };
 }
 
 export async function verifyFiveImageModelSources(input: { fetchImpl?: FetchLike; tokenProvider?: TokenProvider; manifestPath?: string } = {}): Promise<ImageModelPreflight> {
@@ -171,6 +193,43 @@ export function toAgentModelManifest(
   });
   return loras.length ? { models, loras } : { models };
 }
+
+function immutableAgentManifestIdentity(manifest: AgentModelManifest) {
+  return {
+    models: manifest.models.map(({ role, filename, sha256, size_bytes }) => ({
+      role,
+      filename,
+      sha256: sha256.toLowerCase(),
+      size_bytes,
+    })),
+    loras: (manifest.loras ?? []).map(({ id, filename, sha256, size_bytes }) => ({
+      id,
+      filename,
+      sha256: sha256.toLowerCase(),
+      size_bytes,
+    })),
+  };
+}
+
+/**
+ * Signed delivery URLs are intentionally refreshed immediately before the
+ * paid model stage. Only the transport URL may change; the complete immutable
+ * model/LoRA identity and deterministic order must remain byte-for-byte
+ * equivalent to the pre-order gate.
+ */
+export function assertAgentModelManifestIdentityUnchanged(
+  preOrder: AgentModelManifest,
+  refreshed: AgentModelManifest,
+) {
+  if (
+    JSON.stringify(immutableAgentManifestIdentity(preOrder))
+    !== JSON.stringify(immutableAgentManifestIdentity(refreshed))
+  ) {
+    throw new Error("agent_model_manifest_identity_changed_before_install");
+  }
+  return refreshed;
+}
+
 export function validateAgentModelManifestContract(manifest: AgentModelManifest) {
   const agentPath = path.join(process.cwd(), "scripts", "clore", "diagnostic-agent.py"); const script = ["import importlib.util,json,sys", "s=importlib.util.spec_from_file_location('agent',sys.argv[1])", "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)", "m.validate_manifest(json.load(sys.stdin))"].join(";");
   const candidates: Array<[string, string[]]> = process.platform === "win32" ? [["py", ["-3", "-c", script, agentPath]], ["python", ["-c", script, agentPath]]] : [["python3", ["-c", script, agentPath]], ["python", ["-c", script, agentPath]]];

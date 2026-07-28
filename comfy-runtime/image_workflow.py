@@ -17,6 +17,11 @@ CLIP_L = "clip_l.safetensors"
 T5 = "t5xxl_fp8_e4m3fn_scaled.safetensors"
 SAFE_LORA_FILENAME = re.compile(r"^[^/\\\x00-\x1f]{1,180}\.safetensors$", re.I)
 MAX_LORAS = 8
+# ComfyUI deliberately skips the unconditional/negative branch when the
+# sampler CFG is exactly 1.0. Keep the proven FLUX cfg=1 path for an empty
+# negative prompt, but use one conservative classifier-free scale when the
+# user explicitly supplies negative conditioning.
+NEGATIVE_PROMPT_CFG = 1.5
 
 
 def validate_request(payload: object) -> dict[str, Any]:
@@ -116,17 +121,29 @@ def build_text_workflow(job_id: str, options: dict[str, Any]) -> dict[str, Any]:
     graph["4"] = {"class_type": "CLIPTextEncode", "inputs": {"text": options["prompt"], "clip": clip_input}}
     graph["5"] = {"class_type": "FluxGuidance", "inputs": {"conditioning": ["4", 0], "guidance": options["cfg"]}}
     graph["11"] = {"class_type": "CLIPTextEncode", "inputs": {"text": options["negative_prompt"], "clip": clip_input}}
+    negative_input: list[Any] = ["11", 0]
+    sampler_cfg = 1.0
+    if options["negative_prompt"]:
+        # FluxGuidance controls the distilled FLUX guidance input. KSampler
+        # CFG independently controls whether ComfyUI evaluates and combines
+        # the positive and negative conditioning branches.
+        graph["12"] = {
+            "class_type": "FluxGuidance",
+            "inputs": {"conditioning": negative_input, "guidance": options["cfg"]},
+        }
+        negative_input = ["12", 0]
+        sampler_cfg = NEGATIVE_PROMPT_CFG
     graph["7"] = {
         "class_type": "KSampler",
         "inputs": {
             "model": model_input,
             "seed": options["seed"],
             "steps": options["steps"],
-            "cfg": 1.0,
+            "cfg": sampler_cfg,
             "sampler_name": sampler_name,
             "scheduler": "simple",
             "positive": ["5", 0],
-            "negative": ["11", 0],
+            "negative": negative_input,
             "latent_image": ["6", 0],
             "denoise": 1.0,
         },
@@ -140,6 +157,7 @@ def workflow_metadata(options: dict[str, Any]) -> dict[str, Any]:
         "transformer": FLUXED_UP,
         "loras": [{"filename": item["filename"], "strength": item["strength"]} for item in options["loras"]],
         "negative_prompt_present": bool(options["negative_prompt"]),
+        "negative_prompt_cfg": NEGATIVE_PROMPT_CFG if options["negative_prompt"] else 1.0,
         "vae": VAE,
         "clip_l": CLIP_L,
         "t5": T5,

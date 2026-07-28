@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { inflateRawSync } from "node:zlib";
@@ -18,11 +19,11 @@ assert.equal(profile.agentContract, "stage-acceptance-v2");
 assert.deepEqual(profile.acceptedStageResponseFields, ["accepted", "state", "status", "stage", "stage_run_id"]);
 assert.equal(profile.immutable.commit, "5c9364c291ea6a10b36024832a8d1e14200889c2");
 assert.equal(profile.immutable.agentSourceSha256, "678083c89a96579f7e1bf9f7b9d2783f950d83aba43a57e42d841be4a333af51");
-assert.equal(profile.immutable.agentSha256, "52d94b073ee2212bdcc47c8c71b608523e6aa7278383ac83b45a3a2d7bfe8e2c");
+assert.equal(profile.immutable.agentSha256, "eab5c6caf060ac093d1ed6537520ac5dcc718f99fd9e6ca35aaa0d9348446097");
 assert.equal(profile.immutable.controllerSourceSha256, baseline.runtime.controllerSha256);
 assert.equal(profile.immutable.controllerSha256, "11e1126eed3848f5220da7ad0fd4e14c2e8229a9b7c724a0862f6ddae4a8fc67");
 assert.equal(profile.immutable.workflowSourceSha256, baseline.runtime.workflowSha256);
-assert.equal(profile.immutable.workflowSha256, "02fdedec5812f82c96f8396f19ed7c0f3600f8ac3c620ff5473d299c3d2c1e80");
+assert.equal(profile.immutable.workflowSha256, "9fe731c073a0b669d062b98365697b66dc9ffec4f3688374a3e86648cb01b271");
 const profileFingerprint = rtx4090GoldenDeploymentFingerprint(profile);
 assert.match(profileFingerprint, /^[a-f0-9]{64}$/);
 assert.notEqual(
@@ -36,6 +37,13 @@ assert.ok(Buffer.byteLength(command, "utf8") < 16_384);
 const encodedBootstrapProgram = /base64\.b64decode\('([^']+)'\)/.exec(command)?.[1];
 assert.ok(encodedBootstrapProgram);
 const bootstrapProgram = inflateRawSync(Buffer.from(encodedBootstrapProgram, "base64")).toString("utf8");
+const compiledBootstrap = spawnSync("python", ["-c", "import sys;compile(sys.stdin.read(),'<golden-bootstrap>','exec')"], {
+  input: bootstrapProgram,
+  encoding: "utf8",
+  windowsHide: true,
+  timeout: 10_000,
+});
+assert.equal(compiledBootstrap.status, 0, compiledBootstrap.stderr);
 assert.match(bootstrapProgram, new RegExp(profile.immutable.commit));
 assert.match(bootstrapProgram, new RegExp(profile.immutable.agentSourceSha256));
 assert.match(bootstrapProgram, new RegExp(profile.immutable.agentSha256));
@@ -49,6 +57,9 @@ assert.match(bootstrapProgram, /<!doctype html/);
 assert.match(bootstrapProgram, /immutable_source_hash_mismatch/);
 assert.match(bootstrapProgram, /workflow-source-sha256/);
 assert.match(bootstrapProgram, /workflow-patch/);
+assert.match(bootstrapProgram, /for o,n,r in q/);
+assert.match(bootstrapProgram, /--controller-patch',e\(C\)/);
+assert.match(bootstrapProgram, /--workflow-patch',e\(W\)/);
 assert.doesNotMatch(command, /5ff0bd50a48434b9ce1557e7712b3c97a9c0b810/);
 assert.match(bootstrapProgram, /--immutable/);
 assert.equal(createHash("sha256").update(command).digest("hex").length, 64);

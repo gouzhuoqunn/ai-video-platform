@@ -17,6 +17,7 @@ import hmac
 import ipaddress
 import json
 import os
+import queue
 import re
 import shutil
 import socket
@@ -60,6 +61,8 @@ MAX_TASK_LORAS = 8
 MAX_ADDITIONAL_LORA_BYTES = 8 * 1024 * 1024 * 1024
 MAX_SINGLE_LORA_BYTES = 4 * 1024 * 1024 * 1024
 MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024
+MAX_MODEL_DOWNLOAD_REDIRECTS = 5
+MODEL_DOWNLOAD_DNS_TIMEOUT_SECONDS = 10
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 LORA_ID_RE = re.compile(r"^(?:builtin-[a-z0-9-]{1,80}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$", re.I)
 LORA_FILENAME_RE = re.compile(r"^[^/\\\x00-\x1f]{1,180}\.safetensors$", re.I)
@@ -523,12 +526,117 @@ def safe_download_url(value: object) -> str:
         raise ValueError("model_url_localhost_forbidden")
     try:
         address = ipaddress.ip_address(host)
-        if address.is_private or address.is_loopback or address.is_link_local or address.is_unspecified:
+        if not address.is_global:
             raise ValueError("model_url_nonpublic_ip_forbidden")
     except ValueError as error:
         if str(error).startswith("model_url_"):
             raise
     return value
+
+
+class NoModelDownloadRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, _request: Any, _file_pointer: Any, _code: int, _message: str, _headers: Any, _new_url: str) -> None:
+        return None
+
+
+MODEL_DOWNLOAD_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    NoModelDownloadRedirect(),
+)
+
+
+def resolve_public_download_host(
+    value: str,
+    *,
+    resolver: Any = None,
+    timeout: float = MODEL_DOWNLOAD_DNS_TIMEOUT_SECONDS,
+) -> tuple[str, ...]:
+    parsed = urllib.parse.urlsplit(safe_download_url(value))
+    host = parsed.hostname or ""
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        lookup = resolver or socket.getaddrinfo
+        result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def run_lookup() -> None:
+            try:
+                result_queue.put((True, lookup(host, parsed.port or 443, type=socket.SOCK_STREAM)))
+            except BaseException as error:
+                result_queue.put((False, error))
+
+        threading.Thread(target=run_lookup, name="model-download-dns", daemon=True).start()
+        try:
+            succeeded, result = result_queue.get(timeout=max(0.001, timeout))
+        except queue.Empty as error:
+            raise ValueError("model_url_dns_timeout") from error
+        if not succeeded:
+            raise ValueError("model_url_dns_resolution_failed") from result
+        addresses: set[str] = set()
+        for item in result:
+            try:
+                address_text = str(item[4][0]).split("%", 1)[0]
+                address = ipaddress.ip_address(address_text)
+            except (IndexError, TypeError, ValueError):
+                raise ValueError("model_url_dns_invalid_response") from None
+            if not address.is_global:
+                raise ValueError("model_url_dns_nonpublic_forbidden")
+            addresses.add(address.compressed)
+        if not addresses:
+            raise ValueError("model_url_dns_empty")
+        return tuple(sorted(addresses))
+    if not literal.is_global:
+        raise ValueError("model_url_nonpublic_ip_forbidden")
+    return (literal.compressed,)
+
+
+def open_model_download(
+    request: urllib.request.Request,
+    *,
+    timeout: float = 60,
+    resolver: Any = None,
+    open_once: Any = None,
+    max_redirects: int = MAX_MODEL_DOWNLOAD_REDIRECTS,
+) -> Any:
+    if request.get_method() != "GET" or request.data is not None:
+        raise ValueError("model_download_get_required")
+    allowed_headers = {"accept", "accept-encoding", "range", "user-agent"}
+    forbidden_headers = {"authorization", "cookie", "proxy-authorization"}
+    headers: dict[str, str] = {}
+    for name, header_value in request.header_items():
+        lowered = name.lower()
+        if lowered in forbidden_headers:
+            raise ValueError("model_download_credentials_forbidden")
+        if lowered in allowed_headers:
+            headers[name] = header_value
+    opener = open_once or MODEL_DOWNLOAD_OPENER.open
+    current = safe_download_url(request.full_url)
+    redirects = 0
+    while True:
+        resolve_public_download_host(current, resolver=resolver)
+        current_request = urllib.request.Request(current, headers=headers, method="GET")
+        try:
+            response = opener(current_request, timeout=timeout)
+        except urllib.error.HTTPError as error:
+            if error.code not in {301, 302, 303, 307, 308}:
+                raise
+            response = error
+        status = int(getattr(response, "status", getattr(response, "code", 0)))
+        if status not in {301, 302, 303, 307, 308}:
+            return response
+        try:
+            location = response.headers.get("Location") if response.headers else None
+        finally:
+            response.close()
+        if not location:
+            raise ValueError("model_download_redirect_location_missing")
+        if redirects >= max_redirects:
+            raise ValueError("model_download_redirect_limit_exceeded")
+        target = urllib.parse.urljoin(current, location)
+        if urllib.parse.urlsplit(target).scheme.lower() != "https":
+            raise ValueError("model_download_https_redirect_required")
+        current = safe_download_url(target)
+        redirects += 1
 
 
 def validate_manifest(payload: object) -> list[dict[str, Any]]:
@@ -657,7 +765,7 @@ def stream_model(entry: dict[str, Any]) -> dict[str, Any]:
             part.unlink(missing_ok=True); restarted = True; offset = 0
         state("resuming" if offset else "downloading", offset, True)
         try:
-            response = urllib.request.urlopen(download_request(offset), timeout=60); headers = getattr(response, "headers", {})
+            response = open_model_download(download_request(offset), timeout=60); headers = getattr(response, "headers", {})
             get = lambda name: headers.get(name) if hasattr(headers, "get") else None
             status, content_range, content_length = response.status, get("Content-Range"), get("Content-Length")
             last.update({"http_status": status, "content_range": content_range, "content_length": content_length, "hostname": (urllib.parse.urlsplit(response.geturl() if hasattr(response, "geturl") else entry["url"]).hostname or "").lower(), "error": None})
@@ -736,7 +844,7 @@ def stage_models(payload: dict[str, Any]) -> dict[str, Any]:
     with STATE_LOCK:
         STATE["lora_files"] = {}
         save_locked()
-    for entry in manifest:
+    for entry in sorted(manifest, key=lambda item: item["kind"] != "additional_lora"):
         with STATE_LOCK:
             bucket = STATE.setdefault(entry["state_bucket"], {})
             bucket[entry["state_key"]] = {"filename": entry["filename"], "status": "queued", "downloaded_bytes": 0, "size_bytes": entry["size_bytes"], "url": redacted_url(entry["url"])}

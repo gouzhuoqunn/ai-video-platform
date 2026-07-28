@@ -159,7 +159,7 @@ function LoraManagementPanel({
       </article>)}
       {registryLoaded && items.length === 0 ? <p className="text-sm text-stone-400">还没有可显示的 LoRA。</p> : null}
     </div>
-    {error ? <p role="alert" className="border-t border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-100">{error}</p> : null}
+    {error && !addOpen ? <p role="alert" className="border-t border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-100">{error}</p> : null}
     {addOpen ? <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4" onMouseDown={() => !busy && setAddOpen(false)}>
       <section role="dialog" aria-modal="true" aria-label="添加新的 LoRA" onMouseDown={(event) => event.stopPropagation()} className="w-full max-w-xl rounded-2xl border border-stone-600 bg-stone-950 p-5 shadow-2xl">
         <div className="flex items-center justify-between"><h2 className="text-lg font-semibold">添加新的LoRA</h2><button type="button" disabled={busy} onClick={() => setAddOpen(false)}>关闭</button></div>
@@ -167,6 +167,7 @@ function LoraManagementPanel({
         <label className="mt-4 block text-sm">Civitai 或 HuggingFace 链接<textarea value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} className="mt-1 min-h-24 w-full rounded border border-stone-600 bg-stone-900 p-3" placeholder="粘贴模型页、具体版本或 .safetensors 文件链接" /></label>
         <label className="mt-4 block text-sm">默认强度 {safeFixed(defaultStrength, 2)}<input className="mt-1 w-full" type="range" min="0" max="1.5" step="0.05" value={defaultStrength} onChange={(event) => setDefaultStrength(Number(event.target.value))} /></label>
         <p className="mt-3 text-xs text-stone-400">本机只注册不可变来源身份；真正生成时由受限 Agent 下载到 ComfyUI/models/loras，并核对大小、SHA-256 与 safetensors 结构。</p>
+        {error ? <p role="alert" className="mt-3 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-100">{error}</p> : null}
         <button type="button" aria-busy={busy} disabled={busy || !name.trim() || !sourceUrl.trim()} onClick={() => void submitAdd()} className="mt-4 rounded-lg bg-indigo-500 px-4 py-2 font-medium disabled:opacity-40">{busy ? "正在校验…" : "校验并注册"}</button>
       </section>
     </div> : null}
