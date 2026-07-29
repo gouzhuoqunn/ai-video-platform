@@ -1,10 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { readSourceAcquisitionManifest, type SourceArtifact } from "../image-executor/manifests";
 import type { ImageTaskLora } from "../../src/lib/image-generation/image-loras";
-import { resolveTaskLoraDownloads } from "../../src/lib/image-generation/local-lora-registry";
+import {
+  resolveTaskLoraDownloads,
+  systemProxyAwareProviderFetch,
+} from "../../src/lib/image-generation/local-lora-registry";
 
 const REQUIRED_IDS = ["fluxed-up-10.2", "aidma-lora", "flux-vae", "flux-clip-l", "flux-t5xxl-fp8"] as const;
 const ROLE_BY_ID: Record<(typeof REQUIRED_IDS)[number], string> = { "fluxed-up-10.2": "transformer", "aidma-lora": "lora", "flux-vae": "vae", "flux-clip-l": "clip_l", "flux-t5xxl-fp8": "t5" };
@@ -71,35 +73,14 @@ async function nodeProbeOnce(fetchImpl: FetchLike, url: string, token: string): 
   } finally { clearTimeout(timer); }
 }
 
-async function windowsProbeOnce(url: string, token: string): Promise<HeaderResult> {
-  const script = [
-    "Add-Type -AssemblyName System.Net.Http", "$h=[System.Net.Http.HttpClientHandler]::new();$h.AllowAutoRedirect=$false", "$c=[System.Net.Http.HttpClient]::new($h);$c.Timeout=[TimeSpan]::FromSeconds(45)",
-    "$q=[System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get,$env:AI_IMAGE_PREFLIGHT_URL)", `$q.Headers.UserAgent.ParseAdd('${PREFLIGHT_USER_AGENT}')`, "$q.Headers.Accept.ParseAdd('application/octet-stream')",
-    "if($env:AI_IMAGE_PREFLIGHT_TOKEN){$q.Headers.Authorization=[System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$env:AI_IMAGE_PREFLIGHT_TOKEN)}", "$r=$c.SendAsync($q,[System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()",
-    "$p=@{status=[int]$r.StatusCode;location=if($r.Headers.Location){$r.Headers.Location.OriginalString}else{$null};contentLength=if($r.Content.Headers.ContentRange -and $r.Content.Headers.ContentRange.Length){[int64]$r.Content.Headers.ContentRange.Length}else{$r.Content.Headers.ContentLength};finalUrl=$q.RequestUri.AbsoluteUri}|ConvertTo-Json -Compress", "$r.Dispose();$q.Dispose();$c.Dispose();$h.Dispose();Write-Output $p",
-  ].join(";");
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-    cwd: process.cwd(),
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: 60_000,
-    killSignal: "SIGTERM",
-    env: { ...process.env, AI_IMAGE_PREFLIGHT_URL: url, AI_IMAGE_PREFLIGHT_TOKEN: token },
-  });
-  if (result.signal || (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") throw new Error("model_source_child_timeout");
-  if (result.status !== 0) throw new Error(`model_source_transport_failed:${String(result.stderr || result.stdout).trim().slice(0, 300)}`);
-  const json = /\{[^{}]*\}/.exec(String(result.stdout))?.[0]; if (!json) throw new Error("model_source_transport_invalid_response");
-  const parsed = JSON.parse(json) as { status: number; location?: string | null; contentLength?: number | null; finalUrl: string };
-  return resultFromHeaders({ status: parsed.status, location: parsed.location ?? null, contentLength: parsed.contentLength ?? null, finalUrl: parsed.finalUrl, redirectCount: 0 });
-}
-
 /** GET only: responses are disposed at headers, so full model bodies are never downloaded locally. */
 export async function probeGetHeaders(url: string, options: ProbeOptions = {}): Promise<HeaderResult> {
   const redirect = options.redirect ?? "manual"; const initial = requireHttps(url, "invalid_model_source_url"); const initialOrigin = new URL(initial).origin;
+  const fetchImpl = options.fetchImpl ?? systemProxyAwareProviderFetch();
   let current = initial; let redirects = 0;
   for (;;) {
     const token = options.authorizationToken && new URL(current).origin === initialOrigin ? options.authorizationToken : "";
-    const once = await (options.fetchImpl ? nodeProbeOnce(options.fetchImpl, current, token) : os.platform() === "win32" ? windowsProbeOnce(current, token) : nodeProbeOnce(fetch, current, token));
+    const once = await nodeProbeOnce(fetchImpl, current, token);
     const location = once.location ? requireHttps(new URL(once.location, current).toString(), "invalid_model_redirect_url") : null;
     if (redirect !== "follow" || ![301, 302, 303, 307, 308].includes(once.status)) return { ...once, finalUrl: current, finalHostname: new URL(current).hostname.toLowerCase(), redirectCount: redirects };
     if (!location) throw new Error("model_source_redirect_location_missing"); if (++redirects > 8) throw new Error("model_source_redirect_limit_exceeded"); current = location;

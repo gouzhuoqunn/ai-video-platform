@@ -14,6 +14,7 @@ import {
   PRIOR_SESSION_MANUAL_RECOVERY_CLASSIFICATION,
   PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE,
   PRIOR_SESSION_RECOVERY_CLASSIFICATION,
+  PREORDER_SUPERVISOR_START_FAILURE_CLASSIFICATION,
   projectRunnerStatus,
 } from "../src/lib/image-generation/runner-status-projection";
 
@@ -192,7 +193,6 @@ function main() {
   assert.doesNotMatch(JSON.stringify(manualRecovery), /prior_session_manual_recovery_required/);
   for (const token of [
     "prior_session_receipt_unreadable",
-    "prior_session_local_execution_state_present",
     "prior_session_local_active_order_exists",
     "prior_session_active_order_exists",
     "prior_session_target_task_changed",
@@ -209,13 +209,53 @@ function main() {
     assert.equal(projected.blocker, PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE);
     assert.doesNotMatch(JSON.stringify(projected), new RegExp(token));
   }
+  const historicalSupervisorPidReuse = projectRunnerStatus(
+    {
+      state: "failed",
+      pid: null,
+      host: null,
+      blocker: "image_session_worker_start_failed",
+      error: {
+        stage: "runner_exited",
+        at: "2026-07-29T08:39:43.613Z",
+        message: "image session supervisor exited without publishing a worker: prior_session_local_execution_state_present",
+      },
+    },
+    { pidAlive: false, activeOrder: false, createLock: false },
+  );
+  assert.equal(historicalSupervisorPidReuse.error?.displayMessage, HISTORICAL_RUNNER_GENERIC_MESSAGE);
+  assert.equal(historicalSupervisorPidReuse.error?.classification, PREORDER_SUPERVISOR_START_FAILURE_CLASSIFICATION);
+  assert.equal(historicalSupervisorPidReuse.error?.isBlocking, false);
+  assert.equal(historicalSupervisorPidReuse.blocker, null);
+  assert.doesNotMatch(JSON.stringify(historicalSupervisorPidReuse), /prior_session_local_execution_state_present/);
+  const liveSupervisorCollision = projectRunnerStatus(
+    {
+      state: "running",
+      pid: 12345,
+      host: null,
+      blocker: "image_session_worker_start_failed",
+      error: {
+        stage: "runner_exited",
+        at: "2026-07-29T08:39:43.613Z",
+        message: "prior_session_local_execution_state_present",
+      },
+    },
+    { pidAlive: true, activeOrder: false, createLock: true },
+  );
+  assert.equal(liveSupervisorCollision.error?.isBlocking, true);
+  assert.equal(liveSupervisorCollision.blocker, "image_session_worker_start_failed");
 
   const route = readFileSync("src/app/api/local-lab/image-tasks/route.ts", "utf8");
-  assert.match(route, /host: display\.error\?\.historical \? null : runner\.host/);
+  assert.match(
+    route,
+    /const historicalTerminal = terminalRunnerState\(runner\.state\)[\s\S]*?&& !runnerPidAlive[\s\S]*?&& !activeOrder[\s\S]*?&& !createLockPresent/,
+  );
+  assert.match(route, /host: historicalTerminal \? null : runner\.host/);
   assert.match(route, /progress: blocker[\s\S]*?isBlocking: true/);
   const studio = readFileSync("src/components/ImageCreationStudio.tsx", "utf8");
   assert.match(studio, /candidateRole/);
   assert.match(studio, /candidateRole === "rented_host"/);
+  assert.match(studio, /const rentedHost = running && runner\?\.host\?\.candidateRole === "rented_host"/);
   assert.match(studio, /当前候选显卡/);
   assert.match(studio, /已租用主机/);
   assert.match(studio, /const safetyBlocked = runner\?\.error\?\.isBlocking === true \|\| Boolean\(runner\?\.blocker\)/);

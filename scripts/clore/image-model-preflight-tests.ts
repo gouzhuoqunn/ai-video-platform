@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { verifyFiveImageModelSources } from "./image-model-preflight";
@@ -75,8 +75,12 @@ async function main() {
     assert.ok(stalledSignal);
     assert.equal(stalledSignal.aborted, true, "a body cancel that never settles must abort its request");
     assert.ok(Date.now() - stalledStarted < 2_000, "a stalled response-body cancel must remain bounded");
+    const productionSource = readFileSync("scripts/clore/image-model-preflight.ts", "utf8");
+    assert.match(productionSource, /systemProxyAwareProviderFetch\(\)/);
+    assert.doesNotMatch(productionSource, /powershell\.exe|AI_IMAGE_PREFLIGHT_URL/,
+      "production model network preflight must use the shared bounded provider fetch instead of an opaque child process");
 
-    console.log(JSON.stringify({ ok: true, method: "GET", redirected_credentials_local_only: true, tokenless_remote_delivery_required: true, response_bodies_cancelled: true, stalled_cancel_bounded: true, exact_content_length_or_range_checked: true, head_success_cannot_pass: true }));
+    console.log(JSON.stringify({ ok: true, method: "GET", redirected_credentials_local_only: true, tokenless_remote_delivery_required: true, response_bodies_cancelled: true, stalled_cancel_bounded: true, shared_proxy_aware_fetch: true, exact_content_length_or_range_checked: true, head_success_cannot_pass: true }));
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 void main();

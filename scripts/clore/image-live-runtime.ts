@@ -13,8 +13,8 @@ import { rankFreshMarketplaceCandidates, type MarketScanEvidence } from "./live-
 import { createSessionNonce, isLocalWatchdogTaskInstalled, writeLocalWatchdogArmState } from "./watchdog-io";
 import { agentGetJsonWithRetry, agentHealthResponse } from "./agent-get-transport";
 import { clearTemporaryDeploymentDeny, recordDeploymentFailure, recordDeploymentSuccess, recordTemporaryDeploymentDeny } from "./deployment-host-blacklist";
-import { agentPostJson, assertCallerAgentStageAcceptanceContract, buildPublicAgentBootstrap, createOrderWithRateLimit, getArtifactMetadataWithRetry, persistAndFinalizeExactLocalTask, pollInferenceStage, preflightExactLocalImageTask, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, waitForStage, type AcceptedStage, type AgentStageAcceptanceEvidence, type EligibleImageTask } from "./run-image-e2e";
-import { assertAgentModelManifestIdentityUnchanged, toAgentModelManifest, verifyAdditionalTaskLoraSources, verifyFiveImageModelSources, type AgentAdditionalLoraEntry, type AgentModelManifest } from "./image-model-preflight";
+import { agentPostJson, assertCallerAgentStageAcceptanceContract, buildPublicAgentBootstrap, createOrderWithRateLimit, getArtifactMetadataWithRetry, persistAndFinalizeExactLocalTask, pollInferenceStage, resolveExactEligibleImageTask, startImageTaskLeaseHeartbeat, waitForStage, type AcceptedStage, type AgentStageAcceptanceEvidence, type EligibleImageTask } from "./run-image-e2e";
+import { assertAgentModelManifestIdentityUnchanged, toAgentModelManifest, validateAgentModelManifestContract, verifyAdditionalTaskLoraSources, verifyFiveImageModelSources, type AgentAdditionalLoraEntry, type AgentModelManifest } from "./image-model-preflight";
 import { ensureLocalUi, verifyImageUi } from "./image-e2e-ui";
 import { IMAGE_SESSION_LIMITS, planImageSession, type ImageSessionPlan } from "./image-session";
 import type { ImageGpuClass } from "../../src/lib/image-generation/flux-stack";
@@ -68,19 +68,26 @@ async function fetchArtifactWithTimeout(url: string, token: string, timeoutMs = 
     clearTimeout(timer);
   }
 }
-const fixedConfig = (gpuClass: ImageGpuClass = "rtx4090") => ({
-  ...loadCloreConfig(gpuClass === "rtx4090"
+const fixedConfig = (gpuClass: ImageGpuClass = "rtx4090") => {
+  const loaded = loadCloreConfig(gpuClass === "rtx4090"
     ? { deploymentProfileFingerprint: rtx4090GoldenDeploymentFingerprint() }
-    : {}),
-  targetGpu: gpuClass === "rtx5090" ? "NVIDIA GeForce RTX 5090" as const : "NVIDIA GeForce RTX 4090" as const,
-  minGpuVramGb: gpuClass === "rtx5090" ? 32 : 24,
-  maxGpuPricePerHour: IMAGE_SESSION_LIMITS.maxHourlyUsd,
-  orderType: "on-demand" as const,
-});
+    : {});
+  if (loaded.rentalCurrency !== "USD-Blockchain") {
+    throw new Error("image_session_requires_usd_blockchain_currency");
+  }
+  return {
+    ...loaded,
+    rentalCurrency: "USD-Blockchain" as const,
+    targetGpu: gpuClass === "rtx5090" ? "NVIDIA GeForce RTX 5090" as const : "NVIDIA GeForce RTX 4090" as const,
+    minGpuVramGb: gpuClass === "rtx5090" ? 32 : 24,
+    maxGpuPricePerHour: IMAGE_SESSION_LIMITS.maxHourlyUsd,
+    orderType: "on-demand" as const,
+  };
+};
 const compact = (value: unknown) => String(value instanceof Error ? value.message : value).replace(/(bearer\s+)[^\s]+/gi, "$1<redacted>").replace(/([?&](?:signature|token|credential)[^=&]*=)[^&\s]+/gi, "$1<redacted>").slice(0, 700);
 const atomicJson = (file: string, value: unknown) => { mkdirSync(path.dirname(file), { recursive: true }); const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`; const fd = openSync(tmp, "w", 0o600); try { writeSync(fd, `${JSON.stringify(value, null, 2)}\n`); fsyncSync(fd); } finally { closeSync(fd); } renameSync(tmp, file); };
 
-export function assertDownloadedPngMatchesMetadata(png: Buffer, metadata: { byte_size: unknown; sha256: unknown }) {
+export function assertDownloadedPngMatchesMetadata(png: Buffer, metadata: Record<string, unknown>) {
   const byteSize = Number(metadata.byte_size);
   if (!Number.isSafeInteger(byteSize) || byteSize !== png.length || typeof metadata.sha256 !== "string" || createHash("sha256").update(png).digest("hex") !== metadata.sha256) {
     throw new Error("remote_png_verification_failed");
@@ -199,11 +206,15 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
   const config = fixedConfig(gpuClass);
   const before = await readLiveOrdersSummary(config, { forceRefresh: true });
   if (before.some((order) => order.active)) throw new Error("active_clore_order_exists");
-  for (const task of tasks) await preflightExactLocalImageTask(task.id);
-  // Resolve and validate the union before create_order. Per-task preflight
-  // cannot detect two different IDs claiming one filename or conflicting
-  // immutable bytes across a batch; neither must reach a paid host.
+  // Resolve and validate one canonical union before create_order. Repeating
+  // the identical five-model and LoRA probes once per child made a four-image
+  // group perform the same network preflight five times.
   const modelManifest = await buildLiveAgentModelManifest(tasks);
+  validateAgentModelManifestContract(modelManifest);
+  const rereadTasks = exactTaskIds(input.taskIds);
+  if (rereadTasks.some((task, index) => task.updatedAt !== tasks[index]?.updatedAt)) {
+    throw new Error("image_task_changed_during_prerental_preflight");
+  }
   if (!isLocalWatchdogTaskInstalled()) throw new Error("local_watchdog_not_installed");
   const token = newSessionToken(input.sessionId); const command = buildPublicAgentBootstrap({ ...input.immutable, tokenSha256: token.sha256 });
   if (input.immutable.commit !== profile.immutable.commit || input.immutable.agentSourceSha256 !== profile.immutable.agentSourceSha256 || input.immutable.agentSha256 !== profile.immutable.agentSha256 || input.immutable.controllerSha256 !== profile.immutable.controllerSha256 || input.immutable.workflowSha256 !== profile.immutable.workflowSha256) throw new Error("rtx4090_golden_profile_identity_mismatch");
@@ -360,7 +371,7 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
             if (active.length === 1) throw new Error("active_order_exists_before_create_retry");
           },
         }),
-        reconcile: async () => ({ orders: await readAttemptOrders() }),
+        reconcile: async () => ({ orders: await readAttemptOrders(), checkedAt: Date.now() }),
       });
       const outcome = await createOnce();
       const direct = outcome.adoptedOrderId ?? (outcome.created && typeof outcome.created === "object" ? String((outcome.created as Record<string, unknown>).id ?? (outcome.created as Record<string, unknown>).order_id ?? "") : "");
@@ -429,25 +440,29 @@ export async function createLiveSessionOrder(input: { sessionId: string; taskIds
       createLock.release();
     }
   }
-  const plan = result.order.value.plan; const order = result.order.value.order;
-  const persisted = persistedOrders.get(order.orderId);
+  const createdValue = result.order.value as CandidateContext & { order: CloreOrderSummary };
+  const plan = createdValue.plan; const order = createdValue.order;
+  const orderId = result.order.orderId;
+  if (order.orderId && order.orderId !== orderId) throw new Error("created_order_result_identity_mismatch");
+  if (!order.serverId) throw new Error("created_order_server_identity_missing");
+  const persisted = persistedOrders.get(orderId);
   if (!persisted) throw new Error("created_order_local_state_missing");
   let endpoint = order.controllerUrl;
   const deadline = Date.now() + 10 * 60_000;
   while (!endpoint && Date.now() < deadline) {
     await sleep(10_000);
-    endpoint = (await readLiveOrdersSummary(config, { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.controllerUrl ?? null;
+    endpoint = (await readLiveOrdersSummary(config, { forceRefresh: true })).find((item) => item.orderId === orderId)?.controllerUrl ?? null;
   }
   if (!endpoint) {
     recordGoldenRuntimeDeploymentFailureEvidence({
-      orderId: order.orderId,
+      orderId,
       serverId: order.serverId,
       lastHttpStatus: null,
       profileFingerprint: persisted.deploymentProfileFingerprint,
     });
     throw new Error("order_endpoint_not_published_within_timeout");
   }
-  return { orderId: order.orderId, endpoint, hostname: new URL(endpoint).hostname, serverId: persisted.serverId, hourlyUsd: persisted.hourlyUsd, startingBalanceUsd: persisted.startingBalanceUsd, plan, token: token.token, tokenSha256: token.sha256, hardDeadlineAt: persisted.hardDeadlineAt, deploymentProfileFingerprint: persisted.deploymentProfileFingerprint, modelManifest };
+  return { orderId, endpoint, hostname: new URL(endpoint).hostname, serverId: persisted.serverId, hourlyUsd: persisted.hourlyUsd, startingBalanceUsd: persisted.startingBalanceUsd, plan, token: token.token, tokenSha256: token.sha256, hardDeadlineAt: persisted.hardDeadlineAt, deploymentProfileFingerprint: persisted.deploymentProfileFingerprint, modelManifest };
 }
 
 export class RuntimeDeploymentFailure extends Error {
@@ -504,11 +519,23 @@ export async function waitForAgentIdle(order: LiveSessionOrder) {
   throw new RuntimeDeploymentFailure({ order, elapsedMs: Date.now() - started, lastHttpStatus, lastStartupDiagnostic });
 }
 export async function invokeStage(order: LiveSessionOrder, stage: "environment" | "gpu" | "controller" | "comfyui" | "models", payload?: object, receipt?: { requested: (stageRunId: string) => void; accepted: (value: { stageRunId: string }) => void; evidence: (value: AgentStageAcceptanceEvidence) => void }): Promise<StageTerminal> { const accepted = await agentPostJson(order.endpoint, order.token, `/stage/${stage}`, payload, { onRequested: receipt?.requested, onEvidence: receipt?.evidence }); receipt?.accepted(accepted); const terminal = await waitForStage({ endpoint: order.endpoint, token: order.token, stage, expectedStageRunId: accepted.stageRunId, timeoutMs: stage === "models" ? 3 * 60 * 60_000 : 45 * 60_000, reconcileExactOrder: async () => Boolean((await readLiveOrdersSummary(fixedConfig(order.plan.selectedGpuClass === "RTX 5090" ? "rtx5090" : "rtx4090"), { forceRefresh: true })).find((item) => item.orderId === order.orderId)?.active) }); return { stageRunId: accepted.stageRunId, ...terminal }; }
-export async function buildLiveAgentModelManifest(tasks: readonly EligibleImageTask[]) {
-  const core = await verifyFiveImageModelSources();
+export async function buildLiveAgentModelManifest(
+  tasks: readonly EligibleImageTask[],
+  deps: {
+    verifyModels?: typeof verifyFiveImageModelSources;
+    verifyLoras?: typeof verifyAdditionalTaskLoraSources;
+  } = {},
+) {
+  const core = await (deps.verifyModels ?? verifyFiveImageModelSources)();
   const byId = new Map<string, AgentAdditionalLoraEntry>();
+  const resolvedLoraSets = new Map<string, Awaited<ReturnType<typeof verifyAdditionalTaskLoraSources>>>();
   for (const task of tasks) {
-    const additional = await verifyAdditionalTaskLoraSources(task.loras);
+    const identity = JSON.stringify(task.loras ?? null);
+    let additional = resolvedLoraSets.get(identity);
+    if (!additional) {
+      additional = await (deps.verifyLoras ?? verifyAdditionalTaskLoraSources)(task.loras);
+      resolvedLoraSets.set(identity, additional);
+    }
     for (const lora of additional.loras) {
       const existing = byId.get(lora.id);
       if (existing && (
@@ -605,6 +632,8 @@ export type CleanupLiveSessionResult = {
 
 export type CleanupLiveSessionDeps = {
   cancelOrder?: (orderId: string) => Promise<void>;
+  /** The caller already observed no provider order and is reconciling stale local state. */
+  orderKnownInactive?: boolean;
   readOrders?: () => Promise<CloreOrderSummary[]>;
   sleep?: (milliseconds: number) => Promise<void>;
   readActive?: () => ActiveCloreOrder | null;
@@ -642,11 +671,13 @@ export async function cleanupLiveSession(order: Pick<LiveSessionOrder, "orderId"
   });
 
   let cancelSucceeded = false;
-  try {
-    await cancelOrder(order.orderId);
-    cancelSucceeded = true;
-  } catch (error) {
-    errors.push(compact(error));
+  if (!deps.orderKnownInactive) {
+    try {
+      await cancelOrder(order.orderId);
+      cancelSucceeded = true;
+    } catch (error) {
+      errors.push(compact(error));
+    }
   }
 
   let zeroConfirmations = 0;

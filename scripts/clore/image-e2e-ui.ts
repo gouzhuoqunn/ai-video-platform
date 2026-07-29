@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
+import type { LaunchOptions } from "playwright";
 
 export type LocalUiHandle = { started: boolean; pid: number | null; stop: () => void; logs: () => string };
 type ImageKind = "thumbnail" | "output";
@@ -10,6 +11,32 @@ export type LocalUiVerificationResult = { thumbnail: ImageEvidence; output: Imag
 
 export class LocalUiVerificationError extends Error {
   constructor(readonly code: string, readonly evidence: Partial<ImageEvidence>) { super(`${code}:${JSON.stringify(evidence)}`); }
+}
+
+export function localUiBrowserLaunchOptions(input: {
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  exists?: (candidate: string) => boolean;
+} = {}): LaunchOptions {
+  const platform = input.platform ?? process.platform;
+  const env = input.env ?? process.env;
+  const exists = input.exists ?? existsSync;
+  const explicit = env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? env.SYSTEM_CHROMIUM_PATH;
+  if (explicit) return { headless: true, timeout: 15_000, executablePath: explicit };
+  if (platform === "win32") {
+    const edgeCandidates = [
+      env["ProgramFiles(x86)"],
+      env.ProgramFiles,
+      env.LOCALAPPDATA,
+    ].filter((value): value is string => Boolean(value))
+      .map((root) => path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"));
+    const edge = edgeCandidates.find(exists);
+    if (edge) return { headless: true, timeout: 15_000, executablePath: edge };
+    // Playwright's Edge channel resolves the system installation and never
+    // falls back to an absent bundled chromium_headless_shell on Windows.
+    return { headless: true, timeout: 15_000, channel: "msedge" };
+  }
+  return { headless: true, timeout: 15_000 };
 }
 
 function declaredBytes(response: Response) {
@@ -51,19 +78,30 @@ export async function ensureLocalUi(input: { baseUrl?: string; spawnImpl?: typeo
 export async function verifyImageUi(input: { taskId: string; baseUrl?: string; screenshotPath?: string; fetchImpl?: typeof fetch }) : Promise<LocalUiVerificationResult> {
   const base = input.baseUrl ?? "http://127.0.0.1:3000";
   const fetchImpl = input.fetchImpl ?? fetch;
-  const task = await fetchImpl(`${base}/api/local-lab/image-tasks`).then(async (r) => ({ ok: r.ok, body: await r.json() as { tasks?: Array<{ id: string; status: string; width?: number; height?: number }> } })); const item = task.body.tasks?.find((v) => v.id === input.taskId); if (!task.ok || !item || item.status !== "completed" || typeof item.width !== "number" || typeof item.height !== "number" || !Number.isSafeInteger(item.width) || !Number.isSafeInteger(item.height)) throw new Error("local_ui_exact_task_not_completed");
+  const boundedFetch = (url: string) => fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
+  const task = await boundedFetch(`${base}/api/local-lab/image-tasks`).then(async (r) => ({ ok: r.ok, body: await r.json() as { tasks?: Array<{ id: string; status: string; width?: number; height?: number }> } })); const item = task.body.tasks?.find((v) => v.id === input.taskId); if (!task.ok || !item || item.status !== "completed" || typeof item.width !== "number" || typeof item.height !== "number" || !Number.isSafeInteger(item.width) || !Number.isSafeInteger(item.height)) throw new Error("local_ui_exact_task_not_completed");
   const expectedWidth = item.width; const expectedHeight = item.height;
-  const thumbnail = await validateImageResponse("thumbnail", await fetchImpl(`${base}/api/local-images/${input.taskId}/thumbnail`), expectedWidth, expectedHeight);
-  const output = await validateImageResponse("output", await fetchImpl(`${base}/api/local-images/${input.taskId}/output`), expectedWidth, expectedHeight);
-  const { chromium } = await import("playwright"); const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH; const browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
+  const thumbnail = await validateImageResponse("thumbnail", await boundedFetch(`${base}/api/local-images/${input.taskId}/thumbnail`), expectedWidth, expectedHeight);
+  const output = await validateImageResponse("output", await boundedFetch(`${base}/api/local-images/${input.taskId}/output`), expectedWidth, expectedHeight);
+  const { chromium } = await import("playwright"); const browser = await chromium.launch(localUiBrowserLaunchOptions());
   try {
-    const page = await browser.newPage(); await page.goto(base, { waitUntil: "networkidle" });
+    const page = await browser.newPage();
+    page.setDefaultTimeout(10_000);
+    page.setDefaultNavigationTimeout(15_000);
+    await page.goto(base, { waitUntil: "domcontentloaded", timeout: 15_000 });
     const resultsTab = page.getByRole("button", { name: /^成果/ });
     if (await resultsTab.count()) await resultsTab.first().click();
     const image = page.locator(`img[src*="/api/local-images/${input.taskId}/thumbnail"]`);
     await image.waitFor({ state: "visible", timeout: 10_000 }).catch(() => undefined);
     if (!await image.isVisible() || !(await image.boundingBox())?.width) throw new Error("local_ui_thumbnail_not_rendered");
-    const natural = await image.evaluate((element: HTMLImageElement) => ({ width: element.naturalWidth, height: element.naturalHeight }));
+    await image.scrollIntoViewIfNeeded();
+    const imageDeadline = Date.now() + 10_000;
+    let natural = { width: 0, height: 0 };
+    while (Date.now() < imageDeadline) {
+      natural = await image.evaluate((element: HTMLImageElement) => ({ width: element.naturalWidth, height: element.naturalHeight }));
+      if (natural.width > 0 && natural.height > 0) break;
+      await page.waitForTimeout(200);
+    }
     if (natural.width <= 0 || natural.height <= 0) throw new Error("local_ui_thumbnail_not_rendered");
     if (input.screenshotPath) { mkdirSync(path.dirname(input.screenshotPath), { recursive: true }); await page.screenshot({ path: input.screenshotPath, fullPage: true }); }
     return { thumbnail, output, naturalWidth: natural.width, naturalHeight: natural.height, screenshotPath: input.screenshotPath ?? null };

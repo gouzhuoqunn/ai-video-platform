@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { lookup } from "node:dns/promises";
 import {
   closeSync,
@@ -13,6 +14,12 @@ import {
   writeSync,
 } from "node:fs";
 import path from "node:path";
+import {
+  ProxyAgent,
+  fetch as undiciFetch,
+  type RequestInfo as UndiciRequestInfo,
+  type RequestInit as UndiciRequestInit,
+} from "undici";
 import {
   BUILTIN_AIDMA_LORA,
   MAX_LORA_NAME_LENGTH,
@@ -47,6 +54,9 @@ const MAX_SOURCE_URL_LENGTH = 4_096;
 const CIVITAI_HOSTS = new Set(["civitai.com", "www.civitai.com", "civitai.red", "www.civitai.red"]);
 const HUGGINGFACE_HOSTS = new Set(["huggingface.co", "www.huggingface.co", "hf.co", "www.hf.co"]);
 const DEFAULT_CREATED_AT = "2026-07-28T00:00:00.000Z";
+const WINDOWS_INTERNET_SETTINGS_KEY = String.raw`HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`;
+
+let cachedDefaultProviderFetch: typeof fetch | null | undefined;
 
 export type LoraRegistryOptions = {
   registryPath?: string;
@@ -71,6 +81,99 @@ export type ResolvedLoraDownload = {
     validatedMethod: "GET";
   };
 };
+
+/**
+ * Windows/Edge can be configured with a local HTTP proxy even when Node's
+ * global fetch still connects directly. Only a credential-free loopback
+ * endpoint is accepted here; arbitrary system proxy destinations never become
+ * part of the server-side download trust boundary.
+ */
+export function parseWindowsLoopbackProxyServer(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const entries = raw.split(";").map((entry) => entry.trim()).filter(Boolean);
+  const keyed = new Map<string, string>();
+  let unkeyed: string | null = null;
+  for (const entry of entries) {
+    const separator = entry.indexOf("=");
+    if (separator > 0) {
+      keyed.set(entry.slice(0, separator).trim().toLowerCase(), entry.slice(separator + 1).trim());
+    } else if (!unkeyed) {
+      unkeyed = entry;
+    }
+  }
+  const candidate = keyed.get("https") ?? keyed.get("http") ?? unkeyed;
+  if (!candidate) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate) ? candidate : `http://${candidate}`);
+  } catch {
+    return null;
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  const port = Number(parsed.port);
+  if (
+    !["http:", "https:"].includes(parsed.protocol)
+    || !["127.0.0.1", "localhost", "[::1]"].includes(hostname)
+    || parsed.username
+    || parsed.password
+    || parsed.pathname !== "/"
+    || parsed.search
+    || parsed.hash
+    || !Number.isSafeInteger(port)
+    || port < 1
+    || port > 65_535
+  ) {
+    return null;
+  }
+  return parsed.toString();
+}
+
+function readWindowsInternetSetting(name: "ProxyEnable" | "ProxyServer") {
+  try {
+    const output = execFileSync("reg.exe", [
+      "query",
+      WINDOWS_INTERNET_SETTINGS_KEY,
+      "/v",
+      name,
+    ], {
+      encoding: "utf8",
+      timeout: 1_000,
+      windowsHide: true,
+      maxBuffer: 64 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const match = new RegExp(`\\b${name}\\s+REG_(?:DWORD|SZ)\\s+(.+?)\\s*$`, "im").exec(output);
+    return match?.[1]?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function systemProxyAwareProviderFetch() {
+  if (cachedDefaultProviderFetch !== undefined) return cachedDefaultProviderFetch ?? fetch;
+  if (process.platform !== "win32" || !/^0x0*1$/i.test(readWindowsInternetSetting("ProxyEnable"))) {
+    cachedDefaultProviderFetch = null;
+    return fetch;
+  }
+  const proxyUrl = parseWindowsLoopbackProxyServer(readWindowsInternetSetting("ProxyServer"));
+  if (!proxyUrl) {
+    cachedDefaultProviderFetch = null;
+    return fetch;
+  }
+  const dispatcher = new ProxyAgent(proxyUrl);
+  cachedDefaultProviderFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const response = await undiciFetch(
+      input as unknown as UndiciRequestInfo,
+      {
+        ...(init as unknown as UndiciRequestInit | undefined),
+        dispatcher,
+      },
+    );
+    return response as unknown as Response;
+  }) as typeof fetch;
+  return cachedDefaultProviderFetch;
+}
 
 const DEFAULT_LORAS: RegisteredLora[] = [
   {
@@ -741,7 +844,11 @@ async function resolveCivitaiSource(sourceUrl: URL, options: Required<Pick<LoraR
     !Number.isSafeInteger(modelId)
     || Number(modelId) <= 0
     || model?.id !== modelId
-    || version.modelId !== modelId
+    // The model endpoint already proves the relationship by nesting this
+    // version under the exact requested model ID. Civitai's model-page JSON
+    // may omit the redundant version.modelId, while the standalone version
+    // endpoint is still required above to supply and match it.
+    || (version.modelId !== undefined && version.modelId !== modelId)
   ) {
     throw new Error("civitai_metadata_identity_mismatch");
   }
@@ -858,7 +965,7 @@ async function resolveSourceIdentity(sourceUrl: string, options: LoraRegistryOpt
     throw new Error("direct_lora_source_identity_unavailable");
   }
   const parsed = safePublicHttps(registrationSource.originalUrl);
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl ?? systemProxyAwareProviderFetch();
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const tokenProvider = options.tokenProvider ?? secretToken;
   if (registrationSource.provider === "huggingface") {
@@ -935,7 +1042,11 @@ async function resolveSourceUrl(sourceUrl: string, options: LoraRegistryOptions)
       throw new Error("civitai_lora_remote_delivery_requires_local_token");
     }
   }
-  if (probe.contentLength !== resolved.declaredSize) throw new Error("civitai_lora_size_mismatch");
+  // Civitai's sizeKB field is not an exact byte identity for every legacy
+  // file. The immutable SHA-256 remains authoritative, while the locked
+  // version/file delivery response supplies the exact byte count that the
+  // Agent must enforce. This still fails closed on filename, file ID, hash,
+  // safetensors structure, and the full remote download hash.
   return { ...resolved, sizeBytes: probe.contentLength, probe, provider: "civitai" as const };
 }
 
@@ -1448,7 +1559,11 @@ export async function resolveTaskLoraDownloads(
     if (
       resolved.filename !== registered.filename
       || resolved.sha256 !== registered.sha256
-      || resolved.sizeBytes !== registered.sizeBytes
+      // Hugging Face LFS reports exact bytes. Civitai's legacy sizeKB field
+      // can be a few bytes off, so its exact transfer size is locked by the
+      // pre-rental range response and then enforced by the Agent together
+      // with the immutable SHA-256.
+      || (resolved.provider === "huggingface" && resolved.sizeBytes !== registered.sizeBytes)
     ) {
       throw new Error(`task_lora_source_identity_mismatch:${taskLora.id}`);
     }
@@ -1457,7 +1572,7 @@ export async function resolveTaskLoraDownloads(
       filename: registered.filename,
       url: resolved.probe.url,
       sha256: registered.sha256,
-      sizeBytes: registered.sizeBytes,
+      sizeBytes: resolved.sizeBytes,
       provider: resolved.provider,
       evidence: {
         status: resolved.probe.status,

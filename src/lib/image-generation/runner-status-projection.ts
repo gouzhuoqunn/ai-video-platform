@@ -11,6 +11,7 @@ export const PRIOR_SESSION_AUTO_RECOVERY_MESSAGE = "检测到上次有图片生�
 export const PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE = "上次有图片生成请求已提交，但本地状态无法安全核对。为避免重复生成，已阻止再次启动；请打开“当下日志”处理。";
 export const PRIOR_SESSION_RECOVERY_CLASSIFICATION = "prior_session_recovery_pending";
 export const PRIOR_SESSION_MANUAL_RECOVERY_CLASSIFICATION = "inference_recovery_requires_attention";
+export const PREORDER_SUPERVISOR_START_FAILURE_CLASSIFICATION = "preorder_supervisor_start_failed";
 
 type RunnerError = { stage: string; message: string; at: string; classification?: string; operation?: string };
 type RunnerLike = { state: string; pid?: number | null; host?: { orderId?: string | null } | null; blocker?: string | null; error?: RunnerError | null };
@@ -98,6 +99,27 @@ export function projectRunnerStatus(runner: RunnerLike, state: { pidAlive: boole
   // Only live PID, reconciled active-order state, or a create lock makes it current.
   const historical = ["idle", "failed", "completed"].includes(runner.state) && !state.pidAlive && !state.activeOrder && !state.createLock;
   if (historical) {
+    const retryablePreorderSupervisorCollision =
+      runner.error.stage === "runner_exited"
+      && !runner.pid
+      && !runner.host?.orderId
+      && /prior_session_local_execution_state_present/i.test(runner.error.message);
+    if (retryablePreorderSupervisorCollision) {
+      // The supervisor has not published a Worker yet, so this attempt cannot
+      // have reached create_order or inference. A fresh start still repeats
+      // both the local execution-owner gate and the live active-order check.
+      return {
+        error: {
+          stage: runner.error.stage,
+          at: runner.error.at,
+          displayMessage: HISTORICAL_RUNNER_GENERIC_MESSAGE,
+          isBlocking: false,
+          historical: true,
+          classification: PREORDER_SUPERVISOR_START_FAILURE_CLASSIFICATION,
+        },
+        blocker: null,
+      };
+    }
     if (priorSessionManualRecovery(runner.error.message)) {
       return {
         error: {

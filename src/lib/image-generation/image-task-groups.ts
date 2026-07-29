@@ -43,8 +43,55 @@ export type MutableGroupableImageTask = GroupableImageTask & {
   inferenceRetryBlock?: unknown;
 };
 
+export type StudioExecutableBatch = {
+  plannedTaskIds: string[];
+  executableCount: number;
+  excludedInconsistentTaskIds: string[];
+};
+
+export type StudioBatchTask = GroupableImageTask & {
+  gpuClass?: "rtx4090" | "rtx5090" | null;
+};
+
+export const MAX_STUDIO_SELECTED_BATCH_SIZE = 8;
+
 export function groupIdentity(task: GroupableImageTask) { return task.groupId || task.id; }
 export function promptTitle(prompt: string | undefined) { return Array.from(prompt ?? "").slice(0, 12).join(""); }
+
+/**
+ * An explicit activity-rail selection is authoritative for the next paid
+ * start. In particular, a selected pending group deliberately produces an
+ * empty batch instead of falling through to unrelated historical waiting
+ * tasks. The server still revalidates and canonically orders these exact IDs.
+ */
+export function selectStudioExecutableBatch<T extends StudioBatchTask>(
+  tasks: readonly T[],
+  selectedGroupIds: ReadonlySet<string>,
+  gpuClass: "rtx4090" | "rtx5090",
+  fallback: StudioExecutableBatch,
+): StudioExecutableBatch {
+  if (selectedGroupIds.size === 0) return fallback;
+  const excluded = new Set(fallback.excludedInconsistentTaskIds);
+  const seen = new Set<string>();
+  const plannedTaskIds: string[] = [];
+  for (const task of tasks) {
+    if (
+      plannedTaskIds.length >= MAX_STUDIO_SELECTED_BATCH_SIZE
+      || seen.has(task.id)
+      || !selectedGroupIds.has(groupIdentity(task))
+      || task.status !== "waiting_for_gpu"
+      || task.gpuClass !== gpuClass
+      || excluded.has(task.id)
+    ) continue;
+    seen.add(task.id);
+    plannedTaskIds.push(task.id);
+  }
+  return {
+    plannedTaskIds,
+    executableCount: plannedTaskIds.length,
+    excludedInconsistentTaskIds: fallback.excludedInconsistentTaskIds,
+  };
+}
 
 export function groupStatusLabel(status: ImageTaskGroup["status"]) {
   return ({ pending_confirmation: "待确认", waiting_for_gpu: "等待显卡", generating: "生成中", failed: "失败", completed: "已完成" })[status];

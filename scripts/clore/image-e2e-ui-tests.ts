@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import sharp from "sharp";
-import { LocalUiVerificationError, ensureLocalUi, validateImageResponse } from "./image-e2e-ui";
+import { LocalUiVerificationError, ensureLocalUi, localUiBrowserLaunchOptions, validateImageResponse } from "./image-e2e-ui";
 
 function response(bytes: Buffer, contentType: string, contentLength?: string) {
   const headers = new Headers({ "content-type": contentType });
@@ -33,9 +33,33 @@ async function main() {
   await expectCode(() => validateImageResponse("thumbnail", response(Buffer.from("not-a-webp"), "image/webp"), 768, 768), "local_ui_thumbnail_decode_failed");
   const wrongPng = await sharp({ create: { width: 384, height: 384, channels: 3, background: "#248" } }).png().toBuffer();
   await expectCode(() => validateImageResponse("output", response(wrongPng, "image/png"), 768, 768), "local_ui_output_dimensions_invalid");
+  assert.deepEqual(
+    localUiBrowserLaunchOptions({
+      platform: "win32",
+      env: { ProgramFiles: "C:\\Program Files" },
+      exists: (candidate) => candidate === "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    }),
+    {
+      headless: true,
+      timeout: 15_000,
+      executablePath: "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    },
+    "Windows UI verification must use the installed Edge instead of an absent bundled Chromium",
+  );
+  assert.deepEqual(
+    localUiBrowserLaunchOptions({
+      platform: "win32",
+      env: {},
+      exists: () => false,
+    }),
+    { headless: true, timeout: 15_000, channel: "msedge" },
+    "the Edge channel remains a bounded Windows fallback",
+  );
   const verifierSource = readFileSync(new URL("./image-e2e-ui.ts", import.meta.url), "utf8");
   assert.match(verifierSource, /getByRole\("button", \{ name: \/\^成果\//, "the browser verifier must switch to the separate Results tab before locating thumbnails");
-  console.log(JSON.stringify({ ok: true, ui_start_bounded: true, coordinator_child_only: true, body_without_content_length: true, content_length_consistency: true, empty_mime_decode_and_dimension_failures: true }));
+  assert.match(verifierSource, /AbortSignal\.timeout\(10_000\)/, "all local UI HTTP reads are bounded");
+  assert.match(verifierSource, /imageDeadline = Date\.now\(\) \+ 10_000/, "thumbnail decoding wait is bounded");
+  console.log(JSON.stringify({ ok: true, ui_start_bounded: true, coordinator_child_only: true, installed_edge_selected_on_windows: true, ui_http_reads_bounded: true, thumbnail_decode_wait_bounded: true, body_without_content_length: true, content_length_consistency: true, empty_mime_decode_and_dimension_failures: true }));
 }
 
 void main();

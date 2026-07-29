@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
+import { selectStudioExecutableBatch } from "../src/lib/image-generation/image-task-groups";
 import { publishLocalImageArtifact } from "../src/lib/image-generation/local-image-artifacts";
 import { mutateImageTasks, readImageTask, recoverCompletedImageTaskFromVerifiedArtifact, type LocalImageTask } from "../src/lib/image-generation/local-image-task-store";
 import { planExecutableImageBatch } from "./clore/image-session";
@@ -29,9 +30,48 @@ async function main() {
     const executable = [task(6), task(5), task(4), task(3), restored];
     const batch = planExecutableImageBatch(executable, "rtx4090");
     assert.equal(batch.executableCount, 4); assert.deepEqual(batch.plannedTaskIds, [id(3), id(4), id(5), id(6)]); assert.equal(batch.excludedInconsistentTaskIds.length, 0);
+
+    const oldWaiting = Array.from({ length: 10 }, (_, index) => task(index + 10, {
+      groupId: `old-group-${index}`,
+      createdAt: `2026-07-25T00:${String(index).padStart(2, "0")}:00.000Z`,
+    }));
+    const selectedGroupId = "new-selected-group";
+    const selectedWaiting = Array.from({ length: 5 }, (_, index) => task(index + 30, {
+      groupId: selectedGroupId,
+      groupIndex: index + 1,
+      groupRequestedCount: 5,
+      createdAt: "2026-07-29T00:00:00.000Z",
+    }));
+    const fullQueue = [...selectedWaiting, ...oldWaiting];
+    const globalBatch = planExecutableImageBatch(fullQueue, "rtx4090");
+    assert.equal(globalBatch.plannedTaskIds.some((taskId) => selectedWaiting.some((item) => item.id === taskId)), false, "the historical global planner demonstrates the old-queue conflict");
+    const explicitBatch = selectStudioExecutableBatch(fullQueue, new Set([selectedGroupId]), "rtx4090", globalBatch);
+    assert.deepEqual(explicitBatch.plannedTaskIds, selectedWaiting.map((item) => item.id), "the explicitly selected new group must replace the old global queue");
+    assert.equal(explicitBatch.executableCount, 5);
+    assert.deepEqual(selectStudioExecutableBatch(fullQueue, new Set(), "rtx4090", globalBatch), globalBatch, "only an empty selection may use the global fallback");
+    const selectedPending = selectedWaiting.map((item) => ({ ...item, status: "pending_confirmation" as const }));
+    assert.deepEqual(
+      selectStudioExecutableBatch([...selectedPending, ...oldWaiting], new Set([selectedGroupId]), "rtx4090", globalBatch).plannedTaskIds,
+      [],
+      "an explicit pending selection must disable paid start instead of falling through to old tasks",
+    );
+    assert.deepEqual(
+      selectStudioExecutableBatch(fullQueue, new Set(["stale-cancelled-group"]), "rtx4090", globalBatch).plannedTaskIds,
+      [],
+      "a stale nonempty selection must remain fail-closed",
+    );
+    assert.deepEqual(
+      selectStudioExecutableBatch(fullQueue, new Set([selectedGroupId]), "rtx4090", {
+        ...globalBatch,
+        excludedInconsistentTaskIds: [selectedWaiting[0].id],
+      }).plannedTaskIds,
+      selectedWaiting.slice(1).map((item) => item.id),
+      "the selected batch must retain the server-projected inconsistency exclusions",
+    );
+
     const route = readFileSync("src/app/api/local-lab/image-tasks/route.ts", "utf8"); const studio = readFileSync("src/components/ImageCreationStudio.tsx", "utf8");
-    assert.match(route, /executableBatches:/); assert.match(route, /planExecutableImageBatch\(tasks, "rtx4090"\)/); assert.match(studio, /batches\[gpu\]\.plannedTaskIds/); assert.match(studio, /batches\.rtx4090\.executableCount/);
-    console.log(JSON.stringify({ ok: true, verifiedWaitingResultRestored: true, artifactAndHistoryPreserved: true, invalidArtifactRemainsExcluded: true, rtx4090ExecutableCount: batch.executableCount, providerMutationCount: 0 }));
+    assert.match(route, /executableBatches:/); assert.match(route, /planExecutableImageBatch\(tasks, "rtx4090"\)/); assert.match(studio, /effectiveBatches\[gpu\]\.plannedTaskIds/); assert.match(studio, /batches\.rtx4090\.executableCount/);
+    console.log(JSON.stringify({ ok: true, verifiedWaitingResultRestored: true, artifactAndHistoryPreserved: true, invalidArtifactRemainsExcluded: true, selectedConfirmedGroupPrecedesOldWaiting: true, explicitSelectionNeverFallsBack: true, rtx4090ExecutableCount: batch.executableCount, providerMutationCount: 0 }));
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 

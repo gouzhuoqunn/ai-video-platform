@@ -265,7 +265,8 @@
     "next": "^16.2.10",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "server-only": "^0.0.1"
+    "server-only": "^0.0.1",
+    "undici": "7.28.0"
   },
   "devDependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",

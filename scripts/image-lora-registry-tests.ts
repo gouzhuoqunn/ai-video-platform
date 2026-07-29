@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   listRegisteredLoras,
   parseLoraRegistrationSource,
+  parseWindowsLoopbackProxyServer,
   registerLoraFromUrl,
   resolveAndSnapshotTaskLoras,
   resolveTaskLoraDownloads,
@@ -285,6 +286,26 @@ async function testUnrecognizedSourceRejected(root: string) {
   assert.equal(existsSync(registryPath), false);
 }
 
+async function testWindowsLoopbackProxyParsing() {
+  assert.equal(
+    parseWindowsLoopbackProxyServer("127.0.0.1:22833"),
+    "http://127.0.0.1:22833/",
+  );
+  assert.equal(
+    parseWindowsLoopbackProxyServer("http=127.0.0.1:22000;https=localhost:22833"),
+    "http://localhost:22833/",
+  );
+  for (const value of [
+    "proxy.example.com:8080",
+    "https=user:password@127.0.0.1:22833",
+    "127.0.0.1",
+    "127.0.0.1:70000",
+    "socks=127.0.0.1:22833",
+  ]) {
+    assert.equal(parseWindowsLoopbackProxyServer(value), null, value);
+  }
+}
+
 async function testCivitaiStrictGenerationResolution(root: string) {
   const registryPath = path.join(root, "civitai-strict", "loras.json");
   const calls: FetchCall[] = [];
@@ -366,6 +387,46 @@ async function testCivitaiStrictGenerationResolution(root: string) {
     .every((call) => call.authorization === null));
 }
 
+async function testCivitaiAdvertisedSizeDriftUsesExactTransferSize(root: string) {
+  const registryPath = path.join(root, "civitai-size-drift", "loras.json");
+  const advertisedSize = LORA_SIZE - 80;
+  const version = {
+    id: 456,
+    modelId: 123,
+    baseModel: "Flux.1 D",
+    files: [civitaiFile({ id: 789, sizeBytes: advertisedSize })],
+  };
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const call = callRecord(input, init);
+    if (
+      call.url === "https://civitai.red/api/v1/model-versions/456"
+      || call.url === "https://civitai.com/api/v1/model-versions/456"
+    ) return jsonResponse(version);
+    if (
+      call.url === "https://civitai.red/api/v1/models/123"
+      || call.url === "https://civitai.com/api/v1/models/123"
+    ) return jsonResponse({ id: 123, type: "LORA", modelVersions: [version] });
+    if (call.url === "https://civitai.com/api/download/models/456?fileId=789") {
+      return redirectResponse("https://cdn.civitai.example/fixture-lora.safetensors");
+    }
+    if (call.url === "https://cdn.civitai.example/fixture-lora.safetensors") {
+      return binaryResponse({ totalBytes: LORA_SIZE });
+    }
+    throw new Error(`unexpected_fixture_url:${call.url}`);
+  };
+  const options = registryOptions(registryPath, fetchImpl);
+  const registered = await registerLoraFromUrl({
+    name: "Civitai 旧文件大小校准",
+    sourceUrl: "https://civitai.red/api/download/models/456?fileId=789",
+    defaultStrength: 0.8,
+  }, options);
+  const snapshot = await resolveAndSnapshotTaskLoras(selection(registered.item.id), options);
+  assert.equal(snapshot?.[0]?.sizeBytes, advertisedSize);
+  const downloads = await resolveTaskLoraDownloads(snapshot, options);
+  assert.equal(downloads[0]?.sizeBytes, LORA_SIZE);
+  assert.equal(downloads[0]?.evidence.contentLength, LORA_SIZE);
+}
+
 async function testDisabledRegisteredDoesNotResolve(root: string) {
   const registryPath = path.join(root, "disabled", "loras.json");
   const network = { calls: 0 };
@@ -391,14 +452,12 @@ async function testCivitaiModelPageChoosesFlux1VersionFromRedMetadata(root: stri
   const calls: FetchCall[] = [];
   const incompatible = {
     id: 3001,
-    modelId: 1988828,
     name: "Klein latest",
     baseModel: "Flux.2 Klein 9B-base",
     files: [civitaiFile({ id: 4001, name: "klein.safetensors", sha256: "1".repeat(64) })],
   };
   const compatible = {
     id: 3002,
-    modelId: 1988828,
     name: "Flux-v1.0",
     baseModel: "Flux.1 D",
     files: [civitaiFile({
@@ -913,7 +972,9 @@ async function main() {
     ["默认项与旧 ready 记录兼容", () => testDefaultAndLegacyReadyRegistry(root)],
     ["Civitai red/com、HF/hf.co 与直链均零网络注册", () => testRecognizedFormatsRegisterWithoutNetwork(root)],
     ["无法识别或不安全链接明确拒绝", () => testUnrecognizedSourceRejected(root)],
+    ["Windows 仅接受无凭据回环代理", () => testWindowsLoopbackProxyParsing()],
     ["Civitai 待下载项建卡零网络、确认锁定身份、租卡前探测", () => testCivitaiStrictGenerationResolution(root)],
+    ["Civitai 旧文件元数据大小漂移使用实际传输长度", () => testCivitaiAdvertisedSizeDriftUsesExactTransferSize(root)],
     ["未启用待下载项不访问网络", () => testDisabledRegisteredDoesNotResolve(root)],
     ["Civitai.red 模型页选择当前 FLUX.1-D 兼容版本", () => testCivitaiModelPageChoosesFlux1VersionFromRedMetadata(root)],
     ["明确 Civitai fileId 不匹配在生成前失败", () => testExplicitCivitaiFileMismatchFailsAtGeneration(root)],

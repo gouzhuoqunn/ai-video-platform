@@ -188,7 +188,15 @@ export function hasUnfinishedLocalExecution(options: { allowedRunnerAttemptId?: 
       const terminal = ["succeeded", "failed", "ambiguous"].includes(state);
       if (!terminal && !["starting", "running"].includes(state)) return true;
       if (terminal) {
-        if (!Number.isSafeInteger(worker.pid) || Number(worker.pid) <= 0 || probeProcess(worker.pid) !== "dead") return true;
+        if (!Number.isSafeInteger(worker.pid) || Number(worker.pid) <= 0) return true;
+        const terminalPidWasReusedByCurrentSupervisor =
+          isCurrentSupervisorStart
+          && Number(worker.pid) === options.allowedRunnerPid;
+        // Windows can immediately reuse a finished Worker's numeric PID for
+        // this exact supervisor process.  The old Worker is still terminal;
+        // treating the current supervisor itself as that Worker permanently
+        // blocks receipt rotation and makes the Studio start appear hung.
+        if (probeProcess(worker.pid) !== "dead" && !terminalPidWasReusedByCurrentSupervisor) return true;
         continue;
       }
       if (worker.sessionId !== sessionId || !Number.isSafeInteger(worker.pid) || Number(worker.pid) <= 0) return true;

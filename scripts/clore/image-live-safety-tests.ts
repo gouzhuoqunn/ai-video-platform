@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   assertDownloadedPngMatchesMetadata,
+  buildLiveAgentModelManifest,
   capturePostFinalizationUiVerification,
   cleanupLiveSession,
   recordGoldenRuntimeDeploymentFailureEvidence,
@@ -13,6 +14,8 @@ import {
   RuntimeDeploymentFailure,
   type CleanupLiveSessionResult,
 } from "./image-live-runtime";
+import type { EligibleImageTask } from "./run-image-e2e";
+import type { RemoteImageModel } from "./image-model-preflight";
 import {
   deploymentFailureCount,
   readTemporaryDeploymentDeniedServerIds,
@@ -106,6 +109,86 @@ async function main() {
   });
   assert.equal(reconciled.cancellationState, "reconciled_inactive");
   assert.equal(reconciled.cleanupConfirmed, true);
+
+  let knownInactiveCancelCalls = 0;
+  let knownInactiveReads = 0;
+  const knownInactive = await cleanupLiveSession(owned, {
+    orderKnownInactive: true,
+    cancelOrder: async () => { knownInactiveCancelCalls += 1; },
+    readOrders: async () => { knownInactiveReads += 1; return []; },
+    sleep: async () => undefined,
+    readActive: () => null,
+    disarmWatchdog: () => undefined,
+  });
+  assert.equal(knownInactiveCancelCalls, 0, "inactive reconciliation performs no cancel mutation");
+  assert.equal(knownInactiveReads, 2, "inactive reconciliation still requires two fresh zero reads");
+  assert.equal(knownInactive.cancellationState, "reconciled_inactive");
+  assert.equal(knownInactive.cleanupConfirmed, true);
+
+  let splitReadCount = 0;
+  let splitDisarmCalls = 0;
+  const splitRead = await cleanupLiveSession(owned, {
+    orderKnownInactive: true,
+    readOrders: async () => {
+      splitReadCount += 1;
+      return splitReadCount === 1 ? [] : [order()];
+    },
+    sleep: async () => undefined,
+    readActive: () => null,
+    disarmWatchdog: () => { splitDisarmCalls += 1; },
+  });
+  assert.equal(splitRead.zeroConfirmations, 1);
+  assert.equal(splitRead.cleanupConfirmed, false);
+  assert.equal(splitDisarmCalls, 0);
+
+  const fiveRoles = ["transformer", "lora", "vae", "clip_l", "t5"];
+  const fiveIds = ["fluxed-up-10.2", "aidma-lora", "flux-vae", "flux-clip-l", "flux-t5xxl-fp8"] as const;
+  const coreModels: RemoteImageModel[] = fiveRoles.map((role, index) => ({
+    role,
+    id: fiveIds[index],
+    filename: `core-${index}.safetensors`,
+    url: `https://downloads.example.invalid/core-${index}.safetensors`,
+    sha256: String(index).repeat(64),
+    size_bytes: index + 1,
+  }));
+  const loraSelection = [{
+    id: "11111111-1111-4111-8111-111111111111",
+    name: "fixture",
+    filename: "fixture.safetensors",
+    strength: .8,
+    enabled: true,
+    sha256: "a".repeat(64),
+    sizeBytes: 123,
+  }];
+  const sameLoraTasks = Array.from({ length: 4 }, (_, index) => ({
+    id: `task-${index}`,
+    loras: structuredClone(loraSelection),
+  })) as EligibleImageTask[];
+  let coreVerifyCalls = 0;
+  let loraVerifyCalls = 0;
+  const deduplicatedManifest = await buildLiveAgentModelManifest(sameLoraTasks, {
+    verifyModels: async () => {
+      coreVerifyCalls += 1;
+      return { models: coreModels, checked: [] };
+    },
+    verifyLoras: async () => {
+      loraVerifyCalls += 1;
+      return {
+        loras: [{
+          id: loraSelection[0].id,
+          filename: loraSelection[0].filename,
+          url: "https://downloads.example.invalid/fixture.safetensors",
+          sha256: loraSelection[0].sha256,
+          size_bytes: loraSelection[0].sizeBytes,
+        }],
+        checked: [],
+      };
+    },
+  });
+  assert.equal(coreVerifyCalls, 1);
+  assert.equal(loraVerifyCalls, 1, "four cloned task selections share one immutable LoRA preflight");
+  assert.equal(deduplicatedManifest.models.length, 5);
+  assert.equal(deduplicatedManifest.loras?.length, 1);
 
   const fakeResult: CleanupLiveSessionResult = {
     cancellationState: "cancellation_unconfirmed",
@@ -255,6 +338,14 @@ async function main() {
   assert.match(apiRouteSource, /"--deployment-profile-fingerprint"/, "the guarded UI start passes the exact deployment profile fingerprint");
   assert.match(apiRouteSource, /"--agent-source-sha256"/, "the guarded UI start passes the immutable Agent source hash");
   assert.doesNotMatch(apiRouteSource, /scripts", "image-4090-runner\.ts"/, "the UI must not start the legacy runner directly");
+  assert.match(apiRouteSource, /reconcileKnownInactiveLocalSession/, "zero-order recovery uses canonical two-read cleanup");
+  assert.match(apiRouteSource, /cleanupLiveSession\(/, "operator cancellation uses centralized cleanup");
+  assert.doesNotMatch(apiRouteSource, /cloreRequest\([^)]*cancel_order/, "the route never owns an independent cancel mutation");
+  const matchingOrderSource = apiRouteSource.slice(
+    apiRouteSource.indexOf("function matchingImageOrder"),
+    apiRouteSource.indexOf("function resetRunnerAfterCancel"),
+  );
+  assert.doesNotMatch(matchingOrderSource, /order\.serverId\s*===/, "server reuse never authorizes cancellation");
   const directExecuteSource = readFileSync(new URL("./image-session-execute.ts", import.meta.url), "utf8");
   assert.doesNotMatch(directExecuteSource, /runLiveImageSession/, "the legacy execute command must not bypass the detached worker");
   assert.match(directExecuteSource, /direct_image_session_execute_disabled_use_image_session_supervisor/);
@@ -263,7 +354,7 @@ async function main() {
   const sha256 = createHash("sha256").update(png).digest("hex");
   assert.doesNotThrow(() => assertDownloadedPngMatchesMetadata(png, { byte_size: png.length, sha256 }));
   assert.throws(() => assertDownloadedPngMatchesMetadata(png, { byte_size: png.length + 1, sha256 }), /remote_png_verification_failed/);
-  console.log(JSON.stringify({ ok: true, singleOrderInvariant: true, selectedCandidatePlanPersisted: true, immediateOwnedOrderPersistence: true, inferenceRetryBlockBeforeSolePost: true, sessionReceiptEndpointRedacted: true, detachedSupervisorProductionWiring: true, twoZeroCleanupRequired: true, watchdogRetainedOnUncertainty: true, deadWorkerReceiptCleanupProjection: true, statusPollingProviderMutationCount: 0, postFinalizationUiFailureNonfatal: true, pngByteSizeVerified: true, providerMutationCount: 0 }));
+  console.log(JSON.stringify({ ok: true, singleOrderInvariant: true, selectedCandidatePlanPersisted: true, immediateOwnedOrderPersistence: true, inferenceRetryBlockBeforeSolePost: true, sessionReceiptEndpointRedacted: true, detachedSupervisorProductionWiring: true, twoZeroCleanupRequired: true, knownInactiveSkipsCancelMutation: true, watchdogRetainedOnUncertainty: true, identicalGroupPreflightDeduplicated: true, deadWorkerReceiptCleanupProjection: true, statusPollingProviderMutationCount: 0, postFinalizationUiFailureNonfatal: true, pngByteSizeVerified: true, providerMutationCount: 0 }));
 }
 
 void main().catch((error) => {

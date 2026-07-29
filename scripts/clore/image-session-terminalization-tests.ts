@@ -82,6 +82,24 @@ try {
     false,
     "a dead stale Worker label cannot permanently block a new session",
   );
+  const terminalPidReuseSession = "a23e4567-e89b-42d3-a456-426614174000";
+  mkdirSync(path.dirname(workerPath(terminalPidReuseSession)), { recursive: true });
+  writeFileSync(workerPath(terminalPidReuseSession), JSON.stringify({
+    sessionId: terminalPidReuseSession,
+    pid: process.pid,
+    state: "succeeded",
+  }), "utf8");
+  assert.equal(
+    hasUnfinishedLocalExecution({ allowedRunnerAttemptId: "current-attempt", allowedRunnerPid: process.pid }),
+    false,
+    "the exact current supervisor PID may reuse a terminal historical Worker PID",
+  );
+  assert.equal(
+    hasUnfinishedLocalExecution({ allowedRunnerAttemptId: "wrong-attempt", allowedRunnerPid: process.pid }),
+    true,
+    "PID reuse is safe only for the exact current supervisor attempt",
+  );
+  rmSync(workerPath(terminalPidReuseSession), { force: true });
   assert.equal(hasUnfinishedLocalExecution({ allowedRunnerAttemptId: "wrong-attempt", allowedRunnerPid: process.pid }), true, "a different attempt cannot reuse the start-lock exception");
   rmSync(path.join(".secrets", "image-studio", "runner-start.lock"), { force: true });
   writeFileSync(path.join(".secrets", "image-studio", "runner-session.json"), JSON.stringify({ state: "idle", pid: null }), "utf8");

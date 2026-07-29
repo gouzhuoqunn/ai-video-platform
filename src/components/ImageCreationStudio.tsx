@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { groupImageTasks, groupStatusLabel, type GroupableImageTask, type ImageTaskGroup } from "@/lib/image-generation/image-task-groups";
+import { groupImageTasks, groupStatusLabel, selectStudioExecutableBatch, type GroupableImageTask, type ImageTaskGroup } from "@/lib/image-generation/image-task-groups";
 import { safeFixed } from "@/lib/image-generation/formatters";
 import { rentalClockSnapshot, type RentalTiming } from "@/lib/image-generation/live-runner-display";
 import type { RegisteredLora } from "@/lib/image-generation/image-loras";
@@ -317,7 +317,7 @@ function GpuClassPanel({ tasks, runner, readiness, batches, price, busy, setPric
   const running = runner?.state === "running" || runner?.state === "cancelling";
   const safetyBlocked = runner?.error?.isBlocking === true || Boolean(runner?.blocker);
   const counts = { rtx4090: batches.rtx4090.executableCount, rtx5090: batches.rtx5090.executableCount };
-  const rentedHost = runner?.host?.candidateRole === "rented_host" && Boolean(runner.host.orderId);
+  const rentedHost = running && runner?.host?.candidateRole === "rented_host" && Boolean(runner.host.orderId);
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     if (!rentedHost) return;
@@ -390,6 +390,10 @@ export function ImageCreationStudio() {
   const groups = useMemo(() => groupImageTasks(tasks), [tasks]);
   const activeGroups = groups.filter((group) => group.isActive);
   const resultGroups = groups.filter((group) => group.completedCount > 0).sort((a, b) => (b.latestCompletedAt ?? "").localeCompare(a.latestCompletedAt ?? ""));
+  const effectiveBatches = useMemo(() => ({
+    rtx4090: selectStudioExecutableBatch(tasks, selectedIds, "rtx4090", batches.rtx4090),
+    rtx5090: selectStudioExecutableBatch(tasks, selectedIds, "rtx5090", batches.rtx5090),
+  }), [batches, selectedIds, tasks]);
   const post = async (body: Record<string, unknown>) => { const { response, data } = await fetchJsonWithTimeout<Response & { error?: string }>("/api/local-lab/image-tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }, 60_000); apply(data); return { ok: response.ok, data }; };
   const mutateLoraRegistry = async (body: Record<string, unknown>) => {
     if (loraMutationLock.current) return false;
@@ -452,25 +456,42 @@ export function ImageCreationStudio() {
       if (!result.ok) { setError(result.data.error ?? "创建任务组失败。"); return; }
       window.localStorage.setItem(countKey, String(requestedCount));
       setError(null);
-      setSelectedIds((ids) => new Set([...ids, result.data.groupId ?? ""]));
+      setSelectedIds(new Set(result.data.groupId ? [result.data.groupId] : []));
       setPrompt((current) => current === submittedPrompt ? "" : current);
       setNegativePrompt((current) => current === submittedNegativePrompt ? "" : current);
     });
   };
   const groupAction = async (id: string, action: "confirm_group" | "cancel_group" | "unconfirm_group") => {
+    if (action !== "cancel_group") setSelectedIds(new Set([id]));
     await runMutation(async () => {
       const result = await post({ action, groupId: id });
       setError(result.data.error ?? result.data.groupAction?.blocker ?? null);
+      if (action === "cancel_group" && result.ok) {
+        setSelectedIds((ids) => {
+          const next = new Set(ids);
+          next.delete(id);
+          return next;
+        });
+      }
     });
   };
   const confirmSelected = async () => {
+    const requestedIds = [...selectedIds].filter((id) =>
+      activeGroups.some((candidate) => candidate.id === id && candidate.pendingConfirmationCount > 0));
+    if (!requestedIds.length) return;
+    // Keep explicit-selection mode armed even when one confirmation fails, so
+    // the paid button can never fall through to an unrelated old queue.
+    setSelectedIds(new Set(requestedIds));
     await runMutation(async () => {
-      for (const id of [...selectedIds]) {
+      const confirmedIds: string[] = [];
+      for (const id of requestedIds) {
         const group = activeGroups.find((candidate) => candidate.id === id);
         if (!group?.pendingConfirmationCount) continue;
         const result = await post({ action: "confirm_group", groupId: id });
         if (!result.ok) { setError(result.data.error ?? "确认任务失败。"); break; }
+        confirmedIds.push(id);
       }
+      if (confirmedIds.length === requestedIds.length) setSelectedIds(new Set(confirmedIds));
     });
   };
   const toggle = (id: string) => setSelectedIds((ids) => { const next = new Set(ids); if (next.has(id)) next.delete(id); else next.add(id); return next; });
@@ -488,7 +509,7 @@ export function ImageCreationStudio() {
     });
   };
   const start = async (gpu: "rtx4090" | "rtx5090") => {
-    const ids = batches[gpu].plannedTaskIds;
+    const ids = effectiveBatches[gpu].plannedTaskIds;
     if (!ids.length) return;
     await runMutation(async () => {
       const result = await post({ action: "start_batch", taskIds: ids, maxHourlyPrice: price });
@@ -542,5 +563,5 @@ export function ImageCreationStudio() {
     window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
     setLogNotice("日志下载已开始。");
   };
-  return <main className="image-studio-interactions min-h-screen bg-stone-950 text-stone-100"><ImageStudioNavigation tab={tab} onChange={changeTab} activeCount={activeGroups.length} resultCount={resultGroups.length} />{actionBusy ? <div role="status" aria-live="polite" className="fixed right-4 top-4 z-40 rounded-lg border border-indigo-300/60 bg-stone-950 px-4 py-2 text-sm shadow-xl">正在处理，请勿重复点击…</div> : null}{tab === "prompt" ? <div className="mx-auto grid min-h-screen max-w-[1600px] lg:grid-cols-[320px_minmax(0,1fr)_360px]"><GpuClassPanel tasks={tasks} runner={runner} readiness={readiness} batches={batches} price={price} busy={actionBusy} setPrice={setPrice} onStart={(gpu) => void start(gpu)} onStop={() => void stop()} onOpenLogs={() => void openLogs()} /><ImagePromptWorkspace resolution={resolution} setResolution={setResolution} prompt={prompt} setPrompt={setPrompt} negativePrompt={negativePrompt} setNegativePrompt={setNegativePrompt} referenceImage={referenceImage} setReferenceImage={setReferenceImage} settings={settings} setSettings={setSettings} loras={loras} setLoras={setLoras} loraRegistryLoaded={loraRegistryLoaded} loraBusy={loraBusy} loraError={loraError} onAddLora={addLora} onUpdateLora={updateLora} count={count} setCount={setCount} error={error} busy={actionBusy} onCreate={() => void create()} /><MultiActiveTaskRail groups={activeGroups} selectedIds={selectedIds} toggle={toggle} action={(id, action) => void groupAction(id, action)} confirmSelected={() => void confirmSelected()} busy={actionBusy} /></div> : <ImageResultsGallery groups={resultGroups} selected={selectedResult} setSelected={setSelectedResult} open={setModal} />}{modal ? <ImageResultModal group={groups.find((group) => group.id === modal.id) ?? modal} busy={actionBusy} onClose={closeResult} onRegenerate={(value, promptDraft) => void regenerate(value, promptDraft)} /> : null}{logOpen ? <StudioLogModal logs={logs} loading={logLoading} error={logError} notice={logNotice} onClose={closeLogs} onCopy={() => void copyLogs()} onDownload={downloadLogs} /> : null}</main>;
+  return <main className="image-studio-interactions min-h-screen bg-stone-950 text-stone-100"><ImageStudioNavigation tab={tab} onChange={changeTab} activeCount={activeGroups.length} resultCount={resultGroups.length} />{actionBusy ? <div role="status" aria-live="polite" className="fixed right-4 top-4 z-40 rounded-lg border border-indigo-300/60 bg-stone-950 px-4 py-2 text-sm shadow-xl">正在处理，请勿重复点击…</div> : null}{tab === "prompt" ? <div className="mx-auto grid min-h-screen max-w-[1600px] lg:grid-cols-[320px_minmax(0,1fr)_360px]"><GpuClassPanel tasks={tasks} runner={runner} readiness={readiness} batches={effectiveBatches} price={price} busy={actionBusy} setPrice={setPrice} onStart={(gpu) => void start(gpu)} onStop={() => void stop()} onOpenLogs={() => void openLogs()} /><ImagePromptWorkspace resolution={resolution} setResolution={setResolution} prompt={prompt} setPrompt={setPrompt} negativePrompt={negativePrompt} setNegativePrompt={setNegativePrompt} referenceImage={referenceImage} setReferenceImage={setReferenceImage} settings={settings} setSettings={setSettings} loras={loras} setLoras={setLoras} loraRegistryLoaded={loraRegistryLoaded} loraBusy={loraBusy} loraError={loraError} onAddLora={addLora} onUpdateLora={updateLora} count={count} setCount={setCount} error={error} busy={actionBusy} onCreate={() => void create()} /><MultiActiveTaskRail groups={activeGroups} selectedIds={selectedIds} toggle={toggle} action={(id, action) => void groupAction(id, action)} confirmSelected={() => void confirmSelected()} busy={actionBusy} /></div> : <ImageResultsGallery groups={resultGroups} selected={selectedResult} setSelected={setSelectedResult} open={setModal} />}{modal ? <ImageResultModal group={groups.find((group) => group.id === modal.id) ?? modal} busy={actionBusy} onClose={closeResult} onRegenerate={(value, promptDraft) => void regenerate(value, promptDraft)} /> : null}{logOpen ? <StudioLogModal logs={logs} loading={logLoading} error={logError} notice={logNotice} onClose={closeLogs} onCopy={() => void copyLogs()} onDownload={downloadLogs} /> : null}</main>;
 }

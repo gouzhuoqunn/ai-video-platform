@@ -39,6 +39,7 @@ const testFiles = [
   "scripts/image-runner-status-projection-tests.ts",
   "scripts/image-task-unconfirmation-tests.ts",
   "scripts/image-result-groups-tests.ts",
+  "scripts/image-task-reconciliation-count-tests.ts",
   "scripts/image-executor-focused-tests.ts",
   "scripts/clore/watchdog-tests.ts",
 ] as const;
@@ -80,6 +81,7 @@ const requiredChecks: CheckDefinition[] = [
   { name: "historical_errors_nonblocking_after_cleanup", files: ["scripts/image-runner-status-projection-tests.ts"] },
   { name: "candidate_and_rented_host_labels_distinct", files: ["scripts/image-runner-status-projection-tests.ts", "scripts/clore/image-live-safety-tests.ts"] },
   { name: "task_unconfirmation_behavior", files: ["scripts/image-task-unconfirmation-tests.ts"] },
+  { name: "selected_confirmed_group_precedes_old_waiting", files: ["scripts/image-task-reconciliation-count-tests.ts"] },
 ];
 
 const isolationRoot = mkdtempSync(path.join(os.tmpdir(), "image-pipeline-focused-acceptance-"));

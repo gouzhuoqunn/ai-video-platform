@@ -22,8 +22,16 @@ import {
 } from "@/lib/image-generation/local-lora-registry";
 import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/route-guard";
 import { COMFY_RUNTIME_IMAGE, loadCloreConfig } from "../../../../../scripts/clore/config";
-import { cloreRequest } from "../../../../../scripts/clore/client";
 import { loadCloreExecutionConfig } from "../../../../../scripts/clore/execution-config";
+import { cleanupLiveSession, type CleanupLiveSessionResult } from "../../../../../scripts/clore/image-live-runtime";
+import {
+  atomic as atomicSessionReceipt,
+  cleanupReceiptOwnedOrder,
+  readReceipt as readSessionReceipt,
+  sessionReceiptPath,
+  terminalizeReceipt,
+  workerTerminalState,
+} from "../../../../../scripts/clore/image-session-supervision";
 import { readLiveOrdersSummary, type CloreOrderSummary } from "../../../../../scripts/clore/live";
 import { ACTIVE_ORDER_PATH, LEGACY_ORDER_CREATE_LOCK_PATH, ORDER_CREATE_LOCK_PATH, clearActiveOrder, clearOrderCreateLocks, readActiveOrder } from "../../../../../scripts/clore/order-state";
 import { finalSanitizedLogLines, imageExecutorReadinessForGpuClass, processExists, sanitizeRunnerLog, STALE_RUNNER_NO_ORDER_MESSAGE } from "../../../../../scripts/image-executor/readiness";
@@ -589,9 +597,16 @@ async function reconcileStaleRunner(runner: ImageRunnerSession) {
   }
   stopRunnerProcessTree(runner.pid);
   const hadStaleLock = existsSync(ORDER_CREATE_LOCK_PATH) || existsSync(LEGACY_ORDER_CREATE_LOCK_PATH);
-  clearLocalActiveImageState();
+  const receipt = readSessionReceipt();
+  const cleanup = await reconcileKnownInactiveLocalSession(
+    runner,
+    receiptBelongsToRunner(runner, receipt) ? receipt : null,
+  );
+  if (!cleanup.cleanupConfirmed) return runner;
+  await persistOperatorCleanupReceipt(runner, receipt, cleanup);
+  if (processExists(runner.pid)) return runner;
   const message = localActive || hadStaleLock
-    ? "检测到本地残留订单状态，已自动清理"
+    ? "检测到本地残留订单状态，已完成两次清零核对并自动清理"
     : staleCreatingOrder
       ? "创建订单失败，未产生订单"
       : STALE_RUNNER_NO_ORDER_MESSAGE;
@@ -915,16 +930,21 @@ async function responsePayload(extra: Record<string, unknown> = {}) {
   const activeOrder = activeStateLooksImageOrder();
   const runner = projectLiveReceiptRunner(projectConfirmedActiveOrder(readRunner(), activeOrder));
   const createLockPresent = existsSync(ORDER_CREATE_LOCK_PATH) || existsSync(LEGACY_ORDER_CREATE_LOCK_PATH) || existsSync(RUNNER_START_LOCK_PATH);
+  const runnerPidAlive = processExists(runner.pid);
   const display = projectRunnerStatus(runner, {
-    pidAlive: processExists(runner.pid),
+    pidAlive: runnerPidAlive,
     // A terminal host/order field is retained as historical evidence.  Billing
     // state comes only from the active-order record reconciled against Clore.
     activeOrder: Boolean(activeOrder),
     createLock: createLockPresent,
   });
   const tasks = readTasks();
-  const progressRunner = display.error?.historical
-    ? { ...runner, host: null, stage: display.error.displayMessage }
+  const historicalTerminal = terminalRunnerState(runner.state)
+    && !runnerPidAlive
+    && !activeOrder
+    && !createLockPresent;
+  const progressRunner = historicalTerminal
+    ? { ...runner, host: null, stage: display.error?.displayMessage ?? runner.stage }
     : runner;
   const blocker = terminalRunnerState(runner.state)
     ? (readiness.rtx4090.ready ? display.blocker : readiness.rtx4090.blocker)
@@ -940,7 +960,7 @@ async function responsePayload(extra: Record<string, unknown> = {}) {
       ...runner,
       // A terminal receipt without PID/order/lock is historical evidence, not
       // a current rented host or a reusable marketplace selection.
-      host: display.error?.historical ? null : runner.host,
+      host: historicalTerminal ? null : runner.host,
       error: display.error,
       progress: blocker
         ? { ...progress, displayMessage: display.error?.displayMessage ?? blocker, isBlocking: true }
@@ -989,9 +1009,12 @@ function publicTaskCreationError(error: unknown) {
     civitai_lora_version_missing: "已注册的 Civitai 地址没有可解析的模型版本；请改用具体版本或带 fileId 的下载链接。",
     civitai_lora_file_ambiguous_or_missing: "该 Civitai 模型没有唯一可识别的 LoRA 文件；请改用带 fileId 的具体下载链接。",
     civitai_lora_flux1_version_missing: "该 Civitai 模型页没有适配当前 FLUX.1-D 图像模型的 LoRA 版本；任务卡已保留，请更换兼容版本链接。",
+    civitai_lora_flux1_incompatible: "该 Civitai 具体版本不适配当前 FLUX.1-D 图像模型；任务卡已保留，请选择 FLUX.1 D 版本。",
+    civitai_metadata_identity_mismatch: "Civitai 返回的模型或版本身份与所选链接不一致；任务卡已保留，未进入租卡。",
     civitai_lora_identity_incomplete: "Civitai 没有提供该 LoRA 的完整大小和 SHA-256，尚不能安全生成。",
     civitai_lora_size_mismatch: "Civitai LoRA 的实际大小与平台身份不一致；任务卡已保留，未进入租卡。",
     civitai_model_is_not_lora: "该 Civitai 地址指向的模型不是 LoRA，请更换链接。",
+    civitai_lora_remote_delivery_requires_local_token: "该 Civitai LoRA 只能使用本机令牌下载，云端 Agent 无法安全获取；任务卡已保留，未进入租卡。",
     huggingface_lora_file_url_required: "该 HuggingFace 仓库包含多个文件；请改用具体的 .safetensors 文件链接。",
     huggingface_lora_file_ambiguous_or_missing: "该 HuggingFace 地址没有唯一可识别的 .safetensors 文件。",
     huggingface_lora_identity_incomplete: "HuggingFace 没有提供该 LoRA 的完整大小和 SHA-256，尚不能安全生成。",
@@ -1108,7 +1131,14 @@ function groupIdentity(task: ImageTask) { return task.groupId || task.id; }
 
 function assertUnconfirmIsSafe() {
   const runner = readRunner();
-  if (runner.state === "running" || runner.state === "cancelling" || processExists(runner.pid) || runner.host?.orderId) {
+  // A terminal runner retains its host/order as historical evidence. It must
+  // not make an unrelated waiting task look as though it has started.
+  if (
+    runner.state === "running"
+    || runner.state === "cancelling"
+    || processExists(runner.pid)
+    || Boolean(activeStateLooksImageOrder())
+  ) {
     throw new Error("任务已开始生成，请使用停止并退租。");
   }
   return runner;
@@ -1248,19 +1278,25 @@ function activeStateLooksImageOrder() {
 function matchingImageOrder(runner: ImageRunnerSession, orders: CloreOrderSummary[]) {
   const active = orders.filter((order) => order.active && order.orderId);
   const activeState = activeStateLooksImageOrder();
-  if (activeState) {
-    const byId = active.find((order) => order.orderId === activeState.order_id);
-    if (byId) return byId;
-    const byServer = active.find((order) => order.serverId === activeState.server_id);
-    if (byServer) return byServer;
+  const exactOwnedOrderIds = new Set<string>();
+  if (activeState?.order_id) exactOwnedOrderIds.add(activeState.order_id);
+  if (runner.host?.orderId) exactOwnedOrderIds.add(runner.host.orderId);
+  const receipt = readSessionReceipt();
+  if (
+    typeof receipt?.orderId === "string"
+    && receipt.orderId
+    && (
+      !runner.createAttempt?.id
+      || receipt.sessionId === runner.createAttempt.id
+    )
+  ) {
+    exactOwnedOrderIds.add(receipt.orderId);
   }
-  if (!runner.gpuClass || !runner.frozenTaskIds.length) return null;
-  if (runner.host?.orderId) return active.find((order) => order.orderId === runner.host?.orderId) ?? null;
-  if (runner.host?.serverId) {
-    const matches = active.filter((order) => order.serverId === runner.host?.serverId);
-    return matches.length === 1 ? matches[0] : null;
-  }
-  return null;
+  const matches = active.filter((order) => exactOwnedOrderIds.has(order.orderId!));
+  if (matches.length > 1) throw new Error("multiple_exact_owned_image_orders_detected");
+  // Server IDs are deliberately not an ownership key: a later unrelated
+  // order may reuse the same physical host.
+  return matches[0] ?? null;
 }
 
 function resetRunnerAfterCancel(message: string, orderId: string | null) {
@@ -1286,37 +1322,175 @@ function resetRunnerAfterCancel(message: string, orderId: string | null) {
   });
 }
 
-async function cancelCurrentImageBatch() {
-  const runner = readRunner();
-  stopRunnerProcessTree(runner.pid);
-  const orders = await activeCloreOrders();
-  const order = matchingImageOrder(runner, orders);
-  if (!order?.orderId) {
-    clearLocalActiveImageState();
-    const message = "没有活跃图像订单，已清理本地批次状态。";
-    resetRunnerAfterCancel(message, null);
-    return { orderId: null, cancelled: false, message };
-  }
-  const execution = loadCloreExecutionConfig();
-  if (!execution.enabled) throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false，无法执行真实退租。");
-  await cloreRequest<unknown>(loadCloreConfig(), "/cancel_order", {
-    method: "POST",
-    body: JSON.stringify({ id: order.orderId, issue: "image_session_cancel" }),
-  });
-  const activeAfter = await activeCloreOrders();
-  if (activeAfter.some((candidate) => candidate.orderId === order.orderId)) throw new Error(`退租后订单仍活跃：${order.orderId}`);
-  const activeState = activeStateLooksImageOrder();
-  if (activeState?.order_id === order.orderId && existsSync(ACTIVE_ORDER_PATH)) {
+function receiptBelongsToRunner(
+  runner: ImageRunnerSession,
+  receipt: Record<string, unknown> | null,
+) {
+  if (!receipt || typeof receipt.sessionId !== "string") return false;
+  if (runner.createAttempt?.id) return receipt.sessionId === runner.createAttempt.id;
+  if (
+    runner.host?.orderId
+    && typeof receipt.orderId === "string"
+    && receipt.orderId === runner.host.orderId
+  ) return true;
+  const selectedTaskIds = Array.isArray(receipt.selectedTaskIds)
+    ? receipt.selectedTaskIds.map(String)
+    : Object.keys(
+        receipt.tasks && typeof receipt.tasks === "object" && !Array.isArray(receipt.tasks)
+          ? receipt.tasks as Record<string, unknown>
+          : {},
+      );
+  if (!runner.frozenTaskIds.length || selectedTaskIds.length !== runner.frozenTaskIds.length) return false;
+  const selected = new Set(selectedTaskIds);
+  return runner.frozenTaskIds.every((taskId) => selected.has(taskId));
+}
+
+async function reconcileKnownInactiveLocalSession(
+  runner: ImageRunnerSession,
+  receipt: Record<string, unknown> | null,
+): Promise<CleanupLiveSessionResult> {
+  const localActive = activeStateLooksImageOrder();
+  const watchdog = (() => {
     try {
-      clearActiveOrder(order.orderId);
+      return readLocalWatchdogArmState();
     } catch {
-      rmSync(ACTIVE_ORDER_PATH, { force: true });
+      return null;
     }
+  })();
+  const orderIds = new Set([
+    localActive?.order_id,
+    runner.host?.orderId,
+    typeof receipt?.orderId === "string" ? receipt.orderId : null,
+  ].filter((value): value is string => Boolean(value)));
+  if (orderIds.size > 1) throw new Error("local_image_order_identity_mismatch");
+  const serverIds = new Set([
+    localActive?.server_id,
+    runner.host?.serverId,
+    typeof receipt?.serverId === "string" ? receipt.serverId : null,
+    watchdog?.armed ? watchdog.serverId : null,
+  ].filter((value): value is string => Boolean(value)));
+  if (serverIds.size > 1) throw new Error("local_image_server_identity_mismatch");
+
+  const orderId = [...orderIds][0] ?? `not-created-${runner.createAttempt?.id ?? "local"}`;
+  const serverId = [...serverIds][0] ?? null;
+  if (serverId && /^\d+$/.test(serverId)) {
+    return await cleanupLiveSession({
+      orderId,
+      serverId,
+      startingBalanceUsd: watchdog?.startingBalanceUsd ?? 0,
+    }, {
+      orderKnownInactive: true,
+    });
   }
-  const message = `已退租图像订单 ${order.orderId}。`;
-  clearStaleCreateLocks();
-  resetRunnerAfterCancel(message, order.orderId);
-  return { orderId: order.orderId, cancelled: true, message };
+  if (watchdog?.armed) throw new Error("armed_watchdog_server_identity_missing");
+  if (localActive) throw new Error("local_active_order_server_identity_missing");
+
+  let zeroConfirmations = 0;
+  for (let check = 0; check < 2; check += 1) {
+    const active = await activeCloreOrders();
+    if (active.length) throw new Error("active_order_appeared_during_inactive_reconciliation");
+    zeroConfirmations += 1;
+    if (check === 0) await new Promise((resolve) => setTimeout(resolve, 1_200));
+  }
+  clearLocalActiveImageState();
+  return {
+    cancellationState: "reconciled_inactive",
+    zeroConfirmations,
+    watchdogDisarmed: true,
+    localOrderStateCleared: true,
+    cleanupConfirmed: true,
+    cleanupErrors: [],
+  };
+}
+
+async function persistOperatorCleanupReceipt(
+  runner: ImageRunnerSession,
+  receipt: Record<string, unknown> | null,
+  cleanup: CleanupLiveSessionResult,
+) {
+  if (!receiptBelongsToRunner(runner, receipt) || !receipt) return;
+  let reconciled = receipt;
+  if (typeof receipt.orderId === "string" && receipt.orderId) {
+    reconciled = (await cleanupReceiptOwnedOrder(receipt, {
+      cleanup: async () => cleanup,
+    })).receipt ?? receipt;
+  } else {
+    reconciled = structuredClone(receipt);
+    reconciled.cancellationState = "not_created";
+    reconciled.cleanupErrors = cleanup.cleanupErrors;
+    reconciled.cleanupEvidence = {
+      zeroActiveOrderConfirmations: cleanup.zeroConfirmations,
+      watchdogDisarmed: cleanup.watchdogDisarmed,
+      localOrderStateCleared: cleanup.localOrderStateCleared,
+    };
+  }
+  const sessionId = typeof reconciled.sessionId === "string" ? reconciled.sessionId : null;
+  if (!sessionId) throw new Error("image_session_receipt_identity_missing_after_cleanup");
+  const now = new Date().toISOString();
+  const terminal = terminalizeReceipt(reconciled, {
+    sessionId,
+    state: workerTerminalState(reconciled, "failed"),
+    error: "operator_cancelled_image_batch",
+    now,
+  });
+  if (terminal) atomicSessionReceipt(sessionReceiptPath, terminal);
+}
+
+async function cancelCurrentImageBatch() {
+  const release = acquireRunnerStartLock(`cancel:${randomUUID()}`);
+  try {
+    const runner = readRunner();
+    saveRunner({ ...runner, state: "cancelling", stage: "正在停止任务并核对账单状态" });
+    stopRunnerProcessTree(runner.pid);
+    const receipt = readSessionReceipt();
+    const orders = await activeCloreOrders();
+    const order = matchingImageOrder(runner, orders);
+    if (!order?.orderId) {
+      if (orders.length) throw new Error("unrelated_or_unowned_active_order_detected");
+      const cleanup = await reconcileKnownInactiveLocalSession(
+        runner,
+        receiptBelongsToRunner(runner, receipt) ? receipt : null,
+      );
+      if (!cleanup.cleanupConfirmed) {
+        throw new Error(`账单清理状态未确认：${cleanup.cleanupErrors.join("；") || "unknown_cleanup_error"}`);
+      }
+      await persistOperatorCleanupReceipt(runner, receipt, cleanup);
+      if (processExists(runner.pid)) throw new Error("paid_runner_process_remains_after_stop");
+      const message = "当前没有活动订单；已完成两次清零核对并清理本地批次状态。";
+      clearStaleCreateLocks();
+      resetRunnerAfterCancel(message, null);
+      return { orderId: null, cancelled: false, message };
+    }
+    const execution = loadCloreExecutionConfig();
+    if (!execution.enabled) throw new Error("CLORE_ORDER_EXECUTION_ENABLED=false，无法执行真实退租。");
+    const watchdog = (() => {
+      try {
+        return readLocalWatchdogArmState();
+      } catch {
+        return null;
+      }
+    })();
+    const serverId = order.serverId ?? runner.host?.serverId;
+    if (!serverId || !/^\d+$/.test(serverId)) {
+      throw new Error("owned_image_order_server_identity_missing");
+    }
+    const cleanup = await cleanupLiveSession({
+      orderId: order.orderId,
+      serverId,
+      startingBalanceUsd: watchdog?.startingBalanceUsd ?? 0,
+    });
+    if (!cleanup.cleanupConfirmed) {
+      throw new Error(`退租状态未确认：${cleanup.cleanupErrors.join("；") || "unknown_cleanup_error"}`);
+    }
+    await persistOperatorCleanupReceipt(runner, receipt, cleanup);
+    if (processExists(runner.pid)) throw new Error("paid_runner_process_remains_after_stop");
+    const message = `已退租图像订单 ${order.orderId}。`;
+    clearStaleCreateLocks();
+    resetRunnerAfterCancel(message, order.orderId);
+    return { orderId: order.orderId, cancelled: true, message };
+  } finally {
+    release();
+  }
 }
 
 export async function GET(request: NextRequest) {
@@ -1571,6 +1745,7 @@ export async function POST(request: NextRequest) {
               stage: "runner_exited",
               message: `image session supervisor exited without publishing a worker: code=${code ?? "null"} signal=${signal ?? "null"}${stderr ? `\n${stderr}` : ""}`,
               at: new Date().toISOString(),
+              classification: "preorder_supervisor_start_failed",
             },
             blocker: "image_session_worker_start_failed",
           });
