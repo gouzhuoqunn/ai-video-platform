@@ -19,10 +19,12 @@ import {
   MAX_REGISTERED_LORAS,
   MAX_TASK_LORAS,
   assertImageTaskLoras,
+  assertImageTaskLoraSelections,
   assertSafeLoraFilename,
   validImageLoraId,
   validLoraStrength,
   type ImageTaskLora,
+  type ImageTaskLoraSelection,
   type LoraRegistrationSource,
   type LoraSourceLocator,
   type RegisteredLora,
@@ -579,6 +581,7 @@ type CivitaiFile = {
   name?: string;
   primary?: boolean;
   type?: string;
+  sizeKB?: number;
   hashes?: { SHA256?: string };
   downloadUrl?: string;
   pickleScanResult?: string;
@@ -587,6 +590,8 @@ type CivitaiFile = {
 type CivitaiVersion = {
   id?: number;
   modelId?: number;
+  name?: string;
+  baseModel?: string;
   files?: CivitaiFile[];
 };
 type CivitaiModel = {
@@ -617,10 +622,14 @@ function civitaiFile(version: CivitaiVersion, requestedFileId?: number) {
       ?? (candidates.length === 1 ? candidates[0] : undefined);
   if (!selected) throw new Error("civitai_lora_file_ambiguous_or_missing");
   const digest = selected.hashes?.SHA256?.toLowerCase();
+  const declaredSize = Number(selected.sizeKB) * 1024;
   if (
     !Number.isSafeInteger(selected.id)
     || !SAFE_SHA256.test(digest ?? "")
     || typeof selected.name !== "string"
+    || !Number.isSafeInteger(declaredSize)
+    || declaredSize < MIN_LORA_BYTES
+    || declaredSize > MAX_LORA_BYTES
   ) {
     throw new Error("civitai_lora_identity_incomplete");
   }
@@ -628,8 +637,52 @@ function civitaiFile(version: CivitaiVersion, requestedFileId?: number) {
     id: selected.id!,
     filename: assertSafeLoraFilename(path.basename(selected.name)),
     sha256: digest!,
+    declaredSize,
     downloadUrl: selected.downloadUrl,
   };
+}
+
+function flux1CompatibleCivitaiVersion(version: CivitaiVersion) {
+  const baseModel = String(version.baseModel ?? "").trim().toLowerCase();
+  return /^flux[\s._-]*1(?:[\s._-]*(?:d|dev))?\b/.test(baseModel)
+    && !/klein|flux[\s._-]*2/.test(baseModel);
+}
+
+function civitaiMetadataHosts(sourceUrl: URL) {
+  const original = sourceUrl.hostname.toLowerCase();
+  return original.endsWith(".red") || original === "civitai.red"
+    ? ["civitai.red", "civitai.com"] as const
+    : ["civitai.com", "civitai.red"] as const;
+}
+
+async function readCivitaiMetadata<T>(
+  sourceUrl: URL,
+  pathname: string,
+  options: Required<Pick<LoraRegistryOptions, "fetchImpl" | "timeoutMs">> & {
+    token: string;
+    registryOptions: LoraRegistryOptions;
+  },
+) {
+  let lastError: unknown;
+  const deadline = Date.now() + options.timeoutMs;
+  for (const hostname of civitaiMetadataHosts(sourceUrl)) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    try {
+      return await boundedJson<T>(`https://${hostname}${pathname}`, {
+        fetchImpl: options.fetchImpl,
+        // Never disclose an official Civitai token to a mirror.
+        token: hostname === "civitai.com" ? options.token : "",
+        // The fallback set shares one deadline; a stalled primary must not
+        // double the caller's configured timeout.
+        timeoutMs: remainingMs,
+        registryOptions: options.registryOptions,
+      });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("civitai_metadata_unavailable");
 }
 
 async function resolveCivitaiSource(sourceUrl: URL, options: Required<Pick<LoraRegistryOptions, "fetchImpl" | "timeoutMs">> & { token: string; registryOptions: LoraRegistryOptions }) {
@@ -645,29 +698,58 @@ async function resolveCivitaiSource(sourceUrl: URL, options: Required<Pick<LoraR
   let model: CivitaiModel | undefined;
   let modelId: number | null = modelMatch ? Number(modelMatch[1]) : null;
   if (Number.isSafeInteger(requestedVersion) && requestedVersion > 0) {
-    version = await boundedJson<CivitaiVersion>(
-      `https://civitai.com/api/v1/model-versions/${requestedVersion}`,
+    version = await readCivitaiMetadata<CivitaiVersion>(
+      sourceUrl,
+      `/api/v1/model-versions/${requestedVersion}`,
       options,
     );
-    modelId = Number.isSafeInteger(version.modelId) ? version.modelId! : modelId;
+    if (
+      version.id !== requestedVersion
+      || !Number.isSafeInteger(version.modelId)
+      || Number(version.modelId) <= 0
+      || (modelId !== null && version.modelId !== modelId)
+    ) {
+      throw new Error("civitai_metadata_identity_mismatch");
+    }
+    modelId = version.modelId!;
   } else if (modelId && Number.isSafeInteger(modelId)) {
-    model = await boundedJson<CivitaiModel>(
-      `https://civitai.com/api/v1/models/${modelId}`,
+    model = await readCivitaiMetadata<CivitaiModel>(
+      sourceUrl,
+      `/api/v1/models/${modelId}`,
       options,
     );
-    version = model.modelVersions?.[0];
+    if (model.id !== modelId) throw new Error("civitai_metadata_identity_mismatch");
+    version = Number.isSafeInteger(requestedFileId) && requestedFileId > 0
+      ? model.modelVersions?.find((candidate) =>
+        candidate.files?.some((file) => file.id === requestedFileId))
+      : model.modelVersions?.find(flux1CompatibleCivitaiVersion);
+    if (!version && model.modelVersions?.length) {
+      throw new Error("civitai_lora_flux1_version_missing");
+    }
   }
   if (!version || !Number.isSafeInteger(version.id) || Number(version.id) <= 0) {
     throw new Error("civitai_lora_version_missing");
   }
   if (!model && modelId && Number.isSafeInteger(modelId)) {
-    model = await boundedJson<CivitaiModel>(
-      `https://civitai.com/api/v1/models/${modelId}`,
+    model = await readCivitaiMetadata<CivitaiModel>(
+      sourceUrl,
+      `/api/v1/models/${modelId}`,
       options,
     );
   }
+  if (
+    !Number.isSafeInteger(modelId)
+    || Number(modelId) <= 0
+    || model?.id !== modelId
+    || version.modelId !== modelId
+  ) {
+    throw new Error("civitai_metadata_identity_mismatch");
+  }
   if (String(model?.type ?? "").toUpperCase() !== "LORA") {
     throw new Error("civitai_model_is_not_lora");
+  }
+  if (!flux1CompatibleCivitaiVersion(version)) {
+    throw new Error("civitai_lora_flux1_incompatible");
   }
   const selected = civitaiFile(
     version,
@@ -676,15 +758,13 @@ async function resolveCivitaiSource(sourceUrl: URL, options: Required<Pick<LoraR
   const fallbackDownloadUrl = new URL(`https://civitai.com/api/download/models/${version.id}`);
   // Civitai's generic version endpoint may resolve a different file when a
   // version contains multiple safetensors files. Pin the selected file ID
-  // even when the API did not provide a direct download URL.
+  // unconditionally instead of trusting an optional provider downloadUrl.
   fallbackDownloadUrl.searchParams.set("fileId", String(selected.id));
-  const downloadUrl = safePublicHttps(
-    selected.downloadUrl
-      ?? fallbackDownloadUrl.toString(),
-  ).toString();
+  const downloadUrl = safePublicHttps(fallbackDownloadUrl.toString()).toString();
   return {
     filename: selected.filename,
     sha256: selected.sha256,
+    declaredSize: selected.declaredSize,
     source: {
       provider: "civitai",
       modelId,
@@ -772,7 +852,7 @@ async function resolveHuggingFaceSource(
   };
 }
 
-async function resolveSourceUrl(sourceUrl: string, options: LoraRegistryOptions) {
+async function resolveSourceIdentity(sourceUrl: string, options: LoraRegistryOptions) {
   const registrationSource = parseLoraRegistrationSource(sourceUrl);
   if (registrationSource.provider === "direct") {
     throw new Error("direct_lora_source_identity_unavailable");
@@ -784,20 +864,44 @@ async function resolveSourceUrl(sourceUrl: string, options: LoraRegistryOptions)
   if (registrationSource.provider === "huggingface") {
     const token = tokenProvider("HF_TOKEN");
     const resolved = await resolveHuggingFaceSource(parsed, { fetchImpl, timeoutMs, token, registryOptions: options });
-    let probe = await probeBinary(resolved.downloadUrl, {
-      fetchImpl,
+    return {
+      ...resolved,
+      sizeBytes: resolved.declaredSize,
+      provider: "huggingface" as const,
       token,
-      tokenOrigin: "https://huggingface.co",
+      fetchImpl,
       timeoutMs,
+    };
+  }
+  const token = tokenProvider("CIVITAI_API_TOKEN");
+  const resolved = await resolveCivitaiSource(parsed, { fetchImpl, timeoutMs, token, registryOptions: options });
+  return {
+    ...resolved,
+    sizeBytes: resolved.declaredSize,
+    provider: "civitai" as const,
+    token,
+    fetchImpl,
+    timeoutMs,
+  };
+}
+
+async function resolveSourceUrl(sourceUrl: string, options: LoraRegistryOptions) {
+  const resolved = await resolveSourceIdentity(sourceUrl, options);
+  if (resolved.provider === "huggingface") {
+    let probe = await probeBinary(resolved.downloadUrl, {
+      fetchImpl: resolved.fetchImpl,
+      token: resolved.token,
+      tokenOrigin: "https://huggingface.co",
+      timeoutMs: resolved.timeoutMs,
       registryOptions: options,
     });
-    if (token && new URL(probe.url).origin === "https://huggingface.co") {
+    if (resolved.token && new URL(probe.url).origin === "https://huggingface.co") {
       try {
         probe = await probeBinary(probe.url, {
-          fetchImpl,
+          fetchImpl: resolved.fetchImpl,
           token: "",
           tokenOrigin: "",
-          timeoutMs,
+          timeoutMs: resolved.timeoutMs,
           registryOptions: options,
         });
       } catch {
@@ -809,15 +913,29 @@ async function resolveSourceUrl(sourceUrl: string, options: LoraRegistryOptions)
     if (probe.contentLength !== resolved.declaredSize) throw new Error("huggingface_lora_size_mismatch");
     return { ...resolved, sizeBytes: probe.contentLength, probe, provider: "huggingface" as const };
   }
-  const token = tokenProvider("CIVITAI_API_TOKEN");
-  const resolved = await resolveCivitaiSource(parsed, { fetchImpl, timeoutMs, token, registryOptions: options });
-  const probe = await probeBinary(resolved.downloadUrl, {
-    fetchImpl,
-    token,
+  let probe = await probeBinary(resolved.downloadUrl, {
+    fetchImpl: resolved.fetchImpl,
+    token: resolved.token,
     tokenOrigin: "https://civitai.com",
-    timeoutMs,
+    timeoutMs: resolved.timeoutMs,
     registryOptions: options,
   });
+  if (resolved.token && new URL(probe.url).origin === "https://civitai.com") {
+    try {
+      probe = await probeBinary(probe.url, {
+        fetchImpl: resolved.fetchImpl,
+        token: "",
+        tokenOrigin: "",
+        timeoutMs: resolved.timeoutMs,
+        registryOptions: options,
+      });
+    } catch {
+      // The remote Agent never receives the user's Civitai token. A source
+      // that only works with the local token must fail before GPU rental.
+      throw new Error("civitai_lora_remote_delivery_requires_local_token");
+    }
+  }
+  if (probe.contentLength !== resolved.declaredSize) throw new Error("civitai_lora_size_mismatch");
   return { ...resolved, sizeBytes: probe.contentLength, probe, provider: "civitai" as const };
 }
 
@@ -1132,7 +1250,7 @@ async function promoteRegisteredLora(
   if (expectedRegistrationSource.provider === "direct") {
     throw new Error("direct_lora_source_identity_unavailable");
   }
-  const resolved = await resolveSourceUrl(expectedRegistrationSource.originalUrl, options);
+  const resolved = await resolveSourceIdentity(expectedRegistrationSource.originalUrl, options);
   return withRegistryLock(options, (items, write) => {
     const current = items.find((item) => item.id === id);
     if (!current) throw new Error("lora_registry_item_not_found");
@@ -1227,11 +1345,34 @@ export function snapshotTaskLoras(value: unknown, options: LoraRegistryOptions =
 }
 
 /**
- * Resolve only enabled `registered` selections immediately before task
- * persistence. The resulting task remains on the existing immutable
+ * Validate browser selections against the server-owned registry without any
+ * network access. This is the only LoRA work allowed while creating a
+ * pending-confirmation card.
+ */
+export function snapshotTaskLoraSelections(
+  value: unknown,
+  options: LoraRegistryOptions = {},
+): ImageTaskLoraSelection[] | undefined {
+  if (value === undefined) return undefined;
+  const selections = assertImageTaskLoraSelections(value);
+  const registry = listRegisteredLoras(options);
+  const byId = new Map(registry.map((item) => [item.id, item]));
+  for (const selection of selections) {
+    const item = byId.get(selection.id);
+    if (!item || (item.availability !== "ready" && item.availability !== "registered")) {
+      throw new Error("invalid_or_unavailable_task_lora");
+    }
+  }
+  return selections;
+}
+
+/**
+ * Resolve only enabled `registered` selections at task confirmation. The
+ * resulting waiting task remains on the existing immutable
  * filename/size/SHA contract, so all paid-runtime and Agent checks continue
  * unchanged. Direct URLs without a trusted provider identity stay registered
- * but fail clearly before a task or order can be created.
+ * but fail clearly before confirmation can complete or an order can be
+ * created.
  */
 export async function resolveAndSnapshotTaskLoras(
   value: unknown,

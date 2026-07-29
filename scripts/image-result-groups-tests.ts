@@ -6,10 +6,14 @@ import { NextRequest } from "next/server";
 import { GET, POST } from "../src/app/api/local-lab/image-tasks/route";
 import { groupImageTasks } from "../src/lib/image-generation/image-task-groups";
 import { listImageTasks, mutateImageTasks } from "../src/lib/image-generation/local-image-task-store";
+import { registerLoraFromUrl } from "../src/lib/image-generation/local-lora-registry";
+import { planExecutableImageBatch } from "./clore/image-session";
+import { resolveExactEligibleImageTask } from "./clore/run-image-e2e";
 
 const root = mkdtempSync(path.join(os.tmpdir(), "image-result-groups-"));
 process.env.AI_IMAGE_TASK_STORE_PATH = path.join(root, "tasks.json");
 process.env.AI_IMAGE_LIBRARY_ROOT = path.join(root, "images");
+process.env.AI_IMAGE_LORA_REGISTRY_PATH = path.join(root, "loras.json");
 process.env.LOCAL_LAB_ENABLED = "true";
 process.env.NEXT_PUBLIC_APP_MODE = "local_lab";
 
@@ -26,6 +30,76 @@ async function createGroup(requestedCount = 3) {
 }
 
 async function main() {
+  const pendingLora = await registerLoraFromUrl({
+    name: "待确认边界测试",
+    sourceUrl: "https://downloads.example.net/model.safetensors",
+    defaultStrength: 0.8,
+  });
+  const pendingCardResponse = await request({
+    ...source,
+    requestedCount: 1,
+    loras: [{
+      id: pendingLora.item.id,
+      name: "browser value is ignored",
+      filename: "../browser-value.safetensors",
+      strength: 0.9,
+      enabled: true,
+    }],
+  });
+  assert.equal(pendingCardResponse.status, 200,
+    "registered LoRA must not perform network work before the pending card exists");
+  const pendingCardPayload = await pendingCardResponse.json() as { groupId: string; createdTaskIds: string[] };
+  const pendingCardBeforeConfirm = structuredClone(
+    listImageTasks().find((task) => task.id === pendingCardPayload.createdTaskIds[0]),
+  );
+  assert.ok(pendingCardBeforeConfirm);
+  assert.equal(pendingCardBeforeConfirm.status, "pending_confirmation");
+  assert.deepEqual(pendingCardBeforeConfirm.loraSelections, [{
+    id: pendingLora.item.id,
+    strength: 0.9,
+    enabled: true,
+  }]);
+  assert.equal(pendingCardBeforeConfirm.loras, undefined);
+  const failedConfirmation = await request({
+    action: "confirm_group",
+    groupId: pendingCardPayload.groupId,
+  });
+  assert.equal(failedConfirmation.status, 400);
+  assert.match(
+    String((await failedConfirmation.json() as { error?: unknown }).error),
+    /缺少可信大小和 SHA-256/,
+  );
+  assert.deepEqual(
+    listImageTasks().find((task) => task.id === pendingCardBeforeConfirm.id),
+    pendingCardBeforeConfirm,
+    "failed LoRA confirmation must leave the pending card unchanged",
+  );
+  mutateImageTasks((tasks) => ({
+    tasks: tasks.map((task) => task.id === pendingCardBeforeConfirm.id
+      ? { ...task, status: "waiting_for_gpu" }
+      : task),
+    value: null,
+  }));
+  assert.throws(
+    () => resolveExactEligibleImageTask(pendingCardBeforeConfirm.id),
+    /image_task_not_eligible_for_restricted_text_run/,
+    "an unresolved selection must fail closed even if task state is corrupted to waiting",
+  );
+  const corruptedPlan = planExecutableImageBatch(listImageTasks(), "rtx4090");
+  assert.equal(corruptedPlan.executableCount, 0);
+  assert.deepEqual(corruptedPlan.excludedInconsistentTaskIds, [pendingCardBeforeConfirm.id],
+    "the canonical planner must not count an unresolved waiting task");
+  mutateImageTasks((tasks) => ({
+    tasks: tasks.map((task) => task.id === pendingCardBeforeConfirm.id
+      ? structuredClone(pendingCardBeforeConfirm)
+      : task),
+    value: null,
+  }));
+  assert.equal((await request({
+    action: "cancel_group",
+    groupId: pendingCardPayload.groupId,
+  })).status, 200);
+
   const created = await createGroup(5);
   assert.equal(created.createdTaskIds.length, 5);
   let groups = groupImageTasks(listImageTasks());

@@ -191,6 +191,9 @@ export function resolveExactEligibleImageTask(taskId: string, options: LocalTask
   try {
     normalizeNegativePrompt(task?.negativePrompt);
     if (task?.loras !== undefined) assertImageTaskLoras(task.loras);
+    if (task?.loraSelections !== undefined && task?.loras === undefined) {
+      extendedSettingsValid = false;
+    }
   } catch {
     extendedSettingsValid = false;
   }

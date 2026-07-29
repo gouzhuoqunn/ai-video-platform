@@ -24,6 +24,7 @@ function validExtendedTaskSettings(task: LocalImageTask) {
   try {
     normalizeNegativePrompt(task.negativePrompt);
     if (task.loras !== undefined) assertImageTaskLoras(task.loras);
+    if (task.loraSelections !== undefined && task.loras === undefined) return false;
     return true;
   } catch {
     return false;

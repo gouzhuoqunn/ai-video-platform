@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import path from "node:path";
 import { type LocalArtifactReference, verifyPublishedLocalImageArtifact } from "./local-image-artifacts";
-import type { ImageTaskLora } from "./image-loras";
+import type { ImageTaskLora, ImageTaskLoraSelection } from "./image-loras";
 import {
   AMBIGUOUS_INFERENCE_RETRY_CLASSIFICATION,
   AMBIGUOUS_INFERENCE_RETRY_MESSAGE,
@@ -21,6 +21,8 @@ export type LocalImageTask = Record<string, unknown> & {
   updatedAt: string;
   negativePrompt?: string;
   loras?: ImageTaskLora[];
+  /** Deferred registry selection; resolved before pending_confirmation ends. */
+  loraSelections?: ImageTaskLoraSelection[];
   result?: LocalArtifactReference;
   /** Optional grouping metadata. Legacy tasks intentionally omit these fields. */
   groupId?: string;

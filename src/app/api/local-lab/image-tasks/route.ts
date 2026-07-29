@@ -6,13 +6,20 @@ import path from "node:path";
 import { NextResponse, type NextRequest } from "next/server";
 import { FLUX_IMAGE_STACK, IMAGE_RESOLUTION_5090_MAX, IMAGE_RESOLUTION_MIN, IMAGE_RESOLUTION_STEP, classifyImageGpu, type ImageGpuClass, type ImageTaskSettings } from "@/lib/image-generation/flux-stack";
 import { finiteNumber } from "@/lib/image-generation/formatters";
-import { normalizeNegativePrompt } from "@/lib/image-generation/image-loras";
+import {
+  assertImageTaskLoraSelections,
+  normalizeNegativePrompt,
+  type ImageTaskLora,
+} from "@/lib/image-generation/image-loras";
 import { confirmImageTaskGroup, deletePendingImageTaskGroup, retryFailedImageTaskGroup, unconfirmImageTaskGroup } from "@/lib/image-generation/image-task-groups";
 import { AMBIGUOUS_INFERENCE_RETRY_CLASSIFICATION, AMBIGUOUS_INFERENCE_RETRY_MESSAGE, requiresManualInferenceRecovery } from "@/lib/image-generation/image-task-retry-policy";
 import { activeOrderMatchesRunner, projectLiveReceiptStage, projectRentalTiming } from "@/lib/image-generation/live-runner-display";
 import { imageLibraryRoot } from "@/lib/image-generation/local-image-artifacts";
 import { listImageTasks, mutateImageTasks, type LocalImageTask } from "@/lib/image-generation/local-image-task-store";
-import { resolveAndSnapshotTaskLoras, snapshotTaskLoras } from "@/lib/image-generation/local-lora-registry";
+import {
+  resolveAndSnapshotTaskLoras,
+  snapshotTaskLoraSelections,
+} from "@/lib/image-generation/local-lora-registry";
 import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/route-guard";
 import { COMFY_RUNTIME_IMAGE, loadCloreConfig } from "../../../../../scripts/clore/config";
 import { cloreRequest } from "../../../../../scripts/clore/client";
@@ -981,27 +988,39 @@ function publicTaskCreationError(error: unknown) {
     direct_lora_source_identity_unavailable: "已注册的直接下载链接缺少可信大小和 SHA-256；请换成可解析的 Civitai 或 HuggingFace 模型地址后再生成。",
     civitai_lora_version_missing: "已注册的 Civitai 地址没有可解析的模型版本；请改用具体版本或带 fileId 的下载链接。",
     civitai_lora_file_ambiguous_or_missing: "该 Civitai 模型没有唯一可识别的 LoRA 文件；请改用带 fileId 的具体下载链接。",
+    civitai_lora_flux1_version_missing: "该 Civitai 模型页没有适配当前 FLUX.1-D 图像模型的 LoRA 版本；任务卡已保留，请更换兼容版本链接。",
     civitai_lora_identity_incomplete: "Civitai 没有提供该 LoRA 的完整大小和 SHA-256，尚不能安全生成。",
+    civitai_lora_size_mismatch: "Civitai LoRA 的实际大小与平台身份不一致；任务卡已保留，未进入租卡。",
     civitai_model_is_not_lora: "该 Civitai 地址指向的模型不是 LoRA，请更换链接。",
     huggingface_lora_file_url_required: "该 HuggingFace 仓库包含多个文件；请改用具体的 .safetensors 文件链接。",
     huggingface_lora_file_ambiguous_or_missing: "该 HuggingFace 地址没有唯一可识别的 .safetensors 文件。",
     huggingface_lora_identity_incomplete: "HuggingFace 没有提供该 LoRA 的完整大小和 SHA-256，尚不能安全生成。",
     huggingface_lora_remote_delivery_requires_local_token: "该 HuggingFace LoRA 只能使用本机令牌下载，云端 Agent 无法安全获取；请改用公开文件地址。",
+    lora_source_timeout: "LoRA 来源当前连接超时；任务卡已保留为待确认，没有租用显卡，请稍后重试确认。",
+    "fetch failed": "LoRA 来源当前网络不可达；任务卡已保留为待确认，没有租用显卡，请稍后重试确认。",
   };
+  if (/^lora_metadata_http_/.test(code)) {
+    return `LoRA 平台元数据请求失败（${code.replace("lora_metadata_http_", "HTTP ")}）；任务卡已保留，未进入租卡。`;
+  }
   return loraMessages[code] ?? message;
 }
 
 type TaskLoraSnapshot = Awaited<ReturnType<typeof resolveAndSnapshotTaskLoras>>;
-type TaskBuildOptions = { loras: TaskLoraSnapshot };
+type TaskLoraSelections = ReturnType<typeof snapshotTaskLoraSelections>;
+type TaskBuildOptions = {
+  loras?: TaskLoraSnapshot;
+  loraSelections?: TaskLoraSelections;
+};
 
 function taskFrom(input: Record<string, unknown>, options?: TaskBuildOptions): ImageTask {
   const prompt = String(input.prompt ?? "").trim();
   const negativePrompt = normalizeNegativePrompt(input.negativePrompt);
-  const loras = options === undefined
-    ? snapshotTaskLoras(input.loras)
-    : options.loras === undefined
+  const loraSelections = options === undefined
+    ? snapshotTaskLoraSelections(input.loras)
+    : options.loraSelections === undefined
       ? undefined
-      : structuredClone(options.loras);
+      : structuredClone(options.loraSelections);
+  const loras = options?.loras === undefined ? undefined : structuredClone(options.loras);
   const width = imageDimension(input.width);
   const height = imageDimension(input.height);
   const steps = Number(input.steps);
@@ -1040,6 +1059,7 @@ function taskFrom(input: Record<string, unknown>, options?: TaskBuildOptions): I
     prompt,
     negativePrompt,
     ...(loras === undefined ? {} : { loras }),
+    ...(loraSelections === undefined ? {} : { loraSelections }),
     referenceImage,
     steps,
     loraStrength,
@@ -1100,10 +1120,10 @@ function removeUnsubmittedFrozenGroupTasks(runner: ImageRunnerSession, groupId: 
   saveRunner({ ...runner, frozenTaskIds: runner.frozenTaskIds.filter((id) => !ids.has(id)), currentTaskIndex: null, currentModel: null, promptSummary: null, updatedAt: new Date().toISOString() });
 }
 
-function createGroupedTasks(input: Record<string, unknown>, loras: TaskLoraSnapshot) {
+function createGroupedTasks(input: Record<string, unknown>, loraSelections: TaskLoraSelections) {
   const requestedCount = positiveSafeInteger(input.requestedCount);
   const groupId = randomUUID();
-  const children = createGroupChildren(input, requestedCount, groupId, 0, new Date().toISOString(), { loras });
+  const children = createGroupChildren(input, requestedCount, groupId, 0, new Date().toISOString(), { loraSelections });
   const result = mutateImageTasks<ImageTask[]>((current) => ({ tasks: [...children, ...current], value: children }));
   return { groupId, createdTaskIds: result.map((task) => task.id), tasks: result };
 }
@@ -1123,7 +1143,6 @@ function regenerateGroupedTasks(input: Record<string, unknown>) {
     const childInput: Record<string, unknown> = {
       prompt: input.prompt,
       negativePrompt: origin.negativePrompt ?? "",
-      ...(origin.loras === undefined ? {} : { loras: structuredClone(origin.loras) }),
       referenceImage: origin.referenceImage,
       width: origin.width,
       height: origin.height,
@@ -1138,16 +1157,75 @@ function regenerateGroupedTasks(input: Record<string, unknown>) {
       requestedGroupId,
       existingTotal,
       new Date().toISOString(),
-      { loras: origin.loras === undefined ? undefined : structuredClone(origin.loras) },
+      {
+        loras: origin.loras === undefined ? undefined : structuredClone(origin.loras),
+        loraSelections: origin.loraSelections === undefined
+          ? undefined
+          : structuredClone(origin.loraSelections),
+      },
     );
     const next = [...children.map((task) => ({ ...task, groupRequestedCount: total })), ...tasks];
     return { tasks: next, value: { groupId: requestedGroupId, createdTaskIds: children.map((task) => task.id), tasks: next } };
   });
 }
 
+type PendingGroupLoraResolution = {
+  expectedUpdatedAt: string;
+  loras: ImageTaskLora[];
+};
+
+/**
+ * A pending card is created without network access. Confirmation is the
+ * boundary that upgrades its server-owned registry selections to immutable
+ * filename/size/SHA snapshots. A failed upgrade leaves the card pending.
+ */
+async function resolvePendingGroupLoras(groupId: string) {
+  const pending = readTasks().filter((task) =>
+    groupIdentity(task) === groupId
+    && task.status === "pending_confirmation"
+    && task.loras === undefined
+    && task.loraSelections !== undefined);
+  const cache = new Map<string, Promise<ImageTaskLora[]>>();
+  const resolved = new Map<string, PendingGroupLoraResolution>();
+  for (const task of pending) {
+    const selections = assertImageTaskLoraSelections(task.loraSelections);
+    const identity = JSON.stringify(selections);
+    let resolution = cache.get(identity);
+    if (!resolution) {
+      resolution = resolveAndSnapshotTaskLoras(selections).then((loras) => {
+        if (loras === undefined) throw new Error("invalid_image_task_lora_selections");
+        return loras;
+      });
+      cache.set(identity, resolution);
+    }
+    resolved.set(task.id, {
+      expectedUpdatedAt: task.updatedAt,
+      loras: await resolution,
+    });
+  }
+  return resolved;
+}
+
+async function resolvePendingTaskLora(taskId: string) {
+  const task = readTasks().find((candidate) => candidate.id === taskId);
+  if (
+    !task
+    || task.status !== "pending_confirmation"
+    || task.loras !== undefined
+    || task.loraSelections === undefined
+  ) return null;
+  const selections = assertImageTaskLoraSelections(task.loraSelections);
+  const loras = await resolveAndSnapshotTaskLoras(selections);
+  if (loras === undefined) throw new Error("invalid_image_task_lora_selections");
+  return { expectedUpdatedAt: task.updatedAt, loras } satisfies PendingGroupLoraResolution;
+}
+
 function assertStartableBatch(batch: ImageTask[], maxHourlyPrice: number) {
   const classes = [...new Set(batch.map((task) => task.gpuClass))];
   if (!batch.length) throw new Error("no_confirmed_image_tasks_selected");
+  if (batch.some((task) => task.loraSelections !== undefined && task.loras === undefined)) {
+    throw new Error("image_task_lora_confirmation_incomplete");
+  }
   if (classes.length !== 1) throw new Error("mixed_gpu_classes_are_not_allowed");
   if (!Number.isFinite(maxHourlyPrice) || maxHourlyPrice <= 0) throw new Error("invalid_max_hourly_price");
   const selectedGpuClass = classes[0];
@@ -1264,19 +1342,20 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === "create") {
-      // Resolve an enabled registered source before the task-store write. The
-      // returned immutable snapshot is reused below; taskFrom must not repeat
-      // provider metadata work.
-      const loras = await resolveAndSnapshotTaskLoras(body.loras);
-      const task = taskFrom(body, { loras });
+      // Creating a pending card is deliberately network-free. Confirmation
+      // resolves these server-validated registry selections before the task
+      // can become eligible for paid execution.
+      const loraSelections = snapshotTaskLoraSelections(body.loras);
+      const task = taskFrom(body, { loraSelections });
       tasks = updateTasks((current) => [task, ...current.filter((candidate) => candidate.id !== task.id)]);
       return NextResponse.json({ task, ...(await responsePayload()) });
     }
 
     if (action === "create_group") {
-      // One provider resolution serves every child in this group.
-      const loras = await resolveAndSnapshotTaskLoras(body.loras);
-      const created = createGroupedTasks(body, loras);
+      // All children share the same local-only selection snapshot. A later
+      // confirmation performs one provider resolution for the whole group.
+      const loraSelections = snapshotTaskLoraSelections(body.loras);
+      const created = createGroupedTasks(body, loraSelections);
       return NextResponse.json({
         groupId: created.groupId,
         createdTaskIds: created.createdTaskIds,
@@ -1300,9 +1379,34 @@ export async function POST(request: NextRequest) {
       if (!groupId) throw new Error("invalid_group_id");
       const updatedAt = new Date().toISOString();
       const runner = action === "unconfirm_group" ? assertUnconfirmIsSafe() : null;
+      const pendingLoraResolutions = action === "confirm_group"
+        ? await resolvePendingGroupLoras(groupId)
+        : new Map<string, PendingGroupLoraResolution>();
       const outcome = mutateImageTasks<Record<string, unknown>>((current) => {
         const imageTasks = current as ImageTask[];
         if (action === "confirm_group") {
+          for (const task of imageTasks) {
+            if (
+              groupIdentity(task) === groupId
+              && task.status === "pending_confirmation"
+              && task.loraSelections !== undefined
+              && task.loras === undefined
+              && !pendingLoraResolutions.has(task.id)
+            ) {
+              throw new Error("image_task_changed_during_lora_confirmation");
+            }
+            const resolution = pendingLoraResolutions.get(task.id);
+            if (!resolution) continue;
+            if (
+              groupIdentity(task) !== groupId
+              || task.status !== "pending_confirmation"
+              || task.updatedAt !== resolution.expectedUpdatedAt
+              || task.loras !== undefined
+            ) {
+              throw new Error("image_task_changed_during_lora_confirmation");
+            }
+            task.loras = structuredClone(resolution.loras);
+          }
           const result = confirmImageTaskGroup(imageTasks, groupId, updatedAt);
           return { tasks: result.tasks as LocalImageTask[], value: { action, ...result } };
         }
@@ -1482,6 +1586,9 @@ export async function POST(request: NextRequest) {
     if (!tasks.some((task) => task.id === id)) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
     if (!["delete", "confirm", "retry"].includes(action)) return NextResponse.json({ error: "invalid_action" }, { status: 400 });
     const updatedAt = new Date().toISOString();
+    const pendingLoraResolution = action === "confirm"
+      ? await resolvePendingTaskLora(id)
+      : null;
     tasks = mutateImageTasks<ImageTask[]>((current) => {
       const imageTasks = current as ImageTask[];
       const selectedTask = imageTasks.find((task) => task.id === id);
@@ -1500,7 +1607,30 @@ export async function POST(request: NextRequest) {
         if (selectedTask.status !== "pending_confirmation" || selectedTask.localClaim || selectedTask.result) {
           throw new Error("任务状态已变化，只能确认尚未确认的任务。");
         }
-        const next = imageTasks.map((task) => task.id === id ? { ...task, status: "waiting_for_gpu" as const, updatedAt } : task);
+        if (
+          selectedTask.loraSelections !== undefined
+          && selectedTask.loras === undefined
+          && !pendingLoraResolution
+        ) {
+          throw new Error("image_task_changed_during_lora_confirmation");
+        }
+        if (
+          pendingLoraResolution
+          && (
+            selectedTask.updatedAt !== pendingLoraResolution.expectedUpdatedAt
+            || selectedTask.loras !== undefined
+          )
+        ) {
+          throw new Error("image_task_changed_during_lora_confirmation");
+        }
+        const next = imageTasks.map((task) => task.id === id
+          ? {
+            ...task,
+            ...(pendingLoraResolution ? { loras: structuredClone(pendingLoraResolution.loras) } : {}),
+            status: "waiting_for_gpu" as const,
+            updatedAt,
+          }
+          : task);
         return { tasks: next, value: next };
       }
       if (selectedTask.status !== "failed" || selectedTask.localClaim || selectedTask.result || selectedTask.error?.retryable !== true) {

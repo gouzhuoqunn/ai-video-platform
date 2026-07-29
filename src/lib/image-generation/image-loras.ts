@@ -25,6 +25,17 @@ export type ImageTaskLora = {
   sizeBytes: number;
 };
 
+/**
+ * Server-validated registry selection persisted while a task is still
+ * pending confirmation. It deliberately contains no URL or browser-supplied
+ * model identity. Confirmation upgrades it to `ImageTaskLora`.
+ */
+export type ImageTaskLoraSelection = {
+  id: string;
+  strength: number;
+  enabled: boolean;
+};
+
 export type LoraSourceLocator =
   | {
     provider: "civitai";
@@ -42,7 +53,7 @@ export type LoraSourceLocator =
 /**
  * A syntactically recognized user-supplied source. Unlike
  * `LoraSourceLocator`, this is not an immutable file identity: it is allowed
- * to omit version/file/hash information until the task-creation boundary
+ * to omit version/file/hash information until the task-confirmation boundary
  * resolves the provider metadata.
  */
 export type LoraRegistrationSource =
@@ -152,6 +163,36 @@ export function assertImageTaskLoras(value: unknown): ImageTaskLora[] {
   });
   if (enabledCount > MAX_TASK_LORAS) throw new Error("too_many_enabled_loras");
   if (enabledBytes > MAX_TASK_LORA_BYTES) throw new Error("enabled_loras_too_large");
+  return result;
+}
+
+export function assertImageTaskLoraSelections(value: unknown): ImageTaskLoraSelection[] {
+  if (!Array.isArray(value) || value.length > MAX_REGISTERED_LORAS) {
+    throw new Error("invalid_image_task_lora_selections");
+  }
+  const seenIds = new Set<string>();
+  let enabledCount = 0;
+  const result = value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error("invalid_image_task_lora_selection");
+    }
+    const input = item as Record<string, unknown>;
+    const id = String(input.id ?? "");
+    const strength = Number(input.strength);
+    const enabled = input.enabled;
+    if (
+      !validImageLoraId(id)
+      || !validLoraStrength(strength)
+      || typeof enabled !== "boolean"
+      || seenIds.has(id)
+    ) {
+      throw new Error("invalid_image_task_lora_selection");
+    }
+    seenIds.add(id);
+    if (enabled) enabledCount += 1;
+    return { id, strength, enabled };
+  });
+  if (enabledCount > MAX_TASK_LORAS) throw new Error("too_many_enabled_loras");
   return result;
 }
 

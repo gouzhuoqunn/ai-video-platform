@@ -133,6 +133,7 @@ async function main() {
   const registryFile = temporaryRoot
     ? path.join(temporaryRoot, "loras.json")
     : path.join(process.cwd(), ".secrets", "image-studio", "loras.json");
+  const taskStoreFile = temporaryRoot ? path.join(temporaryRoot, "tasks.json") : null;
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   let output = "";
@@ -147,6 +148,7 @@ async function main() {
         env: {
           ...process.env,
           ...(temporaryRoot ? { AI_IMAGE_LORA_REGISTRY_PATH: registryFile } : {}),
+          ...(taskStoreFile ? { AI_IMAGE_TASK_STORE_PATH: taskStoreFile } : {}),
           CLORE_ORDER_EXECUTION_ENABLED: "false",
           LOCAL_LAB_ENABLED: "true",
           NEXT_PUBLIC_APP_MODE: "local_lab",
@@ -162,10 +164,17 @@ async function main() {
     const context = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
     const page = await context.newPage();
     let taskPosts = 0;
+    let allowedPendingCardPosts = 0;
     let cloreRequests = 0;
     await page.route("**/api/local-lab/image-tasks*", async (route) => {
       if (route.request().method() !== "GET") {
         taskPosts += 1;
+        const body = route.request().postDataJSON() as JsonRecord | null;
+        if (temporaryRoot && body?.action === "create_group") {
+          allowedPendingCardPosts += 1;
+          await route.continue();
+          return;
+        }
         await route.fulfill({
           status: 409,
           contentType: "application/json",
@@ -210,8 +219,30 @@ async function main() {
       assert.equal(registrationSource?.originalUrl, testCase.sourceUrl);
       assert.equal(registrationSource?.modelId, testCase.modelId);
     }
+    if (temporaryRoot) {
+      const prompt = "待确认任务卡片不应被 LoRA 下载网络阻塞";
+      await page.getByLabel(`启用 ${sourceCases[0].name}`).check();
+      await page.getByLabel("提示词", { exact: true }).fill(prompt);
+      const responsePromise = page.waitForResponse((response) =>
+        response.request().method() === "POST"
+        && new URL(response.url()).pathname === "/api/local-lab/image-tasks");
+      await page.getByRole("button", { name: "创建图像任务组", exact: true }).click();
+      const response = await responsePromise;
+      assert.equal(response.status(), 200, "pending card creation must be local-only and succeed");
+      await page.getByRole("button", { name: `${prompt} 活动任务组`, exact: true }).waitFor({
+        state: "visible",
+      });
+      assert.equal(taskPosts, 1);
+      assert.equal(allowedPendingCardPosts, 1);
+      const taskStore = JSON.parse(readFileSync(taskStoreFile!, "utf8")) as JsonRecord[];
+      assert.equal(taskStore.length, 1);
+      assert.ok(Array.isArray(taskStore[0]?.loraSelections));
+      assert.equal(taskStore[0]?.loras, undefined);
+    }
     await context.close();
-    console.log(`image-lora-live-ui-acceptance: PASS (2/2 real page registrations, task POST 0, Clore calls 0, registry=${persistDefaultRegistry ? "default" : "temporary"})`);
+    console.log(
+      `image-lora-live-ui-acceptance: PASS (2/2 real page registrations, pending cards=${temporaryRoot ? 1 : 0}, task POST ${taskPosts}, Clore calls 0, registry=${persistDefaultRegistry ? "default" : "temporary"})`,
+    );
   } finally {
     await browser.close();
     await stopProcessTree(next);

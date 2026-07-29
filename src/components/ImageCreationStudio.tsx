@@ -274,7 +274,7 @@ export function ImagePromptWorkspace({
       {unsupported ? <p className="mt-1 text-xs text-amber-200">当前文本生图最高支持 1536 × 1536，请缩小分辨率后创建任务。</p> : null}
     </section>
     <label className="mt-5 block text-sm font-medium">连续生成 <input aria-label="连续生成张数" type="number" min="1" value={count} onChange={(event) => setCount(event.target.value)} className="mx-2 w-24 rounded border border-stone-600 bg-stone-950 px-2 py-1" /> 张</label>
-    {error ? <p className="mt-2 text-sm text-rose-200">{error}</p> : null}
+    {error ? <p role="alert" aria-live="assertive" className="mt-3 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-100">{error}</p> : null}
     <button type="button" aria-busy={busy} disabled={busy || loraBusy || !prompt.trim() || unsupported} onClick={onCreate} className="mt-4 rounded-lg bg-indigo-500 px-5 py-2 font-medium disabled:opacity-40">{busy ? "正在提交…" : "创建图像任务组"}</button>
   </section>;
 }
