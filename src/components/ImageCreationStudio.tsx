@@ -21,6 +21,8 @@ type LoraRegistryResponse = { items?: RegisteredLora[]; item?: RegisteredLora; m
 type AddLoraRequest = { name: string; sourceUrl: string; defaultStrength: number; presetId?: string };
 type Point = [number, number]; type Resolution = { width: number; height: number };
 const initialSettings: Settings = { steps: 30, loraStrength: .8, cfg: 4, sampler: "FlowMatch" };
+const selectableLora = (item: Pick<RegisteredLora, "availability">) =>
+  item.availability === "ready" || item.availability === "registered";
 function hasActiveTaskClaim(task: Task) { const claim = task.localClaim; if (!claim || typeof claim !== "object") return Boolean(claim); const expiresAt = (claim as { leaseExpiresAt?: unknown }).leaseExpiresAt; return typeof expiresAt !== "string" || !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) > Date.now(); }
 const cells = Array.from({ length: 64 }, (_, index) => [index % 8, Math.floor(index / 8)] as Point);
 const tabKey = "image-studio-selected-tab"; const countKey = "image-studio-generation-count";
@@ -51,7 +53,7 @@ function mergeLoraSelections(registered: RegisteredLora[], current: LoraSelectio
       availability: item.availability,
       builtIn: item.builtIn,
       strength: existing?.strength ?? item.defaultStrength,
-      enabled: item.availability === "ready" && (existing?.enabled ?? item.defaultEnabled),
+      enabled: selectableLora(item) && (existing?.enabled ?? item.defaultEnabled),
     };
   });
 }
@@ -118,7 +120,13 @@ function LoraManagementPanel({
             {editingId === item.id
               ? <input aria-label={`${item.name} 显示名称`} maxLength={80} value={editingName} onChange={(event) => setEditingName(event.target.value)} className="w-full rounded border border-stone-600 bg-stone-950 px-2 py-1 font-semibold" />
               : <b className="block break-words">{item.name}</b>}
-            <p className="mt-1 truncate text-xs text-stone-500">{item.availability === "ready" ? item.filename : "尚未添加模型文件"}</p>
+            <p className="mt-1 truncate text-xs text-stone-500">
+              {item.availability === "ready"
+                ? item.filename
+                : item.availability === "registered"
+                  ? item.filename || "已登记来源，等待生成时下载"
+                  : "尚未添加模型文件"}
+            </p>
           </div>
           <label className="flex shrink-0 items-center gap-2 text-sm">
             <span>{item.enabled ? "已启用" : "未启用"}</span>
@@ -126,7 +134,7 @@ function LoraManagementPanel({
               aria-label={`启用 ${item.name}`}
               type="checkbox"
               checked={item.enabled}
-              disabled={busy || item.availability !== "ready"}
+              disabled={busy || !selectableLora(item)}
               onChange={(event) => replace(item.id, { enabled: event.target.checked })}
             />
           </label>
@@ -141,7 +149,7 @@ function LoraManagementPanel({
             max="1.5"
             step="0.05"
             value={item.strength}
-            disabled={busy || item.availability !== "ready"}
+            disabled={busy || !selectableLora(item)}
             onChange={(event) => replace(item.id, { strength: Number(event.target.value) })}
           />
         </label>
@@ -154,7 +162,13 @@ function LoraManagementPanel({
                 <button type="button" disabled={busy} onClick={() => setEditingId(null)} className="rounded border border-stone-500 px-2 py-1 text-xs">取消编辑</button>
               </>
               : <button type="button" disabled={busy} onClick={() => { setEditingId(item.id); setEditingName(item.name); }} className="rounded border border-stone-500 px-2 py-1 text-xs">编辑名称/默认值</button>}
-          <span className={`text-xs ${item.availability === "ready" ? "text-emerald-300" : "text-amber-200"}`}>{item.availability === "ready" ? "来源身份已锁定；云端下载后会再次校验 SHA-256" : "缺少已验证来源，不能勾选"}</span>
+          <span className={`text-xs ${selectableLora(item) ? "text-emerald-300" : "text-amber-200"}`}>
+            {item.availability === "ready"
+              ? "来源身份已锁定；云端下载后会再次校验 SHA-256"
+              : item.availability === "registered"
+                ? "已注册，生成时下载并校验"
+                : "缺少已登记来源，不能勾选"}
+          </span>
         </div>
       </article>)}
       {registryLoaded && items.length === 0 ? <p className="text-sm text-stone-400">还没有可显示的 LoRA。</p> : null}
@@ -166,9 +180,9 @@ function LoraManagementPanel({
         <label className="mt-4 block text-sm">显示名称<input maxLength={80} value={name} onChange={(event) => setName(event.target.value)} className="mt-1 w-full rounded border border-stone-600 bg-stone-900 px-3 py-2" placeholder="例如：解决男人女器官LoRA" /></label>
         <label className="mt-4 block text-sm">Civitai 或 HuggingFace 链接<textarea value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} className="mt-1 min-h-24 w-full rounded border border-stone-600 bg-stone-900 p-3" placeholder="粘贴模型页、具体版本或 .safetensors 文件链接" /></label>
         <label className="mt-4 block text-sm">默认强度 {safeFixed(defaultStrength, 2)}<input className="mt-1 w-full" type="range" min="0" max="1.5" step="0.05" value={defaultStrength} onChange={(event) => setDefaultStrength(Number(event.target.value))} /></label>
-        <p className="mt-3 text-xs text-stone-400">本机只注册不可变来源身份；真正生成时由受限 Agent 下载到 ComfyUI/models/loras，并核对大小、SHA-256 与 safetensors 结构。</p>
+        <p className="mt-3 text-xs text-stone-400">本机保存可识别的模型来源；真正生成时由受限 Agent 下载到 ComfyUI/models/loras，并核对大小、SHA-256 与 safetensors 结构。</p>
         {error ? <p role="alert" className="mt-3 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-100">{error}</p> : null}
-        <button type="button" aria-busy={busy} disabled={busy || !name.trim() || !sourceUrl.trim()} onClick={() => void submitAdd()} className="mt-4 rounded-lg bg-indigo-500 px-4 py-2 font-medium disabled:opacity-40">{busy ? "正在校验…" : "校验并注册"}</button>
+        <button type="button" aria-busy={busy} disabled={busy || !name.trim() || !sourceUrl.trim()} onClick={() => void submitAdd()} className="mt-4 rounded-lg bg-indigo-500 px-4 py-2 font-medium disabled:opacity-40">{busy ? "正在注册…" : "校验并注册"}</button>
       </section>
     </div> : null}
   </section>;
@@ -385,13 +399,13 @@ export function ImageCreationStudio() {
     try {
       const { response, data } = await fetchJsonWithTimeout<LoraRegistryResponse>("/api/local-lab/image-loras", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }, 90_000);
       if (!response.ok || !Array.isArray(data.items)) {
-        setLoraError(data.error ?? "LoRA 校验或注册失败，没有保存未验证的文件。");
+        setLoraError(data.error ?? "LoRA 注册失败，请检查链接格式、模型访问权限或稍后重试。");
         return false;
       }
       applyLoraRegistry(data.items);
       return true;
     } catch {
-      setLoraError("LoRA 来源校验超时或网络中断，没有保存未验证的文件。");
+      setLoraError("LoRA 注册请求超时或网络中断，请稍后重试。");
       return false;
     } finally {
       loraMutationLock.current = false;
@@ -421,7 +435,7 @@ export function ImageCreationStudio() {
     const submittedPrompt = prompt;
     const submittedNegativePrompt = negativePrompt;
     const submittedLoras = loras
-      .filter((item) => item.availability === "ready")
+      .filter(selectableLora)
       .map(({ id, name, filename, strength, enabled }) => ({ id, name, filename, strength, enabled }));
     await runMutation(async () => {
       const result = await post({

@@ -12,7 +12,7 @@ import { AMBIGUOUS_INFERENCE_RETRY_CLASSIFICATION, AMBIGUOUS_INFERENCE_RETRY_MES
 import { activeOrderMatchesRunner, projectLiveReceiptStage, projectRentalTiming } from "@/lib/image-generation/live-runner-display";
 import { imageLibraryRoot } from "@/lib/image-generation/local-image-artifacts";
 import { listImageTasks, mutateImageTasks, type LocalImageTask } from "@/lib/image-generation/local-image-task-store";
-import { snapshotTaskLoras } from "@/lib/image-generation/local-lora-registry";
+import { resolveAndSnapshotTaskLoras, snapshotTaskLoras } from "@/lib/image-generation/local-lora-registry";
 import { guardLocalLabMutation, guardLocalLabRequest } from "@/lib/local-lab/route-guard";
 import { COMFY_RUNTIME_IMAGE, loadCloreConfig } from "../../../../../scripts/clore/config";
 import { cloreRequest } from "../../../../../scripts/clore/client";
@@ -974,10 +974,34 @@ function imageDimension(value: unknown) {
   return Number.isInteger(dimension) ? dimension : null;
 }
 
-function taskFrom(input: Record<string, unknown>): ImageTask {
+function publicTaskCreationError(error: unknown) {
+  const message = error instanceof Error ? error.message : "image_task_failed";
+  const code = message.split(":")[0];
+  const loraMessages: Record<string, string> = {
+    direct_lora_source_identity_unavailable: "已注册的直接下载链接缺少可信大小和 SHA-256；请换成可解析的 Civitai 或 HuggingFace 模型地址后再生成。",
+    civitai_lora_version_missing: "已注册的 Civitai 地址没有可解析的模型版本；请改用具体版本或带 fileId 的下载链接。",
+    civitai_lora_file_ambiguous_or_missing: "该 Civitai 模型没有唯一可识别的 LoRA 文件；请改用带 fileId 的具体下载链接。",
+    civitai_lora_identity_incomplete: "Civitai 没有提供该 LoRA 的完整大小和 SHA-256，尚不能安全生成。",
+    civitai_model_is_not_lora: "该 Civitai 地址指向的模型不是 LoRA，请更换链接。",
+    huggingface_lora_file_url_required: "该 HuggingFace 仓库包含多个文件；请改用具体的 .safetensors 文件链接。",
+    huggingface_lora_file_ambiguous_or_missing: "该 HuggingFace 地址没有唯一可识别的 .safetensors 文件。",
+    huggingface_lora_identity_incomplete: "HuggingFace 没有提供该 LoRA 的完整大小和 SHA-256，尚不能安全生成。",
+    huggingface_lora_remote_delivery_requires_local_token: "该 HuggingFace LoRA 只能使用本机令牌下载，云端 Agent 无法安全获取；请改用公开文件地址。",
+  };
+  return loraMessages[code] ?? message;
+}
+
+type TaskLoraSnapshot = Awaited<ReturnType<typeof resolveAndSnapshotTaskLoras>>;
+type TaskBuildOptions = { loras: TaskLoraSnapshot };
+
+function taskFrom(input: Record<string, unknown>, options?: TaskBuildOptions): ImageTask {
   const prompt = String(input.prompt ?? "").trim();
   const negativePrompt = normalizeNegativePrompt(input.negativePrompt);
-  const loras = snapshotTaskLoras(input.loras);
+  const loras = options === undefined
+    ? snapshotTaskLoras(input.loras)
+    : options.loras === undefined
+      ? undefined
+      : structuredClone(options.loras);
   const width = imageDimension(input.width);
   const height = imageDimension(input.height);
   const steps = Number(input.steps);
@@ -1043,10 +1067,10 @@ function groupTitle(prompt: string) {
   return Array.from(prompt).slice(0, 12).join("");
 }
 
-function createGroupChildren(input: Record<string, unknown>, requestedCount: number, groupId: string = randomUUID(), startIndex = 0, sharedCreatedAt = new Date().toISOString()): ImageTask[] {
+function createGroupChildren(input: Record<string, unknown>, requestedCount: number, groupId: string = randomUUID(), startIndex = 0, sharedCreatedAt = new Date().toISOString(), options?: TaskBuildOptions): ImageTask[] {
   const title = groupTitle(String(input.prompt ?? "").trim());
   return Array.from({ length: requestedCount }, (_, offset) => {
-    const task = taskFrom(input);
+    const task = taskFrom(input, options);
     return {
       ...task,
       groupId,
@@ -1076,10 +1100,10 @@ function removeUnsubmittedFrozenGroupTasks(runner: ImageRunnerSession, groupId: 
   saveRunner({ ...runner, frozenTaskIds: runner.frozenTaskIds.filter((id) => !ids.has(id)), currentTaskIndex: null, currentModel: null, promptSummary: null, updatedAt: new Date().toISOString() });
 }
 
-function createGroupedTasks(input: Record<string, unknown>) {
+function createGroupedTasks(input: Record<string, unknown>, loras: TaskLoraSnapshot) {
   const requestedCount = positiveSafeInteger(input.requestedCount);
   const groupId = randomUUID();
-  const children = createGroupChildren(input, requestedCount, groupId);
+  const children = createGroupChildren(input, requestedCount, groupId, 0, new Date().toISOString(), { loras });
   const result = mutateImageTasks<ImageTask[]>((current) => ({ tasks: [...children, ...current], value: children }));
   return { groupId, createdTaskIds: result.map((task) => task.id), tasks: result };
 }
@@ -1108,7 +1132,14 @@ function regenerateGroupedTasks(input: Record<string, unknown>) {
       loraStrength: origin.loraStrength,
       sampler: origin.sampler,
     };
-    const children = createGroupChildren(childInput, requestedCount, requestedGroupId, existingTotal);
+    const children = createGroupChildren(
+      childInput,
+      requestedCount,
+      requestedGroupId,
+      existingTotal,
+      new Date().toISOString(),
+      { loras: origin.loras === undefined ? undefined : structuredClone(origin.loras) },
+    );
     const next = [...children.map((task) => ({ ...task, groupRequestedCount: total })), ...tasks];
     return { tasks: next, value: { groupId: requestedGroupId, createdTaskIds: children.map((task) => task.id), tasks: next } };
   });
@@ -1233,13 +1264,19 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === "create") {
-      const task = taskFrom(body);
+      // Resolve an enabled registered source before the task-store write. The
+      // returned immutable snapshot is reused below; taskFrom must not repeat
+      // provider metadata work.
+      const loras = await resolveAndSnapshotTaskLoras(body.loras);
+      const task = taskFrom(body, { loras });
       tasks = updateTasks((current) => [task, ...current.filter((candidate) => candidate.id !== task.id)]);
       return NextResponse.json({ task, ...(await responsePayload()) });
     }
 
     if (action === "create_group") {
-      const created = createGroupedTasks(body);
+      // One provider resolution serves every child in this group.
+      const loras = await resolveAndSnapshotTaskLoras(body.loras);
+      const created = createGroupedTasks(body, loras);
       return NextResponse.json({
         groupId: created.groupId,
         createdTaskIds: created.createdTaskIds,
@@ -1476,7 +1513,7 @@ export async function POST(request: NextRequest) {
     });
     return NextResponse.json(await responsePayload());
   } catch (error) {
-    const message = error instanceof Error ? error.message : "image_task_failed";
+    const message = publicTaskCreationError(error);
     if (["create", "create_group", "confirm_group", "cancel_group", "retry_failed_group", "unconfirm_group", "regenerate_group", "confirm", "retry", "delete"].includes(action)) {
       return NextResponse.json({ error: message, ...(await responsePayload()) }, { status: 400 });
     }

@@ -3,10 +3,13 @@ import { readFileSync } from "node:fs";
 import {
   CREATE_RATE_LIMIT_CLASSIFICATION,
   CURRENT_CREATE_RATE_LIMIT_MESSAGE,
+  CURRENT_MODEL_DOWNLOAD_MESSAGE,
   HISTORICAL_AGENT_STAGE_MESSAGE,
   HISTORICAL_CREATE_RATE_LIMIT_MESSAGE,
+  HISTORICAL_MODEL_DOWNLOAD_MESSAGE,
   HISTORICAL_RENTED_CANDIDATE_MESSAGE,
   HISTORICAL_RUNNER_GENERIC_MESSAGE,
+  MODEL_DOWNLOAD_FAILURE_CLASSIFICATION,
   PRIOR_SESSION_AUTO_RECOVERY_MESSAGE,
   PRIOR_SESSION_MANUAL_RECOVERY_CLASSIFICATION,
   PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE,
@@ -58,6 +61,35 @@ function main() {
   assert.equal(historicalAgent.error?.historical, true);
   assert.equal(historicalAgent.error?.isBlocking, false);
   assert.equal(JSON.stringify(historicalAgent).includes("agent_stage_acceptance_invalid"), false);
+
+  const rawModelFailure = {
+    ...historicalCode6,
+    blocker: "model_download_incomplete_after_retries:custom-lora.safetensors",
+    error: {
+      ...historicalCode6.error,
+      stage: "models",
+      message: "model_sha256_mismatch:custom-lora.safetensors expected_sha256=secret actual_sha256=other",
+    },
+  };
+  const historicalModelFailure = projectRunnerStatus(
+    rawModelFailure,
+    { pidAlive: false, activeOrder: false, createLock: false },
+  );
+  assert.equal(historicalModelFailure.error?.displayMessage, HISTORICAL_MODEL_DOWNLOAD_MESSAGE);
+  assert.equal(historicalModelFailure.error?.classification, MODEL_DOWNLOAD_FAILURE_CLASSIFICATION);
+  assert.equal(historicalModelFailure.error?.isBlocking, false);
+  assert.equal(historicalModelFailure.blocker, null);
+  assert.doesNotMatch(JSON.stringify(historicalModelFailure), /custom-lora|expected_sha256|actual_sha256/);
+
+  const currentModelFailure = projectRunnerStatus(
+    { ...rawModelFailure, state: "running" },
+    { pidAlive: true, activeOrder: true, createLock: false },
+  );
+  assert.equal(currentModelFailure.error?.displayMessage, CURRENT_MODEL_DOWNLOAD_MESSAGE);
+  assert.equal(currentModelFailure.error?.classification, MODEL_DOWNLOAD_FAILURE_CLASSIFICATION);
+  assert.equal(currentModelFailure.error?.isBlocking, true);
+  assert.equal(currentModelFailure.blocker, CURRENT_MODEL_DOWNLOAD_MESSAGE);
+  assert.doesNotMatch(JSON.stringify(currentModelFailure), /custom-lora|expected_sha256|actual_sha256/);
 
   const active = projectRunnerStatus({ ...historicalCode6, state: "running" }, { pidAlive: true, activeOrder: false, createLock: false });
   assert.equal(active.error?.isBlocking, true);

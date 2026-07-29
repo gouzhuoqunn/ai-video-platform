@@ -23,6 +23,7 @@ import {
   validImageLoraId,
   validLoraStrength,
   type ImageTaskLora,
+  type LoraRegistrationSource,
   type LoraSourceLocator,
   type RegisteredLora,
 } from "./image-loras";
@@ -40,6 +41,9 @@ const STALE_LOCK_MS = 30_000;
 const SAFE_SHA256 = /^[a-f0-9]{64}$/i;
 const SAFE_HF_REVISION = /^[a-f0-9]{40}$/i;
 const SAFE_REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const MAX_SOURCE_URL_LENGTH = 4_096;
+const CIVITAI_HOSTS = new Set(["civitai.com", "www.civitai.com", "civitai.red", "www.civitai.red"]);
+const HUGGINGFACE_HOSTS = new Set(["huggingface.co", "www.huggingface.co", "hf.co", "www.hf.co"]);
 const DEFAULT_CREATED_AT = "2026-07-28T00:00:00.000Z";
 
 export type LoraRegistryOptions = {
@@ -82,6 +86,7 @@ const DEFAULT_LORAS: RegisteredLora[] = [
       versionId: 780667,
       fileId: 694003,
     },
+    registrationSource: null,
     builtIn: true,
     createdAt: DEFAULT_CREATED_AT,
     updatedAt: DEFAULT_CREATED_AT,
@@ -96,6 +101,7 @@ const DEFAULT_LORAS: RegisteredLora[] = [
     sha256: null,
     sizeBytes: null,
     source: null,
+    registrationSource: null,
     builtIn: true,
     createdAt: DEFAULT_CREATED_AT,
     updatedAt: DEFAULT_CREATED_AT,
@@ -110,6 +116,7 @@ const DEFAULT_LORAS: RegisteredLora[] = [
     sha256: null,
     sizeBytes: null,
     source: null,
+    registrationSource: null,
     builtIn: true,
     createdAt: DEFAULT_CREATED_AT,
     updatedAt: DEFAULT_CREATED_AT,
@@ -150,7 +157,12 @@ function normalizedName(value: unknown) {
 }
 
 function safePublicHttps(value: string, allowedInitialHosts?: ReadonlySet<string>) {
-  const parsed = new URL(value);
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("unrecognized_lora_source_url");
+  }
   const hostname = parsed.hostname.toLowerCase();
   if (
     parsed.protocol !== "https:"
@@ -166,6 +178,126 @@ function safePublicHttps(value: string, allowedInitialHosts?: ReadonlySet<string
     throw new Error("unsupported_lora_source_url");
   }
   return parsed;
+}
+
+function positiveInteger(value: string | null | undefined) {
+  if (!value || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function safeRegistrationFilename(value: string) {
+  try {
+    const decoded = decodeURIComponent(value);
+    return /\.safetensors$/i.test(decoded)
+      ? assertSafeLoraFilename(path.posix.basename(decoded))
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizedOriginalUrl(parsed: URL) {
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+function assertNoCredentialQuery(parsed: URL) {
+  const sensitive = /^(?:token|access[_-]?token|api[_-]?key|signature|credential|authorization|auth|x-amz-.+|x-goog-.+)$/i;
+  if ([...parsed.searchParams.keys()].some((key) => sensitive.test(key))) {
+    throw new Error("lora_source_url_contains_credentials");
+  }
+}
+
+/**
+ * Recognize a user source without performing DNS resolution or a network
+ * request. This keeps adding a LoRA responsive even when a provider is
+ * temporarily unavailable; immutable file identity is resolved separately at
+ * the task-creation boundary.
+ */
+export function parseLoraRegistrationSource(value: unknown): LoraRegistrationSource {
+  const sourceUrl = String(value ?? "").trim();
+  if (!sourceUrl || sourceUrl.length > MAX_SOURCE_URL_LENGTH) {
+    throw new Error("unrecognized_lora_source_url");
+  }
+  const parsed = safePublicHttps(sourceUrl);
+  assertNoCredentialQuery(parsed);
+  const hostname = parsed.hostname.toLowerCase();
+  const originalUrl = normalizedOriginalUrl(parsed);
+
+  if (CIVITAI_HOSTS.has(hostname)) {
+    const modelMatch = /^\/models\/(\d+)(?:\/[^/]*)?\/?$/.exec(parsed.pathname);
+    const versionMatch = /^\/api\/download\/models\/(\d+)\/?$/.exec(parsed.pathname);
+    const modelId = positiveInteger(modelMatch?.[1]);
+    const versionId = positiveInteger(
+      versionMatch?.[1]
+        ?? parsed.searchParams.get("modelVersionId")
+        ?? parsed.searchParams.get("versionId"),
+    );
+    const fileId = positiveInteger(parsed.searchParams.get("fileId"));
+    if (!modelId && !versionId && !fileId) throw new Error("unrecognized_lora_source_url");
+    return {
+      provider: "civitai",
+      originalUrl,
+      modelId,
+      versionId,
+      fileId,
+    };
+  }
+
+  if (HUGGINGFACE_HOSTS.has(hostname)) {
+    let parts: string[];
+    try {
+      parts = parsed.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    } catch {
+      throw new Error("unrecognized_lora_source_url");
+    }
+    if (parts.length < 2) throw new Error("unrecognized_lora_source_url");
+    const repository = `${parts[0]}/${parts[1]}`;
+    if (!SAFE_REPOSITORY.test(repository)) throw new Error("unrecognized_lora_source_url");
+    if (parts.length === 2) {
+      return {
+        provider: "huggingface",
+        originalUrl,
+        repository,
+        revision: null,
+        path: null,
+      };
+    }
+    if (!["blob", "resolve"].includes(parts[2]) || parts.length < 5) {
+      throw new Error("unrecognized_lora_source_url");
+    }
+    const revision = parts[3] || null;
+    const requestedPath = parts.slice(4).join("/");
+    if (
+      !revision
+      || !requestedPath
+      || requestedPath.includes("\\")
+      || requestedPath.split("/").some((segment) => !segment || segment === "." || segment === ".." || /[\u0000-\u001f]/.test(segment))
+    ) {
+      throw new Error("unrecognized_lora_source_url");
+    }
+    return {
+      provider: "huggingface",
+      originalUrl,
+      repository,
+      revision,
+      path: requestedPath,
+    };
+  }
+
+  const queryHasFileId = [...parsed.searchParams.keys()].some((key) =>
+    key.toLowerCase() === "fileid" && positiveInteger(parsed.searchParams.get(key)));
+  const obviousDownload = /\.safetensors$/i.test(parsed.pathname)
+    || /(?:^|\/)download(?:\/|$)/i.test(parsed.pathname)
+    || /(?:^|\/)models(?:\/|$)/i.test(parsed.pathname)
+    || queryHasFileId;
+  if (!obviousDownload) throw new Error("unrecognized_lora_source_url");
+  return {
+    provider: "direct",
+    originalUrl,
+    inferredFilename: safeRegistrationFilename(path.posix.basename(parsed.pathname)),
+  };
 }
 
 function forbiddenNetworkAddress(address: string) {
@@ -641,14 +773,15 @@ async function resolveHuggingFaceSource(
 }
 
 async function resolveSourceUrl(sourceUrl: string, options: LoraRegistryOptions) {
-  const parsed = safePublicHttps(
-    sourceUrl,
-    new Set(["civitai.com", "www.civitai.com", "huggingface.co"]),
-  );
+  const registrationSource = parseLoraRegistrationSource(sourceUrl);
+  if (registrationSource.provider === "direct") {
+    throw new Error("direct_lora_source_identity_unavailable");
+  }
+  const parsed = safePublicHttps(registrationSource.originalUrl);
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const tokenProvider = options.tokenProvider ?? secretToken;
-  if (parsed.hostname.toLowerCase() === "huggingface.co") {
+  if (registrationSource.provider === "huggingface") {
     const token = tokenProvider("HF_TOKEN");
     const resolved = await resolveHuggingFaceSource(parsed, { fetchImpl, timeoutMs, token, registryOptions: options });
     let probe = await probeBinary(resolved.downloadUrl, {
@@ -711,19 +844,52 @@ function sourceValid(value: unknown): value is LoraSourceLocator {
     && safeSegments;
 }
 
+function normalizedRegistrationSource(value: unknown): LoraRegistrationSource | null {
+  if (value === undefined || value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("lora_registration_source_invalid");
+  }
+  const stored = value as Record<string, unknown>;
+  const parsed = parseLoraRegistrationSource(stored.originalUrl);
+  if (stored.provider !== parsed.provider) throw new Error("lora_registration_source_invalid");
+  if (parsed.provider === "civitai") {
+    if (
+      stored.modelId !== parsed.modelId
+      || stored.versionId !== parsed.versionId
+      || stored.fileId !== parsed.fileId
+    ) throw new Error("lora_registration_source_invalid");
+  } else if (parsed.provider === "huggingface") {
+    if (
+      stored.repository !== parsed.repository
+      || stored.revision !== parsed.revision
+      || stored.path !== parsed.path
+    ) throw new Error("lora_registration_source_invalid");
+  } else if (stored.inferredFilename !== parsed.inferredFilename) {
+    throw new Error("lora_registration_source_invalid");
+  }
+  return parsed;
+}
+
 function registeredLora(value: unknown): RegisteredLora | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const item = value as Record<string, unknown>;
   const availability = item.availability;
   const ready = availability === "ready";
+  const registered = availability === "registered";
+  const missing = availability === "missing";
   try {
+    if (!ready && !registered && !missing) return null;
+    const registrationSource = normalizedRegistrationSource(item.registrationSource);
+    const registeredFilename = registered && typeof item.filename === "string" && item.filename
+      ? assertSafeLoraFilename(item.filename)
+      : "";
     const parsed: RegisteredLora = {
       id: String(item.id ?? ""),
       name: normalizedName(item.name),
-      filename: ready ? assertSafeLoraFilename(item.filename) : "",
+      filename: ready ? assertSafeLoraFilename(item.filename) : registeredFilename,
       defaultStrength: Number(item.defaultStrength),
       defaultEnabled: item.defaultEnabled === true,
-      availability: ready ? "ready" : "missing",
+      availability,
       sha256: ready && typeof item.sha256 === "string" && SAFE_SHA256.test(item.sha256)
         ? item.sha256.toLowerCase()
         : null,
@@ -731,6 +897,7 @@ function registeredLora(value: unknown): RegisteredLora | null {
         ? Number(item.sizeBytes)
         : null,
       source: ready && sourceValid(item.source) ? item.source : null,
+      registrationSource,
       builtIn: item.builtIn === true,
       createdAt: typeof item.createdAt === "string" ? item.createdAt : DEFAULT_CREATED_AT,
       updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : DEFAULT_CREATED_AT,
@@ -739,6 +906,8 @@ function registeredLora(value: unknown): RegisteredLora | null {
       !validImageLoraId(parsed.id)
       || !validLoraStrength(parsed.defaultStrength)
       || (ready && (!parsed.sha256 || !parsed.sizeBytes || !parsed.source))
+      || (registered && !parsed.registrationSource)
+      || (missing && parsed.registrationSource !== null)
     ) return null;
     return parsed;
   } catch {
@@ -827,6 +996,47 @@ export function listRegisteredLoras(options: LoraRegistryOptions = {}) {
   return withRegistryLock(options, (items) => structuredClone(items));
 }
 
+function registrationSourceIdentity(source: LoraRegistrationSource) {
+  if (source.provider === "civitai") {
+    return `civitai:model=${source.modelId ?? ""}:version=${source.versionId ?? ""}:file=${source.fileId ?? ""}`;
+  }
+  if (source.provider === "huggingface") {
+    return `huggingface:${source.repository}:revision=${source.revision ?? ""}:path=${source.path ?? ""}`;
+  }
+  return `direct:${source.originalUrl}`;
+}
+
+function registrationMatchesReady(source: LoraRegistrationSource, item: RegisteredLora) {
+  if (item.availability !== "ready" || !item.source) return false;
+  if (
+    item.registrationSource
+    && registrationSourceIdentity(item.registrationSource) === registrationSourceIdentity(source)
+  ) return true;
+  if (source.provider === "civitai" && item.source.provider === "civitai") {
+    const fields = [
+      source.modelId === null || source.modelId === item.source.modelId,
+      source.versionId === null || source.versionId === item.source.versionId,
+      source.fileId === null || source.fileId === item.source.fileId,
+    ];
+    return fields.every(Boolean);
+  }
+  if (source.provider === "huggingface" && item.source.provider === "huggingface") {
+    const immutableRevisionRequested = SAFE_HF_REVISION.test(source.revision ?? "");
+    return source.repository === item.source.repository
+      && (source.path === null || source.path === item.source.path)
+      && (!immutableRevisionRequested || source.revision!.toLowerCase() === item.source.revision);
+  }
+  return false;
+}
+
+function inferredRegistrationFilename(source: LoraRegistrationSource) {
+  if (source.provider === "direct") return source.inferredFilename ?? "";
+  if (source.provider === "huggingface" && source.path) {
+    return safeRegistrationFilename(path.posix.basename(source.path)) ?? "";
+  }
+  return "";
+}
+
 export async function registerLoraFromUrl(
   input: {
     name: unknown;
@@ -840,50 +1050,41 @@ export async function registerLoraFromUrl(
   const sourceUrl = String(input.sourceUrl ?? "").trim();
   const defaultStrength = Number(input.defaultStrength);
   if (!sourceUrl || !validLoraStrength(defaultStrength)) throw new Error("invalid_lora_registration");
-  const resolved = await resolveSourceUrl(sourceUrl, options);
+  const registrationSource = parseLoraRegistrationSource(sourceUrl);
   const now = new Date().toISOString();
   const result = withRegistryLock(options, (items, write) => {
     const presetId = typeof input.presetId === "string" ? input.presetId : null;
-    const filenameMatch = items.find((item) =>
-      item.availability === "ready"
-      && item.filename.toLowerCase() === resolved.filename.toLowerCase());
-    const digestMatch = items.find((item) =>
-      item.availability === "ready" && item.sha256 === resolved.sha256);
-    if (filenameMatch && filenameMatch.sha256 !== resolved.sha256) {
-      throw new Error("lora_filename_identity_conflict");
-    }
-    if (
-      digestMatch
-      && (
-        digestMatch.filename !== resolved.filename
-        || JSON.stringify(digestMatch.source) !== JSON.stringify(resolved.source)
-        || digestMatch.sizeBytes !== resolved.sizeBytes
-      )
-    ) {
-      throw new Error("lora_digest_identity_conflict");
-    }
-    const exactExisting = items.find((item) =>
-      item.availability === "ready"
-      && item.sha256 === resolved.sha256
-      && item.filename === resolved.filename
-      && item.sizeBytes === resolved.sizeBytes
-      && JSON.stringify(item.source) === JSON.stringify(resolved.source));
+    const sourceIdentity = registrationSourceIdentity(registrationSource);
+    const exactRegistered = items.find((item) =>
+      item.registrationSource
+      && registrationSourceIdentity(item.registrationSource) === sourceIdentity);
+    const matchingReady = items.find((item) => registrationMatchesReady(registrationSource, item));
     const placeholder = items.find((item) =>
       item.availability === "missing"
       && ((presetId && item.id === presetId) || item.name === name));
-    const id = exactExisting?.id ?? placeholder?.id ?? randomUUID();
-    const createdAt = exactExisting?.createdAt ?? placeholder?.createdAt ?? now;
-    const registered: RegisteredLora = {
+    const existing = exactRegistered ?? matchingReady ?? placeholder;
+    const id = existing?.id ?? randomUUID();
+    const createdAt = existing?.createdAt ?? now;
+    const registered: RegisteredLora = existing?.availability === "ready"
+      ? {
+        ...existing,
+        name,
+        defaultStrength,
+        registrationSource,
+        updatedAt: now,
+      }
+      : {
       id,
       name,
-      filename: resolved.filename,
+      filename: inferredRegistrationFilename(registrationSource),
       defaultStrength,
-      defaultEnabled: exactExisting?.defaultEnabled ?? false,
-      availability: "ready",
-      sha256: resolved.sha256,
-      sizeBytes: resolved.sizeBytes,
-      source: resolved.source,
-      builtIn: exactExisting?.builtIn ?? placeholder?.builtIn ?? false,
+      defaultEnabled: existing?.defaultEnabled ?? false,
+      availability: "registered",
+      sha256: null,
+      sizeBytes: null,
+      source: null,
+      registrationSource,
+      builtIn: existing?.builtIn ?? false,
       createdAt,
       updatedAt: now,
     };
@@ -897,13 +1098,10 @@ export async function registerLoraFromUrl(
   return {
     ...result,
     verification: {
-      provider: resolved.provider,
-      status: resolved.probe.status,
-      contentLength: resolved.probe.contentLength,
-      finalHostname: resolved.probe.finalHostname,
-      redirectCount: resolved.probe.redirectCount,
-      validatedMethod: "GET" as const,
-      sha256: resolved.sha256,
+      provider: registrationSource.provider,
+      classification: result.item.availability === "ready"
+        ? "already_ready"
+        : "registered_for_generation_validation",
     },
   };
 }
@@ -923,6 +1121,62 @@ export function updateRegisteredLora(
     const next = items.map((candidate) => candidate.id === id ? item : candidate);
     write(next);
     return { item, items: next };
+  });
+}
+
+async function promoteRegisteredLora(
+  id: string,
+  expectedRegistrationSource: LoraRegistrationSource,
+  options: LoraRegistryOptions,
+) {
+  if (expectedRegistrationSource.provider === "direct") {
+    throw new Error("direct_lora_source_identity_unavailable");
+  }
+  const resolved = await resolveSourceUrl(expectedRegistrationSource.originalUrl, options);
+  return withRegistryLock(options, (items, write) => {
+    const current = items.find((item) => item.id === id);
+    if (!current) throw new Error("lora_registry_item_not_found");
+    if (current.availability === "ready") return current;
+    if (
+      current.availability !== "registered"
+      || !current.registrationSource
+      || registrationSourceIdentity(current.registrationSource) !== registrationSourceIdentity(expectedRegistrationSource)
+    ) {
+      throw new Error("lora_registration_changed_during_resolution");
+    }
+    const filenameMatch = items.find((item) =>
+      item.id !== id
+      && item.availability === "ready"
+      && item.filename.toLowerCase() === resolved.filename.toLowerCase());
+    const digestMatch = items.find((item) =>
+      item.id !== id
+      && item.availability === "ready"
+      && item.sha256 === resolved.sha256);
+    if (filenameMatch && filenameMatch.sha256 !== resolved.sha256) {
+      throw new Error("lora_filename_identity_conflict");
+    }
+    if (
+      digestMatch
+      && (
+        digestMatch.filename !== resolved.filename
+        || JSON.stringify(digestMatch.source) !== JSON.stringify(resolved.source)
+        || digestMatch.sizeBytes !== resolved.sizeBytes
+      )
+    ) {
+      throw new Error("lora_digest_identity_conflict");
+    }
+    const ready: RegisteredLora = {
+      ...current,
+      filename: resolved.filename,
+      availability: "ready",
+      sha256: resolved.sha256,
+      sizeBytes: resolved.sizeBytes,
+      source: resolved.source,
+      updatedAt: new Date().toISOString(),
+    };
+    const next = items.map((item) => item.id === id ? ready : item);
+    write(next);
+    return ready;
   });
 }
 
@@ -948,6 +1202,7 @@ export function snapshotTaskLoras(value: unknown, options: LoraRegistryOptions =
     if (!item || !validLoraStrength(strength) || typeof enabled !== "boolean" || seen.has(id)) {
       throw new Error("invalid_or_unavailable_task_lora");
     }
+    seen.add(id);
     // The built-in recommendation placeholders are intentionally allowed to
     // remain unchecked while disabled. They have no immutable file identity
     // yet, so omit them from the persisted task snapshot; enabling one still
@@ -956,7 +1211,6 @@ export function snapshotTaskLoras(value: unknown, options: LoraRegistryOptions =
       if (!enabled) return null;
       throw new Error("invalid_or_unavailable_task_lora");
     }
-    seen.add(id);
     if (enabled) enabledCount += 1;
     return {
       id: item.id,
@@ -970,6 +1224,57 @@ export function snapshotTaskLoras(value: unknown, options: LoraRegistryOptions =
   }).filter((item): item is ImageTaskLora => item !== null);
   if (enabledCount > MAX_TASK_LORAS) throw new Error("too_many_enabled_loras");
   return assertImageTaskLoras(snapshots);
+}
+
+/**
+ * Resolve only enabled `registered` selections immediately before task
+ * persistence. The resulting task remains on the existing immutable
+ * filename/size/SHA contract, so all paid-runtime and Agent checks continue
+ * unchanged. Direct URLs without a trusted provider identity stay registered
+ * but fail clearly before a task or order can be created.
+ */
+export async function resolveAndSnapshotTaskLoras(
+  value: unknown,
+  options: LoraRegistryOptions = {},
+): Promise<ImageTaskLora[] | undefined> {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_REGISTERED_LORAS) {
+    throw new Error("invalid_image_task_loras");
+  }
+  const registry = listRegisteredLoras(options);
+  const byId = new Map(registry.map((item) => [item.id, item]));
+  const seen = new Set<string>();
+  const pending: Array<{ id: string; source: LoraRegistrationSource }> = [];
+  let enabledCount = 0;
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid_image_task_lora");
+    const selection = raw as Record<string, unknown>;
+    const id = String(selection.id ?? "");
+    const strength = Number(selection.strength);
+    const enabled = selection.enabled;
+    const item = byId.get(id);
+    if (
+      !item
+      || !validLoraStrength(strength)
+      || typeof enabled !== "boolean"
+      || seen.has(id)
+    ) {
+      throw new Error("invalid_or_unavailable_task_lora");
+    }
+    seen.add(id);
+    if (!enabled) continue;
+    enabledCount += 1;
+    if (item.availability === "registered" && item.registrationSource) {
+      pending.push({ id, source: item.registrationSource });
+    } else if (item.availability !== "ready") {
+      throw new Error("invalid_or_unavailable_task_lora");
+    }
+  }
+  if (enabledCount > MAX_TASK_LORAS) throw new Error("too_many_enabled_loras");
+  for (const item of pending) {
+    await promoteRegisteredLora(item.id, item.source, options);
+  }
+  return snapshotTaskLoras(value, options);
 }
 
 export async function resolveTaskLoraDownloads(

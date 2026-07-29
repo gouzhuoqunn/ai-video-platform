@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
   listRegisteredLoras,
+  parseLoraRegistrationSource,
   registerLoraFromUrl,
+  resolveAndSnapshotTaskLoras,
   snapshotTaskLoras,
   updateRegisteredLora,
   type LoraRegistryOptions,
@@ -121,28 +123,166 @@ function registryOptions(
   };
 }
 
-async function testDefaultRegistry(root: string) {
-  const registryPath = path.join(root, "defaults", "loras.json");
-  mkdirSync(path.dirname(registryPath), { recursive: true });
-  const items = listRegisteredLoras({ registryPath });
-  assert.equal(items.length, 3);
-  assert.deepEqual(items.map((item) => item.name), [
+function noNetworkOptions(registryPath: string, counter: { calls: number }) {
+  return registryOptions(registryPath, async () => {
+    counter.calls += 1;
+    throw new Error("registration_must_not_fetch");
+  });
+}
+
+function selection(id: string, enabled = true, strength = 0.8) {
+  return [{
+    id,
+    name: "browser value is not authoritative",
+    filename: "../browser-value.safetensors",
+    sha256: "0".repeat(64),
+    sizeBytes: 1,
+    strength,
+    enabled,
+  }];
+}
+
+async function testDefaultAndLegacyReadyRegistry(root: string) {
+  const defaultPath = path.join(root, "defaults", "loras.json");
+  mkdirSync(path.dirname(defaultPath), { recursive: true });
+  const defaults = listRegisteredLoras({ registryPath: defaultPath });
+  assert.deepEqual(defaults.map((item) => item.name), [
     "画裸体LoRA",
     "解决男人女器官LoRA",
     "大肌肉阳刚LoRA",
   ]);
-  assert.deepEqual(items.map((item) => item.availability), ["ready", "missing", "missing"]);
-  assert.equal(items[0].defaultStrength, 0.8);
-  assert.equal(items[1].defaultStrength, 0.85);
-  assert.equal(items[2].defaultStrength, 0.75);
-  assert.equal(items[0].defaultEnabled, true);
-  assert.equal(items[1].defaultEnabled, false);
-  assert.equal(items[2].defaultEnabled, false);
-  assert.equal(existsSync(registryPath), false, "read-only default listing must not create registry state");
+  assert.deepEqual(defaults.map((item) => item.availability), ["ready", "missing", "missing"]);
+  assert.equal(existsSync(defaultPath), false, "read-only listing must not create registry state");
+
+  const legacyPath = path.join(root, "legacy-ready", "loras.json");
+  mkdirSync(path.dirname(legacyPath), { recursive: true });
+  const legacyId = "11111111-1111-4111-8111-111111111111";
+  writeFileSync(legacyPath, `${JSON.stringify({
+    schemaVersion: 1,
+    items: [{
+      id: legacyId,
+      name: "旧版 ready LoRA",
+      filename: "legacy.safetensors",
+      defaultStrength: 0.7,
+      defaultEnabled: false,
+      availability: "ready",
+      sha256: HF_SHA,
+      sizeBytes: LORA_SIZE,
+      source: {
+        provider: "huggingface",
+        repository: "org/legacy",
+        revision: HF_COMMIT,
+        path: "legacy.safetensors",
+      },
+      builtIn: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    }],
+  }, null, 2)}\n`);
+  const legacy = listRegisteredLoras({ registryPath: legacyPath }).find((item) => item.id === legacyId);
+  assert.equal(legacy?.availability, "ready");
+  assert.equal(legacy?.registrationSource ?? null, null);
+  assert.equal(snapshotTaskLoras(selection(legacyId), { registryPath: legacyPath })?.[0]?.sha256, HF_SHA);
 }
 
-async function testCivitaiRegistrationPersistenceAndSnapshot(root: string) {
-  const registryPath = path.join(root, "civitai-success", "loras.json");
+async function testRecognizedFormatsRegisterWithoutNetwork(root: string) {
+  const cases = [
+    {
+      label: "用户链接 1",
+      url: "https://civitai.red/models/1988828/better-penis-for-flux-z-imageb-klein-9b",
+      expected: { provider: "civitai", modelId: 1988828, versionId: null, fileId: null },
+    },
+    {
+      label: "用户链接 2",
+      url: "https://civitai.red/models/371317/milkytiger-and-milkybot-and-hu-ku-lior-fursona",
+      expected: { provider: "civitai", modelId: 371317, versionId: null, fileId: null },
+    },
+    {
+      label: "Civitai red 下载",
+      url: "https://civitai.red/api/download/models/2834733?fileId=2720788",
+      expected: { provider: "civitai", modelId: null, versionId: 2834733, fileId: 2720788 },
+    },
+    {
+      label: "Civitai com 页面",
+      url: "https://civitai.com/models/1988828/better-penis-for-flux",
+      expected: { provider: "civitai", modelId: 1988828, versionId: null, fileId: null },
+    },
+    {
+      label: "HuggingFace 页面",
+      url: "https://huggingface.co/org/repo",
+      expected: { provider: "huggingface", repository: "org/repo", revision: null, path: null },
+    },
+    {
+      label: "hf.co 文件",
+      url: "https://hf.co/org/repo/blob/main/weights/model.safetensors",
+      expected: { provider: "huggingface", repository: "org/repo", revision: "main", path: "weights/model.safetensors" },
+    },
+    {
+      label: "直接 safetensors",
+      url: "https://downloads.example.net/files/custom.safetensors",
+      expected: { provider: "direct", inferredFilename: "custom.safetensors" },
+    },
+    {
+      label: "明显下载地址",
+      url: "https://models.example.net/download?id=42",
+      expected: { provider: "direct", inferredFilename: null },
+    },
+  ] as const;
+
+  for (const [index, testCase] of cases.entries()) {
+    const registryPath = path.join(root, "recognized", String(index), "loras.json");
+    const network = { calls: 0 };
+    const parsed = parseLoraRegistrationSource(testCase.url);
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(parsed).filter(([key]) => key !== "originalUrl")),
+      testCase.expected,
+      testCase.label,
+    );
+    const result = await registerLoraFromUrl({
+      name: testCase.label,
+      sourceUrl: testCase.url,
+      defaultStrength: 0.85,
+    }, noNetworkOptions(registryPath, network));
+    assert.equal(network.calls, 0, `${testCase.label} registration must be zero-network`);
+    assert.equal(result.item.availability, "registered");
+    assert.equal(result.item.name, testCase.label);
+    assert.equal(result.item.defaultStrength, 0.85);
+    assert.equal(result.item.sha256, null);
+    assert.equal(result.item.sizeBytes, null);
+    assert.equal(result.item.source, null);
+    assert.equal(result.item.registrationSource?.originalUrl, testCase.url);
+    assert.equal(result.verification.classification, "registered_for_generation_validation");
+    const reread = listRegisteredLoras({ registryPath }).find((item) => item.id === result.item.id);
+    assert.equal(reread?.availability, "registered");
+    assert.deepEqual(reread?.registrationSource, result.item.registrationSource);
+  }
+}
+
+async function testUnrecognizedSourceRejected(root: string) {
+  const registryPath = path.join(root, "unrecognized", "loras.json");
+  const options = noNetworkOptions(registryPath, { calls: 0 });
+  for (const url of [
+    "not a URL",
+    "http://civitai.red/models/123/example",
+    "https://example.com/about",
+    "https://127.0.0.1/model.safetensors",
+    "https://user:password@example.com/model.safetensors",
+  ]) {
+    await assert.rejects(
+      registerLoraFromUrl({
+        name: "无法识别",
+        sourceUrl: url,
+        defaultStrength: 0.8,
+      }, options),
+      /(?:unrecognized|unsupported)_lora_source_url/,
+      url,
+    );
+  }
+  assert.equal(existsSync(registryPath), false);
+}
+
+async function testCivitaiStrictGenerationResolution(root: string) {
+  const registryPath = path.join(root, "civitai-strict", "loras.json");
   const calls: FetchCall[] = [];
   const version = {
     id: 456,
@@ -152,189 +292,114 @@ async function testCivitaiRegistrationPersistenceAndSnapshot(root: string) {
   const fetchImpl: typeof fetch = async (input, init) => {
     const call = callRecord(input, init);
     calls.push(call);
-    if (call.url === "https://civitai.com/api/v1/model-versions/456") {
-      return jsonResponse(version);
-    }
+    if (call.url === "https://civitai.com/api/v1/model-versions/456") return jsonResponse(version);
     if (call.url === "https://civitai.com/api/v1/models/123") {
       return jsonResponse({ id: 123, type: "LORA", modelVersions: [version] });
     }
     if (call.url === "https://civitai.com/api/download/models/456") {
       return redirectResponse("https://cdn.civitai.example/fixture-lora.safetensors");
     }
-    if (call.url === "https://cdn.civitai.example/fixture-lora.safetensors") {
-      return binaryResponse({});
-    }
+    if (call.url === "https://cdn.civitai.example/fixture-lora.safetensors") return binaryResponse({});
     throw new Error(`unexpected_fixture_url:${call.url}`);
   };
-
-  const result = await registerLoraFromUrl({
-    name: "测试 Civitai LoRA",
-    sourceUrl: "https://civitai.com/models/123/fixture?modelVersionId=456&fileId=789",
+  const options = registryOptions(registryPath, fetchImpl);
+  const registered = await registerLoraFromUrl({
+    name: "Civitai red 待下载",
+    sourceUrl: "https://civitai.red/api/download/models/456?fileId=789",
     defaultStrength: 0.7,
-  }, registryOptions(registryPath, fetchImpl));
+  }, options);
+  assert.equal(registered.item.availability, "registered");
+  assert.equal(calls.length, 0, "local registration must not fetch metadata or bytes");
 
-  assert.equal(result.item.name, "测试 Civitai LoRA");
-  assert.equal(result.item.filename, "fixture-lora.safetensors");
-  assert.equal(result.item.sha256, CIVITAI_SHA);
-  assert.equal(result.item.sizeBytes, LORA_SIZE);
-  assert.deepEqual(result.item.source, {
-    provider: "civitai",
-    modelId: 123,
-    versionId: 456,
-    fileId: 789,
-  });
-  assert.equal(result.verification.finalHostname, "cdn.civitai.example");
-  assert.equal(result.verification.redirectCount, 1);
-  assert.equal(result.items.length, 4);
-
-  const civitaiOriginCalls = calls.filter((call) => new URL(call.url).origin === "https://civitai.com");
-  const cdnCalls = calls.filter((call) => new URL(call.url).hostname === "cdn.civitai.example");
-  assert.ok(civitaiOriginCalls.every((call) => call.authorization === "Bearer civitai-local-token"));
-  assert.ok(cdnCalls.every((call) => call.authorization === null), "credential must not cross redirect origin");
-  assert.ok(calls.every((call) => call.redirect === "manual"));
-  assert.ok(calls.some((call) => call.range?.startsWith("bytes=0-")));
-
-  assert.equal(existsSync(registryPath), true);
-  const persisted = JSON.parse(readFileSync(registryPath, "utf8")) as {
-    schemaVersion: number;
-    items: Array<{ id: string; filename: string; sha256: string }>;
-  };
-  assert.equal(persisted.schemaVersion, 1);
-  assert.equal(persisted.items.find((item) => item.id === result.item.id)?.sha256, CIVITAI_SHA);
-  assert.equal(readFileSync(registryPath, "utf8").includes("civitai-local-token"), false);
-  assert.equal(readFileSync(registryPath, "utf8").includes("cdn.civitai.example"), false);
-  assert.equal(existsSync(`${registryPath}.lock`), false);
-
-  const reread = listRegisteredLoras({ registryPath });
-  assert.equal(reread.find((item) => item.id === result.item.id)?.filename, "fixture-lora.safetensors");
   const updated = updateRegisteredLora({
-    id: result.item.id,
+    id: registered.item.id,
     name: "已编辑 Civitai LoRA",
     defaultStrength: 1.15,
   }, { registryPath });
   assert.equal(updated.item.name, "已编辑 Civitai LoRA");
-  assert.equal(updated.item.defaultStrength, 1.15);
-  const rereadUpdated = listRegisteredLoras({ registryPath }).find((item) => item.id === result.item.id);
-  assert.equal(rereadUpdated?.name, "已编辑 Civitai LoRA");
-  assert.equal(rereadUpdated?.defaultStrength, 1.15);
 
-  const snapshot = snapshotTaskLoras([{
-    id: result.item.id,
-    name: "browser-spoof",
-    filename: "../browser-spoof.safetensors",
-    sha256: "0".repeat(64),
-    sizeBytes: 1,
-    strength: 1.25,
-    enabled: true,
-  }], { registryPath });
+  const snapshot = await resolveAndSnapshotTaskLoras(selection(registered.item.id, true, 1.25), options);
   assert.deepEqual(snapshot, [{
-    id: result.item.id,
+    id: registered.item.id,
     name: "已编辑 Civitai LoRA",
     filename: "fixture-lora.safetensors",
     strength: 1.25,
     enabled: true,
     sha256: CIVITAI_SHA,
     sizeBytes: LORA_SIZE,
-  }], "task identity must be an authoritative registry snapshot");
-  assert.deepEqual(snapshotTaskLoras([], { registryPath }), []);
-  assert.equal(snapshotTaskLoras(undefined, { registryPath }), undefined);
+  }], "task identity must come from strict provider resolution, never browser fields");
+  const ready = listRegisteredLoras({ registryPath }).find((item) => item.id === registered.item.id);
+  assert.equal(ready?.availability, "ready");
+  assert.deepEqual(ready?.source, {
+    provider: "civitai",
+    modelId: 123,
+    versionId: 456,
+    fileId: 789,
+  });
+  assert.ok(calls.every((call) => call.redirect === "manual"));
+  assert.ok(calls.some((call) => call.range?.startsWith("bytes=0-")));
+  assert.ok(calls.filter((call) => new URL(call.url).origin === "https://civitai.com")
+    .every((call) => call.authorization === "Bearer civitai-local-token"));
+  assert.ok(calls.filter((call) => new URL(call.url).hostname === "cdn.civitai.example")
+    .every((call) => call.authorization === null));
 }
 
-async function testCivitaiAmbiguousPageThenSpecificDownload(root: string) {
-  const registryPath = path.join(root, "civitai-specific", "loras.json");
-  let invalidFileDownloadCalls = 0;
-  const ambiguousVersion = {
-    id: 900,
-    modelId: 88,
-    files: [
-      civitaiFile({
-        id: 701,
-        name: "first.safetensors",
-        sha256: "d".repeat(64),
-        primary: false,
-        downloadUrl: "https://civitai.com/api/download/models/900?fileId=701",
-      }),
-      civitaiFile({
-        id: 702,
-        name: "second.safetensors",
-        sha256: "e".repeat(64),
-        primary: false,
-        downloadUrl: "https://civitai.com/api/download/models/900?fileId=702",
-      }),
-    ],
-  };
-  const primaryVersion = {
+async function testDisabledRegisteredDoesNotResolve(root: string) {
+  const registryPath = path.join(root, "disabled", "loras.json");
+  const network = { calls: 0 };
+  const options = noNetworkOptions(registryPath, network);
+  const registered = await registerLoraFromUrl({
+    name: "未启用待下载",
+    sourceUrl: "https://civitai.red/models/1988828/example",
+    defaultStrength: 0.8,
+  }, options);
+  assert.deepEqual(
+    await resolveAndSnapshotTaskLoras(selection(registered.item.id, false), options),
+    [],
+  );
+  assert.equal(network.calls, 0);
+  assert.equal(
+    listRegisteredLoras({ registryPath }).find((item) => item.id === registered.item.id)?.availability,
+    "registered",
+  );
+}
+
+async function testExplicitCivitaiFileMismatchFailsAtGeneration(root: string) {
+  const registryPath = path.join(root, "civitai-file-mismatch", "loras.json");
+  let binaryCalls = 0;
+  const version = {
     id: 901,
     modelId: 88,
-    files: [
-      civitaiFile({
-        id: 703,
-        name: "primary.safetensors",
-        sha256: "f".repeat(64),
-        primary: true,
-        downloadUrl: "https://civitai.com/api/download/models/901?fileId=703",
-      }),
-    ],
+    files: [civitaiFile({ id: 703, name: "primary.safetensors", sha256: "f".repeat(64) })],
   };
   const fetchImpl: typeof fetch = async (input, init) => {
     const call = callRecord(input, init);
+    if (call.url === "https://civitai.com/api/v1/model-versions/901") return jsonResponse(version);
     if (call.url === "https://civitai.com/api/v1/models/88") {
-      return jsonResponse({ id: 88, type: "LORA", modelVersions: [ambiguousVersion] });
+      return jsonResponse({ id: 88, type: "LORA", modelVersions: [version] });
     }
-    if (call.url === "https://civitai.com/api/v1/model-versions/900") {
-      return jsonResponse(ambiguousVersion);
-    }
-    if (call.url === "https://civitai.com/api/v1/model-versions/901") {
-      return jsonResponse(primaryVersion);
-    }
-    if (call.url === "https://civitai.com/api/download/models/900?fileId=702") {
-      return binaryResponse({});
-    }
-    if (call.url === "https://civitai.com/api/download/models/901?fileId=703") {
-      invalidFileDownloadCalls += 1;
-      return binaryResponse({});
-    }
-    throw new Error(`unexpected_fixture_url:${call.url}`);
+    binaryCalls += 1;
+    throw new Error(`binary_must_not_run:${call.url}`);
   };
   const options = registryOptions(registryPath, fetchImpl);
-
-  await assert.rejects(
-    registerLoraFromUrl({
-      name: "歧义页面",
-      sourceUrl: "https://civitai.com/models/88/ambiguous",
-      defaultStrength: 0.8,
-    }, options),
-    /civitai_lora_file_ambiguous_or_missing/,
-  );
-  assert.equal(existsSync(registryPath), false, "failed source resolution must not persist partial state");
-
-  await assert.rejects(
-    registerLoraFromUrl({
-      name: "不存在的明确文件",
-      sourceUrl: "https://civitai.com/api/download/models/901?fileId=999",
-      defaultStrength: 0.8,
-    }, options),
-    /civitai_lora_file_ambiguous_or_missing/,
-  );
-  assert.equal(invalidFileDownloadCalls, 0, "an explicit missing fileId must never fall back to the primary file");
-  assert.equal(existsSync(registryPath), false, "an explicit fileId mismatch must not persist partial state");
-
-  const specific = await registerLoraFromUrl({
-    name: "明确文件",
-    sourceUrl: "https://civitai.com/api/download/models/900?fileId=702",
-    defaultStrength: 0.9,
+  const registered = await registerLoraFromUrl({
+    name: "不存在的明确文件",
+    sourceUrl: "https://civitai.red/api/download/models/901?fileId=999",
+    defaultStrength: 0.8,
   }, options);
-  assert.equal(specific.item.filename, "second.safetensors");
-  assert.equal(specific.item.sha256, "e".repeat(64));
-  assert.deepEqual(specific.item.source, {
-    provider: "civitai",
-    modelId: 88,
-    versionId: 900,
-    fileId: 702,
-  });
+  assert.equal(registered.item.availability, "registered");
+  await assert.rejects(
+    resolveAndSnapshotTaskLoras(selection(registered.item.id), options),
+    /civitai_lora_file_ambiguous_or_missing/,
+  );
+  assert.equal(binaryCalls, 0);
+  assert.equal(
+    listRegisteredLoras({ registryPath }).find((item) => item.id === registered.item.id)?.availability,
+    "registered",
+  );
 }
 
-async function testHuggingFaceImmutableRevision(root: string) {
+async function testHuggingFaceStrictGenerationResolution(root: string) {
   const registryPath = path.join(root, "huggingface", "loras.json");
   const calls: FetchCall[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
@@ -352,36 +417,34 @@ async function testHuggingFaceImmutableRevision(root: string) {
     if (call.url === `https://huggingface.co/org/repo/resolve/${HF_COMMIT}/weights/fixture-hf.safetensors`) {
       return redirectResponse("https://cdn.huggingface.example/fixture-hf.safetensors");
     }
-    if (call.url === "https://cdn.huggingface.example/fixture-hf.safetensors") {
-      return binaryResponse({});
-    }
+    if (call.url === "https://cdn.huggingface.example/fixture-hf.safetensors") return binaryResponse({});
     throw new Error(`unexpected_fixture_url:${call.url}`);
   };
-
-  const result = await registerLoraFromUrl({
+  const options = registryOptions(registryPath, fetchImpl);
+  const registered = await registerLoraFromUrl({
     name: "HF 固定提交 LoRA",
-    sourceUrl: "https://huggingface.co/org/repo/blob/main/weights/fixture-hf.safetensors",
+    sourceUrl: "https://hf.co/org/repo/blob/main/weights/fixture-hf.safetensors",
     defaultStrength: 0.65,
-  }, registryOptions(registryPath, fetchImpl));
-
-  assert.deepEqual(result.item.source, {
-    provider: "huggingface",
-    repository: "org/repo",
-    revision: HF_COMMIT,
-    path: "weights/fixture-hf.safetensors",
-  });
-  assert.equal(result.item.sha256, HF_SHA);
+  }, options);
+  assert.equal(calls.length, 0);
+  const snapshot = await resolveAndSnapshotTaskLoras(selection(registered.item.id), options);
+  assert.equal(snapshot?.[0]?.sha256, HF_SHA);
+  assert.deepEqual(
+    listRegisteredLoras({ registryPath }).find((item) => item.id === registered.item.id)?.source,
+    {
+      provider: "huggingface",
+      repository: "org/repo",
+      revision: HF_COMMIT,
+      path: "weights/fixture-hf.safetensors",
+    },
+  );
   assert.ok(calls.some((call) =>
     call.url === `https://huggingface.co/org/repo/resolve/${HF_COMMIT}/weights/fixture-hf.safetensors`));
   assert.equal(calls.some((call) => /\/resolve\/main\//.test(call.url)), false);
-  assert.ok(calls.filter((call) => new URL(call.url).origin === "https://huggingface.co")
-    .every((call) => call.authorization === "Bearer hf-local-token"));
-  assert.ok(calls.filter((call) => new URL(call.url).hostname === "cdn.huggingface.example")
-    .every((call) => call.authorization === null));
 }
 
-async function testHuggingFaceRemoteDeliveryMustBeTokenless(root: string) {
-  const registryPath = path.join(root, "huggingface-tokenless", "loras.json");
+async function testPrivateHuggingFaceRegistersThenFailsClearly(root: string) {
+  const registryPath = path.join(root, "huggingface-private", "loras.json");
   let tokenlessDeliveryCalls = 0;
   const fetchImpl: typeof fetch = async (input, init) => {
     const call = callRecord(input, init);
@@ -401,68 +464,83 @@ async function testHuggingFaceRemoteDeliveryMustBeTokenless(root: string) {
     }
     throw new Error(`unexpected_fixture_url:${call.url}`);
   };
-
+  const options = registryOptions(registryPath, fetchImpl);
+  const registered = await registerLoraFromUrl({
+    name: "私有 HF",
+    sourceUrl: "https://huggingface.co/org/private/blob/main/private.safetensors",
+    defaultStrength: 0.8,
+  }, options);
   await assert.rejects(
-    registerLoraFromUrl({
-      name: "只能携带本地令牌下载的 LoRA",
-      sourceUrl: "https://huggingface.co/org/private/blob/main/private.safetensors",
-      defaultStrength: 0.8,
-    }, registryOptions(registryPath, fetchImpl)),
+    resolveAndSnapshotTaskLoras(selection(registered.item.id), options),
     /huggingface_lora_remote_delivery_requires_local_token/,
   );
-  assert.equal(tokenlessDeliveryCalls, 1, "registration must prove the paid Agent can download without the local HF token");
-  assert.equal(existsSync(registryPath), false);
+  assert.equal(tokenlessDeliveryCalls, 1);
+  assert.equal(
+    listRegisteredLoras({ registryPath }).find((item) => item.id === registered.item.id)?.availability,
+    "registered",
+  );
 }
 
-async function testPrivateDnsRejected(root: string) {
-  const registryPath = path.join(root, "private-dns", "loras.json");
-  let fetchCalls = 0;
-  const fetchImpl: typeof fetch = async () => {
-    fetchCalls += 1;
-    throw new Error("fetch_must_not_run");
-  };
+async function testDirectRegistersButNeedsTrustedIdentity(root: string) {
+  const registryPath = path.join(root, "direct", "loras.json");
+  const network = { calls: 0 };
+  const options = noNetworkOptions(registryPath, network);
+  const registered = await registerLoraFromUrl({
+    name: "直接下载",
+    sourceUrl: "https://downloads.example.net/files/direct.safetensors",
+    defaultStrength: 0.9,
+  }, options);
+  assert.equal(registered.item.availability, "registered");
+  assert.equal(registered.item.filename, "direct.safetensors");
   await assert.rejects(
-    registerLoraFromUrl({
-      name: "私网拒绝",
-      sourceUrl: "https://huggingface.co/org/repo/blob/main/private.safetensors",
-      defaultStrength: 0.8,
-    }, registryOptions(registryPath, fetchImpl, {
-      resolveHostname: async () => ["127.0.0.1"],
-    })),
+    resolveAndSnapshotTaskLoras(selection(registered.item.id), options),
+    /direct_lora_source_identity_unavailable/,
+  );
+  assert.equal(network.calls, 0);
+}
+
+async function testStrictResolutionNetworkGuards(root: string) {
+  const privatePath = path.join(root, "private-dns", "loras.json");
+  let privateFetchCalls = 0;
+  const privateOptions = registryOptions(privatePath, async () => {
+    privateFetchCalls += 1;
+    throw new Error("fetch_must_not_run");
+  }, { resolveHostname: async () => ["127.0.0.1"] });
+  const privateItem = await registerLoraFromUrl({
+    name: "私网拒绝",
+    sourceUrl: "https://huggingface.co/org/repo/blob/main/private.safetensors",
+    defaultStrength: 0.8,
+  }, privateOptions);
+  await assert.rejects(
+    resolveAndSnapshotTaskLoras(selection(privateItem.item.id), privateOptions),
     /lora_source_nonpublic_address/,
   );
-  assert.equal(fetchCalls, 0);
-  assert.equal(existsSync(registryPath), false);
-}
+  assert.equal(privateFetchCalls, 0);
 
-async function testNetworkTimeout(root: string) {
-  const registryPath = path.join(root, "timeout", "loras.json");
-  const fetchImpl: typeof fetch = async (_input, init) => await new Promise<Response>((_resolve, reject) => {
+  const timeoutPath = path.join(root, "timeout", "loras.json");
+  const timeoutFetch: typeof fetch = async (_input, init) => await new Promise<Response>((_resolve, reject) => {
     const fail = () => {
       const error = new Error("fixture_aborted");
       error.name = "AbortError";
       reject(error);
     };
-    if (init?.signal?.aborted) {
-      fail();
-      return;
-    }
-    init?.signal?.addEventListener("abort", fail, { once: true });
+    if (init?.signal?.aborted) fail();
+    else init?.signal?.addEventListener("abort", fail, { once: true });
   });
-
+  const timeoutOptions = registryOptions(timeoutPath, timeoutFetch, { timeoutMs: 15 });
+  const timeoutItem = await registerLoraFromUrl({
+    name: "超时 LoRA",
+    sourceUrl: "https://huggingface.co/org/repo/blob/main/timeout.safetensors",
+    defaultStrength: 0.8,
+  }, timeoutOptions);
   await assert.rejects(
-    registerLoraFromUrl({
-      name: "超时 LoRA",
-      sourceUrl: "https://huggingface.co/org/repo/blob/main/timeout.safetensors",
-      defaultStrength: 0.8,
-    }, registryOptions(registryPath, fetchImpl, { timeoutMs: 15 })),
+    resolveAndSnapshotTaskLoras(selection(timeoutItem.item.id), timeoutOptions),
     /(?:lora_source_timeout|fixture_aborted)/,
   );
-  assert.equal(existsSync(registryPath), false);
 }
 
-async function testStalledBinaryBodyAndCancelTimeout(root: string) {
-  const registryPath = path.join(root, "stalled-binary-body", "loras.json");
+async function testStalledBodyTerminatesAtStrictResolution(root: string) {
+  const registryPath = path.join(root, "stalled-body", "loras.json");
   let binarySignal: AbortSignal | null = null;
   let cancelCalls = 0;
   const fetchImpl: typeof fetch = async (input, init) => {
@@ -498,22 +576,22 @@ async function testStalledBinaryBodyAndCancelTimeout(root: string) {
     }
     throw new Error(`unexpected_fixture_url:${call.url}`);
   };
-
+  const options = registryOptions(registryPath, fetchImpl, { timeoutMs: 30 });
+  const registered = await registerLoraFromUrl({
+    name: "正文停滞 LoRA",
+    sourceUrl: "https://huggingface.co/org/stalled/blob/main/stalled.safetensors",
+    defaultStrength: 0.8,
+  }, options);
   const started = Date.now();
   await assert.rejects(
-    registerLoraFromUrl({
-      name: "正文停滞 LoRA",
-      sourceUrl: "https://huggingface.co/org/stalled/blob/main/stalled.safetensors",
-      defaultStrength: 0.8,
-    }, registryOptions(registryPath, fetchImpl, { timeoutMs: 30 })),
+    resolveAndSnapshotTaskLoras(selection(registered.item.id), options),
     /lora_source_timeout/,
   );
   const elapsedMs = Date.now() - started;
   assert.ok(binarySignal);
-  assert.equal(binarySignal.aborted, true, "the total AbortController must remain armed after response headers");
-  assert.equal(cancelCalls, 1, "the stalled reader must receive one cancellation attempt");
+  assert.equal(binarySignal.aborted, true);
+  assert.equal(cancelCalls, 1);
   assert.ok(elapsedMs < 1_500, `stalled body/cancel must terminate promptly, elapsed=${elapsedMs}ms`);
-  assert.equal(existsSync(registryPath), false);
 }
 
 function hfFixtureFetch(input: {
@@ -546,60 +624,59 @@ function hfFixtureFetch(input: {
   }) as typeof fetch;
 }
 
-async function testIntegrityFailures(root: string) {
-  const sourceUrl = "https://huggingface.co/org/integrity/blob/main/integrity.safetensors";
+async function registerThenResolveIntegrityFixture(
+  registryPath: string,
+  fetchImpl: typeof fetch,
+) {
+  const options = registryOptions(registryPath, fetchImpl);
+  const registered = await registerLoraFromUrl({
+    name: "完整性测试",
+    sourceUrl: "https://huggingface.co/org/integrity/blob/main/integrity.safetensors",
+    defaultStrength: 0.8,
+  }, options);
+  assert.equal(registered.item.availability, "registered");
+  return resolveAndSnapshotTaskLoras(selection(registered.item.id), options);
+}
 
-  const badHashPath = path.join(root, "bad-hash", "loras.json");
+async function testIntegrityFailuresOccurAtStrictResolution(root: string) {
   await assert.rejects(
-    registerLoraFromUrl({
-      name: "错误哈希",
-      sourceUrl,
-      defaultStrength: 0.8,
-    }, registryOptions(badHashPath, hfFixtureFetch({ metadataSha: "not-a-sha256" }))),
+    registerThenResolveIntegrityFixture(
+      path.join(root, "bad-hash", "loras.json"),
+      hfFixtureFetch({ metadataSha: "not-a-sha256" }),
+    ),
     /huggingface_lora_identity_incomplete/,
   );
-  assert.equal(existsSync(badHashPath), false);
-
-  const badSizePath = path.join(root, "bad-size", "loras.json");
   await assert.rejects(
-    registerLoraFromUrl({
-      name: "错误大小",
-      sourceUrl,
-      defaultStrength: 0.8,
-    }, registryOptions(badSizePath, hfFixtureFetch({
-      metadataSize: LORA_SIZE + 1,
-      binarySize: LORA_SIZE,
-    }))),
+    registerThenResolveIntegrityFixture(
+      path.join(root, "bad-size", "loras.json"),
+      hfFixtureFetch({ metadataSize: LORA_SIZE + 1, binarySize: LORA_SIZE }),
+    ),
     /huggingface_lora_size_mismatch/,
   );
-  assert.equal(existsSync(badSizePath), false);
-
-  const corruptPath = path.join(root, "corrupt-header", "loras.json");
   await assert.rejects(
-    registerLoraFromUrl({
-      name: "损坏 safetensors",
-      sourceUrl,
-      defaultStrength: 0.8,
-    }, registryOptions(corruptPath, hfFixtureFetch({
-      binaryBody: Buffer.alloc(32),
-    }))),
+    registerThenResolveIntegrityFixture(
+      path.join(root, "corrupt-header", "loras.json"),
+      hfFixtureFetch({ binaryBody: Buffer.alloc(32) }),
+    ),
     /invalid_safetensors_header_length/,
   );
-  assert.equal(existsSync(corruptPath), false);
 }
 
 async function main() {
   const root = mkdtempSync(path.join(os.tmpdir(), "image-lora-registry-"));
   const checks: Array<[string, () => Promise<void>]> = [
-    ["默认三项", () => testDefaultRegistry(root)],
-    ["Civitai 注册、持久化与任务快照", () => testCivitaiRegistrationPersistenceAndSnapshot(root)],
-    ["Civitai 歧义页面失败后使用具体下载链接", () => testCivitaiAmbiguousPageThenSpecificDownload(root)],
-    ["HuggingFace 分支固定到不可变提交", () => testHuggingFaceImmutableRevision(root)],
-    ["HuggingFace 远端交付不得依赖本地令牌", () => testHuggingFaceRemoteDeliveryMustBeTokenless(root)],
-    ["DNS 私网地址拒绝", () => testPrivateDnsRejected(root)],
-    ["网络请求超时", () => testNetworkTimeout(root)],
-    ["响应正文与取消操作均有界", () => testStalledBinaryBodyAndCancelTimeout(root)],
-    ["错误哈希、错误大小与损坏 safetensors", () => testIntegrityFailures(root)],
+    ["默认项与旧 ready 记录兼容", () => testDefaultAndLegacyReadyRegistry(root)],
+    ["Civitai red/com、HF/hf.co 与直链均零网络注册", () => testRecognizedFormatsRegisterWithoutNetwork(root)],
+    ["无法识别或不安全链接明确拒绝", () => testUnrecognizedSourceRejected(root)],
+    ["Civitai 待下载项在任务创建前严格晋升", () => testCivitaiStrictGenerationResolution(root)],
+    ["未启用待下载项不访问网络", () => testDisabledRegisteredDoesNotResolve(root)],
+    ["明确 Civitai fileId 不匹配在生成前失败", () => testExplicitCivitaiFileMismatchFailsAtGeneration(root)],
+    ["HuggingFace/hf.co 在任务创建前固定不可变身份", () => testHuggingFaceStrictGenerationResolution(root)],
+    ["私有 HuggingFace 可注册但无令牌远端交付失败", () => testPrivateHuggingFaceRegistersThenFailsClearly(root)],
+    ["直接文件可注册但缺可信身份时清晰失败", () => testDirectRegistersButNeedsTrustedIdentity(root)],
+    ["严格解析保留 DNS 与超时保护", () => testStrictResolutionNetworkGuards(root)],
+    ["严格解析正文停滞可有界退出", () => testStalledBodyTerminatesAtStrictResolution(root)],
+    ["哈希、大小与 safetensors 损坏在严格解析阶段拒绝", () => testIntegrityFailuresOccurAtStrictResolution(root)],
   ];
   let passed = 0;
   try {

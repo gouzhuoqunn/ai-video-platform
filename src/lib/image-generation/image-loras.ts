@@ -39,16 +39,48 @@ export type LoraSourceLocator =
     path: string;
   };
 
+/**
+ * A syntactically recognized user-supplied source. Unlike
+ * `LoraSourceLocator`, this is not an immutable file identity: it is allowed
+ * to omit version/file/hash information until the task-creation boundary
+ * resolves the provider metadata.
+ */
+export type LoraRegistrationSource =
+  | {
+    provider: "civitai";
+    originalUrl: string;
+    modelId: number | null;
+    versionId: number | null;
+    fileId: number | null;
+  }
+  | {
+    provider: "huggingface";
+    originalUrl: string;
+    repository: string;
+    revision: string | null;
+    path: string | null;
+  }
+  | {
+    provider: "direct";
+    originalUrl: string;
+    inferredFilename: string | null;
+  };
+
 export type RegisteredLora = {
   id: string;
   name: string;
   filename: string;
   defaultStrength: number;
   defaultEnabled: boolean;
-  availability: "ready" | "missing";
+  availability: "ready" | "registered" | "missing";
   sha256: string | null;
   sizeBytes: number | null;
   source: LoraSourceLocator | null;
+  /**
+   * Server-private input used to resolve a `registered` item. It is optional
+   * so existing schema-v1 `ready` records remain valid without migration.
+   */
+  registrationSource?: LoraRegistrationSource | null;
   builtIn: boolean;
   createdAt: string;
   updatedAt: string;

@@ -1,6 +1,9 @@
 export const HISTORICAL_RENTED_CANDIDATE_MESSAGE = "候选显卡已被其他用户租用，上次启动已结束，可以重新尝试。";
 export const HISTORICAL_RUNNER_GENERIC_MESSAGE = "上次启动未完成，当前没有活动订单，可以重新尝试。";
 export const HISTORICAL_AGENT_STAGE_MESSAGE = "运行环境控制服务响应不兼容，尚未进入模型加载或图片生成，订单已安全退租。";
+export const CURRENT_MODEL_DOWNLOAD_MESSAGE = "模型下载或完整性校验失败，系统正在安全清理订单；请打开“当下日志”查看具体文件原因。";
+export const HISTORICAL_MODEL_DOWNLOAD_MESSAGE = "上次模型下载或完整性校验失败，订单已结束；请打开“当下日志”查看具体文件原因后修正来源再重试。";
+export const MODEL_DOWNLOAD_FAILURE_CLASSIFICATION = "model_download_or_integrity_failed";
 export const CURRENT_CREATE_RATE_LIMIT_MESSAGE = "创建订单请求受到限流，正在核对订单状态，请稍候重试。";
 export const HISTORICAL_CREATE_RATE_LIMIT_MESSAGE = "上次创建订单请求受到限流，当前没有活动订单，可以重新尝试。";
 export const CREATE_RATE_LIMIT_CLASSIFICATION = "create_rate_limited";
@@ -28,6 +31,11 @@ function rentedCandidateCode6(message: string, classification?: string) {
 
 function agentStageAcceptanceFailure(message: string) {
   return /^agent_stage_acceptance_invalid:[a-z_]+$/i.test(message);
+}
+
+function modelDownloadFailure(message: string, classification?: string) {
+  return /(?:model_download_(?:http_error|incomplete_after_retries|exceeds_expected_size|invalid_range)|model_sha256_mismatch|invalid_lora_safetensors|lora_safetensors|model_source_(?:size_mismatch|http)|task_lora_source_identity_mismatch)/i
+    .test(`${classification ?? ""} ${message}`);
 }
 
 function priorSessionAutoRecovery(message: string) {
@@ -61,6 +69,7 @@ function safeCurrentMessage(error: RunnerError) {
   if (priorSessionManualRecovery(error.message)) return PRIOR_SESSION_MANUAL_RECOVERY_MESSAGE;
   if (priorSessionAutoRecovery(error.message)) return PRIOR_SESSION_AUTO_RECOVERY_MESSAGE;
   if (createRateLimitFailure(error)) return CURRENT_CREATE_RATE_LIMIT_MESSAGE;
+  if (modelDownloadFailure(error.message, error.classification)) return CURRENT_MODEL_DOWNLOAD_MESSAGE;
   return providerPayload(error.message) ? "启动请求遇到服务端错误，请先停止并检查运行状态。" : error.message;
 }
 
@@ -68,6 +77,7 @@ function safeClassification(error: RunnerError) {
   if (priorSessionManualRecovery(error.message)) return PRIOR_SESSION_MANUAL_RECOVERY_CLASSIFICATION;
   if (priorSessionAutoRecovery(error.message)) return PRIOR_SESSION_RECOVERY_CLASSIFICATION;
   if (createRateLimitFailure(error)) return CREATE_RATE_LIMIT_CLASSIFICATION;
+  if (modelDownloadFailure(error.message, error.classification)) return MODEL_DOWNLOAD_FAILURE_CLASSIFICATION;
   if (rentedCandidateCode6(error.message, error.classification)) return "candidate_already_rented";
   if (["rate_limited", "authentication_failed", "transport_failed", "invalid_json", "schema_incompatible", "provider_error"].includes(error.classification ?? "")) return error.classification;
   return undefined;
@@ -105,13 +115,19 @@ export function projectRunnerStatus(runner: RunnerLike, state: { pidAlive: boole
     const createRateLimited = createRateLimitFailure(runner.error);
     const marketMessage = historicalMarketMessage(runner.error.classification);
     const autoRecovery = priorSessionAutoRecovery(runner.error.message);
+    const modelFailure = modelDownloadFailure(runner.error.message, runner.error.classification);
     const displayMessage = autoRecovery
       ? PRIOR_SESSION_AUTO_RECOVERY_MESSAGE
       : createRateLimited
       ? HISTORICAL_CREATE_RATE_LIMIT_MESSAGE
       : rented
         ? HISTORICAL_RENTED_CANDIDATE_MESSAGE
-        : marketMessage ?? (agentStageAcceptanceFailure(runner.error.message) ? HISTORICAL_AGENT_STAGE_MESSAGE : HISTORICAL_RUNNER_GENERIC_MESSAGE);
+        : marketMessage
+          ?? (modelFailure
+            ? HISTORICAL_MODEL_DOWNLOAD_MESSAGE
+            : agentStageAcceptanceFailure(runner.error.message)
+              ? HISTORICAL_AGENT_STAGE_MESSAGE
+              : HISTORICAL_RUNNER_GENERIC_MESSAGE);
     return {
       error: {
         stage: runner.error.stage,
@@ -127,7 +143,9 @@ export function projectRunnerStatus(runner: RunnerLike, state: { pidAlive: boole
             ? "candidate_already_rented"
             : marketMessage
               ? runner.error.classification
-              : undefined,
+              : modelFailure
+                ? MODEL_DOWNLOAD_FAILURE_CLASSIFICATION
+                : undefined,
       },
       blocker: null,
     };
@@ -135,6 +153,10 @@ export function projectRunnerStatus(runner: RunnerLike, state: { pidAlive: boole
   const displayMessage = safeCurrentMessage(runner.error);
   return {
     error: { stage: runner.error.stage, at: runner.error.at, displayMessage, isBlocking: true, historical: false, classification: safeClassification(runner.error) },
-    blocker: runner.blocker && (providerPayload(runner.blocker) || createRateLimitFailure({ ...runner.error, message: runner.blocker })) ? displayMessage : runner.blocker ?? displayMessage,
+    blocker: runner.blocker && (
+      providerPayload(runner.blocker)
+      || createRateLimitFailure({ ...runner.error, message: runner.blocker })
+      || modelDownloadFailure(runner.blocker, runner.error.classification)
+    ) ? displayMessage : runner.blocker ?? displayMessage,
   };
 }

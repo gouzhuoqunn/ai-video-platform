@@ -151,19 +151,26 @@ async function main() {
         return;
       }
       if (String(body.sourceUrl).includes("invalid")) {
-        await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "测试 LoRA 链接无效，没有保存任何文件。", code: "unsupported_lora_source_url" }) });
+        await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "无法识别此链接，请提供 Civitai 模型页、带 fileId 的下载链接，或 HuggingFace 模型地址。", code: "unsupported_lora_source_url" }) });
         return;
       }
       const item: RegisteredLora = {
         id: addedLoraId,
         name: String(body.name),
-        filename: "newly-added.safetensors",
+        filename: "",
         defaultStrength: Number(body.defaultStrength),
         defaultEnabled: false,
-        availability: "ready",
-        sha256: "4".repeat(64),
-        sizeBytes: 22_000_000,
-        source: { provider: "huggingface", repository: "fixture/loras", revision: "b".repeat(40), path: "newly-added.safetensors" },
+        availability: "registered",
+        sha256: null,
+        sizeBytes: null,
+        source: null,
+        registrationSource: {
+          provider: "civitai",
+          originalUrl: String(body.sourceUrl),
+          modelId: 1_988_828,
+          versionId: null,
+          fileId: null,
+        },
         builtIn: false,
         createdAt: loraTimestamp,
         updatedAt: loraTimestamp,
@@ -209,12 +216,14 @@ async function main() {
     await addLoraDialog.getByRole("button", { name: "校验并注册" }).click();
     const modalError = addLoraDialog.getByRole("alert");
     await modalError.waitFor({ state: "visible" });
-    assert.match(await modalError.innerText(), /测试 LoRA 链接无效/);
+    assert.match(await modalError.innerText(), /无法识别此链接/);
     assert.equal(await loraPanel.locator(':scope > [role="alert"]').count(), 0, "open modal must not duplicate its error beneath the overlay");
-    await addLoraDialog.getByLabel("Civitai 或 HuggingFace 链接").fill("https://huggingface.co/fixture/loras/blob/main/newly-added.safetensors");
+    await addLoraDialog.getByLabel("Civitai 或 HuggingFace 链接").fill("https://civitai.red/models/1988828/better-penis-for-flux-z-imageb-klein-9b");
     await addLoraDialog.getByRole("button", { name: "校验并注册" }).click();
     await addLoraDialog.waitFor({ state: "detached" });
     await loraPanel.getByText("测试新增LoRA", { exact: true }).waitFor({ state: "visible" });
+    assert.match(await loraPanel.getByText("测试新增LoRA", { exact: true }).locator("xpath=ancestor::article").innerText(), /已注册，生成时下载并校验/);
+    await loraPanel.getByLabel("启用 测试新增LoRA").check();
     await loraPanel.getByLabel("启用 解决男人女器官LoRA").check();
 
     const promptTab = page.getByRole("button", { name: /^提示词/ });
@@ -304,7 +313,7 @@ async function main() {
     ]);
     assert.deepEqual(
       submittedLoras.map((item) => item.enabled),
-      [true, true, false, false],
+      [true, true, false, true],
       "the task snapshot must preserve disabled LoRAs while runtime filtering remains downstream",
     );
     assert.equal(await createButton.getAttribute("aria-busy"), "true");
