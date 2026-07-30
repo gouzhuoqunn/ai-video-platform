@@ -60,6 +60,7 @@ MAX_ADDITIONAL_LORAS = 16
 MAX_TASK_LORAS = 8
 MAX_ADDITIONAL_LORA_BYTES = 8 * 1024 * 1024 * 1024
 MAX_SINGLE_LORA_BYTES = 4 * 1024 * 1024 * 1024
+MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024 * 1024
 MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024
 MAX_MODEL_DOWNLOAD_REDIRECTS = 5
 MODEL_DOWNLOAD_DNS_TIMEOUT_SECONDS = 10
@@ -77,7 +78,7 @@ APPROVED_MODELS = {
 }
 STATE_LOCK = threading.Lock()
 STAGE_GATE = threading.Lock()
-STATE: dict[str, Any] = {"alive": True, "started_at": None, "current_stage": "idle", "current_stage_run_id": None, "last_error": None, "stages": {}, "models": {}, "lora_files": {}}
+STATE: dict[str, Any] = {"alive": True, "started_at": None, "current_stage": "idle", "current_stage_run_id": None, "last_error": None, "stages": {}, "models": {}, "checkpoints": {}, "lora_files": {}}
 CHILDREN: dict[str, subprocess.Popen[str]] = {}
 CONFIG: dict[str, str] = {}
 
@@ -640,10 +641,13 @@ def open_model_download(
 
 
 def validate_manifest(payload: object) -> list[dict[str, Any]]:
+    family = payload.get("family", "flux1") if isinstance(payload, dict) else None
+    if family == "sdxl":
+        return validate_sdxl_manifest(payload)
     entries = payload.get("models") if isinstance(payload, dict) else None
     if (
         not isinstance(payload, dict)
-        or not set(payload).issubset({"models", "loras"})
+        or not set(payload).issubset({"family", "models", "loras"})
         or not isinstance(entries, list)
         or len(entries) != len(APPROVED_MODELS)
     ):
@@ -699,11 +703,81 @@ def validate_manifest(payload: object) -> list[dict[str, Any]]:
     return result
 
 
+def validate_sdxl_manifest(payload: object) -> list[dict[str, Any]]:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) - {"family", "checkpoints", "loras"}
+        or payload.get("family") != "sdxl"
+        or not isinstance(payload.get("checkpoints"), list)
+        or not 1 <= len(payload["checkpoints"]) <= 8
+    ):
+        raise ValueError("invalid_sdxl_model_manifest")
+    result: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_names: set[str] = set()
+    for entry in payload["checkpoints"]:
+        if not isinstance(entry, dict) or set(entry) != {"id", "filename", "url", "sha256", "size_bytes"}:
+            raise ValueError("invalid_checkpoint_manifest_fields")
+        checkpoint_id = entry["id"]; filename = entry["filename"]
+        digest = entry["sha256"]; size = entry["size_bytes"]
+        if not isinstance(checkpoint_id, str) or not LORA_ID_RE.fullmatch(checkpoint_id) or checkpoint_id in seen_ids:
+            raise ValueError("invalid_or_duplicate_checkpoint_id")
+        if not isinstance(filename, str) or not LORA_FILENAME_RE.fullmatch(filename) or filename.lower() in seen_names:
+            raise ValueError("invalid_or_duplicate_checkpoint_filename")
+        if not isinstance(digest, str) or not SHA_RE.fullmatch(digest) or not isinstance(size, int) or size < 1024 or size > MAX_CHECKPOINT_BYTES:
+            raise ValueError("invalid_checkpoint_hash_or_size")
+        result.append({
+            "kind": "checkpoint",
+            "role": f"checkpoint:{checkpoint_id}",
+            "state_bucket": "checkpoints",
+            "state_key": filename,
+            "checkpoint_id": checkpoint_id,
+            "filename": filename,
+            "url": safe_download_url(entry["url"]),
+            "sha256": digest.lower(),
+            "size_bytes": size,
+            "destination": str(COMFY_DIR / "models" / "checkpoints" / filename),
+        })
+        seen_ids.add(checkpoint_id); seen_names.add(filename.lower())
+    loras = payload.get("loras", [])
+    if not isinstance(loras, list) or len(loras) > MAX_ADDITIONAL_LORAS:
+        raise ValueError("too_many_additional_loras")
+    additional_bytes = 0
+    for entry in loras:
+        if not isinstance(entry, dict) or set(entry) != {"id", "filename", "url", "sha256", "size_bytes"}:
+            raise ValueError("invalid_additional_lora_fields")
+        lora_id = entry["id"]; filename = entry["filename"]
+        digest = entry["sha256"]; size = entry["size_bytes"]
+        if not isinstance(lora_id, str) or not LORA_ID_RE.fullmatch(lora_id) or lora_id in seen_ids:
+            raise ValueError("invalid_or_duplicate_lora_id")
+        if not isinstance(filename, str) or not LORA_FILENAME_RE.fullmatch(filename) or filename.lower() in seen_names:
+            raise ValueError("invalid_or_duplicate_lora_filename")
+        if not isinstance(digest, str) or not SHA_RE.fullmatch(digest) or not isinstance(size, int) or size < 1024 or size > MAX_SINGLE_LORA_BYTES:
+            raise ValueError("invalid_lora_hash_or_size")
+        additional_bytes += size
+        if additional_bytes > MAX_ADDITIONAL_LORA_BYTES:
+            raise ValueError("additional_loras_too_large")
+        result.append({
+            "kind": "additional_lora",
+            "role": f"lora:{lora_id}",
+            "state_bucket": "lora_files",
+            "state_key": filename,
+            "lora_id": lora_id,
+            "filename": filename,
+            "url": safe_download_url(entry["url"]),
+            "sha256": digest.lower(),
+            "size_bytes": size,
+            "destination": str(COMFY_DIR / "models" / "loras" / filename),
+        })
+        seen_ids.add(lora_id); seen_names.add(filename.lower())
+    return result
+
+
 def stream_model(entry: dict[str, Any]) -> dict[str, Any]:
     destination = Path(entry["destination"]); part = destination.with_name(destination.name + ".part")
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_file() and destination.stat().st_size == entry["size_bytes"] and sha256(destination) == entry["sha256"]:
-        if entry["kind"] == "additional_lora":
+        if entry["kind"] in {"additional_lora", "checkpoint"}:
             try:
                 validate_safetensors_file(destination)
             except StageFailure:
@@ -749,7 +823,7 @@ def stream_model(entry: dict[str, Any]) -> dict[str, Any]:
                 part.unlink(missing_ok=True)
                 state("corrupt_discarded", 0, True)
                 raise StageFailure(f"model_sha256_mismatch:{entry['filename']}", {"code": "model_sha256_mismatch", "role": entry["role"], "filename": entry["filename"], "expected_sha256": entry["sha256"], "actual_sha256": actual, "byte_size": offset, "discarded_partial": True})
-            if entry["kind"] == "additional_lora":
+            if entry["kind"] in {"additional_lora", "checkpoint"}:
                 try:
                     validate_safetensors_file(part)
                 except StageFailure as error:
@@ -843,6 +917,8 @@ def stage_models(payload: dict[str, Any]) -> dict[str, Any]:
     lora_results: dict[str, Any] = {}
     with STATE_LOCK:
         STATE["lora_files"] = {}
+        if payload.get("family", "flux1") == "sdxl":
+            STATE["checkpoints"] = {}
         save_locked()
     for entry in sorted(manifest, key=lambda item: item["kind"] != "additional_lora"):
         with STATE_LOCK:
@@ -855,9 +931,11 @@ def stage_models(payload: dict[str, Any]) -> dict[str, Any]:
             save_locked()
         if entry["kind"] == "base":
             model_results[entry["role"]] = result
-        else:
+        elif entry["kind"] == "additional_lora":
             lora_results[entry["lora_id"]] = result
-    return {"models": model_results, "loras": lora_results}
+        else:
+            model_results[entry["checkpoint_id"]] = result
+    return {"family": payload.get("family", "flux1"), "models": model_results, "loras": lora_results}
 
 
 def png_dimensions(data: bytes) -> tuple[int, int]:
@@ -868,17 +946,21 @@ def png_dimensions(data: bytes) -> tuple[int, int]:
 
 def stage_inference(payload: dict[str, Any]) -> dict[str, Any]:
     task_id = validate_inference_shape(payload)
+    family = payload.get("family", "flux1")
     with STATE_LOCK:
         verified_roles = {role for role, value in STATE.get("models", {}).items() if value.get("status") in {"verified", "verified_existing"}}
+        verified_checkpoints = {filename for filename, value in STATE.get("checkpoints", {}).items() if value.get("status") in {"verified", "verified_existing"}}
         verified_lora_files = {filename for filename, value in STATE.get("lora_files", {}).items() if value.get("status") in {"verified", "verified_existing"}}
-    if verified_roles != set(APPROVED_MODELS):
+    if family == "flux1" and verified_roles != set(APPROVED_MODELS):
         raise RuntimeError("models_not_verified")
+    if family == "sdxl" and payload["checkpoint"]["filename"] not in verified_checkpoints:
+        raise StageFailure("requested_checkpoint_not_verified", {"code": "requested_checkpoint_not_verified", "filename": payload["checkpoint"]["filename"]})
     requested_loras = payload.get("loras")
     if requested_loras is None:
         requested_lora_filenames = {APPROVED_MODELS["lora"][0]}
     else:
         requested_lora_filenames = {entry["filename"] for entry in requested_loras}
-    builtin_lora = APPROVED_MODELS["lora"][0]
+    builtin_lora = APPROVED_MODELS["lora"][0] if family == "flux1" else ""
     missing_loras = sorted(filename for filename in requested_lora_filenames if filename != builtin_lora and filename not in verified_lora_files)
     if missing_loras:
         raise StageFailure("requested_loras_not_verified", {"code": "requested_loras_not_verified", "filenames": missing_loras})
@@ -920,15 +1002,25 @@ def stage_inference(payload: dict[str, Any]) -> dict[str, Any]:
     artifact = ARTIFACT_DIR / task_id
     artifact.mkdir(parents=True, exist_ok=True)
     image_path = artifact / "image.png"; image_path.write_bytes(image)
-    metadata = {"task_id": task_id, "width": width, "height": height, "byte_size": len(image), "sha256": sha256(image_path), "generation_duration_seconds": round(time.monotonic() - started, 3), "controller_job_id": job_id, "controller_prompt_id": job.get("prompt_id"), "negative_prompt_present": bool(payload.get("negative_prompt")), "loras": [{"filename": entry["filename"], "strength": entry["strength"]} for entry in payload.get("loras", [{"filename": builtin_lora, "strength": payload["lora_strength"]}])]}
+    default_loras = [{"filename": builtin_lora, "strength": payload["lora_strength"]}] if builtin_lora else []
+    metadata = {"task_id": task_id, "family": family, "checkpoint": payload.get("checkpoint"), "width": width, "height": height, "byte_size": len(image), "sha256": sha256(image_path), "generation_duration_seconds": round(time.monotonic() - started, 3), "controller_job_id": job_id, "controller_prompt_id": job.get("prompt_id"), "negative_prompt_present": bool(payload.get("negative_prompt")), "loras": [{"filename": entry["filename"], "strength": entry["strength"]} for entry in payload.get("loras", default_loras)]}
     (artifact / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return metadata
 
 
 def validate_inference_shape(payload: object) -> str:
     required = {"task_id", "mode", "prompt", "width", "height", "steps", "cfg", "lora_strength", "seed", "sampler"}
-    if not isinstance(payload, dict) or not required.issubset(payload) or not set(payload).issubset(required | {"negative_prompt", "loras"}):
+    if not isinstance(payload, dict) or not required.issubset(payload) or not set(payload).issubset(required | {"negative_prompt", "loras", "family", "checkpoint"}):
         raise ValueError("invalid_inference_fields")
+    family = payload.get("family", "flux1")
+    checkpoint = payload.get("checkpoint")
+    if family not in {"flux1", "sdxl"}:
+        raise ValueError("invalid_model_family")
+    if family == "sdxl":
+        if not isinstance(checkpoint, dict) or set(checkpoint) != {"id", "filename"} or not isinstance(checkpoint.get("id"), str) or not LORA_ID_RE.fullmatch(checkpoint["id"]) or not isinstance(checkpoint.get("filename"), str) or not LORA_FILENAME_RE.fullmatch(checkpoint["filename"]):
+            raise ValueError("invalid_inference_checkpoint")
+    elif checkpoint is not None:
+        raise ValueError("inference_checkpoint_not_allowed")
     task_id = payload.get("task_id")
     if not isinstance(task_id, str) or not UUID_RE.fullmatch(task_id):
         raise ValueError("invalid_task_id")
@@ -937,6 +1029,15 @@ def validate_inference_shape(payload: object) -> str:
     negative_prompt = payload.get("negative_prompt", "")
     if not isinstance(negative_prompt, str) or len(negative_prompt) > 4000:
         raise ValueError("invalid_negative_prompt")
+    width = payload.get("width"); height = payload.get("height"); seed = payload.get("seed")
+    if not isinstance(width, int) or not isinstance(height, int) or isinstance(width, bool) or isinstance(height, bool):
+        raise ValueError("invalid_inference_dimensions")
+    grid = 64 if family == "sdxl" else 256
+    minimum = 512 if family == "sdxl" else 768
+    if width < minimum or height < minimum or width > 1536 or height > 1536 or width % grid or height % grid:
+        raise ValueError("invalid_inference_dimensions")
+    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0 or seed > 9_007_199_254_740_991:
+        raise ValueError("invalid_inference_seed")
     loras = payload.get("loras")
     if loras is not None:
         if not isinstance(loras, list) or len(loras) > MAX_TASK_LORAS:

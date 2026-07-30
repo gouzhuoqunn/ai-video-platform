@@ -266,7 +266,11 @@ def make_handler(state: ControllerState):
                     status, _headers, response = request_upstream(f"{state.comfy_base_url}/object_info")
                     if status != 200:
                         raise ValueError("runtime_node_introspection_failed")
-                    assert_node_classes(json_payload(response), require_lora=bool(options["loras"]))
+                    assert_node_classes(
+                        json_payload(response),
+                        require_lora=bool(options["loras"]),
+                        family=options["family"],
+                    )
                 except ValueError as error:
                     self.send_json(400, {"error": str(error)})
                     return
